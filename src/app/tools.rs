@@ -168,7 +168,7 @@ impl App {
         dialog_foot(ui, |ui| {
             let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
             if ui.add_enabled(ok, primary_button(ui, if f.restore { "Restore…" } else { "Dump" }, if f.restore { WARNING() } else { PRIMARY() })).clicked() {
-                match stored_uri(f.conn) {
+                match if self.ephemeral && !cfg!(test) { Err(keyring::Error::NoEntry) } else { stored_uri(f.conn) } {
                     Err(e) => self.err(uri_err(e)),
                     Ok(uri) => {
                         let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());

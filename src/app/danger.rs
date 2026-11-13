@@ -24,6 +24,11 @@ impl App {
             if self.groups.prune(&alive) {
                 self.save_groups();
             }
+            // Its agent access goes with it. Settings that failed their signature are left for the user to review,
+            // since saving here would sign them.
+            if self.agents.cfg.conns.remove(&id).is_some() && self.agents.distrust.is_none() {
+                self.save_agents();
+            }
             return self.ok("Connection removed");
         }
         if let Danger::DeleteRows(sel, rows) = action {

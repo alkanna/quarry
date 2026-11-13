@@ -431,7 +431,16 @@ impl App {
                 name: meta.name.clone(),
                 tag: meta.tag.clone(),
                 engine: meta.engine,
-                addr: if meta.engine.is_sql() { db::sql::Addr::parse(&uri).unwrap_or_default() } else { Default::default() },
+                // With no stored address the form starts from the engine's own scheme and port, or an empty scheme
+                // would be saved as mysql:// for a PostgreSQL connection.
+                addr: if meta.engine.is_sql() {
+                    db::sql::Addr::parse(&uri).unwrap_or_else(|| {
+                        let scheme = if meta.engine == db::sql::Engine::Postgres { "postgres" } else { "mysql" };
+                        db::sql::Addr { scheme: scheme.into(), port: db::sql::Addr::default_port(scheme), ..Default::default() }
+                    })
+                } else {
+                    Default::default()
+                },
                 uri: if meta.engine.is_sql() { String::new() } else { uri },
                 ssh_on: meta.ssh.is_some(),
                 ssh: meta.ssh.clone().unwrap_or_default(),

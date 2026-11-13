@@ -416,7 +416,9 @@ impl App {
     }
 
     pub(super) fn start_shell(&mut self) {
-        if self.demo {
+        // Fixture mode (QUARRY_TEST_JSON) is not the demo but is just as offline: its connection ids overlap real
+        // ones, so reading the Keychain here would run the script on the user's real server. Tests mock the vault.
+        if self.demo || (self.ephemeral && !cfg!(test)) {
             return self.ok("Offline demo: the shell needs a real connection.");
         }
         let Some(runtime) = find_bun(&self.prefs.shell_runtime) else {

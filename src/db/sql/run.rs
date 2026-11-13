@@ -289,6 +289,11 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
 async fn run_on(conn: &mut Conn, db: &Db, stmt: &str, page: usize, read_only: bool, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
     let d = db.dialect;
     if d != Dialect::Postgres {
+        // A statement that may write (DELETE ... RETURNING, a CALL that selects then updates) is read to its end, as on
+        // PostgreSQL: closing the connection mid-result would make the server abort it after the grid showed rows.
+        if lex::read_only_check(stmt, d).is_err() {
+            return (run_sent(conn, stmt, stmt, RUN_ROWS_MAX, 0, true).await.0, None);
+        }
         let rs = run_stmt(conn, d, stmt, page).await;
         let stop = rs.last().is_some_and(|r| r.capped).then_some(CUT);
         return (rs, stop);
