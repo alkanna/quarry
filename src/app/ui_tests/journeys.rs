@@ -37,7 +37,7 @@ impl Drop for Dir {
 impl UiApp {
     /// The current tab's SQL Query state.
     fn query(&self) -> Option<&SqlTab> {
-        self.app().t().and_then(|t| t.sql.as_ref())
+        self.app().t().and_then(|t| t.sql.as_deref())
     }
 
     /// Waits for the current tab's Query run to come back.
@@ -170,7 +170,7 @@ fn mysql_a_linked_file_is_edited_saved_and_reloaded_after_a_change_on_disk() {
     ui.h.state_mut().rescan_link(link);
     ui.wait("the conflict", |a| a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.conflict.as_deref() == Some(theirs.as_str())));
     if ui.h.query_all_by_label("Reload").next().is_some() {
-        ui.click("Reload");
+        ui.click_last("Reload");
     } else {
         ui.h.state_mut().conflict_reload();
     }
@@ -285,11 +285,16 @@ fn mongo_a_filter_with_a_date_shortcut_is_saved_to_a_linked_file_and_reopens() {
     // The shortcut stays a shortcut, so the filter means today on the day it runs, not the day it was saved.
     assert!(saved.contains("#today") && saved.contains(&coll), "{saved}");
 
-    // Opened again from the file, in a new tab: the filter as written, and today's document only.
-    let before = ui.app().tabs.len();
-    ui.h.state_mut().open_script(&ScriptRef::File { link, rel: "today.json".into() }, How::NewTab);
+    // The tab moves on to another filter and lets go of the file, then the file is opened again: the filter as written,
+    // and today's document only.
+    let a = ui.h.state_mut();
+    if let Some(t) = a.tm() {
+        t.filter_txt = "{}".into();
+        t.script = None;
+    }
+    a.open_script(&ScriptRef::File { link, rel: "today.json".into() }, How::NewTab);
     ui.wait_files();
-    ui.wait("the file's tab", |a| a.tabs.len() > before && a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| matches!(&b.r, ScriptRef::File { rel, .. } if rel == Path::new("today.json"))));
+    ui.wait("the file's tab", |a| a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| matches!(&b.r, ScriptRef::File { rel, .. } if rel == Path::new("today.json"))));
     assert_eq!(ui.app().t().unwrap().filter_txt, "{ created: #today }");
     ui.wait("today's document again", |a| a.t().is_some_and(|t| !t.loading) && ids(a) == [1]);
 }

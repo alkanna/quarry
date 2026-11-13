@@ -184,12 +184,12 @@ impl Move {
         if self.to > self.from { self.to + 1 } else { self.to }
     }
 
-    /// Moves the item in `v`. A `to` past the end is the end, so a list that shrank since the move was made still takes
-    /// it; a move into an item is the caller's to apply.
+    /// Moves the item in `v`. A move with an index past the end does nothing: the list changed since the move was made,
+    /// so its indexes name other items now. A move into an item is the caller's to apply.
     pub(crate) fn apply<T>(self, v: &mut Vec<T>) {
-        if !self.into && self.from < v.len() {
+        if !self.into && self.from < v.len() && self.to < v.len() {
             let x = v.remove(self.from);
-            v.insert(self.to.min(v.len()), x);
+            v.insert(self.to, x);
         }
     }
 }
@@ -771,10 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn a_move_past_the_end_lands_last_and_names_alike_get_their_own_keys() {
-        let mut v = vec!['a', 'b', 'c'];
+    fn a_stale_move_changes_nothing_and_names_alike_get_their_own_keys() {
+        let mut v = vec!['b', 'c', 'a'];
         Move { from: 0, to: 7, into: false }.apply(&mut v);
-        assert_eq!(v, ['b', 'c', 'a'], "a move past the end was dropped");
+        assert_eq!(v, ['b', 'c', 'a']);
         Move { from: 0, to: 1, into: true }.apply(&mut v);
         assert_eq!(v, ['b', 'c', 'a']);
         Move { from: 5, to: 0, into: false }.apply(&mut v);

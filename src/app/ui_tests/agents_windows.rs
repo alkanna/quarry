@@ -136,3 +136,19 @@ fn custom_rules_drag_to_reorder_and_the_selection_follows() {
     assert_eq!(rule_names(&ui), ["b", "c", "a"]);
     assert_eq!(ui.app().agents.rules.as_ref().and_then(|w| w.sel), Some(2), "the selection stayed on the old index");
 }
+
+#[test]
+fn custom_rules_move_from_their_menu_and_with_alt_arrows() {
+    let Some(mut ui) = demo_ui(three_rules) else { return };
+    ui.click("Custom 3");
+    ui.show("Rule row 1");
+    let at = ui.h.get_by_label("Rule row 1").rect().center();
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+    ui.click_contains("Move down");
+    assert_eq!(rule_names(&ui), ["b", "a", "c"]);
+    ui.h.get_by_label("Rule row 3").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowUp);
+    assert_eq!(rule_names(&ui), ["b", "c", "a"]);
+}

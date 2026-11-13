@@ -268,6 +268,20 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_that_cannot_be_made_says_the_skipped_entries_will_be_lost() {
+        let dir = std::env::temp_dir().join(format!("quarry-library-nobak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // A folder where the copy would go makes the copy fail.
+        std::fs::create_dir_all(dir.join("library.json.bak")).unwrap();
+        let p = dir.join("library.json");
+        std::fs::write(&p, r#"{"v":1,"scripts":[{"id":"x"},{"id":2,"name":"ok","kind":"sql"}]}"#).unwrap();
+        let (l, note) = load_library_from(&p);
+        assert_eq!(l.scripts.len(), 1);
+        assert!(note.is_some_and(|n| n.contains("will be lost")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_id_counter_is_read_back_from_the_file() {
         let dir = std::env::temp_dir().join(format!("quarry-library-next-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

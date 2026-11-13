@@ -210,7 +210,7 @@ impl App {
                             b.disk = None;
                         }
                         self.drop_entry(link, &rel);
-                        self.warn(format!("{} was deleted on disk. Nothing was saved; press Cmd+S again to write it back.", file_label(&rel)));
+                        self.warn(format!("{} was deleted on disk. Nothing was saved; save again to write it back.", file_label(&rel)));
                     }
                     SaveOut::Refused(e) => self.warn(e),
                     SaveOut::Failed(e) => self.err(e),

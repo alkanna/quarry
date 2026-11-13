@@ -204,3 +204,20 @@ fn a_group_member_moves_from_its_menu() {
     ui.click_contains("Move up");
     assert_eq!(form(ui.app()), Some(vec![11, 13, 12]));
 }
+
+#[test]
+fn alt_arrows_move_the_focused_tab() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let colls = |a: &App| a.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
+    ui.show("Tab customers");
+    ui.h.get_by_label("Tab customers").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    assert_eq!(colls(ui.app()), ["orders", "customers", "events"]);
+    // The tab keeps its focus where it went, so the next press moves it on.
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    assert_eq!(colls(ui.app()), ["orders", "events", "customers"]);
+    // At the end it stays.
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    assert_eq!(colls(ui.app()), ["orders", "events", "customers"]);
+}

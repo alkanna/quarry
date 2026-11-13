@@ -129,3 +129,18 @@ fn search_path_rows_drag_to_reorder_and_esc_cancels_without_closing_the_form() {
     ui.click("Remove public");
     assert_eq!(path(&ui), ["staging", "$user"]);
 }
+
+#[test]
+fn search_path_rows_move_with_alt_arrows_and_their_menu() {
+    let Some(mut ui) = demo_ui(path_form) else { return };
+    ui.show("Schema staging");
+    ui.h.get_by_label("Schema staging").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowUp);
+    assert_eq!(path(&ui), ["$user", "staging", "public"]);
+    let at = ui.h.get_by_label("Schema $user").rect().center();
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+    ui.click_contains("Move down");
+    assert_eq!(path(&ui), ["staging", "$user", "public"]);
+}

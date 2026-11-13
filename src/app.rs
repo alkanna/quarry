@@ -121,7 +121,7 @@ const SHORTCUTS: [(&str, &str); 38] = [
     ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret, or the selected script of the Library panel"),
     ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
     ("Esc", "Close or deselect"),
-    ("Alt+Up/Down (Left/Right)", "Move the focused row, column, tab or stage; their right-click menus have Move up and Move down"),
+    ("Alt+Up/Down (Left/Right)", "Move the focused row, column, tab or stage"),
     ("Cmd+Backspace, Delete", "Delete the selected script or folder of the Library panel; the toast offers Undo"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
