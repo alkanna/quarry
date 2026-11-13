@@ -208,6 +208,9 @@ fn alt_down_moves_the_focused_column_row() {
     ui.settle();
     ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
     assert_eq!(moves(&ui), [("id".to_string(), db::sql::ddl::Pos::After("customer_id".into()))]);
+    // The row shows where the move put it and keeps the focus, so a second press moves it one place further.
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
+    assert_eq!(moves(&ui), [("id".to_string(), db::sql::ddl::Pos::After("status".into()))], "a second Alt+Down did not go further");
 }
 
 #[test]

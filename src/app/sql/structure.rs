@@ -261,16 +261,20 @@ impl App {
                     ui.close();
                 }
             };
+            // The rows show in the order the staged changes leave, so a staged move shows at once and the next drag or
+            // Alt+arrow starts from there. `at` maps a row to its column in `d.columns`.
+            let at = rows_in_staged_order(&d, &staged);
             // Rows drag only where a move can be staged: a writable table on an engine that keeps column order.
-            let keys: Vec<egui::Id> = d.columns.iter().map(|c| egui::Id::unique(("structure-col", c.name.as_str()))).collect();
+            let keys: Vec<egui::Id> = at.iter().map(|&i| egui::Id::unique(("structure-col", d.columns[i].name.as_str()))).collect();
             let drag = (editable && order && !is_view).then_some(keys.as_slice());
             let hit = grid_drag(
                 ui,
                 "columns",
                 &heads,
-                d.columns.len(),
-                sel[0],
+                at.len(),
+                sel[0].and_then(|s| at.iter().position(|&i| i == s)),
                 &mut |ui, rect, r, c| {
+                    let r = at[r];
                     if c == 0 {
                         let name = &d.columns[r].name;
                         let mark = if dropped.contains(name) { Some(ALERT()) } else if changed.contains(name) { Some(WARNING()) } else { None };
@@ -280,18 +284,18 @@ impl App {
                     }
                     column_cell(ui, rect, &d.columns[r], shown[c], pg)
                 },
-                Some(&mut menu),
+                Some(&mut |ui: &mut egui::Ui, r: usize| menu(ui, at[r])),
                 drag,
             );
             if let Some(r) = hit.click {
-                sel[0] = Some(r);
+                sel[0] = Some(at[r]);
             }
             if let Some(m) = hit.moved {
-                acts.push(Act::MoveColumnTo(m.from, m.to));
-                sel[0] = Some(m.to);
+                acts.push(Act::MoveColumnTo(at[m.from], at[m.to]));
+                sel[0] = Some(at[m.from]);
             }
             if let (Some(r), true) = (hit.double, editable) {
-                acts.push(Act::EditColumn(r));
+                acts.push(Act::EditColumn(at[r]));
             }
             ui.add_space(14.0);
             let ix = sel[1].filter(|i| *i < d.indexes.len());
@@ -841,9 +845,12 @@ fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Opt
         put(ui, head, c.head, FontId::proportional(TXT_SMALL), MUTED(), c.right);
     }
     let stripe = ui.visuals().faint_bg_color;
+    let keyed = drag.is_some();
     let mut hit = Hit::default();
     let mut draw_row = |ui: &mut egui::Ui, row: Rect, r: usize, st: dnd::ItemState, hit: &mut Hit| -> egui::Response {
-        let resp = ui.interact(row, ui.scope_id().with(("sql-grid", salt, r)), Sense::click());
+        // A dragged grid draws each row in a scope keyed by the row's own key, so the id holds still when the row moves and
+        // it keeps its focus for the next Alt+arrow.
+        let resp = ui.interact(row, ui.scope_id().with(("sql-grid", salt, if keyed { 0 } else { r })), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, sel == Some(r), format!("{salt} row {}", r + 1)));
         let hovered = resp.hovered() && !st.busy;
         let fill = if sel == Some(r) { if hovered { SEL_HOVER() } else { SEL() } } else if hovered { HOVER() } else if st.lifted { RAISED() } else if r % 2 == 1 { stripe } else { BG() };
@@ -892,6 +899,23 @@ fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Opt
     ui.painter().hline(rect.x_range(), rect.top() + TABLE_HEAD_H, Stroke::new(1.0, LINE()));
     ui.painter().rect_stroke(rect, R_MD, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
     hit
+}
+
+/// The column grid's rows as indexes into `d.columns`, in the order the staged changes leave the columns. A column
+/// staged to be dropped keeps its place in the server's order, so its mark shows where it is.
+fn rows_in_staged_order(d: &Structure, staged: &[Change]) -> Vec<usize> {
+    let after = db::sql::ddl::columns_after(d, staged);
+    let renamed = |c: &Column| staged.iter().rev().find_map(|ch| match ch {
+        Change::Modify { from, def, .. } if *from == c.name => Some(def.name.clone()),
+        _ => None,
+    });
+    let mut out: Vec<usize> = after.iter().filter_map(|n| d.columns.iter().position(|c| renamed(c).as_ref().unwrap_or(&c.name) == n)).collect();
+    for i in 0..d.columns.len() {
+        if !out.contains(&i) {
+            out.insert(i.min(out.len()), i);
+        }
+    }
+    out
 }
 
 /// A read-only code area with line numbers, scrolling both ways inside `height`.
