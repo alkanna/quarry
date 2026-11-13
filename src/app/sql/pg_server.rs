@@ -193,6 +193,13 @@ impl PgServerWin {
         self.rows().iter().find(|r| r.query.contains(tag) && r.active()).map(|r| r.pid)
     }
 
+    /// Asks for the list on the next frame, past the poll interval and the backoff after a failed read, for a UI test that
+    /// waits on a session the server may not have started yet.
+    #[cfg(test)]
+    pub(in crate::app) fn refresh_now(&mut self) {
+        (self.refresh, self.act_next) = (true, None);
+    }
+
     /// What the Activity tab holds, for a UI test that waits on it: the error of the last read, or how many sessions it listed.
     #[cfg(test)]
     pub(in crate::app) fn activity_state(&self) -> String {
