@@ -704,7 +704,8 @@ impl Tab {
     /// because its rows are none of the ones `selected` points into.
     pub(super) fn record_row(&self) -> bool {
         match (self.view, &self.sql) {
-            (View::Sql, Some(s)) => s.qsel.is_some(),
+            // Text mode draws no grid, so no record either.
+            (View::Sql, Some(s)) => s.qsel.is_some() && !s.text_mode,
             _ => self.selected.is_some(),
         }
     }

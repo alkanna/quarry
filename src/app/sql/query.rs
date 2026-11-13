@@ -56,6 +56,12 @@ pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialec
     Some((r, i + 1, all.len()))
 }
 
+/// A statement on one line for a menu, from its first word of code: a leading comment would color the whole line as one.
+fn preview(text: &str, d: db::sql::Dialect) -> String {
+    let start = lex::tokens(text, d).into_iter().find(|(t, _)| !matches!(t, lex::Tok::Space | lex::Tok::Comment)).map_or(0, |(_, r)| r.start);
+    db::sql::server::one_line(&text[start..], 90)
+}
+
 /// The database a run uses: the picked one, else the tab's own.
 fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
@@ -133,7 +139,7 @@ struct GridOut {
 
 /// The rows of one result set as a grid with a checkbox column. Checked rows are tinted, and the menu of a
 /// checked row acts on every checked row. `record` draws the selected row's record under it.
-fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Option<usize>, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
+fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
     let mono = FontId::monospace(TXT_SMALL);
     let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     // Widths from the headers and the first rows, so a wide cell further down is cut with an ellipsis.
@@ -156,6 +162,9 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                 for i in 0..set.rows.len() {
                     // Every row takes its room so the scroll stays true, but only rows on screen are drawn.
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
+                    if scroll && sel == Some(i) {
+                        resp.scroll_to_me(None);
+                    }
                     if ui.is_rect_visible(rr) {
                         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, format!("Result row {}", i + 1)));
                         let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
@@ -302,14 +311,13 @@ impl App {
         let mut pick = None;
         egui::ScrollArea::vertical().id_salt("sql-run-pick").max_height(360.0).show(ui, |ui| {
             for (i, (r, text)) in lex::split_statements(&s.query, d).into_iter().enumerate() {
-                let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 // The number keeps two statements that read the same apart; the one under the caret is in the accent.
                 let mut job = egui::text::LayoutJob::single_section(format!("{:>2}  ", i + 1), mono_fmt(TXT_SMALL, if here.as_ref() == Some(&r) { PRIMARY() } else { FAINT() }, 400.0));
-                let sql = sql_job_in(&one_line.chars().take(90).collect::<String>(), TXT_SMALL, d);
+                let sql = sql_job_in(&preview(text, d), TXT_SMALL, d);
                 for sec in sql.sections {
                     job.append(&sql.text[sec.byte_range.start.0..sec.byte_range.end.0], 0.0, sec.format);
                 }
-                job.wrap.max_rows = 1;
+                job.wrap = egui::text::TextWrapping::truncate_at_width(396.0);
                 let r = ui.add(quiet_button(job)).on_hover_text(text);
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Run statement {}", i + 1)));
                 if r.clicked() {
@@ -454,9 +462,8 @@ impl App {
                     }
                     egui::ScrollArea::vertical().id_salt("sql-hist").max_height(300.0).show(ui, |ui| {
                         for h in hist {
-                            let one_line: String = h.split_whitespace().collect::<Vec<_>>().join(" ");
-                            let mut job = sql_job(&one_line.chars().take(90).collect::<String>(), TXT_SMALL);
-                            job.wrap.max_rows = 1;
+                            let mut job = sql_job_in(&preview(h, dialect), TXT_SMALL, dialect);
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(496.0);
                             if ui.add(quiet_button(job)).on_hover_text(h.as_str()).clicked() {
                                 load = Some(h.clone());
                                 ui.close();
@@ -842,9 +849,10 @@ impl App {
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
                 let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
                 let names: Vec<String> = sets[sel].cols.iter().map(|c| c.name.clone()).collect();
+                let scroll = std::mem::take(&mut self.scroll_sel);
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
-                let out = grid(ui, &sets[sel], &checked, qsel, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
+                let out = grid(ui, &sets[sel], &checked, qsel, scroll, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
                 let Some(s) = self.tabs[cur].sql.as_mut() else { return };
                 (s.sets, s.qchecked) = (sets, checked);
                 view = out.view.or(rec.view);
@@ -1002,6 +1010,12 @@ mod tests {
         // A caret past the end stays with the last statement.
         assert_eq!(statement_pos(t, 999, D).unwrap().1, 3);
         assert!(statement_pos("  ", 0, D).is_none());
+    }
+
+    #[test]
+    fn the_menu_preview_starts_at_the_code() {
+        assert_eq!(preview("-- Paid orders\n/* by customer */\nSELECT  c.name\nFROM c", db::sql::Dialect::MySql), "SELECT c.name FROM c");
+        assert_eq!(preview("-- only a comment", db::sql::Dialect::MySql), "-- only a comment");
     }
 
     #[test]

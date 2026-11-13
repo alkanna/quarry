@@ -90,6 +90,12 @@ fn tab_opens_the_record_of_a_query_result_row() {
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| t.record), "Tab did not open the record");
     ui.show("email record");
+    // Down moves the selection, and the record with it.
+    ui.h.key_press(egui::Key::ArrowDown);
+    ui.settle();
+    assert!(qsel(&ui) == Some(2) && ui.app().t().is_some_and(|t| t.record), "Down did not move the record to row 3");
+    ui.h.key_press(egui::Key::ArrowUp);
+    ui.settle();
     // Esc closes the record first, then lets the row go.
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
@@ -105,4 +111,18 @@ fn the_run_tip_lists_every_statement_of_the_script() {
     ui.click("Choose what to run");
     ui.show("Run statement 1");
     ui.show("Run statement 3");
+}
+
+#[test]
+fn tab_leaves_the_record_closed_while_the_result_shows_as_text() {
+    let Some(mut ui) = query_with_editor_focused() else { return };
+    let cur = ui.app().cur;
+    if let Some(s) = ui.h.state_mut().tabs[cur].sql.as_mut() {
+        (s.qsel, s.text_mode) = (Some(1), true);
+    }
+    ui.h.ctx.memory_mut(|m| m.surrender_focus(App::sql_editor_id(cur)));
+    ui.settle();
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| !t.record), "Tab opened a record the Text result never draws");
 }

@@ -183,6 +183,18 @@ impl App {
                     self.reload();
                 }
             }
+            // The Query grid keeps its own selection, so the arrows move that one.
+            if (up || down) && let Some(s) = self.tm().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_mut()).filter(|s| !s.text_mode) {
+                let len = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))).map_or(0, |x| x.rows.len());
+                if len > 0 {
+                    s.qsel = Some(match s.qsel {
+                        None => 0,
+                        Some(i) if down => (i + 1).min(len - 1),
+                        Some(i) => i.saturating_sub(1),
+                    });
+                    self.scroll_sel = true;
+                }
+            }
         }
         // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
