@@ -228,6 +228,12 @@ pub(super) fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// A pattern from `like_escape` as a literal. Under NO_BACKSLASH_ESCAPES MySQL's LIKE has no escape character at
+/// all, so one that holds a backslash names it. Plain patterns stay bare so the bar can read them back.
+fn like_lit(pat: &str, d: Dialect, bs: bool) -> String {
+    if !bs && d != Dialect::Postgres && pat.contains('\\') { format!("{} ESCAPE '\\'", lit(pat, bs)) } else { lit(pat, bs) }
+}
+
 fn unlike(s: &str) -> String {
     let mut out = String::new();
     let mut it = s.chars();
@@ -276,12 +282,12 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
         Between => format!("{c} BETWEEN {} AND {}", val(r.kind, v(0), bs), val(r.kind, v(1), bs)),
         IsNull => format!("{c} IS NULL"),
         NotNull => format!("{c} IS NOT NULL"),
-        Contains => format!("{c} LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
-        NotContains => format!("{c} NOT LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
-        StartsWith => format!("{c} LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
-        NotStartsWith => format!("{c} NOT LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
-        EndsWith => format!("{c} LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
-        NotEndsWith => format!("{c} NOT LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
+        Contains => format!("{c} LIKE {}", like_lit(&format!("%{}%", like_escape(v(0))), d, bs)),
+        NotContains => format!("{c} NOT LIKE {}", like_lit(&format!("%{}%", like_escape(v(0))), d, bs)),
+        StartsWith => format!("{c} LIKE {}", like_lit(&format!("{}%", like_escape(v(0))), d, bs)),
+        NotStartsWith => format!("{c} NOT LIKE {}", like_lit(&format!("{}%", like_escape(v(0))), d, bs)),
+        EndsWith => format!("{c} LIKE {}", like_lit(&format!("%{}", like_escape(v(0))), d, bs)),
+        NotEndsWith => format!("{c} NOT LIKE {}", like_lit(&format!("%{}", like_escape(v(0))), d, bs)),
         Like => format!("{c} LIKE {}", lit(v(0), bs)),
         NotLike => format!("{c} NOT LIKE {}", lit(v(0), bs)),
         Regexp => format!("{c} REGEXP {}", lit(v(0), bs)),
@@ -687,6 +693,15 @@ mod tests {
                 assert_eq!(back, vec![r], "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn like_names_its_escape_without_backslash_escapes() {
+        let r = Rule { col: "name".into(), kind: Kind::Text, op: Op::Contains, values: vec!["50%".into()] };
+        assert_eq!(rule_sql(&r, Dialect::MySql, false), "`name` LIKE '%50\\%%' ESCAPE '\\'");
+        assert_eq!(rule_sql(&r, Dialect::MySql, true), "`name` LIKE '%50\\\\%%'");
+        let plain = Rule { values: vec!["ann".into()], ..r };
+        assert_eq!(rule_sql(&plain, Dialect::MySql, false), "`name` LIKE '%ann%'");
     }
 
     #[test]

@@ -120,10 +120,10 @@ impl Dialect {
         let c = self.quote_ident(col);
         if self == Dialect::Postgres {
             // Grouped by the text, so a json column (which has no equality) and every other type counts the same way.
-            let filter = if prefix { format!(" WHERE {c}::text LIKE $1") } else { format!(" WHERE {c} IS NOT NULL") };
+            let filter = if prefix { format!(" WHERE {c}::text LIKE $1 ESCAPE '!'") } else { format!(" WHERE {c} IS NOT NULL") };
             return format!("SELECT {c}::text AS v, COUNT(*) AS n FROM {}{filter} GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}", self.qualified(db, table));
         }
-        let filter = if prefix { format!(" WHERE {c} LIKE ?") } else { format!(" WHERE {c} IS NOT NULL") };
+        let filter = if prefix { format!(" WHERE {c} LIKE ? ESCAPE '!'") } else { format!(" WHERE {c} IS NOT NULL") };
         format!("SELECT CAST({c} AS CHAR) AS v, COUNT(*) AS n FROM {}{filter} GROUP BY {c} ORDER BY 2 DESC LIMIT {limit}", self.qualified(db, table))
     }
 

@@ -694,6 +694,14 @@ impl Call {
                 if let Some(Bson::String(c)) = command.iter().next().map(|(_, v)| v) {
                     out.push(Target { db: db.clone(), coll: Some(c.clone()) });
                 }
+                // A view's source and what its pipeline joins are read through it, so scope covers them too.
+                if let Ok(src) = command.get_str("viewOn") {
+                    out.push(Target { db: db.clone(), coll: Some(src.to_string()) });
+                }
+                if let Ok(p) = command.get_array("pipeline") {
+                    let p: Vec<Document> = p.iter().filter_map(|s| s.as_document().cloned()).collect();
+                    pipeline_targets(db, &p, &mut out);
+                }
             }
             Call::Aggregate { ns, pipeline, .. } | Call::AggregateInto { ns, pipeline } | Call::Explain { ns, pipeline: Some(pipeline), .. } => pipeline_targets(&ns.db, pipeline, &mut out),
             Call::Update { ns, update: Update::Pipeline(p), .. } => pipeline_targets(&ns.db, p, &mut out),

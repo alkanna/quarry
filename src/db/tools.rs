@@ -25,7 +25,8 @@ pub fn uri_without_db(uri: &str) -> String {
 /// mongodump arguments as the original builds them (getMongodumpCommand, renderer line 135838).
 /// They are passed straight to the program, so no shell quoting is needed.
 pub fn dump_args(uri: &str, db: &str, coll: Option<&str>, archive: &str, gzip: bool) -> Vec<String> {
-    let mut a = vec![format!("--uri={uri}"), format!("--archive={archive}"), format!("--db={db}")];
+    // A path database that differs from --db makes mongodump refuse the pair, so it goes as with mongorestore.
+    let mut a = vec![format!("--uri={}", uri_without_db(uri)), format!("--archive={archive}"), format!("--db={db}")];
     if let Some(c) = coll {
         a.push(format!("--collection={c}"));
     }

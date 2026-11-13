@@ -206,7 +206,18 @@ pub fn visible(scope: &Scope, db: &str, coll: Option<&str>) -> Result<bool, Stri
     Ok(if scope.mode == ScopeMode::Only { hit } else { !hit })
 }
 
-const PG_SYSTEM: [&str; 5] = ["pg_authid", "pg_shadow", "pg_user_mappings", "pg_stat_activity", "pg_stat_statements"];
+const PG_SYSTEM: [&str; 10] = [
+    "pg_authid",
+    "pg_shadow",
+    "pg_user_mappings",
+    "pg_user_mapping",
+    "pg_subscription",
+    "pg_stat_activity",
+    "pg_stat_statements",
+    "pg_stat_get_activity",
+    "pg_stat_get_backend_activity",
+    "pg_stat_statements_info",
+];
 const MY_SYSTEM: [&str; 3] = ["mysql", "performance_schema", "sys"];
 
 /// Namespaces that hold credentials or other sessions' queries, refused outside Server and users.
@@ -242,6 +253,12 @@ fn system_in_sql(sql: &str, d: Dialect) -> Option<String> {
                 }
             } else if MY_SYSTEM.contains(&name.as_str()) && toks.get(i + 1).is_some_and(|(t, p)| *t == Tok::Punct && *p == ".") {
                 return Some(name);
+            } else if name == "processlist" {
+                // SHOW PROCESSLIST and information_schema.PROCESSLIST list other sessions' statements.
+                return Some(name);
+            } else if i == 0 && name == "show" && toks.get(1).zip(toks.get(2)).is_some_and(|((_, a), (_, b))| a.eq_ignore_ascii_case("create") && b.eq_ignore_ascii_case("user")) {
+                // SHOW CREATE USER prints the account's password hash.
+                return Some("show create user".into());
             }
         }
     }
@@ -493,6 +510,10 @@ mod tests {
         assert!(is_refused(&my_d(&sql("SELECT user, authentication_string FROM mysql.user"))));
         assert!(is_refused(&my_d(&sql("SELECT * FROM `performance_schema`.`threads`"))));
         assert!(is_refused(&my_d(&sql("USE mysql; SELECT * FROM user"))));
+        assert!(is_refused(&my_d(&sql("SHOW FULL PROCESSLIST"))));
+        assert!(is_refused(&my_d(&sql("SELECT info FROM information_schema.PROCESSLIST"))));
+        assert!(is_refused(&my_d(&sql("show create user 'app'@'%'"))));
+        assert_eq!(my_d(&sql("SHOW CREATE TABLE shop.t")), Decision::Allow);
         assert_eq!(my_d(&sql("SELECT 'mysql.user', sys_name FROM shop.t")), Decision::Allow);
         assert_eq!(my_d(&find("config", "x")), Decision::Allow, "a MySQL database may be called config");
 
@@ -503,6 +524,7 @@ mod tests {
             assert!(is_refused(&pg_d(&sql(&format!("SELECT * FROM {t}")))), "{t}");
         }
         assert!(is_refused(&pg_d(&sql(r#"SELECT rolpassword FROM pg_catalog."pg_authid""#))));
+        assert!(is_refused(&pg_d(&sql("SELECT query FROM pg_stat_get_activity(NULL)"))));
         assert_eq!(pg_d(&sql("SELECT 'pg_authid'")), Decision::Allow);
         assert_eq!(pg_d(&find("public", "orders")), Decision::Allow);
     }

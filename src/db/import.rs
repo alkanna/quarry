@@ -67,6 +67,8 @@ pub struct CsvOptions {
 
 /// Parses pasted or loaded text into documents, following the original's import rules.
 pub fn parse_import(text: &str, kind: ImportKind, csv: &CsvOptions) -> Res<Vec<Document>> {
+    // Excel's "CSV UTF-8" starts with a byte order mark, which would join the first column's name.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     match kind {
         ImportKind::Json => match parse_value(text)? {
             Bson::Array(a) => a
@@ -163,9 +165,12 @@ pub(crate) fn csv_value(cell: &str) -> Bson {
     if t.eq_ignore_ascii_case("false") {
         return Bson::Boolean(false);
     }
+    // A leading + or zero is part of a code or phone number, which a number would drop, also after a minus sign.
+    let u = t.strip_prefix('-').unwrap_or(t);
     let numeric = t.chars().enumerate().all(|(i, c)| c.is_ascii_digit() || (i == 0 && c == '-') || c == '.' || c == 'e' || c == 'E' || c == '+')
         && t.chars().any(|c| c.is_ascii_digit())
-        && !(t.len() > 1 && t.starts_with('0') && !t.starts_with("0."));
+        && !u.starts_with('+')
+        && !(u.len() > 1 && u.starts_with('0') && !u.starts_with("0."));
     if numeric {
         if let Ok(n) = t.parse::<i64>() {
             return i32::try_from(n).map(Bson::Int32).unwrap_or(Bson::Int64(n));

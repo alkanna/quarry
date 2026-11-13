@@ -503,7 +503,8 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let mut q = sqlx::query(&sql);
         if let Some(p) = prefix {
-            q = q.bind(format!("{}%", super::rules::like_escape(p)));
+            // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
+            q = q.bind(format!("{}%", p.replace('!', "!!").replace('%', "!%").replace('_', "!_")));
         }
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
@@ -541,7 +542,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
             }
         }
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
-        let pattern = prefix.map(|p| format!("{}%", super::rules::like_escape(p)));
+        let pattern = prefix.map(|p| format!("{}%", p.replace('!', "!!").replace('%', "!%").replace('_', "!_")));
         let t = Instant::now();
         let rows = super::pg::read::in_read_only(pc, db, &short, async |c| {
             let mut q = sqlx::query(&sql).persistent(false);

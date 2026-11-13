@@ -278,6 +278,16 @@ impl<'a> G<'a> {
         }
     }
 
+    /// $merge's whenMatched pipeline reads the target's own fields and $out replaces them, so a target with data
+    /// rules could get hidden values copied under keys no rule knows.
+    fn out_target(&self, p: &[Document]) -> Res {
+        let last = p.last().and_then(|s| s.iter().find(|(k, _)| *k == "$out" || *k == "$merge"));
+        match last.and_then(|(k, v)| stage_target(&self.db, k, v)) {
+            Some(t) if self.other(&t).any => refuse(format!("Data rules apply to {}.{}, which $out or $merge would write into", t.db, t.coll.as_deref().unwrap_or(""))),
+            _ => Ok(()),
+        }
+    }
+
     /// Every stage of a pipeline, then the stage checks. $out and $merge are allowed only as the last stage of
     /// aggregate_into; server stages never.
     fn pipeline(&self, p: &[Document], into: bool) -> Res {
@@ -482,7 +492,19 @@ impl<'a> G<'a> {
                 if into && g.any {
                     return refuse("Data rules apply to this collection, and $out or $merge would copy its fields unscrubbed".into());
                 }
+                if into {
+                    g.out_target(&p)?;
+                }
                 g.pipeline(&p, into)
+            }
+            // A view reads its source under its own name, where the source's rules no longer match.
+            n if (n.eq_ignore_ascii_case("create") || n.eq_ignore_ascii_case("collMod")) && c.contains_key("viewOn") => {
+                let src = G::new(self.rules, &self.db, c.get_str("viewOn").unwrap_or(""));
+                if src.any {
+                    return refuse(format!("Data rules apply to {}.{}, so agents cannot make a view of it", self.db, c.get_str("viewOn").unwrap_or("")));
+                }
+                let p: Vec<Document> = c.get_array("pipeline").map(|a| a.iter().filter_map(|s| s.as_document().cloned()).collect()).unwrap_or_default();
+                src.pipeline(&p, false)
             }
             "count" => c.get_document("query").map_or(Ok(()), |q| g.filter(q, "")),
             "distinct" => {
@@ -536,6 +558,7 @@ pub fn check(call: &Call, rules: &Rules) -> Res {
             if g.any {
                 return refuse("Data rules apply to this collection, and $out or $merge would copy its fields unscrubbed".into());
             }
+            g.out_target(pipeline)?;
             g.pipeline(pipeline, true)
         }
         Call::Update { filter, update, .. } => {
@@ -675,6 +698,24 @@ mod tests {
         refused(up(json!({ "$rename": { "email": "contact" } })));
         let distinct = check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: doc! { "distinct": "users", "key": "email" } }, &rules());
         refused(distinct);
+    }
+
+    #[test]
+    fn out_and_merge_refuse_a_target_with_data_rules() {
+        let into = |p: Value| check(&call("aggregate_into", "orders", json!({ "pipeline": p })), &rules());
+        refused(into(json!([{ "$merge": { "into": "users", "on": "_id", "whenMatched": [{ "$set": { "leaked": "$ssn" } }], "whenNotMatched": "discard" } }])));
+        refused(into(json!([{ "$out": "users" }])));
+        refused(into(json!([{ "$merge": "users" }])));
+        allowed(into(json!([{ "$out": "orders_copy" }])));
+    }
+
+    #[test]
+    fn views_of_a_namespace_with_data_rules_are_refused() {
+        let cmd = |c: mongodb::bson::Document| check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: c }, &rules());
+        refused(cmd(doc! { "create": "v", "viewOn": "users", "pipeline": [] }));
+        refused(cmd(doc! { "collMod": "v", "viewOn": "users", "pipeline": [] }));
+        refused(cmd(doc! { "aggregate": "orders", "pipeline": [{ "$merge": { "into": "users" } }], "cursor": {} }));
+        allowed(cmd(doc! { "create": "v", "viewOn": "orders", "pipeline": [] }));
     }
 
     #[test]

@@ -120,11 +120,17 @@ fn path_glob(p: &str) -> Result<Vec<Seg>, String> {
     if p.trim().is_empty() {
         return Err("the field path is empty".into());
     }
-    p.split('.').map(|s| match s {
+    // Paths are matched without their number levels (see `levels`), so the glob drops them too, or a rule on a
+    // numeric key such as `metrics.2024.salary` would never match.
+    let g: Vec<Seg> = p.split('.').filter(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit())).map(|s| match s {
         "" => Err(format!("`{p}` has an empty level")),
         "**" => Ok(Seg::Deep),
         s => Ok(Seg::Pat(s.into())),
-    }).collect()
+    }).collect::<Result<_, _>>()?;
+    if g.is_empty() {
+        return Err(format!("`{p}` names only array positions"));
+    }
+    Ok(g)
 }
 
 fn ns_glob(g: &str) -> Result<NsGlob, String> {
@@ -764,6 +770,8 @@ mod tests {
         assert_eq!(scrubbed(&r, doc! { "card_no": 1, "cardholder": 2, "x": 3 }), doc! { "x": 3 });
         let r = one(path("a.**", Action::Remove));
         assert_eq!(scrubbed(&r, doc! { "a": { "b": 1 }, "c": 2 }), doc! { "c": 2 });
+        let r = one(path("metrics.2024.salary", Action::Remove));
+        assert_eq!(scrubbed(&r, doc! { "metrics": { "2024": { "salary": 1, "n": 2 } } }), doc! { "metrics": { "2024": { "n": 2 } } });
     }
 
     #[test]

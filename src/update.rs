@@ -43,7 +43,8 @@ fn find_install_target() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
         let app = exe.parent()?.parent()?.parent()?;
         (app.extension()? == "app").then(|| app.to_path_buf())
-    } else if exe.components().any(|c| c.as_os_str() == "target") {
+    } else if exe.ancestors().skip(2).take(2).any(|p| p.file_name().is_some_and(|n| n == "target")) {
+        // A cargo build sits in target/<profile> or target/<triple>/<profile>; a folder named target higher up is a real install.
         None
     } else {
         Some(exe)
@@ -255,8 +256,9 @@ pub fn update_db_tools(dir: &Path) -> Result<Option<String>, String> {
 
 /// Downloads one build, checks it against the feed's SHA-256 and puts its programs in `dir`.
 fn install_tools_build(dir: &Path, (version, url, sha): (String, String, String)) -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!("quarry-tools-{version}"));
-    remove(&tmp);
+    // A fresh folder of our own: a predictable one in a shared /tmp could be made by another user, who could then
+    // swap the archive between the checksum and the unpacking.
+    let tmp = fresh_temp_dir("quarry-tools")?;
     let out = tmp.join("x");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let archive = tmp.join(url.rsplit('/').next().unwrap_or("tools"));
