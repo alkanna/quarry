@@ -178,8 +178,7 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
         (Icon::WMax, false, true, "Maximum width: the widest value", HeadAct::Width(WidthPreset::Max)),
     ], acts);
     ui.separator();
-    // Data summaries and the rewrites below run Mongo pipelines.
-    ui.add_enabled_ui(!sql, |ui| ui.menu_button("Data", |ui| {
+    ui.menu_button("Data", |ui| {
         menu_look(ui);
         if !agg {
             segmented(ui, scope_query, &[(false, "This page"), (true, "Whole query")]);
@@ -188,7 +187,7 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
         for op in ColOp::ALL {
             item(ui, op.label(), HeadAct::Data(op), acts);
         }
-    }));
+    });
     // Aggregation results are not documents of the collection, so there is nothing to write back to.
     if !agg && !sql {
         ui.add_enabled_ui(!indexed(c), |ui| {
@@ -310,21 +309,41 @@ impl App {
     fn col_data(&mut self, ctx: &egui::Context, agg: bool, docs: Rows, c: &str, op: ColOp) {
         let Some(t) = self.t() else { return };
         let (sel, matched) = (t.sel.clone(), t.query.scope());
+        // A SQL row's keys are column names, which may hold a dot, so they are never read as paths.
+        let sql_col = t.sql.as_ref().map(|s| {
+            let cols = if agg { s.sets.get(s.set_sel).map_or(&[][..], |r| &r.cols[..]) } else { &s.cols[..] };
+            cols.iter().find(|x| x.name == c).cloned()
+        });
+        let noun = if sql_col.is_some() { "rows" } else { "documents" };
         if agg || !self.col_scope_query {
             // As the table shows them, unsaved edits included.
-            let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match self.shown_row(docs, i, agg) {
-                Some(d) => db::get_path(&d, c).cloned(),
-                None => docs.value(i, c).map(|v| v.bson().into_owned()),
+            let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), &sql_col) {
+                (d, Some(col)) => {
+                    let v = d.or_else(|| docs.owned(i))?.remove(c)?;
+                    Some(match col {
+                        Some(col) if op.is_stat() => db::sql::value::stat_value(col.kind, v),
+                        _ => v,
+                    })
+                }
+                (Some(d), None) => db::get_path(&d, c).cloned(),
+                (None, None) => docs.value(i, c).map(|v| v.bson().into_owned()),
             }).collect();
-            let scope = format!("From the {} documents on this page.", docs.len());
+            let scope = format!("From the {} {noun} on this page.", docs.len());
             return match col_op_result(op, &values) {
                 ColOut::Groups(rows) => {
-                    // Pipeline and script results are not the collection, so there is nothing to reopen.
-                    let pipeline = if agg { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, matched.filter.clone()).unwrap_or_default() };
+                    // Pipeline and script results are not the collection, and a SQL table has no pipeline, so there is nothing to reopen.
+                    let pipeline = if agg || sql_col.is_some() { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, matched.filter.clone()).unwrap_or_default() };
                     self.modal = Some(Modal::Grouped { sel, path: c.into(), pipeline, rows });
                 }
                 out => self.col_result(ctx, &col_title(agg, op, &sel.coll, c), c, out, &scope),
             };
+        }
+        if let Some(col) = sql_col {
+            let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
+            let q = super::sql::bar::page_query(self.t().unwrap());
+            self.ok(format!("Reading {c} from every matching row…"));
+            let src = col.map_or_else(|| c.to_string(), |x| x.src);
+            return self.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
         }
         let Some(target) = self.target() else { return self.warn_offline() };
         let sort = self.t().unwrap().query.sort.clone();
@@ -344,10 +363,11 @@ impl App {
         }
     }
 
-    pub(super) fn column_values_done(&mut self, ctx: &egui::Context, op: ColOp, coll: String, path: String, res: db::Res<(ColOut, bool)>) {
+    pub(super) fn column_values_done(&mut self, ctx: &egui::Context, conn: u64, op: ColOp, coll: String, path: String, res: db::Res<(ColOut, bool)>) {
+        let (noun, one) = if self.conn(conn).is_some_and(|c| c.sql.is_some()) { ("rows", "row") } else { ("documents", "document") };
         match res {
             Ok((out, capped)) => {
-                let scope = if capped { format!("From the first {COL_VALUES_CAP} documents of the query, in its sort order.") } else { "From every document matching the query.".into() };
+                let scope = if capped { format!("From the first {COL_VALUES_CAP} {noun} of the query, in its sort order.") } else { format!("From every {one} matching the query.") };
                 self.col_result(ctx, &col_title(false, op, &coll, &path), &path, out, &scope);
             }
             Err(e) => self.err(e),

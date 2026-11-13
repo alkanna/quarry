@@ -313,7 +313,7 @@ pub enum Msg {
     /// "Group by and count" finished: one `{ _id, count }` per value, most frequent first.
     Grouped { conn: u64, db: String, coll: String, path: String, pipeline: Vec<Document>, res: Res<Vec<Document>> },
     /// A column data action over the whole query; the bool says the document cap was reached.
-    ColumnValues { op: ColOp, coll: String, path: String, res: Res<(ColOut, bool)> },
+    ColumnValues { conn: u64, op: ColOp, coll: String, path: String, res: Res<(ColOut, bool)> },
     /// A field's values across the collection `key` ("conn/db/coll"), for suggestions.
     /// `prefix`: only string values starting with it, looked up while someone types one.
     FieldValues { key: String, path: String, prefix: Option<String>, res: Res<Option<Vec<Bson>>> },

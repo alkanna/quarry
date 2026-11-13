@@ -775,7 +775,7 @@ impl Worker {
             .await;
             match res {
                 Ok((ColOut::Groups(rows), _)) => Msg::Grouped { conn, db: t.db, coll: t.coll, path, pipeline, res: Ok(rows) },
-                res => Msg::ColumnValues { op, coll: t.coll, path, res },
+                res => Msg::ColumnValues { conn, op, coll: t.coll, path, res },
             }
         });
     }

@@ -182,6 +182,30 @@ pub fn to_bson(d: Dialect, kind: Kind, raw: Option<&[u8]>) -> Bson {
     }
 }
 
+/// DECIMAL and date columns arrive as text so they stay exact, but sum, average, median and range need numbers and
+/// dates. A value that does not parse (a zero date, `infinity`) is kept as text, which the stats count as neither.
+pub fn stat_value(kind: Kind, v: Bson) -> Bson {
+    let Bson::String(s) = &v else { return v };
+    match kind {
+        Kind::Decimal => s.parse::<f64>().map_or(v, Bson::Double),
+        Kind::Date | Kind::DateTime => {
+            let mut t = s.replacen(' ', "T", 1);
+            if t.len() == 10 {
+                t.push_str("T00:00:00");
+            }
+            // PostgreSQL writes a zone as +00 or +05:30, RFC 3339 needs +00:00. A value without a zone (DATETIME, and
+            // TIMESTAMP in the session zone) is read as UTC, which keeps spans and order right.
+            match t.get(19..).and_then(|z| z.rfind(['+', '-'])).map(|i| t.len() - 19 - i) {
+                Some(3) => t.push_str(":00"),
+                None => t.push('Z'),
+                _ => {}
+            }
+            mongodb::bson::DateTime::parse_rfc3339_str(&t).map_or(v, Bson::DateTime)
+        }
+        _ => v,
+    }
+}
+
 /// The bytes of PostgreSQL's hex bytea text: a backslash, an x and pairs of digits.
 fn unhex(raw: &[u8]) -> Option<Vec<u8>> {
     let h = raw.strip_prefix(b"\\x")?;
@@ -399,6 +423,27 @@ impl Param {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stats_read_decimal_and_date_text() {
+        use super::{stat_value, Kind};
+        use mongodb::bson::Bson;
+        let ms = |kind, s: &str| match stat_value(kind, Bson::String(s.into())) {
+            Bson::DateTime(d) => Some(d.timestamp_millis()),
+            _ => None,
+        };
+        assert_eq!(stat_value(Kind::Decimal, Bson::String("12.50".into())), Bson::Double(12.5));
+        assert_eq!(ms(Kind::Date, "1970-01-02"), Some(86_400_000));
+        assert_eq!(ms(Kind::DateTime, "1970-01-01 00:00:01.5"), Some(1500));
+        // PostgreSQL zones: +00 and +05:30 shapes.
+        assert_eq!(ms(Kind::DateTime, "1970-01-01 01:00:00+01"), Some(0));
+        assert_eq!(ms(Kind::DateTime, "1970-01-01 05:30:00+05:30"), Some(0));
+        assert_eq!(ms(Kind::DateTime, "1970-01-01 00:00:00-08"), Some(8 * 3_600_000));
+        // Kept as text: zero dates, infinity, and text columns that only look like numbers.
+        for (kind, s) in [(Kind::Date, "0000-00-00"), (Kind::DateTime, "infinity"), (Kind::Text, "12")] {
+            assert_eq!(stat_value(kind, Bson::String(s.into())), Bson::String(s.into()));
+        }
+    }
+
     #[test]
     fn a_postgres_literal_reads_the_same_under_both_string_settings() {
         for (text, want) in [("plain", "'plain'"), ("it's", "'it''s'"), (r"a\b", r"E'a\\b'"), (r"it's \", r"E'it''s \\'"), ("", "''"), ("é'\n", "'é''\n'")] {

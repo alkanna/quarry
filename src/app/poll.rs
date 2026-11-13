@@ -136,7 +136,7 @@ impl App {
                     Ok(s) => self.ok(s),
                     Err(e) => self.err(e),
                 }
-                Msg::ColumnValues { op, coll, path, res } => self.column_values_done(ctx, op, coll, path, res),
+                Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(ctx, conn, op, coll, path, res),
                 Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
                 Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
