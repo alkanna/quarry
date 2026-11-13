@@ -364,6 +364,7 @@ fn every_filter_rule_runs_on_postgres() {
                     Op::Between if g == Group::Number => vec!["1".into(), "9".into()],
                     Op::Between => vec!["2024-01-01".into(), "2030-01-01".into()],
                     Op::In | Op::NotIn | Op::NotInOrNull if g == Group::Number => vec!["1".into(), "2".into()],
+                    Op::In | Op::NotIn | Op::NotInOrNull if kind == Kind::Bool => vec!["true".into(), "false".into()],
                     Op::In | Op::NotIn | Op::NotInOrNull => vec!["a".into(), "50%_off\\".into()],
                     Op::Last => vec!["3".into(), "weeks".into()],
                     Op::AfterCol => vec!["seen_at".into()],
