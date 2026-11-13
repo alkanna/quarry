@@ -232,7 +232,7 @@ impl App {
     }
 
     pub(in crate::app) fn link_dialog(&mut self, ui: &mut egui::Ui, f: &mut LinkForm, keep: &mut bool) {
-        ui.set_width(600.0);
+        ui.set_width(fit_width(ui.ctx(), 600.0));
         // A locate is an edit whose folder can change, so it is looked at and checked like a new one.
         let edit = f.edit.is_some() && !f.locate;
         let head = if f.locate {

@@ -33,7 +33,7 @@ impl App {
     }
 
     pub(super) fn group_dialog(&mut self, ui: &mut egui::Ui, f: &mut GroupForm, keep: &mut bool) {
-        ui.set_width(520.0);
+        ui.set_width(fit_width(ui.ctx(), 520.0));
         let n = f.members.len();
         let sub = format!("{} · {n} connection{}", f.name.trim(), if n == 1 { "" } else { "s" });
         dialog_head(ui, &Head::new("Edit group").sub(sub).glyph(glyphs::folder).tone(group_color(&f.color)));

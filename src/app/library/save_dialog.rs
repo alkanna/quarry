@@ -244,7 +244,7 @@ impl App {
     }
 
     pub(in crate::app) fn save_dialog(&mut self, ui: &mut egui::Ui, f: &mut SaveForm, keep: &mut bool) {
-        ui.set_width(520.0);
+        ui.set_width(fit_width(ui.ctx(), 520.0));
         dialog_head(ui, &Head::new("Save to library").sub(f.head.clone()).glyph(paint_book));
         let name = f.name.trim().to_string();
         let new_folder_empty = f.new_folder.as_deref().is_some_and(|n| n.trim().is_empty());

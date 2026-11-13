@@ -605,7 +605,7 @@ impl App {
     /// Open on: the connections a script can run on, grouped as the Connections panel groups them, when no tab or active
     /// connection is the obvious one. Nothing is preselected, so a production connection is never a default.
     pub(in crate::app) fn open_on_dialog(&mut self, ui: &mut egui::Ui, f: &mut OpenOnForm, keep: &mut bool) {
-        ui.set_width(460.0);
+        ui.set_width(fit_width(ui.ctx(), 460.0));
         let verb = if f.how == How::Run { "Run all" } else { "Open" };
         dialog_head(ui, &Head::new("Which connection?").sub(f.name.clone()).glyph(glyphs::plug));
         // Grouped by the connection groups, in their order, then the connections in no group.
