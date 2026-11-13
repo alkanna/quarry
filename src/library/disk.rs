@@ -336,13 +336,19 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
         return std::fs::write(path, bytes);
     }
+    replace_file(path, bytes, meta.map(|m| m.permissions()))
+}
+
+/// Writes `bytes` to a temp file beside `path`, with `perms` when given, and renames it over `path`. The one temp file
+/// scheme of the app: the config files go through it too.
+pub fn replace_file(path: &Path, bytes: &[u8], perms: Option<std::fs::Permissions>) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("script");
     let tmp = dir.join(format!(".{file}.quarry-tmp"));
     let res = (|| {
         std::fs::write(&tmp, bytes)?;
-        if let Some(m) = &meta {
-            let _ = std::fs::set_permissions(&tmp, m.permissions());
+        if let Some(p) = perms {
+            let _ = std::fs::set_permissions(&tmp, p);
         }
         std::fs::rename(&tmp, path)
     })();

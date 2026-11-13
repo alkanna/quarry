@@ -463,13 +463,13 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     crate::vault::set(&format!("connection-{id}-{what}"), value).map_err(|e| format!("Could not store the {} in the Keychain: {e}", what.replace('-', " ")))
 }
 
-/// Written beside the file, then renamed over it by `disk::write_file`: a crash mid-write leaves the old file whole
+/// Written beside the file, then renamed over it by `disk::replace_file`: a crash mid-write leaves the old file whole
 /// instead of a truncated one that no longer parses.
 // ponytail: no fsync; ui.json is saved on every keystroke in the query boxes and an fsync on the UI
 // thread stalls typing. Only a power loss right after a save can lose it; sync on a worker if that matters.
 pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    crate::library::disk::write_file(&dir.join(file), bytes)
+    crate::library::disk::replace_file(&dir.join(file), bytes, None)
 }
 
 impl App {

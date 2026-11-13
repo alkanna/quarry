@@ -584,12 +584,9 @@ impl App {
                             ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
                             ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                         }
-                        // Built only while the tip shows, not for every tab every frame.
-                        let resp = resp.on_hover_ui(|ui| {
-                            let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                            let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
-                            ui.label(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
-                        });
+                        let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                        let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
+                        let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
                         resp.context_menu(|ui| {
                             menu_look(ui);
                             ui.set_min_width(190.0);
