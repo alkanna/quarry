@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.0](https://github.com/alkanna/quarry/compare/v0.45.0...v0.46.0) (2026-11-13)
+
+
+### Features
+
+* connection groups, a script library with linked folders, and drag and drop everywhere ([#228](https://github.com/alkanna/quarry/issues/228)) ([356f40a](https://github.com/alkanna/quarry/commit/356f40a7f5cec7d1efaba73f2a49af90a4ab80b8))
+
 ## [0.45.0](https://github.com/alkanna/quarry/compare/v0.44.0...v0.45.0) (2026-11-13)
 
 
