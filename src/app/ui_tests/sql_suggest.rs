@@ -38,11 +38,27 @@ fn tables_list_right_after_from_and_values_after_a_comparison() {
 #[test]
 fn ctrl_space_lists_where_typing_alone_shows_nothing() {
     let Some(mut ui) = query_editor() else { return };
-    ui.type_text("SELECT ");
+    ui.type_text("SELECT * FROM orders o ");
     assert!(listed(&ui).is_empty(), "a list opened after a plain space: {:?}", listed(&ui));
     ui.h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Space);
     ui.settle();
     assert!(!listed(&ui).is_empty(), "Ctrl+Space listed nothing");
     let q = ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default();
-    assert_eq!(q, "SELECT ", "Ctrl+Space typed into the editor");
+    assert_eq!(q, "SELECT * FROM orders o ", "Ctrl+Space typed into the editor");
+}
+
+#[test]
+fn a_space_after_where_opens_the_columns_and_esc_closes_them() {
+    let Some(mut ui) = query_editor() else { return };
+    ui.type_text("SELECT * FROM orders WHERE ");
+    assert!(listed(&ui).iter().any(|s| s == "status"), "no columns of orders after WHERE: {:?}", listed(&ui));
+    ui.h.key_press(egui::Key::Escape);
+    ui.settle();
+    assert!(listed(&ui).is_empty(), "Esc left the list open: {:?}", listed(&ui));
+    // Esc takes the focus from the editor, so it is given back before typing on.
+    ui.h.ctx.memory_mut(|m| m.request_focus(App::sql_editor_id(ui.app().cur)));
+    ui.settle();
+    // The next trigger opens it again.
+    ui.type_text("status = 'paid' AND ");
+    assert!(listed(&ui).iter().any(|s| s == "status"), "no columns after AND: {:?}", listed(&ui));
 }

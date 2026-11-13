@@ -282,6 +282,31 @@ fn clause(toks: &[Tk]) -> Option<String> {
     None
 }
 
+/// Whether the caret sits after a space that follows a keyword or comma which asks for a column or expression, such as `WHERE `,
+/// `AND `, `ON ` of a join, `BY `, `SELECT `, `SET ` of an UPDATE, `HAVING `, a comma in a select, order, group or set list, or a
+/// comparison operator. Only there does an empty word list columns by itself; after a value or elsewhere it would be noise on every space.
+fn expects_expr(before: &str, prev: &[Tk]) -> bool {
+    let Some(last) = prev.last() else { return false };
+    if !before.ends_with(char::is_whitespace) {
+        return false;
+    }
+    if last.tok == Tok::Word {
+        return match last.s.to_ascii_uppercase().as_str() {
+            "WHERE" | "AND" | "OR" | "BY" | "HAVING" | "SELECT" | "DISTINCT" => true,
+            "ON" => prev.iter().any(|t| t.is("JOIN")),
+            "SET" => prev.iter().any(|t| t.is("UPDATE")),
+            _ => false,
+        };
+    }
+    if last.punct(",") {
+        return matches!(clause(prev).as_deref(), Some("SELECT" | "ORDER" | "GROUP" | "SET"));
+    }
+    // `->` and `=>` are not comparisons.
+    let arrow = last.s == ">" && prev.len() >= 2 && prev[prev.len() - 2].tok == Tok::Punct && matches!(prev[prev.len() - 2].s, "-" | "=") && prev[prev.len() - 2].start + 1 == last.start;
+    let cmp = last.tok == Tok::Punct && matches!(last.s, "=" | "<" | ">" | "!") && !arrow;
+    cmp && matches!(clause(prev).as_deref(), Some("WHERE" | "ON" | "HAVING"))
+}
+
 /// The percentages of a column's values, when the lookup counted them.
 fn percent(info: &super::complete::FieldInfo, i: usize) -> String {
     let total: u64 = info.freq.iter().sum();
@@ -391,13 +416,14 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     let table_kw = last.is_some_and(|t| ["FROM", "JOIN", "UPDATE", "INTO", "TABLE"].iter().any(|k| t.is(k))) || last.is_some_and(|t| t.punct(",")) && clause(prev).as_deref() == Some("FROM");
     // An empty word lists only where the choice is narrow: tables after FROM and the like, values after a comparison.
     // Anywhere else every column, function and keyword would pop up after each space, so that waits for Ctrl+Space.
+    let expects = expects_expr(before, prev);
     if !in_tick && word.is_empty() && !last.is_some_and(|t| t.punct(".")) && !table_kw {
         // Only values already known: asking the server here would run a lookup for every `a = b` typed, where a column
         // or a function often follows. A typed quote or digit still asks.
         if let Some(out) = value_list(prev, "", from, "", &rts, values).filter(|o| !o.sugs.is_empty()) {
             return Some(out);
         }
-        if !force {
+        if !force && !expects {
             return None;
         }
     }
@@ -1078,8 +1104,62 @@ mod tests {
     fn a_word_typed_in_full_needs_no_list_and_empty_words_stay_quiet() {
         assert!(run("SELECT * FROM orders WHERE statu|").is_some());
         assert!(run("SELECT * FROM orders WHERE JOIN|").is_none());
-        assert!(run("SELECT |").is_none());
         assert!(run("|").is_none());
+    }
+
+    #[test]
+    fn a_space_after_a_keyword_that_wants_a_column_lists_at_once() {
+        let cols = |sql: &str| run(sql).map(|(_, s)| s.into_iter().map(|x| x.text).collect::<Vec<String>>()).unwrap_or_default();
+        for sql in [
+            "SELECT |",
+            "SELECT DISTINCT |",
+            "SELECT * FROM orders WHERE |",
+            "SELECT * FROM orders WHERE id = 1 AND |",
+            "SELECT * FROM orders WHERE id = 1 OR |",
+            "SELECT * FROM orders o JOIN customers c ON |",
+            "SELECT * FROM orders ORDER BY |",
+            "SELECT * FROM orders GROUP BY |",
+            "SELECT * FROM orders GROUP BY id HAVING |",
+            "UPDATE orders SET |",
+            "SELECT id, |",
+            "SELECT * FROM orders ORDER BY id, |",
+            "UPDATE orders SET id = 1, |",
+            "SELECT * FROM orders WHERE id > |",
+            "SELECT * FROM orders WHERE id <> |",
+            "SELECT * FROM orders WHERE id >= |",
+            "SELECT * FROM orders; SELECT |",
+        ] {
+            assert!(!cols(sql).is_empty(), "nothing listed at {sql}");
+        }
+        assert!(cols("SELECT * FROM orders WHERE |").iter().any(|c| c == "id"));
+        for sql in ["SELECT * FROM |", "UPDATE |", "INSERT INTO |", "SELECT * FROM orders JOIN |"] {
+            assert!(cols(sql).iter().any(|c| c == "orders"), "no tables at {sql}");
+        }
+    }
+
+    #[test]
+    fn a_plain_space_elsewhere_stays_quiet() {
+        for sql in [
+            "SELECT * FROM orders WHERE id = 1 |",
+            "SELECT * FROM orders WHERE id = 1 ORDER |",
+            "SELECT * FROM orders WHERE name = 'a b |",
+            "SELECT * FROM orders WHERE -- and |",
+            "SELECT * FROM orders /* where |",
+            "SELECT * FROM orders; |",
+            "SELECT * FROM orders |",
+            "SELECT * FROM orders o |",
+            "INSERT INTO orders (id, |",
+            "INSERT INTO orders VALUES (1, |",
+            "SELECT * FROM orders WHERE id IN (1, |",
+            "SELECT * FROM orders WHERE id |",
+            "CREATE INDEX i ON |",
+            "SET |",
+            "SELECT * FROM orders WHERE x->|",
+            "SELECT * FROM orders WHERE id =|",
+            "SELECT * FROM orders WHERE|",
+        ] {
+            assert!(run(sql).is_none(), "a list opened at {sql}");
+        }
     }
 
     #[test]
