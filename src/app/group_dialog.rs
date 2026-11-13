@@ -38,7 +38,7 @@ impl App {
         dialog_body(ui, |ui| {
             form_card(ui, "", "", |rows| {
                 rows.row("Name", "", |ui| {
-                    let r = ui.add(egui::TextEdit::singleline(&mut f.name).id(egui::Id::new("group-name")).desired_width(ui.available_width()).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.name).id(egui::Id::unique("group-name")).desired_width(ui.available_width()).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Group name"));
                     if std::mem::take(&mut f.focus) {
                         r.request_focus();
@@ -118,7 +118,7 @@ fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
             let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), MEMBER_H), Sense::click_and_drag());
             let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), egui::vec2(24.0, 24.0));
             // Over the row, so a press on the cross is a click on it and never the start of a drag.
-            let x = ui.interact(x_rect, ui.id().with(("member-remove", *id)), Sense::click());
+            let x = ui.interact(x_rect, egui::Id::unique(("member-remove", *id)), Sense::click());
             let p = ui.painter();
             if i > 0 {
                 p.hline(rect.x_range(), rect.top(), Stroke::new(0.5, LINE()));

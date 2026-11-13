@@ -40,10 +40,8 @@ pub(super) struct ConnsUi {
 
 #[derive(Clone, Copy)]
 pub(super) enum DemoDrop {
-    /// A connection hovering inside a group.
+    /// A connection hovering inside this group.
     Into(u64),
-    /// A connection hovering between rows, above the row of this connection.
-    Before(u64),
 }
 
 /// One row of the panel or of the picker.
@@ -228,7 +226,7 @@ impl App {
         ui.add_space(6.0);
         let r = ui.add(
             egui::TextEdit::singleline(&mut self.conns_ui.filter)
-                .id(egui::Id::new("conns-filter"))
+                .id(egui::Id::unique("conns-filter"))
                 .hint_text(RichText::new("Filter connections").color(FAINT()))
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }),
@@ -449,6 +447,7 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 if !note.is_empty() {
                     ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, note, FontId::proportional(TXT_CAPTION), FAINT());
                 }
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, *text));
                 drop_target(ui, &r, rows, i, cx, acts);
             }
             CRow::GroupsEnd => {
@@ -466,6 +465,7 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 ui.painter().vline(rect.left() + GUIDE_X, rect.y_range(), Stroke::new(1.0, tint(color, 128)));
                 let g = ui.painter().layout_no_wrap("Drag connections here".into(), FontId::proportional(TXT_SMALL), FAINT());
                 ui.painter().galley(egui::pos2(rect.left() + MEMBER_INDENT + 8.0, rect.center().y - g.size().y / 2.0), g, FAINT());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "Drag connections here"));
                 drop_target(ui, &r, rows, i, cx, acts);
             }
             CRow::Group { id, open, shown, total } => {
@@ -486,9 +486,6 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 }
                 drag_source(ui, &r, DragItem::Conn(c.meta.id), &c.meta.name);
                 drop_target(ui, &r, rows, i, cx, acts);
-                if st.demo_drop.is_some_and(|d| matches!(d, DemoDrop::Before(x) if x == c.meta.id)) {
-                    drop_line(ui.painter(), r.rect.x_range(), r.rect.top() - 1.0);
-                }
                 conn_menu(&r, c, group.is_some(), acts);
             }
         }
@@ -547,7 +544,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
         let field = egui::Rect::from_min_max(egui::pos2(rect.left() + 46.0, rect.top() + 2.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
         let focus = std::mem::take(&mut st.focus_edit);
         if let Some((_, text)) = st.rename.as_mut() {
-            let e = ui.put(field, egui::TextEdit::singleline(text).id(egui::Id::new(("group-rename", g.id))).desired_width(field.width()).margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }));
+            let e = ui.put(field, egui::TextEdit::singleline(text).id(egui::Id::unique(("group-rename", g.id))).desired_width(field.width()).margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }));
             e.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Group name"));
             if focus {
                 e.request_focus();
@@ -608,12 +605,20 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
         acts.push(PanelAct::Toggle(g.id));
     }
     match st.demo_drop {
-        Some(DemoDrop::Into(id)) if id == g.id => drop_fill(ui.painter(), r.rect),
+        Some(DemoDrop::Into(id)) if id == g.id => {
+            drop_fill(ui.painter(), r.rect);
+            // The ghost a real drag draws beside the pointer, for the picture.
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("demo-drag-ghost")));
+            let galley = p.layout_no_wrap("sandbox".into(), FontId::proportional(TXT_BODY), TEXT());
+            let rect = egui::Rect::from_min_size(r.rect.center() + egui::vec2(24.0, 10.0), galley.size() + egui::vec2(24.0, 10.0));
+            p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+            p.galley(rect.min + egui::vec2(12.0, 5.0), galley, TEXT());
+        }
         _ => {}
     }
     if st.demo_menu == Some(g.id) {
         let pos = r.rect.right_top() + egui::vec2(-24.0, 20.0);
-        egui::Area::new(egui::Id::new("demo-group-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("demo-group-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
                 ui.set_width(250.0);
                 group_menu(ui, g, cx, st, acts);
@@ -707,7 +712,7 @@ fn new_group_field(ui: &mut egui::Ui, text: &mut String, focus: &mut bool, group
     chevron(ui.painter(), egui::pos2(rect.left() + 6.0, rect.center().y), true, FAINT());
     paint_folder(ui.painter(), egui::pos2(rect.left() + 24.0, rect.center().y), group_color(next), true);
     let field = egui::Rect::from_min_max(egui::pos2(rect.left() + 38.0, rect.top() + 2.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
-    let e = ui.put(field, egui::TextEdit::singleline(text).id(egui::Id::new("group-new")).hint_text(RichText::new("Group name").color(FAINT())).desired_width(field.width()).margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }));
+    let e = ui.put(field, egui::TextEdit::singleline(text).id(egui::Id::unique("group-new")).hint_text(RichText::new("Group name").color(FAINT())).desired_width(field.width()).margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }));
     e.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "New group name"));
     if std::mem::take(focus) {
         e.request_focus();
@@ -757,7 +762,7 @@ pub(super) fn color_swatches(ui: &mut egui::Ui, current: &str) -> Option<&'stati
 pub(super) fn picker_filter(ui: &mut egui::Ui, text: &mut String, focus: bool) {
     ui.horizontal(|ui| {
         ui.add_space(6.0);
-        let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::new("picker-filter")).hint_text(RichText::new("Filter connections").color(FAINT())).desired_width(ui.available_width() - 6.0).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
+        let r = ui.add(egui::TextEdit::singleline(text).id(egui::Id::unique("picker-filter")).hint_text(RichText::new("Filter connections").color(FAINT())).desired_width(ui.available_width() - 6.0).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Filter connections"));
         if focus {
             r.request_focus();
