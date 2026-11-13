@@ -309,8 +309,9 @@ impl App {
     fn col_data(&mut self, ctx: &egui::Context, agg: bool, docs: Rows, c: &str, op: ColOp) {
         let Some(t) = self.t() else { return };
         let (sel, matched) = (t.sel.clone(), t.query.scope());
-        // A SQL row's keys are column names, which may hold a dot, so they are never read as paths.
-        let sql_col = t.sql.as_ref().map(|s| {
+        // A SQL table or Query result: its keys are column names, which may hold a dot, so they are never read as paths.
+        // A Shell result on a SQL tab holds documents and reads like Mongo's.
+        let sql_col = t.sql.as_ref().filter(|_| !agg || t.view == View::Sql).map(|s| {
             let cols = if agg { s.sets.get(s.set_sel).map_or(&[][..], |r| &r.cols[..]) } else { &s.cols[..] };
             cols.iter().find(|x| x.name == c).cloned()
         });
@@ -319,7 +320,10 @@ impl App {
             // As the table shows them, unsaved edits included.
             let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), &sql_col) {
                 (d, Some(col)) => {
-                    let v = d.or_else(|| docs.owned(i))?.remove(c)?;
+                    let v = match d {
+                        Some(mut d) => d.remove(c)?,
+                        None => docs.key(i, c)?,
+                    };
                     Some(match col {
                         Some(col) if op.is_stat() => db::sql::value::stat_value(col.kind, v),
                         _ => v,
@@ -340,7 +344,8 @@ impl App {
         }
         if let Some(col) = sql_col {
             let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
-            let q = super::sql::bar::page_query(self.t().unwrap());
+            // The query the grid shows, not bar text typed since.
+            let q = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.ran.clone()).unwrap_or_default();
             self.ok(format!("Reading {c} from every matching row…"));
             let src = col.map_or_else(|| c.to_string(), |x| x.src);
             return self.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
@@ -364,7 +369,7 @@ impl App {
     }
 
     pub(super) fn column_values_done(&mut self, ctx: &egui::Context, conn: u64, op: ColOp, coll: String, path: String, res: db::Res<(ColOut, bool)>) {
-        let (noun, one) = if self.conn(conn).is_some_and(|c| c.sql.is_some()) { ("rows", "row") } else { ("documents", "document") };
+        let (noun, one) = if self.is_sql(conn) { ("rows", "row") } else { ("documents", "document") };
         match res {
             Ok((out, capped)) => {
                 let scope = if capped { format!("From the first {COL_VALUES_CAP} {noun} of the query, in its sort order.") } else { format!("From every {one} matching the query.") };

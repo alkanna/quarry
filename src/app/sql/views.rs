@@ -15,6 +15,9 @@ impl App {
         let t = &mut self.tabs[i];
         (t.req, t.loading, t.size) = (req, true, size);
         let q = crate::app::sql::bar::page_query(t);
+        if let Some(s) = t.sql.as_mut() {
+            s.ran = q.clone();
+        }
         self.worker.sql_page(req, db, space, t.sel.coll.clone(), q, size, t.page * size);
     }
 

@@ -82,6 +82,14 @@ impl<'a> Rows<'a> {
         }
     }
 
+    /// The top-level value `key` of row `i`, for rows whose keys may hold a dot.
+    pub(super) fn key(self, i: usize, key: &str) -> Option<Bson> {
+        match self {
+            Rows::Docs(d) => d.get(i)?.get(key).cloned(),
+            Rows::Raw(r) => Bson::try_from(r.get(i)?.raw().get(key).ok()??).ok(),
+        }
+    }
+
     /// A decoded copy of row `i`, for actions.
     pub(super) fn owned(self, i: usize) -> Option<Document> {
         match self {

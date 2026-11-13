@@ -423,6 +423,8 @@ pub(super) struct SqlTab {
     pub(super) estimated: bool,
     /// Text for the Query view, set by "Edit in Query" on checked rows.
     pub(super) query: String,
+    /// The query of the last page asked for, which whole-query column actions repeat.
+    pub(super) ran: db::sql::PageQuery,
     /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
     pub(super) matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.

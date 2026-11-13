@@ -182,12 +182,12 @@ pub fn to_bson(d: Dialect, kind: Kind, raw: Option<&[u8]>) -> Bson {
     }
 }
 
-/// DECIMAL and date columns arrive as text so they stay exact, but sum, average, median and range need numbers and
-/// dates. A value that does not parse (a zero date, `infinity`) is kept as text, which the stats count as neither.
+/// DECIMAL, date and unsigned values past i64 arrive as text so they stay exact, but sum, average, median and range need
+/// numbers and dates. A value that does not parse (a zero date, NaN, `infinity`) is kept as text, which the stats count as neither.
 pub fn stat_value(kind: Kind, v: Bson) -> Bson {
     let Bson::String(s) = &v else { return v };
     match kind {
-        Kind::Decimal => s.parse::<f64>().map_or(v, Bson::Double),
+        Kind::Decimal | Kind::UInt => s.parse::<f64>().ok().filter(|x| x.is_finite()).map_or(v, Bson::Double),
         Kind::Date | Kind::DateTime => {
             let mut t = s.replacen(' ', "T", 1);
             if t.len() == 10 {
@@ -439,7 +439,8 @@ mod tests {
         assert_eq!(ms(Kind::DateTime, "1970-01-01 05:30:00+05:30"), Some(0));
         assert_eq!(ms(Kind::DateTime, "1970-01-01 00:00:00-08"), Some(8 * 3_600_000));
         // Kept as text: zero dates, infinity, and text columns that only look like numbers.
-        for (kind, s) in [(Kind::Date, "0000-00-00"), (Kind::DateTime, "infinity"), (Kind::Text, "12")] {
+        assert_eq!(stat_value(Kind::UInt, Bson::String("18446744073709551615".into())), Bson::Double(18446744073709551615.0));
+        for (kind, s) in [(Kind::Date, "0000-00-00"), (Kind::DateTime, "infinity"), (Kind::Decimal, "NaN"), (Kind::Decimal, "Infinity"), (Kind::Text, "12")] {
             assert_eq!(stat_value(kind, Bson::String(s.into())), Bson::String(s.into()));
         }
     }

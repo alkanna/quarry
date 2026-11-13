@@ -55,6 +55,11 @@ impl App {
         self.conn(conn).is_none_or(|c| c.meta.engine.supports(f))
     }
 
+    /// Whether `conn` is a MySQL, MariaDB or PostgreSQL connection.
+    pub(in crate::app) fn is_sql(&self, conn: u64) -> bool {
+        self.conn(conn).is_some_and(|c| c.meta.engine.is_sql())
+    }
+
     /// Whether `conn` is a PostgreSQL connection.
     pub(in crate::app) fn is_pg(&self, conn: u64) -> bool {
         self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)

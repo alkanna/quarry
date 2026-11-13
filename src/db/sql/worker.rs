@@ -412,7 +412,8 @@ pub(super) fn pg_kind<R: Cells>(r: &R) -> Kind {
 /// grouped), whether that is an estimate, the time, and the rows before grouping when grouped.
 type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
 
-async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
+/// Without `counted` the count and the grouped row count are skipped and come back as 0 and None.
+async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64, counted: bool) -> Res<Paged> {
     let start = Instant::now();
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
@@ -423,10 +424,11 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
     one_read(&sql, d)?;
     let data = db.read_text(schema, &sql, user_text(q));
-    let ((total, estimated), rows) = tokio::try_join!(count(db, schema, table, q), data)?;
+    let total = async { if counted { count(db, schema, table, q).await } else { Ok((0, false)) } };
+    let ((total, estimated), rows) = tokio::try_join!(total, data)?;
     // The LIMIT chip caps the whole result, not a page.
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
-    let matched = if q.grouped() {
+    let matched = if q.grouped() && counted {
         let sql = q.rows_sql(d, schema, table);
         one_read(&sql, d)?;
         let r = db.read_text(schema, &sql, user_text(q)).await?;
@@ -643,7 +645,7 @@ impl Worker {
                 q.select = vec![db.dialect.quote_ident(&src)];
             }
             let res = async {
-                let (cols, _, rows, ..) = page(&db, &schema, &table, &q, COL_VALUES_CAP as u64, 0).await?;
+                let (cols, _, rows, ..) = page(&db, &schema, &table, &q, COL_VALUES_CAP as u64, 0, false).await?;
                 let c = if narrow { cols.first() } else { cols.iter().find(|x| x.name == col) };
                 let c = c.ok_or_else(|| format!("{col} is not in the result"))?;
                 let values: Vec<Bson> = rows.iter().filter_map(|r| r.raw().get(&c.name).ok().flatten()).filter_map(|v| Bson::try_from(v).ok()).map(|v| if op.is_stat() { value::stat_value(c.kind, v) } else { v }).collect();
@@ -735,7 +737,7 @@ impl Worker {
     pub fn sql_page(&self, req: u64, db: Db, schema: String, table: String, q: PageQuery, limit: u64, offset: u64) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let res = match page(&db, &schema, &table, &q, limit, offset).await {
+            let res = match page(&db, &schema, &table, &q, limit, offset, true).await {
                 Ok((cols, pk, rows, count, estimated, ms, matched)) => {
                     let _ = tx.send(Msg::SqlCols { req, cols, pk, estimated, matched });
                     Ok((rows, count, ms))

@@ -414,7 +414,8 @@ impl App {
         ui.set_width(560.0);
         dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
         let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
-        let noun = if self.conn(sel.conn).is_some_and(|c| c.sql.is_some()) { "rows" } else { "documents" };
+        let sql = self.is_sql(sel.conn);
+        let noun = if sql { "rows" } else { "documents" };
         ui.label(RichText::new(format!("{} values in {} {noun}{}",group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
@@ -434,7 +435,8 @@ impl App {
         });
         dialog_actions(ui, |ui| {
             // Values counted from pipeline or script results have no pipeline to reopen.
-            if ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
+            // A SQL table has no pipeline to open.
+            if !sql && ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
                 let mut t = Tab::new(sel.clone());
                 t.view = View::Aggregate;
                 t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
