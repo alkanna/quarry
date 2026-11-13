@@ -328,8 +328,7 @@ impl RowCx<'_> {
             }
             Node::Dir { rel, .. } => Look::new(file_name(rel), String::new(), row.count.to_string()),
             Node::File { link, rel } => {
-                let kind = self.scans.get(link).and_then(|s| s.entries.iter().find(|f| f.rel == *rel)).map(|f| f.kind.clone()).unwrap_or_default();
-                let mut look = Look::new(file_name(rel), kind, String::new());
+                let mut look = Look::new(file_name(rel), row.kind.clone(), String::new());
                 look.dot = self.changed.contains(&(*link, rel.clone()));
                 look
             }

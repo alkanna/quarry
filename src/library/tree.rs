@@ -60,6 +60,9 @@ pub struct Row {
     pub hit: bool,
     /// The scripts or files below a container that the panel shows, or 0 for a leaf.
     pub count: usize,
+    /// The kind of a script or file ("sql", "shell", "filter" or "pipeline"), so a row is drawn without a search of the
+    /// library or the scan; empty for a folder.
+    pub kind: String,
 }
 
 fn matches(s: &Script, q: &str) -> bool {
@@ -85,15 +88,38 @@ struct Ctx<'a> {
     engine: Option<Engine>,
     q: String,
     open: &'a HashSet<Node>,
+    /// Built once per flatten, since every row and count asks: the scripts shown under each live parent, the folders
+    /// under each, and the folders that directly hold a script of any connection.
+    shown: HashMap<Option<u64>, Vec<&'a Script>>,
+    children: HashMap<Option<u64>, Vec<&'a Folder>>,
+    holding: HashSet<u64>,
 }
 
-impl Ctx<'_> {
-    fn shows(&self, s: &Script) -> bool {
-        self.conn.is_none_or(|c| s.conn == c) && matches(s, &self.q)
+impl<'a> Ctx<'a> {
+    fn new(lib: &'a Library, scans: &'a Scans, conn: Option<u64>, engine: Option<Engine>, query: &str, open: &'a HashSet<Node>) -> Self {
+        let q = query.trim().to_lowercase();
+        let live: HashSet<u64> = lib.folders.iter().map(|f| f.id).collect();
+        let parent = |p: Option<u64>| p.filter(|id| live.contains(id));
+        let (mut shown, mut children, mut holding) = (HashMap::<Option<u64>, Vec<&Script>>::new(), HashMap::<Option<u64>, Vec<&Folder>>::new(), HashSet::new());
+        for s in &lib.scripts {
+            let at = parent(s.folder);
+            holding.extend(at);
+            if conn.is_none_or(|c| s.conn == c) && matches(s, &q) {
+                shown.entry(at).or_default().push(s);
+            }
+        }
+        for f in &lib.folders {
+            children.entry(parent(f.parent)).or_default().push(f);
+        }
+        Ctx { lib, scans, conn, engine, q, open, shown, children, holding }
     }
 
-    fn scripts_in(&self, folder: Option<u64>) -> impl Iterator<Item = &Script> {
-        self.lib.scripts.iter().filter(move |s| live_parent(self.lib, s.folder) == folder && self.shows(s))
+    fn scripts_in(&self, folder: Option<u64>) -> &[&'a Script] {
+        self.shown.get(&folder).map_or(&[], Vec::as_slice)
+    }
+
+    fn folders_in(&self, parent: Option<u64>) -> &[&'a Folder] {
+        self.children.get(&parent).map_or(&[], Vec::as_slice)
     }
 
     /// Scripts shown in a folder and everything below it.
@@ -101,15 +127,12 @@ impl Ctx<'_> {
         if depth > 64 {
             return 0;
         }
-        let here = self.scripts_in(Some(folder)).count();
-        here + self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == Some(folder)).map(|f| self.count(f.id, depth + 1)).sum::<usize>()
+        self.scripts_in(Some(folder)).len() + self.folders_in(Some(folder)).iter().map(|f| self.count(f.id, depth + 1)).sum::<usize>()
     }
 
     /// Whether a folder or anything below it holds a script of any connection, in or out of scope.
     fn holds_any(&self, folder: u64, depth: usize) -> bool {
-        depth <= 64
-            && (self.lib.scripts.iter().any(|s| live_parent(self.lib, s.folder) == Some(folder))
-                || self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == Some(folder)).any(|f| self.holds_any(f.id, depth + 1)))
+        depth <= 64 && (self.holding.contains(&folder) || self.folders_in(Some(folder)).iter().any(|f| self.holds_any(f.id, depth + 1)))
     }
 
     fn folders(&self, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
@@ -117,7 +140,7 @@ impl Ctx<'_> {
             return;
         }
         let searching = !self.q.is_empty();
-        for f in self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == parent) {
+        for f in self.folders_in(parent) {
             let count = self.count(f.id, 0);
             // Empty folders stay visible, except while searching, when only the paths to a match are. Folders are shared by
             // every connection, so a connection's view leaves out those whose scripts all belong to other connections; a
@@ -127,7 +150,7 @@ impl Ctx<'_> {
             }
             let node = Node::Folder(f.id);
             let open = searching || self.open.contains(&node);
-            out.push(Row { node, depth, open, hit: false, count });
+            out.push(Row { node, depth, open, hit: false, count, kind: String::new() });
             if open {
                 self.folders(Some(f.id), depth + 1, out);
                 self.script_rows(Some(f.id), depth + 1, out);
@@ -137,7 +160,7 @@ impl Ctx<'_> {
 
     fn script_rows(&self, folder: Option<u64>, depth: usize, out: &mut Vec<Row>) {
         let hit = !self.q.is_empty();
-        out.extend(self.scripts_in(folder).map(|s| Row { node: Node::Script(s.id), depth, open: false, hit, count: 0 }));
+        out.extend(self.scripts_in(folder).iter().map(|s| Row { node: Node::Script(s.id), depth, open: false, hit, count: 0, kind: s.kind.clone() }));
     }
 
     fn name_matches(&self, rel: &std::path::Path) -> bool {
@@ -164,7 +187,7 @@ impl Ctx<'_> {
             let Some(scan) = self.scans.get(&l.id).filter(|s| !s.missing) else {
                 // Not scanned yet, or the folder is gone: the row shows, empty, unless a search is on.
                 if self.q.is_empty() {
-                    out.push(Row { node, depth: 0, open: false, hit: false, count: 0 });
+                    out.push(Row { node, depth: 0, open: false, hit: false, count: 0, kind: String::new() });
                 }
                 continue;
             };
@@ -173,55 +196,70 @@ impl Ctx<'_> {
                 continue;
             }
             let open = !self.q.is_empty() || self.open.contains(&node);
-            out.push(Row { node, depth: 0, open, hit: false, count: files.len() });
+            out.push(Row { node, depth: 0, open, hit: false, count: files.len(), kind: String::new() });
             if open {
-                self.dir_rows(l.id, &files, &scan.empty_dirs, std::path::Path::new(""), 1, out);
+                let tree = DirTree::new(&files, if self.q.is_empty() { &scan.empty_dirs } else { &[] });
+                self.dir_rows(l.id, &tree, &scan.empty_dirs, std::path::Path::new(""), 1, out);
             }
         }
     }
 
-    fn dir_rows(&self, link: u64, all: &[&Entry], empty: &[PathBuf], prefix: &std::path::Path, depth: usize, out: &mut Vec<Row>) {
+    fn dir_rows(&self, link: u64, tree: &DirTree, empty: &[PathBuf], prefix: &std::path::Path, depth: usize, out: &mut Vec<Row>) {
         if depth > 64 {
             return;
         }
         let searching = !self.q.is_empty();
-        let mut dirs = BTreeSet::new();
-        let mut files = Vec::new();
-        for f in all {
-            let Ok(rest) = f.rel.strip_prefix(prefix) else { continue };
-            let mut parts = rest.components();
-            let (Some(first), second) = (parts.next(), parts.next()) else { continue };
-            if second.is_some() {
-                dirs.insert(PathBuf::from(first.as_os_str()));
-            } else {
-                files.push(f.rel.clone());
-            }
-        }
-        // A folder with nothing in it shows while no search is on.
-        if !searching {
-            for d in empty {
-                if let Ok(rest) = d.strip_prefix(prefix)
-                    && let Some(first) = rest.components().next()
-                {
-                    dirs.insert(PathBuf::from(first.as_os_str()));
-                }
-            }
-        }
-        files.sort();
-        for d in dirs {
-            let rel = prefix.join(d);
-            let count = all.iter().filter(|f| f.rel.starts_with(&rel)).count();
-            if count == 0 && (searching || !empty.iter().any(|e| e.starts_with(&rel))) {
+        for rel in tree.dirs.get(prefix).into_iter().flatten() {
+            let count = tree.count.get(rel).copied().unwrap_or(0);
+            if count == 0 && (searching || !empty.iter().any(|e| e.starts_with(rel))) {
                 continue;
             }
             let node = Node::Dir { link, rel: rel.clone() };
             let open = searching || self.open.contains(&node);
-            out.push(Row { node, depth, open, hit: false, count });
+            out.push(Row { node, depth, open, hit: false, count, kind: String::new() });
             if open {
-                self.dir_rows(link, all, empty, &rel, depth + 1, out);
+                self.dir_rows(link, tree, empty, rel, depth + 1, out);
             }
         }
-        out.extend(files.into_iter().map(|rel| Row { node: Node::File { link, rel }, depth, open: false, hit: searching, count: 0 }));
+        out.extend(tree.files.get(prefix).into_iter().flatten().map(|e| Row { node: Node::File { link, rel: e.rel.clone() }, depth, open: false, hit: searching, count: 0, kind: e.kind.clone() }));
+    }
+}
+
+/// The folders of a link's shown files, built once per flatten instead of a pass over every file for each open folder:
+/// each folder's subfolders in order, its files sorted by path, and how many files sit anywhere below it.
+struct DirTree<'s> {
+    dirs: HashMap<PathBuf, BTreeSet<PathBuf>>,
+    files: HashMap<PathBuf, Vec<&'s Entry>>,
+    count: HashMap<PathBuf, usize>,
+}
+
+impl<'s> DirTree<'s> {
+    /// `empty` are the folders with nothing in them, which show while no search is on.
+    fn new(all: &[&'s Entry], empty: &[PathBuf]) -> Self {
+        let mut t = DirTree { dirs: HashMap::new(), files: HashMap::new(), count: HashMap::new() };
+        for f in all {
+            let dir = f.rel.parent().unwrap_or(std::path::Path::new(""));
+            t.files.entry(dir.to_path_buf()).or_default().push(f);
+            t.add_dir(dir, true);
+        }
+        for d in empty {
+            t.add_dir(d, false);
+        }
+        for v in t.files.values_mut() {
+            v.sort_by(|a, b| a.rel.cmp(&b.rel));
+        }
+        t
+    }
+
+    /// Records `dir` and the folders above it under their parents, counting a file in each when `file`.
+    fn add_dir(&mut self, dir: &std::path::Path, file: bool) {
+        for a in dir.ancestors().filter(|a| !a.as_os_str().is_empty()) {
+            if file {
+                *self.count.entry(a.to_path_buf()).or_default() += 1;
+            }
+            let up = a.parent().unwrap_or(std::path::Path::new(""));
+            self.dirs.entry(up.to_path_buf()).or_default().insert(a.to_path_buf());
+        }
     }
 }
 
@@ -230,7 +268,7 @@ impl Ctx<'_> {
 /// way, empty ones included. A search matches the name and the first 200 characters of the body, forces the folders
 /// above a match open and hides the rest, without touching `open`.
 pub fn flatten(lib: &Library, scans: &Scans, conn: Option<u64>, engine: Option<Engine>, query: &str, open: &HashSet<Node>) -> Vec<Row> {
-    let cx = Ctx { lib, scans, conn, engine, q: query.trim().to_lowercase(), open };
+    let cx = Ctx::new(lib, scans, conn, engine, query, open);
     let mut out = Vec::new();
     cx.links(&mut out);
     cx.folders(None, 0, &mut out);
@@ -289,7 +327,7 @@ mod tests {
 
     #[test]
     fn a_moving_folder_takes_its_share_of_what_it_holds_and_the_rows_below_follow() {
-        let row = |id: u64, depth: usize| Row { node: Node::Folder(id), depth, open: true, hit: false, count: 0 };
+        let row = |id: u64, depth: usize| Row { node: Node::Folder(id), depth, open: true, hit: false, count: 0, kind: String::new() };
         // 1 holds 2 (which holds 3) and 4; 5 is at the top level after it.
         let rows = [row(1, 0), row(2, 1), row(3, 2), row(4, 1), row(5, 0)];
         let at_rest = lay_out(&rows, 10.0, |_| None);
