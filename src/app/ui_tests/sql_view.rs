@@ -137,3 +137,23 @@ fn query_result_headers_drag_to_reorder_and_esc_cancels() {
     want.insert(2, c);
     assert_eq!(names(&result_cols(&ui)), want, "the header did not land after the one it was dropped on");
 }
+
+#[test]
+fn query_headers_with_one_name_twice_reorder_without_losing_a_column() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_query_demo();
+        // A join returns two columns of one name.
+        if let Some(s) = a.tabs.last_mut().and_then(|t| t.sql.as_mut()) {
+            s.sets[0].cols[1].name = "name".into();
+        }
+    }) else { return };
+    ui.show("Result row 1");
+    let before = result_cols(&ui);
+    let names = |v: &[(String, egui::Rect)]| v.iter().map(|c| c.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&before), ["name", "name", "orders", "spent"]);
+    let (from, to) = (before[0].1.center(), egui::pos2(before[2].1.left() + before[2].1.width() * 0.8, before[2].1.center().y));
+    ui.press_and_move(from, to);
+    ui.release(to);
+    assert_eq!(names(&result_cols(&ui)), ["name", "orders", "name", "spent"], "a column went missing or showed twice");
+}

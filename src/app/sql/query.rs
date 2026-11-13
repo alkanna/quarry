@@ -160,10 +160,11 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
     // results with the same columns, so the next page or a run again keeps it.
     let names: Vec<&str> = set.cols.iter().map(|c| c.name.as_str()).collect();
     let oid = egui::Id::unique(("sql-query-order", &names));
-    let kept: Vec<String> = ui.ctx().data(|d| d.get_temp(oid)).unwrap_or_default();
-    let mut order: Vec<usize> = kept.iter().filter_map(|n| names.iter().position(|c| c == n)).collect();
-    let rest: Vec<usize> = (0..names.len()).filter(|i| !order.contains(i)).collect();
-    order.extend(rest);
+    // Kept as indexes, since a join can return two columns of one name; one that is not a whole permutation is dropped.
+    let kept: Vec<usize> = ui.ctx().data(|d| d.get_temp(oid)).unwrap_or_default();
+    let mut sorted = kept.clone();
+    sorted.sort_unstable();
+    let order: Vec<usize> = if sorted.iter().copied().eq(0..names.len()) { kept } else { (0..names.len()).collect() };
     let mut out = GridOut::default();
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
@@ -247,7 +248,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
         p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, LINE()));
         // Headers drag sideways to reorder the columns, or Alt+Left and Alt+Right on the focused one.
         let ow: Vec<f32> = order.iter().map(|&ci| widths[ci]).collect();
-        let keys: Vec<egui::Id> = order.iter().map(|&ci| egui::Id::unique(("sql-query-col", names[ci]))).collect();
+        let keys: Vec<egui::Id> = order.iter().map(|&ci| egui::Id::unique(("sql-query-col", ci))).collect();
         let strip = egui::Rect::from_min_size(egui::pos2(head.left() + lead - off, head.top()), egui::vec2(ow.iter().sum(), TABLE_HEAD_H));
         let room = egui::Rect::from_min_max(egui::pos2(head.left() + lead, head.top()), head.max);
         let mv = put_at(ui, strip, |ui| {
@@ -268,7 +269,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
             })
         });
         if let Some(m) = mv {
-            let mut now: Vec<String> = order.iter().map(|&ci| names[ci].to_string()).collect();
+            let mut now = order.clone();
             m.apply(&mut now);
             ui.ctx().data_mut(|d| d.insert_temp(oid, now));
             ui.ctx().request_repaint();
