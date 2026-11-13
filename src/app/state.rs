@@ -755,6 +755,17 @@ impl Tab {
         self
     }
 
+    /// About the bytes of the rows and texts this tab holds, for the memory readout's tooltip.
+    // ponytail: counts the row holders only; Import and Compare previews count documents at a guessed 1 KB each.
+    pub(super) fn mem(&self) -> usize {
+        let rows = |v: &[db::Row]| v.iter().map(db::Row::mem).sum::<usize>();
+        let sql = self.sql.as_ref().map_or(0, |s| s.sets.iter().map(|r| rows(&r.rows)).sum());
+        let logs: usize = self.shell.logs.iter().map(|(a, b)| a.len() + b.len()).sum();
+        let parsed = self.import.parsed.as_ref().and_then(|p| p.as_ref().ok()).map_or(0, Vec::len);
+        let cmp = self.compare.result.as_ref().map_or(0, |c| c.only_src.len() + c.only_dst.len() + 2 * c.changed.len() + c.diffs.len());
+        rows(&self.docs) + rows(&self.agg_docs) + rows(&self.shell.docs) + rows(&self.watch.rows) + sql + logs + self.shell.raw_text.as_ref().map_or(0, String::len) + self.import.text.len() + (parsed + cmp) * 1024
+    }
+
     pub(super) fn new(sel: Sel) -> Self {
         Self {
             uid: NEXT_TAB.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
