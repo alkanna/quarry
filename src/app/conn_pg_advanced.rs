@@ -4,25 +4,15 @@
 
 use super::conn_form::{note_row, secs_field};
 use super::*;
+use crate::ui::dnd;
 use db::sql::pg::advanced as adv;
 
 /// Width of the setting name column and of the value box.
 const NAME_W: f32 = 230.0;
 const VALUE_W: f32 = 230.0;
 
-/// A small painted arrow that moves a list row; the glyphs of a fallback font sit off center.
-fn arrow(ui: &mut egui::Ui, up: bool, enabled: bool, label: &str) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(CLOSE_W, CLOSE_W), if enabled { Sense::click() } else { Sense::hover() });
-    let state = if enabled { state_of(&r) } else { 0 };
-    ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill_on(ui, state));
-    let color = if !enabled { tint(FAINT(), 90) } else if state > 0 { BRIGHT() } else { FAINT() };
-    let (c, d) = (rect.center(), 3.5);
-    let s = if up { -1.0 } else { 1.0 };
-    ui.painter().add(egui::Shape::line(vec![c + egui::vec2(-d, 1.5 * -s), c + egui::vec2(0.0, 1.5 * s), c + egui::vec2(d, 1.5 * -s)], Stroke::new(1.3, color)));
-    focus_ring(ui, &r, rect, CLOSE_W / 2.0);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
-}
+/// The height of a search path row, which the reorder engine needs before it draws.
+const PATH_ROW_H: f32 = 28.0;
 
 fn remove_x(ui: &mut egui::Ui, label: &str) -> bool {
     let r = close_x(ui);
@@ -81,6 +71,7 @@ fn search_path(ui: &mut egui::Ui, f: &mut ConnForm) {
     });
     ui.add_space(2.0);
     let mut act: Option<(usize, i32)> = None;
+    let mut moved = None;
     card(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -89,30 +80,37 @@ fn search_path(ui: &mut egui::Ui, f: &mut ConnForm) {
             ui.label(RichText::new("Schema picked in the sidebar").color(MUTED()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| small(ui, "always first", FAINT()));
         });
-        let n = f.pg_path.len();
-        for i in 0..n {
-            let name = f.pg_path[i].clone();
-            ui.horizontal(|ui| {
+        // The rows drag to reorder, or Alt+Up and Alt+Down on the focused one; the cross stays a click.
+        let names = f.pg_path.clone();
+        let sizes = vec![PATH_ROW_H; names.len()];
+        let keys: Vec<egui::Id> = names.iter().map(|n| egui::Id::unique(("pg-path", n.as_str()))).collect();
+        let (tested, known) = (f.pg_tested && !f.pg_schemas.is_empty(), &f.pg_schemas);
+        moved = dnd::reorder(ui, egui::Id::unique("pg-path-reorder"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+            let name = &names[i];
+            let r = ui.interact(ui.max_rect(), ui.scope_id().with("row"), Sense::click());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Schema {name}")));
+            if !st.busy && r.hovered() {
+                ui.painter().rect_filled(ui.max_rect(), R_SM, hover_fill_on(ui, 1));
+            }
+            ui.horizontal_centered(|ui| {
+                ui.style_mut().interaction.selectable_labels = false;
                 grip(ui);
                 ui.label(RichText::new((i + 2).to_string()).size(TXT_SMALL).color(FAINT()));
-                ui.label(RichText::new(&name).monospace().color(BRIGHT()));
+                ui.label(RichText::new(name).monospace().color(BRIGHT()));
                 // A schema the last Test did not find in the default database is only a warning: another database may have it.
-                if f.pg_tested && !f.pg_schemas.is_empty() && name != "$user" && !f.pg_schemas.contains(&name) {
+                if tested && name != "$user" && !known.contains(name) {
                     ui.label(RichText::new("Not found in the default database on the last Test").size(TXT_SMALL).color(WARNING()));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if remove_x(ui, &format!("Remove {name}")) {
-                        act = Some((i, 0));
-                    }
-                    if arrow(ui, false, i + 1 < n, &format!("Move {name} down")).clicked() {
-                        act = Some((i, 1));
-                    }
-                    if arrow(ui, true, i > 0, &format!("Move {name} up")).clicked() {
-                        act = Some((i, -1));
-                    }
-                });
+                if !st.lifted {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if remove_x(ui, &format!("Remove {name}")) {
+                            act = Some((i, 0));
+                        }
+                    });
+                }
             });
-        }
+            r
+        });
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let known: Vec<String> = f.pg_schemas.iter().filter(|s| !f.pg_path.contains(s)).cloned().collect();
@@ -142,18 +140,16 @@ fn search_path(ui: &mut egui::Ui, f: &mut ConnForm) {
             f.pg_path = vec!["$user".into(), "public".into()];
         }
     });
-    match act {
-        Some((i, 0)) => {
-            f.pg_path.remove(i);
-        }
-        Some((i, d)) => f.pg_path.swap(i, (i as i32 + d) as usize),
-        None => {}
+    if let Some((i, _)) = act {
+        f.pg_path.remove(i);
+    } else if let Some(m) = moved {
+        m.apply(&mut f.pg_path);
     }
     if let Some((_, _, m)) = f.pg_refused.iter().find(|(n, _, _)| n == "search_path") {
         error_line_free(ui, m);
     }
     ui.add_space(2.0);
-    small(ui, "Unqualified names resolve in this order. Use the arrows to reorder. Test lists the schemas of the default database. With no rows the server's own path applies.", FAINT());
+    small(ui, "Unqualified names resolve in this order. Drag a row to reorder it. Test lists the schemas of the default database. With no rows the server's own path applies.", FAINT());
     ui.add_space(10.0);
 }
 

@@ -67,7 +67,7 @@ fn run(var: &str) {
     ui.fill("Schema name", "adv_ui2");
     ui.click("Add");
     ui.wait("the schema to be added", |a| matches!(&a.modal, Some(Modal::Conn(f)) if f.pg_path == ["public", "adv_ui2"]));
-    ui.click("Move adv_ui2 up");
+    ui.drag("Schema adv_ui2", "Schema public", 0.1, 1);
     assert_eq!(form(ui.h.state_mut()).pg_path, ["adv_ui2", "public"], "{var}");
 
     ui.click("Save and connect");
@@ -102,4 +102,30 @@ fn the_postgres_advanced_tab_adds_a_setting_shows_a_refusal_reorders_the_path_an
     for var in PG_ENVS.into_iter().chain([PGBOUNCER_ENV]) {
         run(var);
     }
+}
+
+/// The PostgreSQL form on its Advanced tab, offline, with three schemas in the search path.
+fn path_form(a: &mut App) {
+    a.load_pg_demo();
+    a.modal = Some(Modal::Conn(Box::new(ConnForm { engine: db::sql::Engine::Postgres, tab: ConnTab::Advanced, pg_path: vec!["$user".into(), "public".into(), "staging".into()], ..Default::default() })));
+}
+
+fn path(ui: &UiApp) -> Vec<String> {
+    match &ui.app().modal {
+        Some(Modal::Conn(f)) => f.pg_path.clone(),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn search_path_rows_drag_to_reorder_and_esc_cancels_without_closing_the_form() {
+    let Some(mut ui) = demo_ui(path_form) else { return };
+    ui.show("Schema staging");
+    ui.drag_esc("Schema staging", "Schema $user", 0.1);
+    assert_eq!(path(&ui), ["$user", "public", "staging"], "Esc moved a schema or closed the form");
+    ui.drag("Schema staging", "Schema $user", 0.1, 1);
+    assert_eq!(path(&ui), ["staging", "$user", "public"]);
+    // The cross is still a click of its own.
+    ui.click("Remove public");
+    assert_eq!(path(&ui), ["staging", "$user"]);
 }
