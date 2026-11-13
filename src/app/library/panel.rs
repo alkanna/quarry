@@ -388,7 +388,7 @@ impl App {
                 })
             })
             .inner;
-        st.scroll_y = out.state.offset().y;
+        st.scroll_y = out.state.clamped_offset().y;
         st.view_h = out.inner_rect.height();
 
         // The space below the last row takes drops that move an item out of its folder.
@@ -465,7 +465,7 @@ impl App {
             Node::File { link, rel } => st.scans.get(link).and_then(|s| s.files.iter().find(|f| f.rel == *rel)).map(|f| f.kind.clone()).unwrap_or_default(),
             _ => String::new(),
         };
-        let mut go = |st: &mut PanelUi, i: usize| {
+        let go = |st: &mut PanelUi, i: usize| {
             st.sel = Some(rows[i].node.clone());
             let y = i as f32 * ROW_H;
             if y < st.scroll_y {
