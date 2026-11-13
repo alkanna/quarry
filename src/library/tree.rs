@@ -124,6 +124,13 @@ impl Ctx<'_> {
         here + self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == Some(folder)).map(|f| self.count(f.id, depth + 1)).sum::<usize>()
     }
 
+    /// Whether a folder or anything below it holds a script of any connection, in or out of scope.
+    fn holds_any(&self, folder: u64, depth: usize) -> bool {
+        depth <= 64
+            && (self.lib.scripts.iter().any(|s| live_parent(self.lib, s.folder) == Some(folder))
+                || self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == Some(folder)).any(|f| self.holds_any(f.id, depth + 1)))
+    }
+
     fn folders(&self, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
         if depth > 64 {
             return;
@@ -131,8 +138,10 @@ impl Ctx<'_> {
         let searching = !self.q.is_empty();
         for f in self.lib.folders.iter().filter(|f| live_parent(self.lib, f.parent) == parent) {
             let count = self.count(f.id, 0);
-            // Empty folders stay visible, except while searching, when only the paths to a match are.
-            if searching && count == 0 {
+            // Empty folders stay visible, except while searching, when only the paths to a match are. Folders are shared by
+            // every connection, so a connection's view leaves out those whose scripts all belong to other connections; a
+            // folder with no script at all stays, so one just made never vanishes.
+            if count == 0 && (searching || (self.conn.is_some() && self.holds_any(f.id, 0))) {
                 continue;
             }
             let node = Node::Folder(f.id);
@@ -256,13 +265,14 @@ mod tests {
         let folder = |id, name: &str, parent| Folder { id, name: name.into(), parent };
         let script = |id, name: &str, conn, folder, body: &str| Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn, folder, ..Default::default() };
         Library {
-            folders: vec![folder(1, "Reports", None), folder(2, "Weekly", Some(1)), folder(3, "Scratch", None)],
+            folders: vec![folder(1, "Reports", None), folder(2, "Weekly", Some(1)), folder(3, "Scratch", None), folder(4, "Theirs", None), folder(5, "Deep", Some(4))],
             scripts: vec![
                 script(10, "top orders", 1, Some(1), "select * from orders"),
                 script(11, "revenue", 1, Some(2), "select sum(total) from sales"),
                 script(12, "elsewhere", 2, Some(1), "select 1"),
                 script(13, "loose", 1, None, "select 2"),
                 script(14, "orphan", 1, Some(99), "select 3"),
+                script(15, "their report", 2, Some(5), "select 4"),
             ],
             ..Default::default()
         }
@@ -279,23 +289,27 @@ mod tests {
     }
 
     fn open_all() -> HashSet<Node> {
-        [1, 2, 3].map(Node::Folder).into_iter().collect()
+        [1, 2, 3, 4, 5].map(Node::Folder).into_iter().collect()
     }
 
     #[test]
     fn folders_come_before_scripts_and_closed_ones_hide_their_contents() {
         let l = lib();
         let rows = flatten(&l, &Scans::new(), None, None, "", &HashSet::new());
-        assert_eq!(names(&rows, &l), ["Reports[3]/0", "Scratch[0]/0", "loose/0", "orphan/0"]);
+        assert_eq!(names(&rows, &l), ["Reports[3]/0", "Scratch[0]/0", "Theirs[1]/0", "loose/0", "orphan/0"]);
         let rows = flatten(&l, &Scans::new(), None, None, "", &open_all());
-        assert_eq!(names(&rows, &l), ["Reports[3]/0", "Weekly[1]/1", "revenue/2", "top orders/1", "elsewhere/1", "Scratch[0]/0", "loose/0", "orphan/0"]);
+        assert_eq!(names(&rows, &l), ["Reports[3]/0", "Weekly[1]/1", "revenue/2", "top orders/1", "elsewhere/1", "Scratch[0]/0", "Theirs[1]/0", "Deep[1]/1", "their report/2", "loose/0", "orphan/0"]);
     }
 
     #[test]
-    fn the_scope_keeps_one_connection_and_every_folder() {
+    fn the_scope_keeps_one_connection_and_its_folders_and_the_empty_ones() {
         let l = lib();
+        // Theirs and Deep hold only connection 2's script, so connection 1's view leaves them out; Scratch holds nothing and
+        // stays, so a folder just made is never hidden.
         let rows = flatten(&l, &Scans::new(), Some(1), None, "", &open_all());
         assert_eq!(names(&rows, &l), ["Reports[2]/0", "Weekly[1]/1", "revenue/2", "top orders/1", "Scratch[0]/0", "loose/0", "orphan/0"]);
+        let rows = flatten(&l, &Scans::new(), Some(2), None, "", &open_all());
+        assert_eq!(names(&rows, &l), ["Reports[1]/0", "elsewhere/1", "Scratch[0]/0", "Theirs[1]/0", "Deep[1]/1", "their report/2"]);
     }
 
     #[test]
