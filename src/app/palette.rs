@@ -202,7 +202,7 @@ impl App {
             }
         }
         let g = "Library";
-        if self.tab_text().is_some() {
+        if self.tab_has_text() {
             add(g, Row::cmd("Save to library\u{2026}", Glyph::Prompt, keys(false, false, "S"), Cmd::SaveToLibrary));
         }
         add(g, Row::cmd("Show the library", Glyph::Prompt, keys(true, false, "L"), Cmd::ShowLibrary));

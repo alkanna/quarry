@@ -109,6 +109,12 @@ impl App {
         Self::text_of(self.t()?)
     }
 
+    /// Whether the current tab's view holds a script, as `tab_text` would find, without copying its text: the keys ask
+    /// every frame.
+    pub(in crate::app) fn tab_has_text(&self) -> bool {
+        self.t().is_some_and(|t| matches!((t.view, t.sql.is_some()), (View::Sql, true) | (View::Shell, _) | (View::Documents | View::Aggregate, false)))
+    }
+
     fn text_of(t: &Tab) -> Option<TabText> {
         let (db, coll) = (t.sel.db.clone(), t.sel.coll.clone());
         Some(match (t.view, t.sql.as_ref()) {

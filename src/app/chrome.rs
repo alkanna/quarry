@@ -76,14 +76,14 @@ impl App {
         // would also open the Save dialog. A view that holds no script (a table's Content grid, Indexes and the like) leaves
         // the key alone, so a press there while the grid's cell editor is open does not warn about a missing script.
         // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
-        if self.sql_cell.is_none() && self.tab_text().is_some() && k(cmd | shift, Key::S) {
+        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
             self.save_script_as();
         }
-        if self.sql_cell.is_none() && self.tab_text().is_some() && k(cmd, Key::S) {
+        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd, Key::S) {
             self.save_script();
         }
         // Cmd+O opens the library picker of the view on screen; a view with no script has none.
-        if self.tab_text().is_some() && k(cmd, Key::O) {
+        if self.tab_has_text() && k(cmd, Key::O) {
             self.lib_ui.open_picker = true;
         }
         if k(cmd | shift, Key::L) {
@@ -584,9 +584,12 @@ impl App {
                             ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
                             ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                         }
-                        let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                        let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
-                        let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
+                        // Built only while the tip shows, not for every tab every frame.
+                        let resp = resp.on_hover_ui(|ui| {
+                            let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                            let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
+                            ui.label(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
+                        });
                         resp.context_menu(|ui| {
                             menu_look(ui);
                             ui.set_min_width(190.0);

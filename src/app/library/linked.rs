@@ -31,14 +31,15 @@ pub(in crate::app) enum Job {
     Trash { link: u64, rel: PathBuf, path: PathBuf },
 }
 
-/// The text of the view a tab's script is bound to.
-pub(in crate::app) fn bound_text(t: &Tab) -> Option<String> {
+/// The text of the view a tab's script is bound to. Borrowed, since the tab strip asks every frame whether each tab
+/// holds edits.
+pub(in crate::app) fn bound_text(t: &Tab) -> Option<&str> {
     let b = t.script.as_ref()?;
     Some(match b.view {
-        View::Sql => t.sql.as_ref()?.query.clone(),
-        View::Shell => t.shell.code.clone(),
-        View::Aggregate => t.agg_txt.clone(),
-        View::Documents => t.filter_txt.clone(),
+        View::Sql => &t.sql.as_ref()?.query,
+        View::Shell => &t.shell.code,
+        View::Aggregate => &t.agg_txt,
+        View::Documents => &t.filter_txt,
         _ => return None,
     })
 }
@@ -175,7 +176,7 @@ impl App {
                     }
                     let Some(t) = self.tab_by_uid(uid).map(|i| &mut self.tabs[i]) else { return };
                     // Reload throws the tab's edits away, so the toast keeps them for Undo.
-                    let mine = bound_text(t).filter(|m| *m != now.text);
+                    let mine = bound_text(t).filter(|m| *m != now.text).map(String::from);
                     set_bound_text(t, &now.text, now.parsed.as_ref());
                     if let Some(b) = t.script.as_mut() {
                         (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
@@ -324,7 +325,7 @@ impl App {
     /// `now` is the file as the scan read it on the worker.
     fn file_changed(&mut self, i: usize, link: u64, rel: &std::path::Path, now: Loaded) {
         let Some(t) = self.tabs.get_mut(i) else { return };
-        let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t)) else { return };
+        let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t).map(String::from)) else { return };
         let follow = match &b.r {
             ScriptRef::File { link, .. } => self.library.links.iter().find(|l| l.id == *link).is_some_and(|l| l.follow),
             _ => false,
@@ -382,7 +383,7 @@ impl App {
             return true;
         }
         let (base, was, uid) = (b.base.clone(), b.disk, t.uid);
-        let (view, text) = (b.view, bound_text(t).unwrap_or_default());
+        let (view, text) = (b.view, bound_text(t).unwrap_or_default().to_string());
         let json = (format::ext_of(&path) == "json").then(|| disk::JsonParts {
             kind: if view == View::Aggregate { "pipeline" } else { "filter" }.into(),
             sort: t.sort_txt.clone(),
@@ -452,7 +453,7 @@ impl App {
         let Some(t) = self.tabs.get(self.cur) else { return };
         let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t)) else { return };
         let (Some(theirs), ScriptRef::File { rel, .. }) = (b.conflict.clone(), &b.r) else { return };
-        let body = match disk::diff_text(&mine, &theirs) {
+        let body = match disk::diff_text(mine, &theirs) {
             Some(d) => format!("- only in this tab\n+ only in the file\n\n{d}"),
             None => "Too many lines to compare here. Use Reload or Keep mine.".to_string(),
         };
