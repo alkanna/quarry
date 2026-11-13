@@ -186,7 +186,6 @@ fn cmd_s_on_a_file_that_changed_since_it_loaded_raises_the_conflict_instead_of_w
 // own under the temp directory, on a connection that is only declared, so no server is involved.
 
 use crate::app::library::open::How;
-use crate::library::tree::Node;
 
 fn panel_app(dir: &Path, files: &[(&str, &str)]) -> Harness<'static, App> {
     for (rel, text) in files {

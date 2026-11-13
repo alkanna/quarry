@@ -247,7 +247,7 @@ impl App {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 for id in f.conns.clone() {
                     let (name, dot) = self.conn(id).map_or(("removed connection".to_string(), FAINT()), |c| (c.meta.name.clone(), crate::app::sidebar::status_color(&c.status)));
-                    if conn_chip(ui, egui::Id::new(("link-chip", id)), &name, dot) {
+                    if conn_chip(ui, egui::Id::unique(("link-chip", id)), &name, dot) {
                         gone = Some(id);
                     }
                 }
