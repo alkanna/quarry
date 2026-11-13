@@ -755,22 +755,7 @@ impl App {
         let ui = outer;
         let testing = f.testing && self.conn_test.is_none();
         let passed = match self.conn_test.as_ref().map(|(_, r)| r) {
-            Some(Ok(m)) => {
-                // How long the test took, measured the first frame its answer shows and kept for that test.
-                let (at, took) = (egui::Id::unique(("conn-test-at", f.test_req)), egui::Id::unique(("conn-test-ms", f.test_req)));
-                let ms = ui.ctx().data_mut(|d| {
-                    let ms = d.get_temp::<u128>(took).or_else(|| d.get_temp::<std::time::Instant>(at).map(|s| s.elapsed().as_millis()));
-                    if let Some(ms) = ms {
-                        d.insert_temp(took, ms);
-                    }
-                    ms
-                });
-                // A SQL test already says how long it took.
-                Some(match ms.filter(|_| !m.contains(" ms")) {
-                    Some(ms) => format!("{}  ·  {ms} ms", m.trim_end_matches('.')),
-                    None => m.clone(),
-                })
-            }
+            Some(Ok(m)) => Some(m.clone()),
             _ => None,
         };
         dialog_foot(ui, |ui| {
@@ -788,8 +773,7 @@ impl App {
                     spin(ui);
                     ui.label(RichText::new("Testing…").size(TXT_SMALL).color(MUTED()));
                 } else if let Some(m) = &passed {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                    glyphs::check(ui.painter(), r.center(), SUCCESS());
+                    glyph_icon(ui, glyphs::check, SUCCESS(), 14.0);
                     ui.add(egui::Label::new(RichText::new(m).size(TXT_SMALL).color(SUCCESS())).truncate());
                 }
             });
@@ -806,7 +790,7 @@ impl App {
             self.test_info = None;
             self.req += 1;
             f.test_req = self.req;
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(("conn-test-at", f.test_req)), std::time::Instant::now()));
+            self.test_started = Some(std::time::Instant::now());
             let mut net = f.net();
             net.tools = self.cloud_tools();
             if f.engine.is_sql() {

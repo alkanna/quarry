@@ -299,6 +299,13 @@ fn sql_block(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+/// An account's first letter in a tinted circle of radius `r`.
+fn initial(p: &egui::Painter, c: egui::Pos2, r: f32, name: &str, size: f32, tone: Color32) {
+    p.circle_filled(c, r, tint(tone, 40));
+    let ini = name.chars().next().map(|ch| ch.to_uppercase().to_string()).unwrap_or_default();
+    p.text(c, egui::Align2::CENTER_CENTER, ini, FontId::proportional(size), tone);
+}
+
 /// Days since the password was set, from MySQL's account ident, which starts with password_last_changed
 /// ("2026-04-15 10:22:01|plugin|hash"). MariaDB's ident has no date, so it gives none.
 fn password_age(ident: &str, today: i64) -> Option<i64> {
@@ -532,7 +539,7 @@ impl App {
                         ui.vertical(|ui| {
                             ui.set_width(236.0);
                             ui.set_min_height(body_h);
-                            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+                            band_spacing(ui);
                             self.users_list(ui, &mut w, writable, &mut acts);
                         });
                     });
@@ -542,7 +549,7 @@ impl App {
                         ui.vertical(|ui| {
                             ui.set_width(ui.available_width());
                             ui.set_min_height(body_h);
-                            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+                            band_spacing(ui);
                             egui::ScrollArea::vertical().id_salt("sql-users-detail").max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
                                 self.users_detail(ui, &mut w, &env, &mut acts);
                             });
@@ -646,9 +653,7 @@ impl App {
                         let r = side_row(ui, 42.0, 0.0, active, &a.user, |p, r| {
                             // An initial in a tinted circle, red for a locked account and amber for an expired password.
                             let c = egui::pos2(r.left() + 11.0, r.center().y);
-                            p.circle_filled(c, 12.0, tint(tone, 40));
-                            let ini = a.user.chars().next().map(|ch| ch.to_uppercase().to_string()).unwrap_or_default();
-                            p.text(c, egui::Align2::CENTER_CENTER, ini, FontId::proportional(TXT_SMALL), tone);
+                            initial(p, c, 12.0, &a.user, TXT_SMALL, tone);
                             let mut job = egui::text::LayoutJob::simple_singleline(a.user.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() });
                             let badge_w = if a.locked { 58.0 } else { 0.0 };
                             job.wrap = egui::text::TextWrapping::truncate_at_width(r.width() - 32.0 - badge_w);
@@ -699,9 +704,7 @@ impl App {
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 16.0, tint(PRIMARY(), 40));
-                let ini = a.user.chars().next().map(|ch| ch.to_uppercase().to_string()).unwrap_or_default();
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, ini, FontId::proportional(TXT_TITLE), PRIMARY());
+                initial(ui.painter(), r.center(), 16.0, &a.user, TXT_TITLE, PRIMARY());
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;

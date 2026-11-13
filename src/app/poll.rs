@@ -240,6 +240,12 @@ impl App {
                     }
                 }
                 Msg::Tested { req, res, info } => {
+                    // A SQL test already says how long it took; the others get the time measured here.
+                    let started = self.test_started.take();
+                    let res = res.map(|m| match started {
+                        Some(t) if !m.contains(" ms") => format!("{}  ·  {} ms", m.trim_end_matches('.'), t.elapsed().as_millis()),
+                        _ => m,
+                    });
                     self.conn_test = Some((req, res));
                     self.test_info = info.map(|i| (req, i));
                 }

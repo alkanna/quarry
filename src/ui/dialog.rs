@@ -80,7 +80,7 @@ pub(crate) fn dialog_head_with(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&
     let bottom = if h.tabs.is_empty() { 14 } else { 0 };
     egui::Frame::new().inner_margin(egui::Margin { left: pad, right: pad - 4, top: 16, bottom }).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+        band_spacing(ui);
         ui.horizontal(|ui| {
             if let Some(g) = h.glyph {
                 tile(ui, g, h.tone.unwrap_or_else(PRIMARY));
@@ -128,6 +128,14 @@ fn tile(ui: &mut egui::Ui, g: Glyph, tone: Color32) {
     ui.add_space(8.0);
 }
 
+/// The global item spacing back on a band's content: `dialog_head` zeroes it on the dialog root so the bands touch.
+pub(crate) fn band_spacing(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+}
+
+/// The padding of the recessed body.
+const BODY_MARGIN: egui::Margin = egui::Margin { left: DIALOG_PAD as i8, right: DIALOG_PAD as i8, top: 18, bottom: 20 };
+
 /// A hairline across the whole dialog at the cursor, `dy` from it.
 fn rule(ui: &egui::Ui, dy: f32) {
     let y = ui.cursor().top() + dy;
@@ -151,13 +159,13 @@ pub(crate) fn dialog_flush<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)
 }
 
 fn body_frame<R>(ui: &mut egui::Ui, pad: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let m = if pad { egui::Margin { left: DIALOG_PAD as i8, right: DIALOG_PAD as i8, top: 18, bottom: 20 } } else { egui::Margin::ZERO };
+    let m = if pad { BODY_MARGIN } else { egui::Margin::ZERO };
     egui::Frame::new()
         .fill(PANEL())
         .inner_margin(m)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+            band_spacing(ui);
             add(ui)
         })
         .inner
@@ -166,15 +174,7 @@ fn body_frame<R>(ui: &mut egui::Ui, pad: bool, add: impl FnOnce(&mut egui::Ui) -
 /// The footer band. `add` runs right to left, so the primary action goes first and lands rightmost; `foot_left`
 /// inside it holds what sits on the left.
 pub(crate) fn dialog_foot<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    rule(ui, 0.5);
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(DIALOG_PAD as i8, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner
-        })
-        .inner
+    dialog_foot_free(ui, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner)
 }
 
 /// The left side of `dialog_foot`: status text or a destructive action.
@@ -190,6 +190,30 @@ pub(crate) fn foot_note(ui: &mut egui::Ui, text: &str) {
 /// The frame of a card on the dialog body.
 pub(crate) fn card_frame() -> egui::Frame {
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR)
+}
+
+/// The recessed frame of code and statement previews.
+pub(crate) fn well_frame() -> egui::Frame {
+    egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR)
+}
+
+/// A card of the given padding at full width, with the gap that follows every card.
+fn card<R>(ui: &mut egui::Ui, margin: egui::Margin, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let r = card_frame()
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner;
+    ui.add_space(16.0);
+    r
+}
+
+/// A glyph in a square of `size`, as an icon in a row of widgets.
+pub(crate) fn glyph_icon(ui: &mut egui::Ui, g: Glyph, color: Color32, size: f32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    g(ui.painter(), r.center(), color);
 }
 
 /// The caps caption over a card, with an optional faint note beside it.
@@ -239,8 +263,7 @@ impl Rows<'_> {
 
     fn sep(&mut self) {
         if self.n > 0 {
-            let y = self.ui.cursor().top() + 0.5;
-            self.ui.painter().hline(self.ui.max_rect().x_range(), y, Stroke::new(1.0, RAISED_LINE()));
+            rule(self.ui, 0.5);
         }
         self.n += 1;
     }
@@ -331,8 +354,7 @@ pub(crate) fn banner(ui: &mut egui::Ui, tone: Notice, lead: &str, msg: &str, act
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.set_min_height(BUTTON_H);
-                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-                g(ui.painter(), r.center(), col);
+                glyph_icon(ui, g, col, 16.0);
                 ui.add_space(4.0);
                 if !lead.is_empty() {
                     ui.label(semibold(RichText::new(lead).size(TXT_BODY).color(BRIGHT())));
@@ -386,15 +408,10 @@ pub(crate) fn radio_card(ui: &mut egui::Ui, width: f32, on: bool, title: &str, d
 
 /// A card holding a table; the caller paints `table_head` and its rows inside.
 pub(crate) fn table_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = card_frame()
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            add(ui)
-        })
-        .inner;
-    ui.add_space(16.0);
-    r
+    card(ui, egui::Margin::ZERO, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add(ui)
+    })
 }
 
 /// The header row of a `table_card`: captions at the given widths, a width of 0 taking what is left. A right-aligned
@@ -423,8 +440,7 @@ pub(crate) fn table_head(ui: &mut egui::Ui, cols: &[(&str, f32)]) {
 
 /// A hairline between table rows.
 pub(crate) fn table_sep(ui: &mut egui::Ui) {
-    let y = ui.cursor().top() + 0.5;
-    ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, RAISED_LINE()));
+    rule(ui, 0.5);
 }
 
 /// The last row of a table card saying what is left out, with an optional action link; returns whether it was clicked.
@@ -445,10 +461,7 @@ pub(crate) fn table_foot_row(ui: &mut egui::Ui, text: &str, action: Option<&str>
 
 /// A recessed code card: a title strip when `title` is given, then `add`.
 pub(crate) fn code_card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = egui::Frame::new()
-        .fill(WELL())
-        .stroke(Stroke::new(1.0, BORDER()))
-        .corner_radius(R_BAR)
+    let r = well_frame()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !title.is_empty() {
@@ -474,15 +487,12 @@ pub(crate) fn code_card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut
 /// statement, or why there is none); `body` draws the full text when open. Opens by itself each time the count goes
 /// from none to some, so a new set of changes is always shown once; the user can close it again.
 pub(crate) fn sql_drawer(ui: &mut egui::Ui, id: egui::Id, title: &str, count: usize, first: &str, body: impl FnOnce(&mut egui::Ui)) {
-    let open_id = id.with("open");
-    let last_id = id.with("last");
-    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
-    let last = ui.data(|d| d.get_temp::<usize>(last_id)).unwrap_or(0);
+    // Whether it is open, and the count it last showed.
+    let (mut open, last) = ui.data(|d| d.get_temp::<(bool, usize)>(id)).unwrap_or_default();
     if count > 0 && last == 0 {
         open = true;
     }
-    ui.data_mut(|d| d.insert_temp(last_id, count));
-    egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).show(ui, |ui| {
+    well_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
         if r.clicked() {
@@ -493,9 +503,7 @@ pub(crate) fn sql_drawer(ui: &mut egui::Ui, id: egui::Id, title: &str, count: us
         if state > 0 {
             p.rect_filled(rect.shrink(1.0), R_BAR - 1, hover_fill(state));
         }
-        let c = egui::pos2(rect.left() + 18.0, rect.center().y);
-        let tri = if open { vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)] } else { vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(-2.0, 3.5), c + egui::vec2(2.5, 0.0)] };
-        p.add(egui::Shape::convex_polygon(tri, MUTED(), Stroke::NONE));
+        chevron(p, egui::pos2(rect.left() + 18.0, rect.center().y), open, MUTED());
         let g = p.layout_job(egui::text::LayoutJob::single_section(title.to_string(), ui_fmt(TXT_BODY, BRIGHT(), W_MEDIUM, 0.0)));
         let tw = g.size().x;
         galley_at(p, rect.left() + 34.0, rect.center().y, g, BRIGHT());
@@ -522,7 +530,7 @@ pub(crate) fn sql_drawer(ui: &mut egui::Ui, id: egui::Id, title: &str, count: us
             });
         }
     });
-    ui.data_mut(|d| d.insert_temp(open_id, open));
+    ui.data_mut(|d| d.insert_temp(id, (open, count)));
     ui.add_space(14.0);
 }
 
@@ -569,38 +577,22 @@ pub(crate) fn danger_solid(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui
 
 /// A two-column form grid inside a card, for forms that lay out label and field pairs with `form_label`.
 pub(crate) fn form_grid<R>(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = card_frame()
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::Grid::new(id).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, add).inner
-        })
-        .inner;
-    ui.add_space(16.0);
-    r
+    plain_card(ui, |ui| egui::Grid::new(id).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, add).inner)
 }
 
 /// The recessed body opened without a closure, for dialogs whose footer reads values the body computes:
 /// `let mut b = body_begin(ui); let outer = ui; let ui = &mut b.content_ui;` … `b.end(outer); let ui = outer;`
 pub(crate) fn body_begin(ui: &mut egui::Ui) -> egui::containers::frame::Prepared {
-    let mut p = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: DIALOG_PAD as i8, right: DIALOG_PAD as i8, top: 18, bottom: 20 }).begin(ui);
+    let mut p = egui::Frame::new().fill(PANEL()).inner_margin(BODY_MARGIN).begin(ui);
     let w = p.content_ui.available_width();
     p.content_ui.set_width(w);
-    p.content_ui.spacing_mut().item_spacing = p.content_ui.ctx().global_style().spacing.item_spacing;
+    band_spacing(&mut p.content_ui);
     p
 }
 
 /// A card around content laid out freely, padded like a form card.
 pub(crate) fn plain_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = card_frame()
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui)
-        })
-        .inner;
-    ui.add_space(16.0);
-    r
+    card(ui, egui::Margin::symmetric(14, 12), add)
 }
 
 /// The footer of a dialog that saves as it goes: one Done button.
@@ -615,7 +607,7 @@ pub(crate) fn dialog_foot_free<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui:
         .inner_margin(egui::Margin::symmetric(DIALOG_PAD as i8, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+            band_spacing(ui);
             add(ui)
         })
         .inner

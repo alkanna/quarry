@@ -129,8 +129,7 @@ impl App {
                     keep = false;
                 }
                 foot_left(ui, |ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                    glyphs::check(ui.painter(), r.center(), SUCCESS());
+                    glyph_icon(ui, glyphs::check, SUCCESS(), 14.0);
                     ui.label(RichText::new("Saved").size(TXT_SMALL).color(MUTED()));
                 });
             });

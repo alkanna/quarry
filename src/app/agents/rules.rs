@@ -217,19 +217,17 @@ impl App {
             let ui = outer;
             dialog_foot(ui, |ui| {
                 let note = if w.tab == RulesTab::Custom { "Rules run top to bottom, after the presets. A rule that doesn't compile stops every agent call until it is fixed." } else { "Secrets first, then personal data, then your rules. A rule that doesn't compile stops every agent call until it is fixed." };
-                {
-                    if ui.button("Done").on_hover_text("Esc").clicked() {
-                        keep = false;
-                    }
-                    if w.tab == RulesTab::Custom && primary(ui, "Add rule", PRIMARY()).clicked() {
-                        let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
-                        let list = self.rule_list(w.scope);
-                        list.push(r);
-                        w.sel = Some(list.len() - 1);
-                    }
-                    export = ui.button("Export…").clicked();
-                    import = ui.button("Import…").clicked();
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    keep = false;
                 }
+                if w.tab == RulesTab::Custom && primary(ui, "Add rule", PRIMARY()).clicked() {
+                    let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
+                    let list = self.rule_list(w.scope);
+                    list.push(r);
+                    w.sel = Some(list.len() - 1);
+                }
+                export = ui.button("Export…").clicked();
+                import = ui.button("Import…").clicked();
                 foot_note(ui, note);
             });
         });

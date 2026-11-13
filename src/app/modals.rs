@@ -360,7 +360,7 @@ impl App {
                 stacked_field(ui, "Name", "Created empty, with the default settings.", |ui| ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY)));
                 return;
             }
-            let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
+            let colls: &[String] = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_deref()).unwrap_or_default();
             form_card(ui, "", "", |rows| {
                 rows.label_width(120.0);
                 rows.row("Name", "", |ui| ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width())));
@@ -368,7 +368,7 @@ impl App {
                     egui::ComboBox::from_id_salt("view-src").width(ui.available_width()).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
                         menu_look(ui);
                         for c in colls {
-                            ui.selectable_value(source, c.clone(), c);
+                            ui.selectable_value(source, c.clone(), c.as_str());
                         }
                     });
                 });
@@ -377,13 +377,14 @@ impl App {
             let id = ui.make_persistent_id("view-pipeline");
             with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui));
         });
+        // Parsed once a frame, for both the footer note and Create.
+        let parsed = view.then(|| db::parse_pipeline(pipeline));
         dialog_foot(ui, |ui| {
             let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
             if ui.add_enabled(ok, primary_button(ui, if *view { "Create view" } else { "Create" }, PRIMARY())).clicked() {
-                let cmd = if *view {
-                    db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
-                } else {
-                    Ok(doc! { "create": name.trim() })
+                let cmd = match &parsed {
+                    Some(p) => p.clone().map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p }),
+                    None => Ok(doc! { "create": name.trim() }),
                 };
                 match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
                     (Ok(cmd), Some(client)) => {
@@ -397,8 +398,8 @@ impl App {
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
-            if *view {
-                match db::parse_pipeline(pipeline) {
+            if let Some(p) = &parsed {
+                match p {
                     Ok(_) => foot_note(ui, "Pipeline parses"),
                     Err(e) => {
                         foot_left(ui, |ui| ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).truncate()));

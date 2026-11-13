@@ -146,42 +146,40 @@ impl App {
             ui.add_space(12.0);
             b.end(outer);
             let ui = outer;
-            {
-                let left = if ask.gone {
-                    "The agent stopped waiting".to_string()
-                } else if !awake {
-                    "Allow wakes up after 1 s".to_string()
-                } else {
-                    let left = DENY_AFTER.saturating_sub(now.saturating_duration_since(ask.at)).as_secs();
-                    format!("Denied in {}:{:02}", left / 60, left % 60)
-                };
-                dialog_foot(ui, |ui| {
-                    if ask.gone {
-                        if ui.button("Close").clicked() {
-                            answer = Some(Answer::Close);
-                        }
-                        foot_note(ui, &left);
-                        return;
-                    }
-                    let (text, a, fill) = if ask.no_undo.is_some() {
-                        ("Allow without undo", Answer::WithoutUndo, ALERT())
-                    } else if ask.why.unlock {
-                        ("Unlock writes and allow once", Answer::UnlockOnce, PRIMARY())
-                    } else {
-                        ("Allow once", Answer::Once, PRIMARY())
-                    };
-                    if ui.add_enabled(awake, primary_button(ui, text, fill)).clicked() && awake {
-                        answer = Some(a);
-                    }
-                    if ask.why.session_ok && ask.no_undo.is_none() && !ask.why.unlock && !shell && ui.add_enabled(awake, egui::Button::new("Allow for this session")).on_hover_text("Allows this kind of call on this connection until the agent disconnects").clicked() && awake {
-                        answer = Some(Answer::Session);
-                    }
-                    if ui.button("Deny").on_hover_text("Esc").clicked() {
-                        answer = Some(Answer::Deny);
+            let left = if ask.gone {
+                "The agent stopped waiting".to_string()
+            } else if !awake {
+                "Allow wakes up after 1 s".to_string()
+            } else {
+                let left = DENY_AFTER.saturating_sub(now.saturating_duration_since(ask.at)).as_secs();
+                format!("Denied in {}:{:02}", left / 60, left % 60)
+            };
+            dialog_foot(ui, |ui| {
+                if ask.gone {
+                    if ui.button("Close").clicked() {
+                        answer = Some(Answer::Close);
                     }
                     foot_note(ui, &left);
-                });
-            }
+                    return;
+                }
+                let (text, a, fill) = if ask.no_undo.is_some() {
+                    ("Allow without undo", Answer::WithoutUndo, ALERT())
+                } else if ask.why.unlock {
+                    ("Unlock writes and allow once", Answer::UnlockOnce, PRIMARY())
+                } else {
+                    ("Allow once", Answer::Once, PRIMARY())
+                };
+                if ui.add_enabled(awake, primary_button(ui, text, fill)).clicked() && awake {
+                    answer = Some(a);
+                }
+                if ask.why.session_ok && ask.no_undo.is_none() && !ask.why.unlock && !shell && ui.add_enabled(awake, egui::Button::new("Allow for this session")).on_hover_text("Allows this kind of call on this connection until the agent disconnects").clicked() && awake {
+                    answer = Some(Answer::Session);
+                }
+                if ui.button("Deny").on_hover_text("Esc").clicked() {
+                    answer = Some(Answer::Deny);
+                }
+                foot_note(ui, &left);
+            });
         });
         // The header's close button answers like Esc.
         if answer.is_none() && r.should_close() {

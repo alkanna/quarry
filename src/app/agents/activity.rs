@@ -258,17 +258,15 @@ impl App {
             let ui = outer;
             dialog_foot(ui, |ui| {
                 let note = if picked.is_some() { "Arguments and answers are shown as scrubbed for the agent. Kept until Quarry quits." } else { "Select a call to see its arguments and answer. Kept until Quarry quits." };
-                {
-                    if ui.button("Done").on_hover_text("Esc").clicked() {
-                        keep = false;
-                    }
-                    let can = picked.and_then(|a| a.undo).is_some();
-                    let tip = if can { "Puts back what this call changed" } else { "Select a change an agent made that can still be undone" };
-                    if ui.add_enabled(can, egui::Button::new("Undo call")).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
-                        undo = picked.map(|a| a.id);
-                    }
-                    reveal = ui.button(REVEAL).on_hover_text("The audit log on disk").clicked();
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    keep = false;
                 }
+                let can = picked.and_then(|a| a.undo).is_some();
+                let tip = if can { "Puts back what this call changed" } else { "Select a change an agent made that can still be undone" };
+                if ui.add_enabled(can, egui::Button::new("Undo call")).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                    undo = picked.map(|a| a.id);
+                }
+                reveal = ui.button(REVEAL).on_hover_text("The audit log on disk").clicked();
                 foot_note(ui, note);
             });
         });
