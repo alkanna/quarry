@@ -20,6 +20,7 @@ pub(super) struct LibUi {
     // B1: the script waiting for its connection to be ready, the quick picker.
 
     // B3: the panel's open folders, selection, search and drags.
+    pub(in crate::app) panel: panel::PanelUi,
 
     // B2: link scans in flight, conflicts and the Link a folder dialog.
 }

@@ -153,3 +153,50 @@ pub(crate) fn pencil(p: &egui::Painter, c: Pos2, col: Color32) {
     closed(p, c, col, &[(10.5, 3.0), (13.0, 5.5), (6.0, 12.5), (3.0, 13.0), (3.5, 10.0)]);
     line(p, c, col, &[(9.0, 4.5), (11.5, 7.0)]);
 }
+
+/// The kind glyphs of the Library panel. The folder is a tab and a body; open, its front edge slants forward.
+pub(crate) fn folder(p: &egui::Painter, c: Pos2, col: Color32) {
+    closed(p, c, col, &[(2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (14.0, 5.5), (14.0, 12.5), (2.0, 12.5)]);
+}
+
+pub(crate) fn folder_open(p: &egui::Painter, c: Pos2, col: Color32) {
+    line(p, c, col, &[(2.0, 12.5), (2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (13.0, 5.5), (13.0, 7.0)]);
+    closed(p, c, col, &[(2.0, 12.5), (4.0, 7.0), (15.0, 7.0), (13.0, 12.5)]);
+}
+
+/// A folder with a plus, for New folder.
+pub(crate) fn folder_plus(p: &egui::Painter, c: Pos2, col: Color32) {
+    line(p, c, col, &[(9.5, 12.5), (2.0, 12.5), (2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (14.0, 5.5), (14.0, 8.0)]);
+    line(p, c, col, &[(12.0, 9.5), (12.0, 14.0)]);
+    line(p, c, col, &[(9.75, 11.75), (14.25, 11.75)]);
+}
+
+/// A page with a folded corner and two lines: a SQL file.
+pub(crate) fn file_sql(p: &egui::Painter, c: Pos2, col: Color32) {
+    doc(p, c, col);
+}
+
+/// A page with braces: a shell script.
+pub(crate) fn file_braces(p: &egui::Painter, c: Pos2, col: Color32) {
+    line(p, c, col, &[(4.0, 2.0), (9.0, 2.0), (12.0, 5.0), (12.0, 14.0), (4.0, 14.0), (4.0, 2.0)]);
+    line(p, c, col, &[(9.0, 2.0), (9.0, 5.0), (12.0, 5.0)]);
+    line(p, c, col, &[(7.2, 8.0), (6.2, 8.6), (6.2, 9.4), (5.6, 10.0), (6.2, 10.6), (6.2, 11.4), (7.2, 12.0)]);
+    line(p, c, col, &[(8.8, 8.0), (9.8, 8.6), (9.8, 9.4), (10.4, 10.0), (9.8, 10.6), (9.8, 11.4), (8.8, 12.0)]);
+}
+
+/// A funnel: a filter.
+pub(crate) fn funnel(p: &egui::Painter, c: Pos2, col: Color32) {
+    closed(p, c, col, &[(2.5, 3.5), (13.5, 3.5), (9.2, 8.4), (9.2, 13.0), (6.8, 11.8), (6.8, 8.4)]);
+}
+
+/// Stacked bars: an aggregation pipeline.
+pub(crate) fn stack(p: &egui::Painter, c: Pos2, col: Color32) {
+    rect(p, c, col, 2.5, 3.0, 11.0, 3.0, 0.8);
+    rect(p, c, col, 4.5, 6.5, 9.0, 3.0, 0.8);
+    rect(p, c, col, 6.5, 10.0, 7.0, 3.0, 0.8);
+}
+
+/// A filled triangle pointing right, for Run.
+pub(crate) fn play(p: &egui::Painter, c: Pos2, col: Color32) {
+    p.add(egui::Shape::convex_polygon(vec![at(c, 5.0, 3.0), at(c, 12.5, 8.0), at(c, 5.0, 13.0)], col, Stroke::NONE));
+}
