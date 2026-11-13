@@ -208,6 +208,8 @@ pub(super) fn paint_conn_row(p: &egui::Painter, r: egui::Rect, c: &Conn, active:
 
 impl App {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
+        // Read only by the resize test's probe below.
+        #[cfg_attr(not(test), allow(unused_variables))]
         let shown = egui::Panel::left("tree")
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
