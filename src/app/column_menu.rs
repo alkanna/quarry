@@ -311,38 +311,33 @@ impl App {
         let (sel, matched) = (t.sel.clone(), t.query.scope());
         // A SQL table or Query result: its keys are column names, which may hold a dot, so they are never read as paths.
         // A Shell result on a SQL tab holds documents and reads like Mongo's.
-        let sql_col = t.sql.as_ref().filter(|_| !agg || t.view == View::Sql).map(|s| {
+        let sql = t.sql.as_ref().filter(|_| !agg || t.view == View::Sql);
+        let col = sql.and_then(|s| {
             let cols = if agg { s.sets.get(s.set_sel).map_or(&[][..], |r| &r.cols[..]) } else { &s.cols[..] };
             cols.iter().find(|x| x.name == c).cloned()
         });
-        let noun = if sql_col.is_some() { "rows" } else { "documents" };
+        let is_sql = sql.is_some();
+        let noun = if is_sql { "rows" } else { "documents" };
         if agg || !self.col_scope_query {
             // As the table shows them, unsaved edits included.
-            let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), &sql_col) {
-                (d, Some(col)) => {
-                    let v = match d {
-                        Some(mut d) => d.remove(c)?,
-                        None => docs.key(i, c)?,
-                    };
-                    Some(match col {
-                        Some(col) if op.is_stat() => db::sql::value::stat_value(col.kind, v),
-                        _ => v,
-                    })
-                }
-                (Some(d), None) => db::get_path(&d, c).cloned(),
-                (None, None) => docs.value(i, c).map(|v| v.bson().into_owned()),
+            let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), is_sql) {
+                (Some(mut d), true) => d.remove(c),
+                (None, true) => docs.key(i, c),
+                (Some(d), false) => db::get_path(&d, c).cloned(),
+                (None, false) => docs.value(i, c).map(|v| v.bson().into_owned()),
             }).collect();
+            let values = db::sql::value::stat_values(op, col.as_ref().map(|x| x.kind), values);
             let scope = format!("From the {} {noun} on this page.", docs.len());
             return match col_op_result(op, &values) {
                 ColOut::Groups(rows) => {
                     // Pipeline and script results are not the collection, and a SQL table has no pipeline, so there is nothing to reopen.
-                    let pipeline = if agg || sql_col.is_some() { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, matched.filter.clone()).unwrap_or_default() };
+                    let pipeline = if agg || is_sql { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, matched.filter.clone()).unwrap_or_default() };
                     self.modal = Some(Modal::Grouped { sel, path: c.into(), pipeline, rows });
                 }
                 out => self.col_result(ctx, &col_title(agg, op, &sel.coll, c), c, out, &scope),
             };
         }
-        if let Some(col) = sql_col {
+        if is_sql {
             let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
             // The query the grid shows, not bar text typed since.
             let q = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.ran.clone()).unwrap_or_default();

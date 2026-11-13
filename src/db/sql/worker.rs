@@ -648,7 +648,8 @@ impl Worker {
                 let (cols, _, rows, ..) = page(&db, &schema, &table, &q, COL_VALUES_CAP as u64, 0, false).await?;
                 let c = if narrow { cols.first() } else { cols.iter().find(|x| x.name == col) };
                 let c = c.ok_or_else(|| format!("{col} is not in the result"))?;
-                let values: Vec<Bson> = rows.iter().filter_map(|r| r.raw().get(&c.name).ok().flatten()).filter_map(|v| Bson::try_from(v).ok()).map(|v| if op.is_stat() { value::stat_value(c.kind, v) } else { v }).collect();
+                let values = rows.iter().filter_map(|r| r.raw().get(&c.name).ok().flatten()).filter_map(|v| Bson::try_from(v).ok()).collect();
+                let values = value::stat_values(op, Some(c.kind), values);
                 Ok((col_op_result(op, &values), rows.len() as i64 >= COL_VALUES_CAP))
             }
             .await;

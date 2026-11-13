@@ -416,7 +416,7 @@ impl App {
         let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
         let sql = self.is_sql(sel.conn);
         let noun = if sql { "rows" } else { "documents" };
-        ui.label(RichText::new(format!("{} values in {} {noun}{}",group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
+        ui.label(RichText::new(format!("{} values in {} {noun}{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                 caption(ui, "VALUE");

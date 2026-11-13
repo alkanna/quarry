@@ -182,12 +182,19 @@ pub fn to_bson(d: Dialect, kind: Kind, raw: Option<&[u8]>) -> Bson {
     }
 }
 
-/// DECIMAL, date and unsigned values past i64 arrive as text so they stay exact, but sum, average, median and range need
-/// numbers and dates. A value that does not parse (a zero date, NaN, `infinity`) is kept as text, which the stats count as neither.
-pub fn stat_value(kind: Kind, v: Bson) -> Bson {
+/// The values a column action works on: for sum, average, median and range each is read by the column's kind.
+pub fn stat_values(op: crate::db::ColOp, kind: Option<Kind>, values: Vec<Bson>) -> Vec<Bson> {
+    match kind {
+        Some(k) if op.is_stat() => values.into_iter().map(|v| stat_value(k, v)).collect(),
+        _ => values,
+    }
+}
+
+/// Dates arrive as text so they stay exact, but average, median and range need them as dates. DECIMAL text needs nothing:
+/// the stats already read numeric text. A date that does not parse (a zero date, `infinity`) is kept as text.
+fn stat_value(kind: Kind, v: Bson) -> Bson {
     let Bson::String(s) = &v else { return v };
     match kind {
-        Kind::Decimal | Kind::UInt => s.parse::<f64>().ok().filter(|x| x.is_finite()).map_or(v, Bson::Double),
         Kind::Date | Kind::DateTime => {
             let mut t = s.replacen(' ', "T", 1);
             if t.len() == 10 {
@@ -424,23 +431,21 @@ impl Param {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn stats_read_decimal_and_date_text() {
+    fn stats_read_date_text() {
         use super::{stat_value, Kind};
         use mongodb::bson::Bson;
         let ms = |kind, s: &str| match stat_value(kind, Bson::String(s.into())) {
             Bson::DateTime(d) => Some(d.timestamp_millis()),
             _ => None,
         };
-        assert_eq!(stat_value(Kind::Decimal, Bson::String("12.50".into())), Bson::Double(12.5));
         assert_eq!(ms(Kind::Date, "1970-01-02"), Some(86_400_000));
         assert_eq!(ms(Kind::DateTime, "1970-01-01 00:00:01.5"), Some(1500));
         // PostgreSQL zones: +00 and +05:30 shapes.
         assert_eq!(ms(Kind::DateTime, "1970-01-01 01:00:00+01"), Some(0));
         assert_eq!(ms(Kind::DateTime, "1970-01-01 05:30:00+05:30"), Some(0));
         assert_eq!(ms(Kind::DateTime, "1970-01-01 00:00:00-08"), Some(8 * 3_600_000));
-        // Kept as text: zero dates, infinity, and text columns that only look like numbers.
-        assert_eq!(stat_value(Kind::UInt, Bson::String("18446744073709551615".into())), Bson::Double(18446744073709551615.0));
-        for (kind, s) in [(Kind::Date, "0000-00-00"), (Kind::DateTime, "infinity"), (Kind::Decimal, "NaN"), (Kind::Decimal, "Infinity"), (Kind::Text, "12")] {
+        // Kept as text: zero dates, infinity, and text columns that only look like dates.
+        for (kind, s) in [(Kind::Date, "0000-00-00"), (Kind::DateTime, "infinity"), (Kind::Text, "2026-01-01")] {
             assert_eq!(stat_value(kind, Bson::String(s.into())), Bson::String(s.into()));
         }
     }
