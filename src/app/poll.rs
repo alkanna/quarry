@@ -230,6 +230,7 @@ impl App {
                 }
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 Msg::LibScan { link, scan } => self.apply_scan(link, scan),
+                Msg::LibFile { job, out } => self.file_done(job, out),
                 Msg::ToolDone(res) => {
                     if let Some(t) = &mut self.tool {
                         t.cancel = None;

@@ -89,10 +89,17 @@ impl Library {
     /// An id no folder, script or link uses or ever used, so the three share one id space and a deleted item's id is not
     /// handed out again.
     pub fn next_id(&mut self) -> u64 {
-        let ids = self.folders.iter().map(|f| f.id).chain(self.scripts.iter().map(|s| s.id)).chain(self.links.iter().map(|l| l.id));
-        let id = self.next.max(ids.max().unwrap_or(0) + 1);
+        self.reserve_ids();
+        let id = self.next;
         self.next = id + 1;
         id
+    }
+
+    /// Moves `next` past every id in use. Called before anything is removed, so an id handed out by a library that had no
+    /// counter yet (an older file, the demo) is not handed out again once its item is gone.
+    pub fn reserve_ids(&mut self) {
+        let ids = self.folders.iter().map(|f| f.id).chain(self.scripts.iter().map(|s| s.id)).chain(self.links.iter().map(|l| l.id));
+        self.next = self.next.max(ids.max().unwrap_or(0) + 1);
     }
 
     /// Puts deleted folders and scripts back for an Undo. An item whose id was taken since gets a new one, and what pointed
@@ -154,6 +161,10 @@ mod tests {
         // The highest id goes: max + 1 would give it again.
         l.scripts.retain(|s| s.id != b);
         assert_eq!(l.next_id(), b + 1);
+        // A library made without the counter (the demo, an older file) keeps its ids too once one is deleted.
+        let mut old = Library { scripts: vec![Script { id: 4, ..Default::default() }, Script { id: 9, ..Default::default() }], ..Default::default() };
+        ops::delete(&mut old, &tree::Node::Script(9));
+        assert_eq!(old.next_id(), 10);
         // The counter survives the file.
         let back: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back.next, b + 2);

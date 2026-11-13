@@ -39,9 +39,25 @@ fn bound_app(dir: &Path, text: &str, follow: bool) -> Harness<'static, App> {
     h
 }
 
+/// A scan as the worker makes it: the files open in tabs are read in full when they changed.
 fn rescan(a: &mut App, dir: &Path) {
-    let scan = disk::scan(dir, &["sql".to_string()], None);
+    let open: Vec<(PathBuf, disk::Meta)> = a.tabs.iter().filter_map(|t| t.script.as_ref()).filter_map(|b| match &b.r {
+        ScriptRef::File { rel, .. } => Some((rel.clone(), b.disk)),
+        _ => None,
+    }).collect();
+    let scan = disk::scan_reading(dir, &["sql".to_string()], None, &open);
     a.apply_scan(1, scan);
+}
+
+/// Steps frames until the linked-file reads and writes on the worker are back.
+fn io(h: &mut Harness<'static, App>) {
+    let t = std::time::Instant::now();
+    while !h.state().lib_ui.jobs.is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(20), "a linked-file job never came back");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.step();
 }
 
 fn query(a: &App) -> String {
@@ -142,6 +158,7 @@ fn an_edited_tab_gets_a_conflict_and_keep_mine_lets_cmd_s_replace_the_file() {
     h.state_mut().conflict_keep();
     assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
     assert!(h.state_mut().save_linked());
+    io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 3");
     let b = h.state().tabs[0].script.as_ref().unwrap();
     assert_eq!(b.base, "select 3");
@@ -156,6 +173,7 @@ fn reload_replaces_the_edits_with_the_file() {
     put(&dir, "a.sql", "select 22");
     rescan(h.state_mut(), &dir);
     h.state_mut().conflict_reload();
+    io(&mut h);
     assert_eq!(query(h.state()), "select 22");
     assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -169,6 +187,7 @@ fn cmd_s_on_a_file_that_changed_since_it_loaded_raises_the_conflict_instead_of_w
     // Changed behind the app's back, before any scan noticed.
     put(&dir, "a.sql", "select 22");
     assert!(h.state_mut().save_linked());
+    io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 22");
     assert_eq!(h.state().tabs[0].script.as_ref().unwrap().conflict.as_deref(), Some("select 22"));
     // A clean tab saving an unchanged file writes it, and the file keeps nothing but the text.
@@ -176,6 +195,7 @@ fn cmd_s_on_a_file_that_changed_since_it_loaded_raises_the_conflict_instead_of_w
     let mut h = bound_app(&dir2, "select 1", false);
     h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 5".into();
     assert!(h.state_mut().save_linked());
+    io(&mut h);
     assert_eq!(std::fs::read_to_string(dir2.join("a.sql")).unwrap(), "select 5");
     assert_eq!(std::fs::read_dir(&dir2).unwrap().count(), 1);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -251,22 +271,25 @@ fn opening_a_file_binds_the_tab_and_cmd_s_writes_it_back_without_adding_a_header
     let h = panel_app(&dir, &[("a.sql", "-- quarry: db=shop\nselect 1")]);
     let mut ui = UiApp { h };
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::Here);
-    ui.settle();
+    io(&mut ui.h);
     let b = ui.app().tabs[ui.app().cur].script.as_ref().expect("a bound tab");
     assert!(matches!(&b.r, ScriptRef::File { link: 1, rel } if rel == Path::new("a.sql")) && b.disk.is_some() && b.view == View::Sql);
     assert_eq!(ui.app().tabs[ui.app().cur].sel.db, "shop");
     let cur = ui.app().cur;
     ui.h.state_mut().tabs[cur].sql.as_mut().unwrap().query = "-- quarry: db=shop\nselect 2".into();
     ui.h.state_mut().save_script();
+    io(&mut ui.h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "-- quarry: db=shop\nselect 2");
     assert!(ui.app().modal.is_none(), "a bound file saves without the dialog");
     // A file with no header gets none.
     put(&dir, "plain.sql", "select 1");
     ui.h.state_mut().lib_ui.scans.insert(1, disk::scan(&dir, &["sql".into()], None));
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "plain.sql".into() }, How::NewTab);
+    io(&mut ui.h);
     let cur = ui.app().cur;
     ui.h.state_mut().tabs[cur].sql.as_mut().unwrap().query = "select 9".into();
     ui.h.state_mut().save_script();
+    io(&mut ui.h);
     assert_eq!(std::fs::read_to_string(dir.join("plain.sql")).unwrap(), "select 9");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -278,6 +301,7 @@ fn deleting_a_file_moves_it_to_the_trash_and_undo_puts_its_bytes_back() {
     let mut ui = UiApp { h };
     ui.click("queries");
     ui.lk_menu("a.sql", "Move to Trash\u{2026}");
+    io(&mut ui.h);
     assert!(!dir.join("a.sql").exists());
     assert!(ui.app().lib_ui.scans[&1].entries.is_empty());
     let id = ui.app().restores.first().map(|r| r.0).expect("an Undo toast");
@@ -291,9 +315,11 @@ fn copying_a_file_out_of_its_folder_leaves_the_file_and_adds_a_library_copy() {
     let dir = temp_dir("out");
     let h = panel_app(&dir, &[("a.sql", "-- quarry: db=shop\nselect 1")]);
     let mut ui = UiApp { h };
-    let id = ui.h.state_mut().file_to_quarry(1, Path::new("a.sql"), crate::library::ops::DropAt::Root).expect("a copy");
+    ui.h.state_mut().file_to_quarry(1, Path::new("a.sql"), crate::library::ops::DropAt::Root);
+    io(&mut ui.h);
     assert!(dir.join("a.sql").exists());
-    let s = ui.app().library.scripts.iter().find(|s| s.id == id).unwrap();
+    let s = ui.app().library.scripts.iter().find(|s| s.name == "a").expect("a copy");
+    assert_eq!(ui.app().lib_ui.panel.sel, Some(crate::library::tree::Node::Script(s.id)));
     assert_eq!((s.name.as_str(), s.kind.as_str(), s.db.as_str(), s.conn), ("a", "sql", "shop", 1));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -352,6 +378,7 @@ fn the_save_dialog_writes_a_new_file_into_a_linked_folder_and_binds_the_tab() {
     let h = panel_app(&dir, &[("a.sql", "select 1")]);
     let mut ui = UiApp { h };
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
+    io(&mut ui.h);
     // The tab is unbound again and holds its own text.
     let a = ui.h.state_mut();
     let cur = a.cur;
@@ -365,6 +392,7 @@ fn the_save_dialog_writes_a_new_file_into_a_linked_folder_and_binds_the_tab() {
     ui.h.run_steps(3);
     ui.show("File name");
     ui.click("Save");
+    io(&mut ui.h);
     assert_eq!(std::fs::read_to_string(dir.join("Answer.sql")).unwrap(), "select 42");
     let a = ui.app();
     assert!(matches!(a.tabs[a.cur].script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: 1, rel }) if rel == Path::new("Answer.sql")));
@@ -400,6 +428,56 @@ fn a_file_that_changed_on_disk_gets_a_dot_until_it_is_opened() {
     h.state_mut().apply_scan(1, scan);
     assert!(h.state().lib_ui.changed.contains(&(1, PathBuf::from("a.sql"))));
     h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::Here);
+    io(&mut h);
     assert!(h.state().lib_ui.changed.is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_changed_file_is_read_by_the_scan_and_not_on_the_ui_thread() {
+    let dir = temp_dir("offthread");
+    let mut h = bound_app(&dir, "select 1", true);
+    put(&dir, "a.sql", "select 22");
+    // A scan that found the change but read nothing (as one without the tab's file would) changes nothing: the UI
+    // thread never reads the file itself.
+    let scan = disk::scan(&dir, &["sql".to_string()], None);
+    h.state_mut().apply_scan(1, scan);
+    assert_eq!(query(h.state()), "select 1");
+    // The worker's scan reads the open file, and the tab follows it.
+    rescan(h.state_mut(), &dir);
+    assert_eq!(query(h.state()), "select 22");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_save_dialog_looks_for_the_file_once_per_path() {
+    let dir = temp_dir("exists");
+    let h = panel_app(&dir, &[("a.sql", "select 1")]);
+    let mut ui = UiApp { h };
+    ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
+    io(&mut ui.h);
+    let a = ui.h.state_mut();
+    let cur = a.cur;
+    a.tabs[cur].script = None;
+    a.tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
+    a.save_script();
+    if let Some(Modal::SaveScript(f)) = &mut a.modal {
+        (f.link, f.name) = (Some(1), "a".into());
+    }
+    ui.h.run_steps(3);
+    ui.show("Replaces a.sql in this folder.");
+    // Gone from disk while the dialog is up: the answer is kept until the name or folder changes.
+    std::fs::remove_file(dir.join("a.sql")).unwrap();
+    ui.h.run_steps(3);
+    let cached = |ui: &UiApp| match &ui.app().modal {
+        Some(Modal::SaveScript(f)) => f.exists.clone(),
+        _ => None,
+    };
+    assert_eq!(cached(&ui), Some((dir.join("a.sql"), true)));
+    if let Some(Modal::SaveScript(f)) = &mut ui.h.state_mut().modal {
+        f.name = "b".into();
+    }
+    ui.h.run_steps(3);
+    assert_eq!(cached(&ui), Some((dir.join("b.sql"), false)));
     std::fs::remove_dir_all(&dir).unwrap();
 }

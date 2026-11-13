@@ -215,7 +215,9 @@ pub(in crate::app) fn picker_button(ui: &mut egui::Ui, d: &PickData, icon: bool,
 
 fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
     let ctx = ui.ctx().clone();
-    ctx.data_mut(|x| x.insert_temp(seen_id(), ctx.cumulative_frame_nr()));
+    // The frame number is read first: asking the context for it inside data_mut would lock it twice.
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|x| x.insert_temp(seen_id(), frame));
     // The frame the popover opens in had only the count. It is egui's invisible sizing pass, and the next frame has the lists.
     if !d.full {
         ctx.request_repaint();

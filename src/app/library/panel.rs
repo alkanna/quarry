@@ -924,14 +924,8 @@ impl App {
                         st.sel = Some(Node::File { link, rel: new });
                     }
                 }
-                (Node::File { link, rel }, Plan::Out(at)) => {
-                    if let Some(id) = self.file_to_quarry(link, &rel, at.clone()) {
-                        if let DropAt::Into(f) = at {
-                            st.open.insert(Node::Folder(f));
-                        }
-                        st.sel = Some(Node::Script(id));
-                    }
-                }
+                // The copy is selected, and its folder opened, once the file is read.
+                (Node::File { link, rel }, Plan::Out(at)) => self.file_to_quarry(link, &rel, at),
                 _ => {}
             },
         }

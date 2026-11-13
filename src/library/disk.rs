@@ -47,6 +47,114 @@ pub struct Scan {
     pub entries: Vec<Entry>,
     /// Folders with nothing in them at all, which no file would otherwise show, such as one just made.
     pub empty_dirs: Vec<PathBuf>,
+    /// Files open in a tab whose time or length changed, read in full by the scan so the UI thread never reads them.
+    pub texts: Vec<(PathBuf, Loaded)>,
+}
+
+/// Modified time and length of a file, which tell a change on disk.
+pub type Meta = Option<(SystemTime, u64)>;
+
+pub fn meta_of(path: &Path) -> Meta {
+    std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())))
+}
+
+/// A script file read in full.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Loaded {
+    /// What the editor holds: the file as it is for .sql and .js, the filter or pipeline as shell text for .json.
+    pub text: String,
+    /// A .json file's parts, which the Documents view also needs for its sort and projection.
+    pub parsed: Option<format::Parsed>,
+    /// Modified time and length when it was read, which the tab keeps to notice a later change.
+    pub meta: Meta,
+}
+
+/// Reads a script file in full. Err names why it cannot be a script, such as a .json file of another shape.
+pub fn read_script(path: &Path) -> Result<Loaded, String> {
+    let meta = meta_of(path);
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    if format::ext_of(path) == "json" {
+        let p = format::parse_json(&raw).ok_or("It is not a filter or a pipeline")?;
+        return Ok(Loaded { text: p.body.clone(), parsed: Some(p), meta });
+    }
+    Ok(Loaded { text: raw, parsed: None, meta })
+}
+
+/// `scan`, which also reads in full each file of `open` (a path and the time and length a tab last saw) that changed since.
+pub fn scan_reading(root: &Path, exts: &[String], prev: Option<&Scan>, open: &[(PathBuf, Meta)]) -> Scan {
+    let mut s = scan(root, exts, prev);
+    for (rel, seen) in open {
+        let changed = s.entries.iter().any(|e| e.rel == *rel && Some((e.mtime, e.len)) != *seen);
+        // A file caught half written, or one that stopped being a script, waits for the next scan.
+        if changed && let Ok(l) = read_script(&root.join(rel)) {
+            s.texts.push((rel.clone(), l));
+        }
+    }
+    s
+}
+
+/// How a save of a tab's text into its file went.
+#[derive(Debug)]
+pub enum SaveOut {
+    /// Written; the file's time and length now.
+    Written(Meta),
+    /// The file changed on disk since the tab read it, to this text: nothing was written.
+    Changed(Loaded),
+    /// The text could not be turned into the file (a filter that does not parse): a warning.
+    Refused(String),
+    /// The disk refused: an error.
+    Failed(String),
+}
+
+/// What a .json file is made of besides the text: the kind, sort and projection a tab holds, and the target used when the
+/// file has none yet.
+#[derive(Debug, Default)]
+pub struct JsonParts {
+    pub kind: String,
+    pub sort: String,
+    pub project: String,
+    pub target: Target,
+}
+
+/// Writes `text` into the file `path` below the linked folder `root`, for a tab that read it at `was` with the text `base`.
+/// A file changed on disk since, to another text, is not written. A .json file keeps its other keys.
+pub fn save_file(root: &Path, path: &Path, was: Meta, base: &str, text: &str, json: Option<JsonParts>) -> SaveOut {
+    if !root.is_dir() {
+        return SaveOut::Failed(format!("{} is not there", root.display()));
+    }
+    if was.is_some() && meta_of(path) != was
+        && let Ok(now) = read_script(path)
+        && now.text != base
+    {
+        return SaveOut::Changed(now);
+    }
+    let bytes = match json {
+        Some(j) => {
+            let old = std::fs::read_to_string(path).ok();
+            let mut p = old.as_deref().and_then(format::parse_json).unwrap_or_else(|| format::Parsed { target: j.target, ..Default::default() });
+            (p.kind, p.body, p.sort, p.project) = (j.kind, text.to_string(), j.sort, j.project);
+            match format::to_json(&p, old.as_deref()) {
+                Ok(s) => s.into_bytes(),
+                Err(e) => return SaveOut::Refused(format!("Not saved: {e}")),
+            }
+        }
+        None => text.as_bytes().to_vec(),
+    };
+    match write_file(path, &bytes) {
+        Ok(()) => SaveOut::Written(meta_of(path)),
+        Err(e) => SaveOut::Failed(format!("Could not save {}: {e}", path.display())),
+    }
+}
+
+/// What a file job run on the worker answers, matched to its job by id.
+#[derive(Debug)]
+pub enum FileOut {
+    Read(Result<Loaded, String>),
+    Saved(SaveOut),
+    /// A new file written, as a scan would list it.
+    Made(Entry),
+    Trashed(Result<Vec<u8>, String>),
 }
 
 fn skipped_dir(name: &str) -> bool {

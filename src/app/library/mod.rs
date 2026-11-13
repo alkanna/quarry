@@ -42,6 +42,9 @@ pub(super) struct LibUi {
     /// file in `changed`. Neither is saved.
     pub(super) baseline: HashMap<(u64, std::path::PathBuf), (std::time::SystemTime, u64)>,
     pub(super) changed: HashSet<(u64, std::path::PathBuf)>,
+    /// Linked-file reads and writes running on the worker, by job id, and the last id given.
+    pub(in crate::app) jobs: HashMap<u64, linked::Job>,
+    pub(super) job_seq: u64,
 }
 
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to
@@ -64,7 +67,9 @@ pub(super) fn load_library_from(path: &std::path::Path) -> (Library, Option<Stri
     errs.extend(e);
     let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let next = o.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
-    (Library { v, folders, scripts, links, recent, next }, skipped_note(path, total, &errs))
+    let mut lib = Library { v, folders, scripts, links, recent, next };
+    lib.reserve_ids();
+    (lib, skipped_note(path, total, &errs))
 }
 
 pub(super) fn load_library() -> (Library, Option<String>) {

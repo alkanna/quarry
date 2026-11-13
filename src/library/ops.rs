@@ -62,6 +62,7 @@ pub fn new_folder(lib: &mut Library, parent: Option<u64>, name: &str) -> u64 {
 
 /// Removes a script, or a folder with every folder and script below it, and returns what went for an Undo.
 pub fn delete(lib: &mut Library, node: &Node) -> Option<(Vec<Folder>, Vec<Script>)> {
+    lib.reserve_ids();
     match node {
         Node::Script(id) => {
             let at = lib.scripts.iter().position(|s| s.id == *id)?;

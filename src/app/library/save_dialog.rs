@@ -2,7 +2,7 @@
 //! bound to the library yet (see `save_script` in open.rs).
 #![allow(dead_code)]
 
-use super::linked::{file_bytes, kind_ext};
+use super::linked::{FileOut, Job, SaveOut, file_bytes, kind_ext};
 use super::open::{TabText, now_secs};
 use super::*;
 use crate::library::{Library, Script, ScriptRef, disk, format};
@@ -36,6 +36,8 @@ pub(in crate::app) struct SaveForm {
     /// The dialect that colors a SQL preview.
     pub dialect: db::sql::Dialect,
     pub focused: bool,
+    /// The linked file the save would write and whether it was there when the path last changed.
+    pub exists: Option<(PathBuf, bool)>,
 }
 
 /// Every Quarry folder in display order with its depth, as the panel shows them: a folder whose parent is gone sits at the
@@ -174,36 +176,29 @@ impl App {
         }
         let typed = f.file.trim();
         let file = disk::file_name(if typed.is_empty() { f.name.trim() } else { typed }, ext);
-        let (dir, rel) = (l.path.join(&f.dir), f.dir.join(&file));
-        let path = dir.join(&file);
-        let old = std::fs::read_to_string(&path).ok();
+        let rel = f.dir.join(&file);
+        let (root, sub, path) = (l.path.clone(), f.dir.clone(), l.path.join(&rel));
         let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
-        let bytes = match file_bytes(&f.kind, &f.body, &f.sort, &f.project, target, old.as_deref()) {
-            Ok(b) => b,
-            Err(e) => return self.warn(format!("Not saved: {e}")),
-        };
-        if let Err(e) = disk::dir_below(&l.path, &f.dir).and_then(|_| disk::write_file(&path, &bytes)) {
-            return self.err(format!("Could not save {}: {e}", path.display()));
-        }
-        self.add_entry(link, &rel);
-        let meta = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
-        match f.view.filter(|v| self.t().is_some_and(|t| t.view == *v)) {
-            Some(v) => {
-                self.bind_script(ScriptRef::File { link, rel: rel.clone() }, v, f.body.clone());
-                if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
-                    b.disk = meta;
-                }
+        let (kind, body, sort, project) = (f.kind.clone(), f.body.clone(), f.sort.clone(), f.project.clone());
+        let place = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
+        let password = f.kind == "sql" && !db::redact_sql(&f.body).1.is_empty();
+        let uid = self.t().map_or(0, |t| t.uid);
+        let job = Job::SaveNew { uid, link, rel: rel.clone(), view: f.view, body: f.body.clone(), place, password };
+        // The old file is read, the new one written and listed on the worker; the tab is bound when it is back.
+        self.run_job(job, move || {
+            let old = std::fs::read_to_string(&path).ok();
+            let bytes = match file_bytes(&kind, &body, &sort, &project, target, old.as_deref()) {
+                Ok(b) => b,
+                Err(e) => return FileOut::Saved(SaveOut::Refused(format!("Not saved: {e}"))),
+            };
+            if let Err(e) = disk::dir_below(&root, &sub).and_then(|_| disk::write_file(&path, &bytes)) {
+                return FileOut::Saved(SaveOut::Failed(format!("Could not save {}: {e}", path.display())));
             }
-            None => {
-                self.library.push_recent(ScriptRef::File { link, rel: rel.clone() });
-                self.save_library();
+            match disk::entry_of(&root, &rel) {
+                Some(e) => FileOut::Made(e),
+                None => FileOut::Saved(SaveOut::Failed(format!("{} was written but cannot be read back", path.display()))),
             }
-        }
-        self.mark_seen(link, &rel, meta);
-        self.ok(format!("Saved {file} to {}", if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }));
-        if f.kind == "sql" && !db::redact_sql(&f.body).1.is_empty() {
-            self.warn("Saved, but the script holds a password in plain text in the file.");
-        }
+        });
     }
 
     pub(in crate::app) fn save_dialog(&mut self, ui: &mut egui::Ui, f: &mut SaveForm, keep: &mut bool) {
@@ -266,7 +261,13 @@ impl App {
             if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
                 let typed = f.file.trim();
                 let file = disk::file_name(if typed.is_empty() { name.as_str() } else { typed }, kind_ext(&f.kind));
-                if !name.is_empty() && l.path.join(&f.dir).join(&file).exists() {
+                // Looked up once per path, not every frame: on a network drive each look is a round trip.
+                let path = l.path.join(&f.dir).join(&file);
+                if f.exists.as_ref().is_none_or(|(p, _)| *p != path) {
+                    let there = path.exists();
+                    f.exists = Some((path, there));
+                }
+                if !name.is_empty() && f.exists.as_ref().is_some_and(|(_, there)| *there) {
                     field_note(ui, &format!("Replaces {file} in this folder."), WARNING());
                 }
             } else if f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, folder).is_some() {
