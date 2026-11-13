@@ -241,6 +241,10 @@ impl App {
 
     pub(super) fn set_view(&mut self, v: View) {
         let Some(t) = self.tm().filter(|t| t.view != v) else { return };
+        // A tab with no collection has nothing for the other views to show.
+        if t.sel.coll.is_empty() && !matches!(v, View::Shell | View::Sql) {
+            return;
+        }
         t.view = v;
         t.selected = None;
         // The editor belongs to the Content grid; another view must never inherit it.

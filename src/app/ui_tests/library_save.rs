@@ -178,6 +178,19 @@ fn a_shell_script_opens_in_a_tab_with_no_collection_named_for_the_database() {
 }
 
 #[test]
+fn a_shell_script_of_a_sql_connection_shows_the_shell() {
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    let id = ui.app().library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 3).map(|s| s.id).unwrap();
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::NewTab);
+    ui.settle();
+    let a = ui.app();
+    assert!(a.t().is_some_and(|t| t.view == View::Shell && t.shell.code.contains("COUNT(*)")));
+    assert_eq!(a.tab_name(a.cur), "Shell · shop");
+    // The Shell is on screen, not the Query view that shares the tab.
+    ui.h.get_by_label("Shell editor");
+}
+
+#[test]
 fn a_filter_script_opens_its_collection_with_the_query_set() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     ui.h.state_mut().demo_scripts();

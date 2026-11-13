@@ -39,7 +39,7 @@ pub fn migrate_into(lib: &mut Library, old: &[(String, Vec<OldEntry>)], now: u64
             };
             let (db, coll) = if sql_key || kind == "sql" { ("", "") } else { (db, coll) };
             let (sort, project) = if kind == "filter" { (e.sort.clone(), e.project.clone()) } else { Default::default() };
-            if lib.scripts.iter().any(|s| s.conn == conn && s.kind == kind && s.name == e.name && s.body == body && s.coll == coll) {
+            if lib.scripts.iter().any(|s| s.conn == conn && s.kind == kind && s.name == e.name && s.body == body && s.db == db && s.coll == coll) {
                 continue;
             }
             let id = lib.next_id();
@@ -86,6 +86,12 @@ mod tests {
     fn a_slash_in_the_collection_name_stays_in_it() {
         let l = run(vec![("2/shop/a/b", vec![entry("x", "{}", None, None)])]);
         assert_eq!((l.scripts[0].db.as_str(), l.scripts[0].coll.as_str()), ("shop", "a/b"));
+    }
+
+    #[test]
+    fn the_same_script_on_two_databases_stays_two_scripts() {
+        let l = run(vec![("1/shop/orders", vec![entry("q", "{}", None, None)]), ("1/test/orders", vec![entry("q", "{}", None, None)])]);
+        assert_eq!(l.scripts.len(), 2);
     }
 
     #[test]

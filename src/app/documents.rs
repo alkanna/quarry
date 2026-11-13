@@ -194,7 +194,7 @@ impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         // A Query tab that belongs to no table has no header or view tabs of a table.
-        if t.sql.is_some() && t.sel.coll.is_empty() {
+        if t.sql.is_some() && t.sel.coll.is_empty() && t.view != View::Shell {
             return self.sql_query_view(ui);
         }
         let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
@@ -220,7 +220,7 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            let heading = if coll.is_empty() && !sql { "Shell" } else { coll.as_str() };
+            let heading = if coll.is_empty() { "Shell" } else { coll.as_str() };
             ui.label(semibold(RichText::new(heading).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
             ui.label(RichText::new(&db).font(FontId::monospace(TXT_SMALL)).color(FAINT()));
@@ -235,7 +235,8 @@ impl App {
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
-            for (v, label) in if sql { &SQL_VIEWS[..] } else { &MONGO_VIEWS[..] }.iter().copied() {
+            // A tab with no collection (a Shell script opened from the library) has only the views that need none.
+            for (v, label) in if sql { &SQL_VIEWS[..] } else { &MONGO_VIEWS[..] }.iter().copied().filter(|(v, _)| !coll.is_empty() || matches!(v, View::Shell | View::Sql)) {
                 if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
                 }

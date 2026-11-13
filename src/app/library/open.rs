@@ -132,6 +132,10 @@ impl App {
         };
         if !status_ready && !self.demo {
             self.lib_ui.pending = Some((r.clone(), how));
+            // activate connects only an idle connection; a failed one is tried again.
+            if self.conn(s.conn).is_some_and(|c| matches!(c.status, Status::Failed(_))) {
+                self.connect(s.conn);
+            }
             self.activate(s.conn);
             return;
         }

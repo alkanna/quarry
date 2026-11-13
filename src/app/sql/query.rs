@@ -270,12 +270,12 @@ impl App {
     /// The name a tab shows: its table, or "Query N" for a Query tab that belongs to no table.
     pub(in crate::app) fn tab_name(&self, i: usize) -> String {
         let Some(t) = self.tabs.get(i) else { return String::new() };
+        // A Shell script opened from the library has no collection: the tab is named for its database.
+        if t.sel.coll.is_empty() && t.view == View::Shell {
+            return format!("Shell · {}", t.sel.db);
+        }
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return format!("Query {}", self.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
-        }
-        // A Mongo Shell script opened from the library has no collection: the tab is named for its database.
-        if t.sql.is_none() && t.sel.coll.is_empty() && t.view == View::Shell {
-            return format!("Shell · {}", t.sel.db);
         }
         t.sel.coll.clone()
     }

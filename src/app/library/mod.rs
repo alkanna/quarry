@@ -57,6 +57,10 @@ pub(super) fn load_library() -> (Library, Option<String>) {
 
 impl App {
     pub(super) fn save_library(&mut self) {
+        // The demo's made-up scripts must never reach the real library file.
+        if self.demo {
+            return;
+        }
         self.library.v = 1;
         let b = serde_json::to_vec_pretty(&self.library).unwrap_or_default();
         self.write_config("library.json", b);
