@@ -2,7 +2,8 @@
 //!
 //! An editor calls `begin` before its wrappers (autocomplete, autopair) so they never see the keys
 //! Vim handled, and `end` after its TextEdit drew, to report Vim's edits as changes, scroll to the
-//! caret and paint the block caret and the mode badge. With the setting off both return at once.
+//! caret and paint the block caret and the mode badge. `wrap` and `wrap_with` do both around an
+//! editor. With the setting off they return at once.
 
 mod engine;
 
@@ -14,11 +15,14 @@ use eframe::egui::{
     text_edit::TextEditOutput,
 };
 use engine::{History, K, Mode, Vim};
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 /// Passes to wait for the clipboard after asking for it. Nothing comes when it holds no text, or
 /// when there is no window, as in tests; the paste then uses Vim's own register.
 const PASTE_WAIT: u64 = 3;
+
+/// The keys that are not text, as egui names them and as Vim reads them.
+const KEYS: [(Key, K); 6] = [(Key::Enter, K::Enter), (Key::Backspace, K::Backspace), (Key::ArrowLeft, K::Left), (Key::ArrowRight, K::Right), (Key::ArrowUp, K::Up), (Key::ArrowDown, K::Down)];
 
 /// Mirrors the setting for the editors, which have no `App`. Kept in the context rather than a static
 /// because UI tests run several apps at once in one process.
@@ -58,7 +62,7 @@ fn sid(id: egui::Id) -> egui::Id {
 }
 
 fn shared(ctx: &egui::Context, id: egui::Id) -> Shared {
-    ctx.data_mut(|d| d.get_temp_mut_or_default::<Shared>(sid(id)).clone())
+    ctx.data(|d| d.get_temp::<Shared>(sid(id))).unwrap_or_else(|| ctx.data_mut(|d| d.get_temp_mut_or_default::<Shared>(sid(id)).clone()))
 }
 
 /// True when the editor is in Normal or Visual mode, where typing does not insert.
@@ -97,16 +101,8 @@ fn take_keys(ctx: &egui::Context, wait: bool) -> (Vec<K>, Option<String>) {
                 }
                 // Printable keys also arrive as Text, which is what Vim reads; dropping their Key events
                 // keeps the editor from acting on Tab, Delete, Home and the like behind Vim's back.
-                if *pressed {
-                    match key {
-                        Key::Enter => keys.push(K::Enter),
-                        Key::Backspace => keys.push(K::Backspace),
-                        Key::ArrowLeft => keys.push(K::Left),
-                        Key::ArrowRight => keys.push(K::Right),
-                        Key::ArrowUp => keys.push(K::Up),
-                        Key::ArrowDown => keys.push(K::Down),
-                        _ => {}
-                    }
+                if let (true, Some(&(_, k))) = (*pressed, KEYS.iter().find(|(name, _)| name == key)) {
+                    keys.push(k);
                 }
                 false
             }
@@ -120,18 +116,14 @@ fn take_keys(ctx: &egui::Context, wait: bool) -> (Vec<K>, Option<String>) {
 /// Puts keys back as input for the editor, for those typed after a key that started Insert mode in
 /// the same frame.
 fn give_back(ctx: &egui::Context, keys: impl Iterator<Item = K>) {
-    let key = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
     ctx.input_mut(|i| {
         for k in keys {
             i.events.push(match k {
                 K::Ch(c) => Event::Text(c.to_string()),
-                K::Enter => key(Key::Enter),
-                K::Backspace => key(Key::Backspace),
-                K::Left => key(Key::ArrowLeft),
-                K::Right => key(Key::ArrowRight),
-                K::Up => key(Key::ArrowUp),
-                K::Down => key(Key::ArrowDown),
-                K::Esc | K::CtrlR => continue,
+                k => match KEYS.iter().find(|(_, v)| *v == k) {
+                    Some(&(key, _)) => Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+                    None => continue,
+                },
             });
         }
     });
@@ -161,19 +153,26 @@ pub(crate) fn demo(ui: &egui::Ui, id: egui::Id, text: &str) {
     s.cur = if s.vim.mode == Mode::Visual { at + 10 } else { at };
     // Counts as focused this pass, so `end` keeps the mode instead of starting Normal.
     s.last_focus = ctx.cumulative_pass_nr();
-    let (a, b) = s.vim.selection(text, s.cur);
+    let b: Vec<char> = text.chars().collect();
+    let (a, z) = s.vim.selection(&b, s.cur);
     let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-    st.cursor.set_char_range(Some(range(a, b)));
+    st.cursor.set_char_range(Some(range(a, z)));
     st.store(ctx, id);
-    s.wrote = Some((a, b));
+    s.wrote = Some((a, z));
 }
 
-/// `begin`, the editor, then `end`, for editors whose wrappers hand back the TextEdit's output.
-pub(crate) fn wrap(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> TextEditOutput) -> TextEditOutput {
+/// `begin`, the editor, then `end`, for editors whose wrappers hand back more than the TextEdit's
+/// output, like the suggestion lists.
+pub(crate) fn wrap_with<R>(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> (TextEditOutput, R)) -> (TextEditOutput, R) {
     begin(ui, id, text);
-    let mut out = show(ui, text);
+    let (mut out, r) = show(ui, text);
     end(ui, id, &mut out);
-    out
+    (out, r)
+}
+
+/// `wrap_with` for editors that hand back only the TextEdit's output.
+pub(crate) fn wrap(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> TextEditOutput) -> TextEditOutput {
+    wrap_with(ui, id, text, |ui, text| (show(ui, text), ())).0
 }
 
 /// Takes this pass's Esc when it means something to Vim. egui drops focus on a bare Esc before any
@@ -185,24 +184,22 @@ fn take_esc(ctx: &egui::Context, id: egui::Id, s: &State, focused: bool, pass: u
     if !(focused || s.last_focus + 1 == pass) || !s.vim.wants_esc() {
         return None;
     }
-    let is_esc = |e: &Event| matches!(e, Event::Key { key: Key::Escape, pressed: true, modifiers, .. } if modifiers.is_none());
-    let at = ctx.input(|i| i.events.iter().position(is_esc))?;
+    let at = ctx.input(|i| i.events.iter().position(|e| matches!(e, Event::Key { key: Key::Escape, pressed: true, modifiers, .. } if modifiers.is_none())))?;
     let insert = s.vim.mode == Mode::Insert;
     let typed = ctx.input_mut(|i| {
+        let after = i.events.split_off(at + 1);
+        i.events.pop();
         let mut typed = String::new();
-        let mut n = 0;
-        i.events.retain(|e| {
-            let before = n < at;
-            n += 1;
-            match e {
-                Event::Text(t) if before && insert => {
+        if insert {
+            i.events.retain(|e| match e {
+                Event::Text(t) => {
                     typed.push_str(t);
                     false
                 }
-                e if n - 1 == at && is_esc(e) => false,
                 _ => true,
-            }
-        });
+            });
+        }
+        i.events.extend(after);
         typed
     });
     ctx.memory_mut(|m| m.request_focus(id));
@@ -230,12 +227,13 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
     let mut st = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
     let now = st.cursor.char_range().map(|r| (r.secondary.index.0, r.primary.index.0));
     let mut cur = s.cur;
-    let mut touched = false;
+    // Whether the caret or selection must be written back to the editor this pass.
+    let mut write = esc.is_some() || s.wrote.is_none();
     if s.vim.mode == Mode::Insert {
         cur = now.map_or(cur, |r| r.1);
     } else if let Some((a, b)) = now.filter(|&r| Some(r) != s.wrote) {
         // A drag selects as Visual mode does; a click or a Cmd shortcut just moves the caret.
-        touched = true;
+        write = true;
         if a != b {
             s.vim.mode = Mode::Visual;
             s.vim.anchor = a;
@@ -255,6 +253,7 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
         }
         keys.push(K::Esc);
     }
+    // Some(answer) once a paste's request for the clipboard is answered, or given up on.
     let mut fetched: Option<Option<String>> = None;
     if esc.is_some() || s.vim.mode != Mode::Insert {
         let (more, pasted) = take_keys(&ctx, s.paste_wait.is_some());
@@ -271,14 +270,25 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
             }
         }
     }
+    // The text as chars, built once for this pass's keys and the caret below.
+    let mut chars: Option<Vec<char>> = None;
     if !keys.is_empty() {
-        touched = true;
+        write = true;
+        let answered = fetched.is_some();
         // A yank reaches the system clipboard only after this frame, so a paste after it in the same
-        // frame uses Vim's own register instead of asking for the stale clipboard.
-        let yanked = std::cell::Cell::new(false);
-        let clip_text = fetched.clone().flatten();
-        let mut clip = || if yanked.get() { None } else { clip_text.clone() };
+        // frame uses Vim's own register instead of the clipboard's older text.
+        let yanked = Cell::new(false);
+        let clip_text = Cell::new(fetched.flatten());
+        let mut clip = || if yanked.get() { None } else { clip_text.take() };
+        let mut b: Vec<char> = text.chars().collect();
+        let mut dirty = false;
+        let mut undo_at = cur;
         let mut undoer = st.undoer();
+        // Writes `b` back to `text`; the text before becomes an undo point, so `u` and Cmd+Z undo Vim's changes.
+        let flush = |text: &mut String, b: &[char], at: usize, undoer: &mut egui::util::undoer::Undoer<(CCursorRange, String)>| {
+            let old = std::mem::replace(text, b.iter().collect());
+            undoer.add_undo(&(CCursorRange::one(CCursor::new(at)), old));
+        };
         let mut rest = keys.into_iter();
         while let Some(k) = rest.next() {
             if s.paste_wait.is_some() {
@@ -289,14 +299,10 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
                 give_back(&ctx, std::iter::once(k).chain(rest.by_ref()));
                 break;
             }
-            s.vim.defer_paste = fetched.is_none() && !yanked.get();
+            s.vim.defer_paste = !answered && !yanked.get();
             let from = cur;
-            let o = s.vim.key(text, &mut cur, k, &mut clip);
-            // The text before each change becomes an undo point, so `u` and Cmd+Z undo one Vim change.
-            if let Some(before) = o.before {
-                undoer.add_undo(&(CCursorRange::one(CCursor::new(from)), before));
-                s.edited = true;
-            }
+            let o = s.vim.key(&mut b, &mut cur, k, &mut clip);
+            dirty |= o.changed;
             if let Some(y) = o.yank {
                 yanked.set(true);
                 ctx.copy_text(y);
@@ -307,40 +313,57 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
                 ctx.request_repaint();
             }
             if let Some(h) = o.history {
-                let now = (CCursorRange::one(CCursor::new(cur)), text.clone());
+                if std::mem::take(&mut dirty) {
+                    flush(text, &b, undo_at, &mut undoer);
+                }
+                let now = (CCursorRange::one(CCursor::new(cur)), std::mem::take(text));
                 let back = match h {
                     History::Undo => undoer.undo(&now),
                     History::Redo => undoer.redo(&now),
-                };
-                if let Some((r, t)) = back.cloned() {
-                    *text = t;
-                    cur = r.primary.index.0.min(r.secondary.index.0);
-                    s.vim.reset();
-                    s.edited = true;
                 }
+                .cloned();
+                match back {
+                    Some((r, t)) => {
+                        *text = t;
+                        cur = r.primary.index.0.min(r.secondary.index.0);
+                        s.vim.reset();
+                        s.edited = true;
+                    }
+                    None => *text = now.1,
+                }
+                b = text.chars().collect();
+                undo_at = cur;
             }
             s.moved |= cur != from;
         }
+        if dirty {
+            flush(text, &b, undo_at, &mut undoer);
+            s.edited = true;
+        }
         st.set_undoer(undoer);
         if s.vim.mode == Mode::Insert {
-            st.cursor.set_char_range(Some(range(cur, cur)));
+            st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(cur))));
             s.wrote = None;
         }
+        chars = Some(b);
     }
     if s.vim.mode != Mode::Insert {
         // Hidden while the block caret is painted in `end`, where it is restored.
         ui.visuals_mut().text_cursor.stroke.color = egui::Color32::TRANSPARENT;
-        // Only after a key or an outside move: both read the whole text, which can be megabytes.
-        if touched || s.wrote.is_none() {
+        // Only after a key or an outside move: it reads the whole text, which can be megabytes.
+        if write {
+            let b = chars.unwrap_or_else(|| text.chars().collect());
             if s.vim.mode == Mode::Normal {
-                cur = engine::clamp_chars(text, cur);
+                cur = engine::clamp(&b, cur);
             }
-            let (a, b) = s.vim.selection(text, cur);
-            st.cursor.set_char_range(Some(range(a, b)));
-            s.wrote = Some((a, b));
+            let (a, z) = s.vim.selection(&b, cur);
+            st.cursor.set_char_range(Some(range(a, z)));
+            s.wrote = Some((a, z));
         }
     }
-    st.store(&ctx, id);
+    if write {
+        st.store(&ctx, id);
+    }
     s.cur = cur;
 }
 
@@ -366,30 +389,31 @@ pub(crate) fn end(ui: &mut egui::Ui, id: egui::Id, out: &mut TextEditOutput) {
     // suggestion, keeps the mode.
     if s.last_focus + 1 < pass {
         s.vim.reset();
-        let text = out.galley.text();
-        let c = out.cursor_range.map_or(0, |r| r.primary.index.0);
-        s.cur = engine::clamp_chars(text, c);
+        let b: Vec<char> = out.galley.text().chars().collect();
+        s.cur = engine::clamp(&b, out.cursor_range.map_or(0, |r| r.primary.index.0));
         let mut st = out.state.clone();
-        st.cursor.set_char_range(Some(range(s.cur, s.cur)));
+        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(s.cur))));
         st.store(&ctx, id);
         s.wrote = Some((s.cur, s.cur));
     }
     s.last_focus = pass;
     let mode = s.vim.mode;
-    let g = &out.galley;
-    let r0 = g.pos_from_cursor(CCursor::new(s.cur));
-    let r1 = g.pos_from_cursor(CCursor::new(s.cur + 1));
-    // The block is one char wide, or half a line high past the end of a line.
-    let w = if (r1.min.y - r0.min.y).abs() < 0.5 && r1.min.x > r0.min.x { r1.min.x - r0.min.x } else { r0.height() * 0.5 };
-    let caret = egui::Rect::from_min_size(out.galley_pos + r0.min.to_vec2(), egui::vec2(w, r0.height()));
-    // The TextEdit scrolls only to carets it moved itself.
-    if std::mem::take(&mut s.moved) {
-        ui.scroll_to_rect(caret, None);
-    }
-    let clip = out.response.rect.intersect(out.text_clip_rect);
+    let moved = std::mem::take(&mut s.moved);
     let painter = ui.painter().with_clip_rect(out.text_clip_rect);
-    if mode != Mode::Insert {
-        painter.rect_filled(caret, R_CARET, tint(PRIMARY(), 110));
+    if mode != Mode::Insert || moved {
+        let g = &out.galley;
+        let r0 = g.pos_from_cursor(CCursor::new(s.cur));
+        let r1 = g.pos_from_cursor(CCursor::new(s.cur + 1));
+        // The block is one char wide, or half a line high past the end of a line.
+        let w = if (r1.min.y - r0.min.y).abs() < 0.5 && r1.min.x > r0.min.x { r1.min.x - r0.min.x } else { r0.height() * 0.5 };
+        let caret = egui::Rect::from_min_size(out.galley_pos + r0.min.to_vec2(), egui::vec2(w, r0.height()));
+        // The TextEdit scrolls only to carets it moved itself.
+        if moved {
+            ui.scroll_to_rect(caret, None);
+        }
+        if mode != Mode::Insert {
+            painter.rect_filled(caret, R_CARET, tint(PRIMARY(), 110));
+        }
     }
     let name = match mode {
         Mode::Normal => "NORMAL",
@@ -403,14 +427,13 @@ pub(crate) fn end(ui: &mut egui::Ui, id: egui::Id, out: &mut TextEditOutput) {
     let g = painter.layout_job(LayoutJob::single_section(label, mono_fmt(TXT_CAPTION, fg, W_SEMIBOLD)));
     let size = egui::vec2(g.size().x + 2.0 * VIM_BADGE_PAD, STATUS_CHIP_H);
     let inset = egui::Vec2::splat(VIM_BADGE_PAD);
+    let clip = out.response.rect.intersect(out.text_clip_rect);
     // A one-line box like the Mongo query has no room for it without covering the text; the block
     // caret still tells Normal from Insert there.
     if clip.height() >= 2.0 * (size.y + inset.y) {
         let rect = egui::Rect::from_min_size(clip.right_bottom() - size - inset, size);
         // An opaque base keeps the badge readable over the text it covers.
         painter.rect_filled(rect, R_SM, BG());
-        painter.rect_filled(rect, R_SM, tint(fg, 31));
-        let dy = optical_dy(&g);
-        painter.galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, fg);
+        crate::ui::widgets::paint_badge(&painter, rect, g, fg, 31);
     }
 }

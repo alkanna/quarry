@@ -283,8 +283,8 @@ impl App {
         };
         // In Normal mode Vim takes Enter as a motion, so it is read first to keep Enter running the query.
         let normal_enter = crate::ui::vim::normal(ui.ctx(), id) && ui.memory(|m| m.has_focus(id)) && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
-        crate::ui::vim::begin(ui, id, text);
-        let (mut out, picked) = ac_field(ui, id, text, ac, &compute, |ui, text, open| {
+        let (out, picked) = crate::ui::vim::wrap_with(ui, id, text, |ui, text| {
+            ac_field(ui, id, text, ac, &compute, |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
                 .frame(frame)
@@ -296,8 +296,8 @@ impl App {
                 .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter))
                 .layouter(&mut code_layout)
                 .show(ui)
+            })
         });
-        crate::ui::vim::end(ui, id, &mut out);
         typed.edit = edited.take();
         let here = out.cursor_range.filter(|r| r.is_empty() && kind == FieldKind::Query && out.response.has_focus()).and_then(|r| {
             let ci = r.primary.index.0;

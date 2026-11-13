@@ -36,8 +36,6 @@ pub(crate) enum History {
 #[derive(Default, Debug)]
 pub(crate) struct Out {
     pub(crate) changed: bool,
-    /// The text before the change, for the editor's undo history, so callers need not copy it first.
-    pub(crate) before: Option<String>,
     pub(crate) yank: Option<String>,
     pub(crate) history: Option<History>,
     /// A paste that waits for the clipboard: the keys to run again once its text is known.
@@ -136,6 +134,16 @@ enum P<T> {
     Ok(T),
 }
 
+impl<T> P<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> P<U> {
+        match self {
+            P::More => P::More,
+            P::Bad => P::Bad,
+            P::Ok(t) => P::Ok(f(t)),
+        }
+    }
+}
+
 impl Vim {
     /// The keys typed so far for a command, or the search line, for the mode badge.
     pub(crate) fn pending(&self) -> String {
@@ -150,16 +158,13 @@ impl Vim {
         self.mode != Mode::Normal || !self.pending.is_empty() || self.typing.is_some()
     }
 
-    pub(crate) fn key(&mut self, text: &mut String, cur: &mut usize, k: K, clip: &mut dyn FnMut() -> Option<String>) -> Out {
-        let mut b: Vec<char> = text.chars().collect();
+    /// Runs one key on the text as chars. The editor converts its text once per frame, not per key.
+    pub(crate) fn key(&mut self, b: &mut Vec<char>, cur: &mut usize, k: K, clip: &mut dyn FnMut() -> Option<String>) -> Out {
         let mut c = (*cur).min(b.len());
         // The text can shrink outside Vim (Cmd+Z, a paste), which would leave a Visual end past it.
         self.anchor = self.anchor.min(b.len());
         let mut out = Out::default();
-        self.step(&mut b, &mut c, k, clip, &mut out);
-        if out.changed {
-            out.before = Some(std::mem::replace(text, b.iter().collect()));
-        }
+        self.step(b, &mut c, k, clip, &mut out);
         *cur = c;
         out
     }
@@ -173,14 +178,13 @@ impl Vim {
 
     /// The selection to show as (fixed end, moving end), end-exclusive like egui's ranges: Visual
     /// includes the char under the cursor, and Visual Line whole lines.
-    pub(crate) fn selection(&self, text: &str, cur: usize) -> (usize, usize) {
-        let b: Vec<char> = text.chars().collect();
+    pub(crate) fn selection(&self, b: &[char], cur: usize) -> (usize, usize) {
         let (a, c) = (self.anchor.min(b.len()), cur.min(b.len()));
         match self.mode {
             Mode::Visual if c >= a => (a, (c + 1).min(b.len())),
             Mode::Visual => ((a + 1).min(b.len()), c),
-            Mode::VisualLine if c >= a => (ls(&b, a), le(&b, c)),
-            Mode::VisualLine => (le(&b, a), ls(&b, c)),
+            Mode::VisualLine if c >= a => (ls(b, a), le(b, c)),
+            Mode::VisualLine => (le(b, a), ls(b, c)),
             _ => (c, c),
         }
     }
@@ -461,7 +465,6 @@ impl Vim {
             }
             Target::Obj(inner, o) => match object(b, start, inner, o) {
                 Some((s, e)) => self.operate(b, c, op, s, e, false, out),
-                None if op == 'c' => {}
                 None => {}
             },
             Target::M(m) => {
@@ -501,7 +504,6 @@ impl Vim {
     }
 
     /// Applies `op` to `a..z`. When `line`, the range is every line `a` and `z` touch.
-    #[allow(clippy::too_many_arguments)]
     fn operate(&mut self, b: &mut Vec<char>, c: &mut usize, op: char, a: usize, z: usize, line: bool, out: &mut Out) {
         let (a, z) = (a.min(z), a.max(z).min(b.len()));
         if line || op == '>' || op == '<' {
@@ -703,15 +705,13 @@ impl Vim {
             }
             M::Rep(rev) => {
                 let (kind, ch) = self.last_find?;
-                let kind = if rev {
-                    match kind {
-                        'f' => 'F',
-                        'F' => 'f',
-                        't' => 'T',
-                        _ => 't',
-                    }
-                } else {
+                // `,` runs the same find the other way: f and F, t and T differ only in case.
+                let kind = if !rev {
                     kind
+                } else if kind.is_ascii_lowercase() {
+                    kind.to_ascii_uppercase()
+                } else {
+                    kind.to_ascii_lowercase()
                 };
                 find_in_line(b, c, kind, ch, n, true)
             }
@@ -719,7 +719,7 @@ impl Vim {
             M::ParaN => Some(((0..n).fold(c, |t, _| para_next(b, t)), Kind::Excl)),
             M::ParaP => Some(((0..n).fold(c, |t, _| para_prev(b, t)), Kind::Excl)),
             M::Next(rev) => {
-                let sr = self.search.clone()?;
+                let sr = self.search.as_ref()?;
                 let back = sr.back ^ rev;
                 let mut t = c;
                 for _ in 0..n {
@@ -728,9 +728,6 @@ impl Vim {
                 Some((t, Kind::Excl))
             }
         };
-        if m == M::Dollar {
-            self.want_col = Some(usize::MAX);
-        }
         r
     }
 }
@@ -792,7 +789,8 @@ fn parse(p: &[char], visual: bool) -> P<Cmd> {
     let c1 = count(p, &mut i);
     let Some(&c) = p.get(i) else { return P::More };
     i += 1;
-    let mk = |n: Option<usize>, what| P::Ok(Cmd { n: n.unwrap_or(1), has: n.is_some(), what });
+    let cmd = |n: Option<usize>, what: What| Cmd { n: n.unwrap_or(1), has: n.is_some(), what };
+    let mk = |n: Option<usize>, what: What| P::Ok(cmd(n, what));
     if visual {
         match c {
             'd' | 'x' | 'c' | 's' | 'y' | '>' | '<' | '~' | 'u' | 'U' | 'p' | 'P' | 'J' | 'o' | 'v' | 'V' => return mk(c1, What::Simple(c)),
@@ -822,11 +820,7 @@ fn parse(p: &[char], visual: bool) -> P<Cmd> {
                         Some(&o) => mk(n, What::Op(c, Target::Obj(m == 'i', o))),
                     };
                 }
-                return match motion(&p[i..]) {
-                    P::More => P::More,
-                    P::Bad => P::Bad,
-                    P::Ok(mm) => mk(n, What::Op(c, Target::M(mm))),
-                };
+                return motion(&p[i..]).map(|mm| cmd(n, What::Op(c, Target::M(mm))));
             }
             'r' => {
                 return match p.get(i) {
@@ -839,11 +833,7 @@ fn parse(p: &[char], visual: bool) -> P<Cmd> {
             _ => {}
         }
     }
-    match motion(&p[i - 1..]) {
-        P::More => P::More,
-        P::Bad => P::Bad,
-        P::Ok(m) => mk(c1, What::Move(m)),
-    }
+    motion(&p[i - 1..]).map(|m| cmd(c1, What::Move(m)))
 }
 
 /// 0 for whitespace, 1 for word chars, 2 for punctuation. `$` is a word char so `$match` and JS names hold together.
@@ -866,22 +856,21 @@ fn le(b: &[char], i: usize) -> usize {
     b[i..].iter().position(|&c| c == '\n').map_or(b.len(), |p| i + p)
 }
 
+fn blank(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
 /// First non-blank of the line starting at `s`.
 fn fnb(b: &[char], s: usize) -> usize {
     let mut j = s;
-    while j < b.len() && (b[j] == ' ' || b[j] == '\t') {
+    while j < b.len() && blank(b[j]) {
         j += 1;
     }
     j
 }
 
 /// In Normal mode the cursor sits on a char, never on a line's newline unless the line is empty.
-pub(crate) fn clamp_chars(text: &str, c: usize) -> usize {
-    let b: Vec<char> = text.chars().collect();
-    clamp(&b, c)
-}
-
-fn clamp(b: &[char], c: usize) -> usize {
+pub(crate) fn clamp(b: &[char], c: usize) -> usize {
     let c = c.min(b.len());
     if c > ls(b, c) && (c == b.len() || b[c] == '\n') { c - 1 } else { c }
 }
@@ -977,39 +966,17 @@ fn end_word(b: &[char], i: usize, big: bool) -> usize {
 
 fn find_in_line(b: &[char], c: usize, kind: char, ch: char, n: usize, rep: bool) -> Option<(usize, Kind)> {
     let (s, e) = (ls(b, c), le(b, c));
-    let mut left = n;
-    if kind == 'f' || kind == 't' {
-        // A repeated `t` starts one further, or it would stay put before the same char.
-        let mut i = if kind == 't' && rep { c + 1 } else { c };
-        loop {
-            i += 1;
-            if i >= e {
-                return None;
-            }
-            if b[i] == ch {
-                left -= 1;
-                if left == 0 {
-                    break;
-                }
-            }
-        }
-        Some((if kind == 't' { i - 1 } else { i }, Kind::Incl))
-    } else {
-        let mut i = if kind == 'T' && rep && c > s { c - 1 } else { c };
-        loop {
-            if i <= s {
-                return None;
-            }
-            i -= 1;
-            if b[i] == ch {
-                left -= 1;
-                if left == 0 {
-                    break;
-                }
-            }
-        }
-        Some((if kind == 'T' { i + 1 } else { i }, Kind::Excl))
-    }
+    let fwd = kind.is_ascii_lowercase();
+    let till = kind.eq_ignore_ascii_case(&'t');
+    // A repeated `t` starts one further, or it would stay put before the same char.
+    let skip = usize::from(till && rep);
+    let i = if fwd { (c + 1 + skip..e).filter(|&i| b[i] == ch).nth(n - 1)? } else { (s..c.saturating_sub(skip)).rev().filter(|&i| b[i] == ch).nth(n - 1)? };
+    Some(match (fwd, till) {
+        (true, true) => (i - 1, Kind::Incl),
+        (true, false) => (i, Kind::Incl),
+        (false, true) => (i + 1, Kind::Excl),
+        (false, false) => (i, Kind::Excl),
+    })
 }
 
 fn pair_of(ch: char) -> Option<(char, char, bool)> {
@@ -1024,35 +991,27 @@ fn pair_of(ch: char) -> Option<(char, char, bool)> {
     })
 }
 
+/// The first index of `it` where a `down` closes the nesting, with every `up` on the way opening a level.
+fn depth_find(b: &[char], it: impl Iterator<Item = usize>, up: char, down: char) -> Option<usize> {
+    let mut d = 0usize;
+    for j in it {
+        if b[j] == up {
+            d += 1;
+        } else if b[j] == down {
+            if d == 0 {
+                return Some(j);
+            }
+            d -= 1;
+        }
+    }
+    None
+}
+
 fn match_bracket(b: &[char], c: usize) -> Option<usize> {
     let e = le(b, c);
     let i = (c..e).find(|&i| pair_of(b[i]).is_some())?;
     let (open, close, fwd) = pair_of(b[i])?;
-    let mut d = 0i32;
-    if fwd {
-        for (j, &ch) in b.iter().enumerate().skip(i) {
-            if ch == open {
-                d += 1;
-            } else if ch == close {
-                d -= 1;
-                if d == 0 {
-                    return Some(j);
-                }
-            }
-        }
-    } else {
-        for j in (0..=i).rev() {
-            if b[j] == close {
-                d += 1;
-            } else if b[j] == open {
-                d -= 1;
-                if d == 0 {
-                    return Some(j);
-                }
-            }
-        }
-    }
-    None
+    if fwd { depth_find(b, i + 1..b.len(), open, close) } else { depth_find(b, (0..i).rev(), close, open) }
 }
 
 fn para_next(b: &[char], i: usize) -> usize {
@@ -1137,7 +1096,7 @@ fn word_obj(b: &[char], c: usize, inner: bool, big: bool) -> Option<(usize, usiz
     if inner {
         return Some((s, e));
     }
-    let ws = |i: usize| b[i] == ' ' || b[i] == '\t';
+    let ws = |i: usize| blank(b[i]);
     if cl != 0 {
         // `aw` takes the spaces after the word, or before it when there are none after.
         let mut e2 = e;
@@ -1174,7 +1133,7 @@ fn quote_obj(b: &[char], c: usize, inner: bool, q: char) -> Option<(usize, usize
         return Some((a + 1, z));
     }
     let mut z2 = z + 1;
-    while z2 < e && (b[z2] == ' ' || b[z2] == '\t') {
+    while z2 < e && blank(b[z2]) {
         z2 += 1;
     }
     Some((a, z2))
@@ -1184,30 +1143,8 @@ fn bracket_obj(b: &[char], c: usize, inner: bool, open: char, close: char) -> Op
     let c = c.min(b.len().checked_sub(1)?);
     // On a closing bracket the block is the one it closes; scanning starts just before it.
     let upto = if b[c] == close { c } else { c + 1 };
-    let mut d = 0;
-    let o = (0..upto).rev().find(|&j| {
-        if b[j] == close {
-            d += 1;
-        } else if b[j] == open {
-            if d == 0 {
-                return true;
-            }
-            d -= 1;
-        }
-        false
-    })?;
-    let mut d = 0;
-    let z = (o + 1..b.len()).find(|&j| {
-        if b[j] == open {
-            d += 1;
-        } else if b[j] == close {
-            if d == 0 {
-                return true;
-            }
-            d -= 1;
-        }
-        false
-    })?;
+    let o = depth_find(b, (0..upto).rev(), close, open)?;
+    let z = depth_find(b, o + 1..b.len(), open, close)?;
     if !inner {
         return Some((o, z + 1));
     }
@@ -1217,7 +1154,7 @@ fn bracket_obj(b: &[char], c: usize, inner: bool, open: char, close: char) -> Op
     if b.get(s) == Some(&'\n') {
         s += 1;
         let zs = ls(b, z);
-        if zs > s && b[zs..z].iter().all(|ch| *ch == ' ' || *ch == '\t') {
+        if zs > s && b[zs..z].iter().all(|&ch| blank(ch)) {
             e = zs;
         }
     }
@@ -1232,7 +1169,7 @@ fn join(b: &mut Vec<char>, c: &mut usize, lines: usize) -> bool {
             break;
         }
         let mut k = e + 1;
-        while k < b.len() && (b[k] == ' ' || b[k] == '\t') {
+        while k < b.len() && blank(b[k]) {
             k += 1;
         }
         let space = !(e == ls(b, e) || b[e - 1] == ' ' || k >= b.len() || b[k] == '\n' || b[k] == ')');
@@ -1244,33 +1181,28 @@ fn join(b: &mut Vec<char>, c: &mut usize, lines: usize) -> bool {
 }
 
 /// Indents or outdents every line from the one starting at `s` to the one ending at `e`, `n` levels.
+/// The block is rebuilt and spliced once: a splice per line would shift the rest of the text each time.
 fn indent(b: &mut Vec<char>, s: usize, e: usize, right: bool, n: usize) {
     let unit: Vec<char> = INDENT.repeat(n).chars().collect();
-    let mut i = s;
-    let mut end = e;
-    loop {
-        if right {
-            if le(b, i) > i {
-                b.splice(i..i, unit.iter().copied());
-                end += unit.len();
+    let mut out = Vec::with_capacity(e - s + unit.len());
+    for (k, line) in b[s..e].split(|&c| c == '\n').enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+        let cut = if right {
+            if !line.is_empty() {
+                out.extend_from_slice(&unit);
             }
+            0
         } else {
-            let mut k = 0;
-            while k < unit.len() && i + k < b.len() && b[i + k] == ' ' {
-                k += 1;
+            match line.iter().take(unit.len()).take_while(|&&c| c == ' ').count() {
+                0 if line.first() == Some(&'\t') => 1,
+                spaces => spaces,
             }
-            if k == 0 && b.get(i) == Some(&'\t') {
-                k = 1;
-            }
-            b.drain(i..i + k);
-            end -= k;
-        }
-        let e2 = le(b, i);
-        if e2 >= end || e2 >= b.len() {
-            break;
-        }
-        i = e2 + 1;
+        };
+        out.extend_from_slice(&line[cut..]);
     }
+    b.splice(s..e, out);
 }
 
 fn case(b: &mut [char], s: usize, e: usize, how: char) {
@@ -1293,7 +1225,7 @@ mod tests {
     /// `<` and `>` inside keys are literal; `\x1b` is Esc and `\r` is Enter.
     fn run_with(v: &mut Vim, before: &str, keys: &str, clip: &mut Option<String>) -> String {
         let mut cur = before.chars().position(|c| c == '|').expect("cursor mark");
-        let mut text: String = before.replacen('|', "", 1);
+        let mut b: Vec<char> = before.replacen('|', "", 1).chars().collect();
         for ch in keys.chars() {
             let k = match ch {
                 '\x1b' => K::Esc,
@@ -1304,20 +1236,18 @@ mod tests {
             };
             // Insert mode typing goes to the editor, not the engine, so the test types it itself.
             if v.mode == Mode::Insert && k != K::Esc {
-                let at = text.char_indices().nth(cur).map_or(text.len(), |(i, _)| i);
-                text.insert(at, ch);
+                b.insert(cur, ch);
                 cur += 1;
                 continue;
             }
             let c2 = clip.clone();
-            let out = v.key(&mut text, &mut cur, k, &mut || c2.clone());
+            let out = v.key(&mut b, &mut cur, k, &mut || c2.clone());
             if let Some(y) = out.yank {
                 *clip = Some(y);
             }
         }
-        let at = text.char_indices().nth(cur).map_or(text.len(), |(i, _)| i);
-        text.insert(at, '|');
-        text
+        b.insert(cur.min(b.len()), '|');
+        b.into_iter().collect()
     }
 
     fn run(before: &str, keys: &str) -> String {
@@ -1418,19 +1348,19 @@ mod tests {
     #[test]
     fn a_deferred_paste_hands_its_keys_back_and_runs_later() {
         let mut v = Vim { defer_paste: true, ..Default::default() };
-        let (mut text, mut cur) = ("ab".to_string(), 0);
-        let out = v.key(&mut text, &mut cur, K::Ch('2'), &mut || None);
+        let (mut b, mut cur): (Vec<char>, usize) = ("ab".chars().collect(), 0);
+        let out = v.key(&mut b, &mut cur, K::Ch('2'), &mut || None);
         assert!(out.paste.is_none());
-        let out = v.key(&mut text, &mut cur, K::Ch('p'), &mut || Some("X".into()));
+        let out = v.key(&mut b, &mut cur, K::Ch('p'), &mut || Some("X".into()));
         assert_eq!(out.paste, Some(vec!['2', 'p']));
-        assert_eq!(text, "ab");
+        assert!(!out.changed);
         v.defer_paste = false;
         let mut out = Out::default();
         for k in ['2', 'p'] {
-            out = v.key(&mut text, &mut cur, K::Ch(k), &mut || Some("X".into()));
+            out = v.key(&mut b, &mut cur, K::Ch(k), &mut || Some("X".into()));
         }
-        assert_eq!(text, "aXXb");
-        assert_eq!(out.before.as_deref(), Some("ab"));
+        assert_eq!(b.iter().collect::<String>(), "aXXb");
+        assert!(out.changed);
     }
 
     #[test]
@@ -1506,17 +1436,17 @@ mod tests {
     #[test]
     fn pending_and_escape() {
         let mut v = Vim::default();
-        let mut text = "abc".to_string();
+        let mut b: Vec<char> = "abc".chars().collect();
         let mut cur = 0;
-        v.key(&mut text, &mut cur, K::Ch('2'), &mut || None);
-        v.key(&mut text, &mut cur, K::Ch('d'), &mut || None);
+        v.key(&mut b, &mut cur, K::Ch('2'), &mut || None);
+        v.key(&mut b, &mut cur, K::Ch('d'), &mut || None);
         assert_eq!(v.pending(), "2d");
         assert!(v.wants_esc());
-        v.key(&mut text, &mut cur, K::Esc, &mut || None);
+        v.key(&mut b, &mut cur, K::Esc, &mut || None);
         assert!(!v.wants_esc());
-        v.key(&mut text, &mut cur, K::Ch('x'), &mut || None);
-        assert_eq!(text, "bc");
-        let out = v.key(&mut text, &mut cur, K::CtrlR, &mut || None);
+        v.key(&mut b, &mut cur, K::Ch('x'), &mut || None);
+        assert_eq!(b, ['b', 'c']);
+        let out = v.key(&mut b, &mut cur, K::CtrlR, &mut || None);
         assert_eq!(out.history, Some(History::Redo));
     }
 
