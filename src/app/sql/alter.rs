@@ -4,6 +4,7 @@
 
 use crate::app::sql::structure::{size, Load};
 use crate::app::*;
+use crate::ui::dnd;
 use db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Plan, Pos};
 use db::sql::structure::Structure;
 use db::sql::Dialect;
@@ -45,7 +46,7 @@ pub(in crate::app) struct ColForm {
 pub(in crate::app) struct IdxForm {
     /// The index being edited; None adds one.
     from: Option<IndexDef>,
-    def: IndexDef,
+    pub(in crate::app) def: IndexDef,
     /// The columns of the table with their types, in order.
     avail: Vec<(String, String)>,
     rest: Vec<Change>,
@@ -820,35 +821,38 @@ impl App {
 
             form_label(ui, "Columns");
             ui.vertical(|ui| {
-                let mut act: Option<(usize, i8)> = None;
-                for (i, c) in f.def.cols.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add_sized([180.0, BUTTON_H], egui::Label::new(RichText::new(c.name.as_str()).monospace().color(TEXT())).truncate());
+                // The key's column order matters, so the rows drag to reorder, or Alt+Up and Alt+Down on the focused one.
+                let mut remove = None;
+                let sizes = vec![BUTTON_H + 6.0; f.def.cols.len()];
+                let keys: Vec<egui::Id> = f.def.cols.iter().map(|c| egui::Id::unique(("idx-col", c.name.as_str()))).collect();
+                let cols = &mut f.def.cols;
+                let moved = dnd::reorder(ui, egui::Id::unique("idx-cols"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+                    let c = &mut cols[i];
+                    let r = ui.interact(ui.max_rect(), ui.scope_id().with("row"), Sense::click());
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Index column {}", c.name)));
+                    ui.horizontal_centered(|ui| {
+                        ui.style_mut().interaction.selectable_labels = false;
+                        grip(ui);
+                        ui.add_sized([166.0, BUTTON_H], egui::Label::new(RichText::new(c.name.as_str()).monospace().color(TEXT())).truncate());
+                        if st.lifted {
+                            return;
+                        }
                         if !pg {
                             let mut p = c.prefix.map(|n| n.to_string()).unwrap_or_default();
                             ui.add(egui::TextEdit::singleline(&mut p).desired_width(54.0).hint_text("length"));
                             c.prefix = p.trim().parse().ok().filter(|n: &u64| *n > 0);
                         }
                         ui.checkbox(&mut c.desc, "DESC");
-                        if quiet_enabled(ui, i > 0, "Up").clicked() {
-                            act = Some((i, -1));
-                        }
-                        if quiet(ui, "Down").clicked() {
-                            act = Some((i, 1));
-                        }
                         if quiet(ui, "Remove").clicked() {
-                            act = Some((i, 0));
+                            remove = Some(i);
                         }
                     });
-                }
-                if let Some((i, by)) = act {
-                    match by {
-                        0 => {
-                            f.def.cols.remove(i);
-                        }
-                        b if (i as i8 + b) >= 0 && ((i as i8 + b) as usize) < f.def.cols.len() => f.def.cols.swap(i, (i as i8 + b) as usize),
-                        _ => {}
-                    }
+                    r
+                });
+                if let Some(i) = remove {
+                    f.def.cols.remove(i);
+                } else if let Some(m) = moved {
+                    m.apply(&mut f.def.cols);
                 }
                 let free: Vec<&(String, String)> = f.avail.iter().filter(|(n, _)| !f.def.cols.iter().any(|c| c.name == *n)).collect();
                 let mut add = None;

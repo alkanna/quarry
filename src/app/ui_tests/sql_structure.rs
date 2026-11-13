@@ -209,3 +209,22 @@ fn alt_down_moves_the_focused_column_row() {
     ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
     assert_eq!(moves(&ui), [("id".to_string(), db::sql::ddl::Pos::After("customer_id".into()))]);
 }
+
+#[test]
+fn index_columns_drag_to_reorder_in_the_index_dialog() {
+    let Some(mut ui) = demo_structure() else { return };
+    let i = ui.app().structure().and_then(|s| s.indexes.iter().position(|x| x.cols.len() == 2)).expect("an index on two columns");
+    ui.h.state_mut().open_idx_form(Some(i));
+    ui.settle();
+    let cols = |ui: &UiApp| match &ui.app().modal {
+        Some(Modal::IdxEdit(f)) => f.def.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let before = cols(&ui);
+    assert_eq!(before.len(), 2, "the index dialog did not open on two columns");
+    let (a, b) = (format!("Index column {}", before[0]), format!("Index column {}", before[1]));
+    ui.drag_esc(&b, &a, 0.1);
+    assert_eq!(cols(&ui), before, "Esc moved a column or closed the dialog");
+    ui.drag(&b, &a, 0.1, 1);
+    assert_eq!(cols(&ui), [before[1].clone(), before[0].clone()]);
+}
