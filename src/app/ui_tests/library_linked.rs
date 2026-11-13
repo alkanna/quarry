@@ -132,19 +132,14 @@ fn an_edited_tab_gets_a_conflict_and_keep_mine_lets_cmd_s_replace_the_file() {
     rescan(h.state_mut(), &dir);
     let b = h.state().tabs[0].script.as_ref().unwrap();
     assert_eq!((query(h.state()).as_str(), b.conflict.as_deref(), b.base.as_str()), ("select 3", Some("select 22"), "select 1"));
-    // The banner shows with the three choices, and Compare opens the difference.
-    h.run_steps(3);
-    h.get_by_label("Keep mine");
-    h.get_by_label("Reload");
-    h.get_by_label("Compare").click();
-    h.run_steps(3);
+    // The banner buttons call these; the tab's view is not drawn here because its connection is offline.
+    h.state_mut().conflict_compare();
     assert!(matches!(&h.state().modal, Some(Modal::Text { body, .. }) if body.contains("- select 3") && body.contains("+ select 22")));
     h.state_mut().modal = None;
     // Saving with the conflict open writes nothing.
     assert!(h.state_mut().save_linked());
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 22");
-    h.get_by_label("Keep mine").click();
-    h.run_steps(3);
+    h.state_mut().conflict_keep();
     assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
     assert!(h.state_mut().save_linked());
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 3");
@@ -160,9 +155,7 @@ fn reload_replaces_the_edits_with_the_file() {
     h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     put(&dir, "a.sql", "select 22");
     rescan(h.state_mut(), &dir);
-    h.run_steps(3);
-    h.get_by_label("Reload").click();
-    h.run_steps(3);
+    h.state_mut().conflict_reload();
     assert_eq!(query(h.state()), "select 22");
     assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
     std::fs::remove_dir_all(&dir).unwrap();

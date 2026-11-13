@@ -283,7 +283,7 @@ impl App {
     }
 
     /// Reload: the tab takes the text of the file.
-    fn conflict_reload(&mut self) {
+    pub(in crate::app) fn conflict_reload(&mut self) {
         let Some(t) = self.tabs.get_mut(self.cur) else { return };
         let Some(ScriptRef::File { link, rel }) = t.script.as_ref().map(|b| b.r.clone()) else { return };
         let Some(path) = self.library.file_path(link, &rel) else { return };
@@ -300,7 +300,7 @@ impl App {
     }
 
     /// Keep mine: the file's text becomes the base, so the tab still counts as edited and Cmd+S replaces the file.
-    fn conflict_keep(&mut self) {
+    pub(in crate::app) fn conflict_keep(&mut self) {
         if let Some(b) = self.tabs.get_mut(self.cur).and_then(|t| t.script.as_mut()) {
             if let Some(text) = b.conflict.take() {
                 b.base = text;
@@ -309,7 +309,7 @@ impl App {
     }
 
     /// Compare: the lines of the tab against those of the file, in a text window.
-    fn conflict_compare(&mut self) {
+    pub(in crate::app) fn conflict_compare(&mut self) {
         let Some(t) = self.tabs.get(self.cur) else { return };
         let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t)) else { return };
         let (Some(theirs), ScriptRef::File { rel, .. }) = (b.conflict.clone(), &b.r) else { return };
