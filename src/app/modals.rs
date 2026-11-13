@@ -236,13 +236,24 @@ impl App {
                     let longest = body.lines().map(|l| l.chars().count()).max().unwrap_or(0);
                     let text_w = ui.painter().layout_no_wrap("0".repeat(longest), egui::FontId::monospace(TXT_BODY), TEXT()).size().x;
                     ui.set_width((text_w + 40.0).clamp(560.0, 820.0));
-                    dialog_title(ui, title.as_str());
-                    let find = Find::bar(ui, egui::Id::unique("text-modal"), body);
-                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        let mut text = body.as_str();
-                        let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(*code)).show(ui);
-                        find.reveal(ui, body, &out);
+                    let id = egui::Id::unique("text-modal");
+                    let mut tree = false;
+                    ui.horizontal(|ui| {
+                        dialog_title(ui, title.as_str());
+                        if crate::ui::json_tree::looks_like(body) {
+                            right_group(ui, |ui| tree = crate::ui::json_tree::mode_switch(ui, id));
+                        }
                     });
+                    if tree {
+                        crate::ui::json_tree::scrolled(ui, id, body, 0.0, 420.0);
+                    } else {
+                        let find = Find::bar(ui, id, body);
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            let mut text = body.as_str();
+                            let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(*code)).show(ui);
+                            find.reveal(ui, body, &out);
+                        });
+                    }
                     dialog_actions(ui, |ui| {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(body.clone());

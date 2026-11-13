@@ -3,6 +3,7 @@ pub mod complete;
 pub mod editor;
 pub mod js_doc;
 pub mod js_elide;
+pub mod json_tree;
 pub mod pickers;
 pub mod sql_complete;
 pub mod sql_words_pg;
