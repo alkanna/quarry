@@ -193,6 +193,16 @@ impl PgServerWin {
         self.rows().iter().find(|r| r.query.contains(tag) && r.active()).map(|r| r.pid)
     }
 
+    /// What the Activity tab holds, for a UI test that waits on it: the error of the last read, or how many sessions it listed.
+    #[cfg(test)]
+    pub(in crate::app) fn activity_state(&self) -> String {
+        match &self.act {
+            None => format!("no answer yet (tab {:?}, waiting {})", self.tab, self.act_wait),
+            Some(Err(e)) => format!("the last read failed: {e:?}"),
+            Some(Ok(a)) => format!("{} sessions listed, {} running", a.rows.len(), a.rows.iter().filter(|r| r.active()).count()),
+        }
+    }
+
     /// Whether a Cancel or Terminate waits for its second click, for the UI test.
     #[cfg(test)]
     pub(in crate::app) fn armed(&self) -> bool {
