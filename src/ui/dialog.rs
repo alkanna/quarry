@@ -174,7 +174,13 @@ fn body_frame<R>(ui: &mut egui::Ui, pad: bool, add: impl FnOnce(&mut egui::Ui) -
 /// The footer band. `add` runs right to left, so the primary action goes first and lands rightmost; `foot_left`
 /// inside it holds what sits on the left.
 pub(crate) fn dialog_foot<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    dialog_foot_free(ui, |ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner)
+    // A bare with_layout fills the height left, and modals share one Area that remembers its last size, so a short
+    // dialog after a tall one kept the tall height with the buttons centered in it. One button high, like ui.horizontal.
+    // The width is read inside the band, past its side padding, or the row overhangs the dialog on the right.
+    dialog_foot_free(ui, |ui| {
+        let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add).inner
+    })
 }
 
 /// The left side of `dialog_foot`: status text or a destructive action.
