@@ -122,7 +122,7 @@ fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
         mv = dnd::reorder(ui, id, dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
             let c = members[i];
             let rect = ui.max_rect();
-            let r = ui.interact(rect, ui.id().with("row"), Sense::click());
+            let r = ui.interact(rect, ui.scope_id().with("row"), Sense::click());
             let p = ui.painter().clone();
             if i > 0 && !st.lifted && st.offset == 0.0 {
                 p.hline(rect.x_range(), rect.top(), Stroke::new(0.5, LINE()));

@@ -457,7 +457,7 @@ fn tile_drop(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: DropOn, gr
 /// A 28 px tile for a folded group: tinted in the group color with a bar on its left edge, holding a 2x2 grid of its
 /// members' engine logos while closed and an open folder while open. Returns the click response and the tile's rect.
 fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, open: bool, marks: &[&str], tip: &str) -> (egui::Response, egui::Rect) {
-    let r = ui.interact(rect, ui.id().with("folder-tile"), Sense::click());
+    let r = ui.interact(rect, ui.scope_id().with("folder-tile"), Sense::click());
     let state = state_of(&r);
     let alpha = [if open { 72 } else { 56 }, 84, 104][state];
     let p = ui.painter();
@@ -618,7 +618,7 @@ fn pg_monogram() -> egui::ColorImage {
 /// connection, a bar in the tag color on the left edge.
 fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool) -> egui::Response {
     // Click only: the reorder engine senses the drag under it.
-    let r = ui.interact(rect, ui.id().with(("tile", c.meta.id)), Sense::click());
+    let r = ui.interact(rect, ui.scope_id().with(("tile", c.meta.id)), Sense::click());
     let state = state_of(&r);
     let (mark, product) = engine_mark(c.meta.engine, &c.server.product);
     let color = mark_color(mark);

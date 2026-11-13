@@ -385,7 +385,10 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
     let mut target: Option<usize> = None;
     let epoch = m.epoch;
     if let Some(l) = m.lift {
-        let pos = pointer.map_or(starts[l.from], |p| rel(p) - l.grab).clamp(lo, (hi - sizes[l.from]).max(lo));
+        // The drop index reads where the pointer is, unclamped: held inside the list, the last item's center could only reach the
+        // midpoint of the item before it, and a midpoint tie stays before, so nothing could be dropped last.
+        let raw = pointer.map_or(starts[l.from], |p| rel(p) - l.grab);
+        let pos = raw.clamp(lo, (hi - sizes[l.from]).max(lo));
         let held = handles[l.from].dragged();
         if l.cancelled {
             if !held {
@@ -406,7 +409,7 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
                     at >= s && at <= s + sizes[k] && zone_at(sizes[k], at - s, true) == Zone::Into
                 })
             });
-            let to = if over.is_some() { l.to } else { clamp_to_block(blocks, n, l.from, drop_index(sizes, l.from, pos + sizes[l.from] / 2.0)) };
+            let to = if over.is_some() { l.to } else { clamp_to_block(blocks, n, l.from, drop_index(sizes, l.from, raw + sizes[l.from] / 2.0)) };
             m.lift = Some(Lift { to, ..l });
             lifted = Some((l.from, pos));
             gap = Some((l.from, to));
