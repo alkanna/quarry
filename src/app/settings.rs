@@ -238,7 +238,7 @@ impl App {
                     });
                     ui.separator();
                     setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
-                        stepper(ui, &mut self.prefs.default_cols, 3, 30);
+                        stepper(ui, "Columns shown", &mut self.prefs.default_cols, 3, 30);
                     });
                     ui.separator();
                     setting_row(ui, "Big objects in columns", "Objects and arrays too long for a cell show their size, or their first characters as in Mingo. Small ones always show in full.", |ui| {

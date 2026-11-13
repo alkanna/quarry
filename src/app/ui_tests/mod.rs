@@ -12,6 +12,7 @@ mod calendar;
 mod demo_states;
 mod dialogs;
 mod journeys;
+mod layout;
 mod dnd;
 mod fit;
 mod fold;

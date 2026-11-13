@@ -45,8 +45,13 @@ pub(crate) fn menu_scroll<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) 
 fn capped_scroll<R>(ui: &mut egui::Ui, room: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let chrome = ui.spacing().menu_margin.sum().y + 2.0;
     let max_h = (room - chrome).max(FIT_MIN_H);
-    ui.set_max_height(max_h);
-    egui::ScrollArea::vertical().id_salt("menu-fit").max_height(max_h).show(ui, add).inner
+    // In a child from the cursor down: set_max_height moves the cursor to its Ui's top, so a title drawn above, as
+    // choice_list draws one, would be overlapped by the list.
+    ui.scope(|ui| {
+        ui.set_max_height(max_h);
+        egui::ScrollArea::vertical().id_salt("menu-fit").max_height(max_h).show(ui, add).inner
+    })
+    .inner
 }
 
 /// Where a menu button about to be added at the cursor will sit, one button high, before egui places it.
@@ -125,18 +130,43 @@ pub(crate) fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: i
     });
 }
 
-/// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
-pub(crate) fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
-    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(2).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        quiet_look(ui);
-        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value += 1;
+/// "−  n  +" for a small whole number, one field high. `name` is what a screen reader and the UI tests call it.
+pub(crate) fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, min: usize, max: usize) {
+    // Painted at a fixed height like `segmented`: a Frame in the setting row's centered layout counted each widget's
+    // whole row-high slot, so the well grew to the height of the row's title and description.
+    const PAD: f32 = 2.0;
+    const BTN_W: f32 = 26.0;
+    const VALUE_W: f32 = 34.0;
+    let enabled = ui.is_enabled();
+    let (rect, well) = ui.allocate_exact_size(egui::vec2(2.0 * (BTN_W + PAD) + VALUE_W, BUTTON_H), Sense::hover());
+    ui.painter().rect(rect, R_MD, pal().well, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    let inner = rect.shrink(PAD);
+    let minus = egui::Rect::from_min_size(inner.min, egui::vec2(BTN_W, inner.height()));
+    let plus = egui::Rect::from_min_size(egui::pos2(inner.right() - BTN_W, inner.top()), egui::vec2(BTN_W, inner.height()));
+    for (r, up, can, label) in [(minus, false, *value > min, "Decrease"), (plus, true, *value < max, "Increase")] {
+        let can = enabled && can;
+        let resp = ui.interact(r, well.id.with(label), if can { Sense::click() } else { Sense::hover() });
+        let state = if can { state_of(&resp) } else { 0 };
+        ui.painter().rect_filled(r, R_SM, hover_fill_on(ui, state));
+        // Painted strokes: the font's "+" and "−" sit on the math axis, below center.
+        let (c, s) = (r.center(), Stroke::new(1.5, if !can { FAINT() } else if state > 0 { BRIGHT() } else { MUTED() }));
+        ui.painter().line_segment([c - egui::vec2(4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
+        if up {
+            ui.painter().line_segment([c - egui::vec2(0.0, 4.5), c + egui::vec2(0.0, 4.5)], s);
         }
-        ui.add_sized([34.0, 20.0], egui::Label::new(RichText::new(value.to_string()).font(FontId::monospace(TXT_BODY)).color(BRIGHT())));
-        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value -= 1;
+        focus_ring(ui, &resp, r, R_SM as f32);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, label));
+        if can && resp.clicked() {
+            *value = if up { *value + 1 } else { *value - 1 };
         }
+    }
+    let g = ui.painter().layout_no_wrap(value.to_string(), FontId::monospace(TXT_BODY), BRIGHT());
+    ui.painter().galley(inner.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, BRIGHT());
+    let v = *value as f64;
+    well.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, name);
+        info.value = Some(v);
+        info
     });
 }
 

@@ -417,37 +417,41 @@ impl App {
             ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 0.5, Stroke::new(1.0, RAISED_LINE()));
             // The list stops above the window's margin with the footer under it, however short the window is.
             let list_h = (ui.ctx().content_rect().bottom() - DIALOG_MARGIN - ui.cursor().top() - PALETTE_FOOT_H).clamp(FIT_MIN_H, LIST_MAX_H);
-            ui.set_max_height(list_h + PALETTE_FOOT_H);
-            egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
-                ui.add_space(6.0);
-                if n == 0 {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), EMPTY_LIST_H), Sense::hover());
-                    let msg = if query.trim().is_empty() { "No commands" } else { "No matches" };
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, FontId::proportional(TXT_TITLE), MUTED());
-                }
-                let mut i = 0;
-                for (title, rows) in &secs {
-                    section_caption(ui, title, (rows.len() > 1).then_some(rows.len()));
-                    for row in rows {
-                        let r = paint_row(ui, row, i == sel, &tok);
-                        if i == sel && (up || down) {
-                            r.scroll_to_me(None);
-                        }
-                        if new_tab_click(&r) {
-                            pick = Some((row.act.clone(), true));
-                        } else if r.clicked() {
-                            pick = Some((row.act.clone(), new_tab));
-                        }
-                        i += 1;
-                    }
+            // In a child from the cursor down: set_max_height moves the cursor to its Ui's top, which here would be the
+            // palette's, and the list drew over the search field.
+            ui.scope(|ui| {
+                ui.set_max_height(list_h + PALETTE_FOOT_H);
+                egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                     ui.add_space(6.0);
+                    if n == 0 {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), EMPTY_LIST_H), Sense::hover());
+                        let msg = if query.trim().is_empty() { "No commands" } else { "No matches" };
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, FontId::proportional(TXT_TITLE), MUTED());
+                    }
+                    let mut i = 0;
+                    for (title, rows) in &secs {
+                        section_caption(ui, title, (rows.len() > 1).then_some(rows.len()));
+                        for row in rows {
+                            let r = paint_row(ui, row, i == sel, &tok);
+                            if i == sel && (up || down) {
+                                r.scroll_to_me(None);
+                            }
+                            if new_tab_click(&r) {
+                                pick = Some((row.act.clone(), true));
+                            } else if r.clicked() {
+                                pick = Some((row.act.clone(), new_tab));
+                            }
+                            i += 1;
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+                if enter || cmd_enter {
+                    pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| (r.act.clone(), new_tab || cmd_enter));
+                    run = cmd_enter;
                 }
+                palette_footer(ui, cmds, new_tab);
             });
-            if enter || cmd_enter {
-                pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| (r.act.clone(), new_tab || cmd_enter));
-                run = cmd_enter;
-            }
-            palette_footer(ui, cmds, new_tab);
         });
         if let Some((a, new)) = pick {
             match a {
@@ -578,7 +582,8 @@ impl App {
 
     /// A connection's header in the tab list: engine tile, name, tag and how many tabs it has open.
     fn tab_group_head(&self, ui: &mut egui::Ui, conn: u64, count: usize) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, TAB_GROUP_H), Sense::hover());
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, TAB_GROUP_H), Sense::hover());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Heading, true, self.conn(conn).map_or("", |c| c.meta.name.as_str())));
         if !ui.is_rect_visible(rect) {
             return;
         }
@@ -608,6 +613,7 @@ impl App {
     /// One tab in the list. Returns the row's response and whether its close cross was clicked.
     fn tab_list_row(&self, ui: &mut egui::Ui, i: usize, name: &str, lit: bool, show_db: bool, tok: &[String]) -> (egui::Response, bool) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, POP_ROW_H), Sense::click());
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, lit, name));
         if !ui.is_rect_visible(rect) {
             return (r, false);
         }
@@ -738,7 +744,8 @@ fn kbd(p: &egui::Painter, right: f32, cy: f32, text: &str) -> f32 {
 }
 
 fn section_caption(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PALETTE_CAPTION_H), Sense::hover());
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PALETTE_CAPTION_H), Sense::hover());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Heading, true, title));
     let p = ui.painter();
     let g = p.layout_job(LayoutJob::single_section(title.to_uppercase(), ui_fmt(TXT_CAPTION, FAINT(), W_SEMIBOLD, 0.5)));
     p.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0 + optical_dy(&g)), g, FAINT());
@@ -776,6 +783,7 @@ fn name_job(name: &str, tok: &[String], color: Color32, width: f32) -> LayoutJob
 fn paint_row(ui: &mut egui::Ui, row: &Row, sel: bool, tok: &[String]) -> egui::Response {
     let two = !row.sub.is_empty();
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if two { PALETTE_ROW_H } else { PALETTE_CMD_H }), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, sel, &row.name));
     // Up to 50 results; only the ones in view are worth painting.
     if !ui.is_rect_visible(rect) {
         return r;
