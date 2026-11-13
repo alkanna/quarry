@@ -5,19 +5,44 @@ use super::*;
 use std::sync::mpsc;
 
 /// A `pg_sleep` on a connection of its own, tagged so the test finds it among other tests' sessions; sends back how it ended.
+/// It sleeps far past the wait limit, so a slow run cannot see it finish before it is cancelled, and a connection the
+/// server refuses (every slot taken by the tests running beside it) is retried, then reported instead of lost.
 fn sleeper(uri: &str, tag: &str) -> mpsc::Receiver<Result<(), String>> {
-    let (uri, sql) = (uri.to_string(), format!("SELECT pg_sleep(30) /* {tag} */"));
+    let (uri, sql) = (uri.to_string(), format!("SELECT pg_sleep(120) /* {tag} */"));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             use sqlx::Connection;
-            let mut c = sqlx::PgConnection::connect(&uri).await.unwrap();
+            let t = std::time::Instant::now();
+            let mut c = loop {
+                match sqlx::PgConnection::connect(&uri).await {
+                    Ok(c) => break c,
+                    Err(e) if t.elapsed() > Duration::from_secs(20) => return drop(tx.send(Err(format!("the sleeping session could not connect: {e}")))),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                }
+            };
             let r = sqlx::Executor::execute(&mut c, sql.as_str()).await.map(|_| ()).map_err(|x| x.to_string());
             let _ = tx.send(r);
         });
     });
     rx
+}
+
+/// Waits for the window to list the session tagged `tag`, failing at once with the reason when the session never started.
+fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &str) -> u64 {
+    let t = std::time::Instant::now();
+    loop {
+        ui.h.step();
+        if let Some(pid) = listed(ui.app(), tag) {
+            return pid;
+        }
+        if let Ok(r) = rx.try_recv() {
+            panic!("the sleeping session ended before it was listed: {r:?}");
+        }
+        assert!(t.elapsed() < LIMIT, "timed out waiting for the sleeping session to be listed; last error: {}", ui.app().last_problem());
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The pid of the session whose query carries `tag`, once the window lists it as running.
@@ -48,8 +73,7 @@ fn a_double_click_on_terminate_arms_it_and_does_not_send() {
         let rx = sleeper(&uri, &tag);
         ui.h.state_mut().open_server(CONN);
         ui.click("Activity");
-        ui.wait("the sleeping session to be listed", |a| listed(a, &tag).is_some());
-        let pid = listed(ui.app(), &tag).unwrap();
+        let pid = wait_listed(&mut ui, &rx, &tag);
         ui.click("Unlock…");
         ui.click("Allow writes");
         ui.wait("writes to be allowed", |a| a.conn(CONN).is_some_and(|c| c.writable));
@@ -91,8 +115,7 @@ fn activity_cancels_a_sleeping_session_after_unlock_and_a_second_click() {
         let rx = sleeper(&uri, &tag);
         ui.h.state_mut().open_server(CONN);
         ui.click("Activity");
-        ui.wait("the sleeping session to be listed", |a| listed(a, &tag).is_some());
-        let pid = listed(ui.app(), &tag).unwrap();
+        let pid = wait_listed(&mut ui, &rx, &tag);
         // The connection starts read-only: the window's note unlocks it.
         ui.click("Unlock…");
         ui.click("Allow writes");
