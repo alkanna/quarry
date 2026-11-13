@@ -349,3 +349,44 @@ fn column_values_read_numeric_and_dates_of_the_whole_query() {
         assert!(s.contains("Span 6h 30m"), "{var}: {s}");
     });
 }
+
+#[test]
+fn every_filter_rule_runs_on_postgres() {
+    use crate::db::sql::rules::{self, Group, Op, Rule};
+    every_pg(|l, var| {
+        let (_db, pool) = fixture(l, "t4_rules", "CREATE TABLE t (id int, total numeric(8,2), name text, u uuid, created_at timestamptz, seen_at timestamptz, status text, tags text, ok bool, data jsonb, blob bytea); \
+             INSERT INTO t VALUES (1, 5.5, 'ann', gen_random_uuid(), now(), now(), 'a', 'a,b', true, '{\"a\": {\"b\": \"v\"}}', '\\x5a3f');");
+        let cols = [("id", Kind::Int), ("total", Kind::Decimal), ("name", Kind::Text), ("u", Kind::Uuid), ("created_at", Kind::DateTime), ("status", Kind::Enum), ("tags", Kind::Set), ("ok", Kind::Bool), ("data", Kind::Json), ("blob", Kind::Binary)];
+        for (col, kind) in cols {
+            for &op in rules::ops_for(kind) {
+                let g = rules::group_of(kind);
+                let values: Vec<String> = match op {
+                    Op::Between if g == Group::Number => vec!["1".into(), "9".into()],
+                    Op::Between => vec!["2024-01-01".into(), "2030-01-01".into()],
+                    Op::In | Op::NotIn | Op::NotInOrNull if g == Group::Number => vec!["1".into(), "2".into()],
+                    Op::In | Op::NotIn | Op::NotInOrNull => vec!["a".into(), "50%_off\\".into()],
+                    Op::Last => vec!["3".into(), "weeks".into()],
+                    Op::AfterCol => vec!["seen_at".into()],
+                    Op::JsonPathEq => vec!["$.a.b".into(), "v".into()],
+                    Op::JsonContains => vec!["{\"a\": {}}".into()],
+                    Op::JsonHasPath => vec!["$.a".into()],
+                    Op::LenEq | Op::LenGt | Op::LenLt => vec!["3".into()],
+                    Op::Eq | Op::Ne if kind == Kind::Binary => vec!["0x5A3F".into()],
+                    Op::Eq | Op::Ne if kind == Kind::Json => vec!["{\"a\": 1}".into()],
+                    Op::Eq | Op::Ne | Op::Gt | Op::Lt | Op::Ge | Op::Le if g == Group::Number => vec!["5.5".into()],
+                    Op::Eq | Op::Ne | Op::Gt | Op::Lt if g == Group::Date => vec!["2024-01-02 03:04:05".into()],
+                    Op::Eq | Op::Ne if kind == Kind::Uuid => vec!["00000000-0000-0000-0000-000000000000".into()],
+                    Op::Eq | Op::Ne if kind == Kind::Bool => vec!["true".into()],
+                    // A quote, wildcards and, for the LIKE rules that escape it, a backslash.
+                    Op::Contains | Op::NotContains | Op::StartsWith | Op::NotStartsWith | Op::EndsWith | Op::NotEndsWith => vec!["a%b_c'd\\".into()],
+                    _ => rules::default_values(op).into_iter().map(|_| "a%b_c'd".to_string()).collect(),
+                };
+                let r = Rule { col: col.into(), kind, op, values };
+                let sql = rules::to_sql(std::slice::from_ref(&r), false, crate::db::sql::Dialect::Postgres, false);
+                let q = format!("SELECT count(*)::text FROM t4_rules.t WHERE {sql}");
+                let ran = l.w.rt.block_on(async { sqlx::raw_sql(&q).fetch_all(&pool).await });
+                assert!(ran.is_ok(), "{var}: {op:?} on {col} ({kind:?}): {q}: {:?}", ran.err());
+            }
+        }
+    });
+}

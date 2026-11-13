@@ -261,7 +261,11 @@ fn unit_sql(u: &str) -> &'static str {
 /// The SQL of one rule.
 pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
     use Op::*;
-    let c = d.quote_ident(&r.col);
+    let mut c = d.quote_ident(&r.col);
+    // PostgreSQL's uuid, inet, range, interval and array types take no LIKE or text length, so they are read as text.
+    if d == Dialect::Postgres && group_of(r.kind) == Group::Text && r.kind != Kind::Text {
+        c = format!("{c}::text");
+    }
     let v = |i: usize| r.values.get(i).map(|s| s.as_str()).unwrap_or("");
     let list = || r.values.iter().filter(|s| !s.trim().is_empty()).map(|s| val(r.kind, s, bs)).collect::<Vec<_>>().join(", ");
     let other = group_of(r.kind) == Group::Other;
@@ -322,7 +326,26 @@ fn pg_rule_sql(r: &Rule, c: &str, n: String) -> Option<String> {
         Some("months") => "months",
         _ => "days",
     };
+    let other = group_of(r.kind) == Group::Other;
+    // MySQL's 0x literal and LENGTH of a JSON value are not PostgreSQL; bytea takes '\x..' and the rest compare as text.
+    let typed = |x: &str| match r.kind {
+        Kind::Binary if is_hex(x.trim()) => super::value::pg_lit(&format!("\\x{}", x.trim().trim_start_matches("0x").trim_start_matches("0X"))),
+        _ => super::value::pg_lit(x),
+    };
+    let side = match r.kind {
+        Kind::Json => format!("{c}::text"),
+        Kind::Binary => c.to_string(),
+        _ => format!("{c}::text"),
+    };
+    let first = r.values.first().map(|s| s.as_str()).unwrap_or("");
     Some(match r.op {
+        Eq if other && r.kind == Kind::Json => format!("{c} = {}::jsonb", typed(first)),
+        Ne if other && r.kind == Kind::Json => format!("{c} <> {}::jsonb", typed(first)),
+        Eq if other => format!("{} = {}", if r.kind == Kind::Binary { &c } else { &side }, typed(first)),
+        Ne if other => format!("{} <> {}", if r.kind == Kind::Binary { &c } else { &side }, typed(first)),
+        LenEq if other => format!("octet_length({side}) = {n}"),
+        LenGt if other => format!("octet_length({side}) > {n}"),
+        LenLt if other => format!("octet_length({side}) < {n}"),
         Regexp => format!("{c}::text ~ {}", v(0)),
         NotRegexp => format!("{c}::text !~ {}", v(0)),
         Today => format!("{c}::date = CURRENT_DATE"),

@@ -475,7 +475,11 @@ pub(super) async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Co
         let r = r.map_err(se)?;
         let mut key = Document::new();
         for p in pk {
-            let given = row.iter().find(|(n, _)| n == p).map(|(_, v)| v).filter(|v| **v != Bson::Null);
+            let auto = pk.len() == 1 && cols.iter().any(|c| c.src == *p && c.auto_increment) && r.last_insert_id() > 0;
+            // Without NO_AUTO_VALUE_ON_ZERO a 0 in the auto-increment key is replaced by the next number, which
+            // LAST_INSERT_ID() then names; with it, nothing is generated and that stays 0.
+            let zero = |v: &Bson| matches!(v, Bson::Int32(0) | Bson::Int64(0)) || matches!(v, Bson::String(s) if s.trim() == "0");
+            let given = row.iter().find(|(n, _)| n == p).map(|(_, v)| v).filter(|v| **v != Bson::Null && !(auto && zero(v)));
             match given {
                 Some(v) => {
                     key.insert(p.clone(), v.clone());

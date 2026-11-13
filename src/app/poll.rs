@@ -526,8 +526,18 @@ impl App {
             self.copying.remove(&(conn, db.clone(), to));
         }
         let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
+        let dropped_coll = self.dropping_coll.take_if(|d| d.0 == conn && d.1 == db);
         match res {
-            Ok(m) => self.ok(m),
+            Ok(m) => {
+                // Only a drop the server confirmed forgets its undo entries; a refused one keeps them.
+                if dropped.is_some() {
+                    self.purge_mongo_undo(conn, &db, "");
+                }
+                if let Some((_, _, coll)) = dropped_coll {
+                    self.purge_mongo_undo(conn, &db, &coll);
+                }
+                self.ok(m)
+            }
             Err(e) => {
                 self.err(e);
                 if dropped.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {

@@ -504,6 +504,16 @@ impl<'a> G<'a> {
                     return refuse(format!("Data rules apply to {}.{}, so agents cannot make a view of it", self.db, c.get_str("viewOn").unwrap_or("")));
                 }
                 let p: Vec<Document> = c.get_array("pipeline").map(|a| a.iter().filter_map(|s| s.as_document().cloned()).collect()).unwrap_or_default();
+                // What the pipeline joins is read under the view's name too, where no rule of the joined namespace applies.
+                let mut ruled = None;
+                each_stage(&p, &mut |name, body| {
+                    if let Some(t) = stage_target(&self.db, name, body) && ruled.is_none() && self.other(&t).any {
+                        ruled = Some(t);
+                    }
+                });
+                if let Some(t) = ruled {
+                    return refuse(format!("Data rules apply to {}.{}, so agents cannot make a view that reads it", t.db, t.coll.as_deref().unwrap_or("")));
+                }
                 src.pipeline(&p, false)
             }
             "count" => c.get_document("query").map_or(Ok(()), |q| g.filter(q, "")),
@@ -716,6 +726,10 @@ mod tests {
         refused(cmd(doc! { "collMod": "v", "viewOn": "users", "pipeline": [] }));
         refused(cmd(doc! { "aggregate": "orders", "pipeline": [{ "$merge": { "into": "users" } }], "cursor": {} }));
         allowed(cmd(doc! { "create": "v", "viewOn": "orders", "pipeline": [] }));
+        // Name rules alone still match under a lookup's `as`, but not once the join is read under a view's name.
+        let names = Rules::compile(&crate::agents::scrub::tests_support::no_presets(), &PresetOverride::default(), &[spec(Matcher::FieldName("^pin$".into()), &["shop.staff"], PresetMode::Hide)], &[], &[1; 32]).unwrap();
+        let view = doc! { "create": "v", "viewOn": "orders", "pipeline": [{ "$lookup": { "from": "staff", "localField": "u", "foreignField": "_id", "as": "u" } }] };
+        refused(check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: view }, &names));
     }
 
     #[test]

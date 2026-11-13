@@ -170,7 +170,8 @@ fn max_chars(ty: &str) -> Option<usize> {
 
 fn decimal_problem(ty: &str, t: &str) -> Option<(String, Option<String>)> {
     let (base, rest) = ty.split_once('(')?;
-    let mut ps = rest.trim_end_matches(')').split(',').map(|x| x.trim().parse::<usize>());
+    // Up to the closing parenthesis, so `decimal(10,2) unsigned` still reads its precision and scale.
+    let mut ps = rest.split(')').next()?.split(',').map(|x| x.trim().parse::<usize>());
     let p = ps.next()?.ok()?;
     let s = ps.next().unwrap_or(Ok(0)).ok()?;
     let name = format!("{}({p},{s})", base.trim().to_ascii_uppercase());
@@ -284,6 +285,7 @@ mod tests {
         assert_eq!(check(Dialect::MySql, &col("decimal(3,2)", Kind::Decimal, true), "-9.996", NOW).fix.as_deref(), None);
         assert_eq!(check(Dialect::MySql, &col("decimal(5,2)", Kind::Decimal, true), "-9.996", NOW).fix.as_deref(), Some("-10.00"));
         assert_eq!(err("decimal(5,2)", Kind::Decimal, "1234"), "DECIMAL(5,2) holds 3 digits before the point");
+        assert_eq!(err("decimal(5,2) unsigned", Kind::Decimal, "1234"), "DECIMAL(5,2) holds 3 digits before the point");
         assert_eq!(round_decimal("", "5", 0), "1");
     }
 

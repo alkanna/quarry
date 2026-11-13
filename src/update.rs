@@ -38,13 +38,19 @@ pub fn install_target() -> Option<PathBuf> {
     TARGET.get_or_init(find_install_target).clone()
 }
 
+/// A cargo build sits in target/debug or target/release, or under a target triple between them. Any other folder
+/// named target, like /opt/target/bin, is a real install.
+fn cargo_build(exe: &Path) -> bool {
+    let profile = exe.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "debug" || n == "release");
+    profile && exe.ancestors().skip(2).take(2).any(|p| p.file_name().is_some_and(|n| n == "target"))
+}
+
 fn find_install_target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     if cfg!(target_os = "macos") {
         let app = exe.parent()?.parent()?.parent()?;
         (app.extension()? == "app").then(|| app.to_path_buf())
-    } else if exe.ancestors().skip(2).take(2).any(|p| p.file_name().is_some_and(|n| n == "target")) {
-        // A cargo build sits in target/<profile> or target/<triple>/<profile>; a folder named target higher up is a real install.
+    } else if cargo_build(&exe) {
         None
     } else {
         Some(exe)
@@ -259,12 +265,18 @@ fn install_tools_build(dir: &Path, (version, url, sha): (String, String, String)
     // A fresh folder of our own: a predictable one in a shared /tmp could be made by another user, who could then
     // swap the archive between the checksum and the unpacking.
     let tmp = fresh_temp_dir("quarry-tools")?;
+    // Its name is random now, so a failed attempt that left it behind would never be cleared by the next one.
+    let res = unpack_tools(dir, &tmp, &version, &url, &sha);
+    remove(&tmp);
+    res.map(|()| version)
+}
+
+fn unpack_tools(dir: &Path, tmp: &Path, version: &str, url: &str, sha: &str) -> Result<(), String> {
     let out = tmp.join("x");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let archive = tmp.join(url.rsplit('/').next().unwrap_or("tools"));
-    run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(&url))?;
-    if !sha256_matches(&archive, &sha)? {
-        remove(&tmp);
+    run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(url))?;
+    if !sha256_matches(&archive, sha)? {
         return Err("The downloaded Database Tools do not match MongoDB's checksum; nothing was installed.".into());
     }
     if cfg!(target_os = "macos") {
@@ -282,9 +294,7 @@ fn install_tools_build(dir: &Path, (version, url, sha): (String, String, String)
         std::fs::copy(f.path(), &part).map_err(|e| e.to_string())?;
         std::fs::rename(&part, dir.join(f.file_name())).map_err(|e| e.to_string())?;
     }
-    std::fs::write(dir.join(TOOLS_VERSION_FILE), &version).map_err(|e| e.to_string())?;
-    remove(&tmp);
-    Ok(version)
+    std::fs::write(dir.join(TOOLS_VERSION_FILE), version).map_err(|e| e.to_string())
 }
 
 /// Moves the running copy aside (allowed even while it runs), then puts the new one in its place;
@@ -373,6 +383,14 @@ pub fn restart() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_cargo_profile_folders_count_as_a_build() {
+        assert!(cargo_build(Path::new("/src/quarry/target/release/quarry")));
+        assert!(cargo_build(Path::new("/src/quarry/target/x86_64-unknown-linux-gnu/debug/quarry")));
+        assert!(!cargo_build(Path::new("/opt/target/bin/quarry")));
+        assert!(!cargo_build(Path::new("/home/a/target/quarry")));
+    }
 
     #[test]
     fn versions() {
