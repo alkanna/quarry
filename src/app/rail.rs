@@ -105,6 +105,7 @@ impl App {
         let mut pick = None;
         let mut act = None;
         let mut toggle = None;
+        let mut folder_act: Option<(u64, u8)> = None;
         let mut drops: Vec<RailDrop> = Vec::new();
         let mut inner: Option<(u64, Vec<u64>, dnd::Move)> = None;
         let mut outer = None;
@@ -128,12 +129,17 @@ impl App {
                         // The tile sits at the first open member in rail order, which is not always the group's first.
                         let anchor = folder_anchor(&self.rail_order, members);
                         let marks: Vec<&str> = members.iter().filter_map(|m| self.conn(*m)).map(|c| engine_mark(c.meta.engine, &c.server.product).0).collect();
-                        let tip = format!("{} \u{b7} {} connection{}, {} open", g.name, g.members.len(), if g.members.len() == 1 { "" } else { "s" }, members.len());
+                        let worst = folder_status(g.members.iter().filter_map(|m| self.conn(*m)).map(|c| &c.status));
+                        let holds_active = self.active.is_some_and(|a| members.contains(&a));
+                        let mut tip = format!("{} \u{b7} {} connection{}, {} open", g.name, g.members.len(), if g.members.len() == 1 { "" } else { "s" }, members.len());
+                        if holds_active {
+                            tip.push_str(" \u{b7} holds the active connection");
+                        }
                         if open_now {
                             let span = egui::Rect::from_min_max(tile.min, egui::pos2(tile.right(), tile.bottom() + members.len() as f32 * MEMBER_SLOT));
                             ui.painter().rect_filled(span.expand2(egui::vec2(3.0, 3.0)), R_LG, tint(color, 36));
                         }
-                        let (r, rect) = folder_tile(ui, tile, &g.name, color, open_now, &marks, &tip);
+                        let (r, rect) = folder_tile(ui, tile, &g.name, color, open_now, &marks, &tip, (!open_now).then_some(worst).flatten(), holds_active && !open_now);
                         if st.lifted {
                             if open_now {
                                 for (i, m) in members.iter().enumerate() {
@@ -146,6 +152,19 @@ impl App {
                         if r.clicked() {
                             toggle = Some(*gid);
                         }
+                        let can_connect = g.members.iter().filter_map(|m| self.conn(*m)).any(|c| matches!(c.status, Status::Idle | Status::Failed(_)));
+                        r.context_menu(|ui| {
+                            menu_look(ui);
+                            for (n, label, on) in [(0u8, if open_now { "Close" } else { "Open" }, true), (1, "Connect all", can_connect), (2, "Disconnect all", true), (3, "Edit group\u{2026}", true), (4, "Don't fold in the rail", true)] {
+                                if n == 3 {
+                                    ui.separator();
+                                }
+                                if ui.add_enabled(on, egui::Button::new(label)).clicked() {
+                                    folder_act = Some((*gid, n));
+                                    ui.close();
+                                }
+                            }
+                        });
                         if !st.busy {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
                             tile_drop(ui, &r, rect, top, &self.groups, &mut drops);
@@ -207,6 +226,28 @@ impl App {
                 self.groups.place(members[m.from], Place::Into(gid, Some(at)), &all);
                 self.save_groups();
             }
+        }
+        match folder_act {
+            Some((gid, 0)) => {
+                if !self.rail_open.remove(&gid) {
+                    self.rail_open.insert(gid);
+                }
+            }
+            Some((gid, 1)) => self.connect_group(gid),
+            Some((gid, 2)) => self.disconnect_group(gid),
+            Some((gid, 3)) => self.edit_group(gid),
+            Some((gid, _)) => {
+                if let Some(g) = self.groups.group_mut(gid) {
+                    g.fold_rail = false;
+                    let name = g.name.clone();
+                    self.save_groups();
+                    self.ok(format!("{name} shows its connections one by one in the rail. Edit group turns folding back on."));
+                }
+            }
+            None => {}
+        }
+        if folder_act.is_some() {
+            ui.ctx().request_repaint();
         }
         match act {
             Some((id, 0)) => {
@@ -475,9 +516,24 @@ fn tile_drop(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: DropOn, gr
     }
 }
 
+/// The status a closed folder shows for its members: a failed one, else one connecting, else ready. None when none is open
+/// or failed.
+fn folder_status<'a>(st: impl Iterator<Item = &'a Status>) -> Option<&'a Status> {
+    let rank = |s: &Status| match s {
+        Status::Failed(_) => 3,
+        Status::Connecting => 2,
+        Status::Ready => 1,
+        _ => 0,
+    };
+    st.filter(|s| rank(s) > 0).max_by_key(|s| rank(s))
+}
+
 /// A 28 px tile for a folded group: tinted in the group color with a bar on its left edge, holding a 2x2 grid of its
-/// members' engine logos while closed and an open folder while open. Returns the click response and the tile's rect.
-fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, open: bool, marks: &[&str], tip: &str) -> (egui::Response, egui::Rect) {
+/// members' engine logos while closed and an open folder while open. A closed one shows `status`, the worst of its members,
+/// as a conn tile shows its own, and a ring when it holds the active connection, which is otherwise out of sight. Returns
+/// the click response and the tile's rect.
+#[allow(clippy::too_many_arguments)]
+fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, open: bool, marks: &[&str], tip: &str, status: Option<&Status>, active: bool) -> (egui::Response, egui::Rect) {
     let r = ui.interact(rect, ui.scope_id().with("folder-tile"), Sense::click());
     let state = state_of(&r);
     let alpha = [if open { 72 } else { 56 }, 84, 104][state];
@@ -493,6 +549,15 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, 
             let at = rect.center() + egui::vec2(if i % 2 == 0 { -5.5 } else { 5.5 }, if i < 2 { -5.5 } else { 5.5 });
             ui.painter().image(tex.id(), egui::Rect::from_center_size(at, egui::vec2(9.0, 9.0)), uv, if state > 0 { BRIGHT() } else { mark_color(mark) });
         }
+    }
+    let p = ui.painter();
+    if active {
+        p.rect_stroke(rect, R_MD, Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Outside);
+    }
+    if let Some(s) = status {
+        let dot = rect.right_bottom() - egui::vec2(4.5, 4.5);
+        p.circle_filled(dot, 4.5, CHROME());
+        p.circle_filled(dot, 3.0, status_color(s));
     }
     focus_ring(ui, &r, rect, R_MD as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} folder")));
@@ -709,59 +774,69 @@ fn rail_button(ui: &mut egui::Ui, icon: RailIcon, active: bool, enabled: bool, t
 
 /// Line icons drawn in a 16 px box, so they need no icon font.
 pub(super) fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: Stroke) {
+    p.extend(icon_shapes(c, icon, s));
+}
+
+/// The shapes of a rail icon centered on `c`.
+fn icon_shapes(c: egui::Pos2, icon: RailIcon, s: Stroke) -> Vec<egui::Shape> {
+    use egui::Shape;
     let v = egui::vec2;
+    let mut out = Vec::new();
     match icon {
-        // A window with a left panel.
+        // A database cylinder, for the databases the explorer browses: the top ellipse, the sides and two curves below.
         RailIcon::Explorer => {
-            let r = egui::Rect::from_center_size(c, v(15.0, 13.0));
-            p.rect_stroke(r, 2.5, s, egui::StrokeKind::Middle);
-            p.vline(r.left() + 5.0, r.y_range(), s);
-        }
-        // A database cylinder: the top ellipse, the sides and two curves below.
-        RailIcon::Connections => {
             let arc = |dy: f32, from: f32, to: f32| -> Vec<egui::Pos2> { (0..=16).map(|i| from + (to - from) * i as f32 / 16.0).map(|a| c + v(6.0 * a.cos(), dy + 2.4 * a.sin())).collect() };
-            p.add(egui::Shape::closed_line(arc(-4.8, 0.0, std::f32::consts::TAU), s));
-            p.line_segment([c + v(-6.0, -4.8), c + v(-6.0, 4.8)], s);
-            p.line_segment([c + v(6.0, -4.8), c + v(6.0, 4.8)], s);
-            p.line(arc(0.0, 0.0, std::f32::consts::PI), s);
-            p.line(arc(4.8, 0.0, std::f32::consts::PI), s);
+            out.push(Shape::closed_line(arc(-4.8, 0.0, std::f32::consts::TAU), s));
+            out.push(Shape::line_segment([c + v(-6.0, -4.8), c + v(-6.0, 4.8)], s));
+            out.push(Shape::line_segment([c + v(6.0, -4.8), c + v(6.0, 4.8)], s));
+            out.push(Shape::line(arc(0.0, 0.0, std::f32::consts::PI), s));
+            out.push(Shape::line(arc(4.8, 0.0, std::f32::consts::PI), s));
+        }
+        // A plug, for saved connections: two prongs over a rounded body, and the cable below it.
+        RailIcon::Connections => {
+            let body = egui::Rect::from_min_max(c + v(-5.0, -3.0), c + v(5.0, 3.0));
+            out.push(Shape::rect_stroke(body, 2.0, s, egui::StrokeKind::Middle));
+            out.push(Shape::line_segment([c + v(-2.5, -3.0), c + v(-2.5, -7.0)], s));
+            out.push(Shape::line_segment([c + v(2.5, -3.0), c + v(2.5, -7.0)], s));
+            out.push(Shape::line(vec![c + v(0.0, 3.0), c + v(0.0, 5.0), c + v(2.5, 7.5)], s));
         }
         // A book: the cover with its spine and two lines of text.
         RailIcon::Library => {
             let r = egui::Rect::from_center_size(c, v(11.5, 14.0));
-            p.rect_stroke(r, 2.0, s, egui::StrokeKind::Middle);
-            p.vline(r.left() + 3.0, r.y_range(), s);
+            out.push(Shape::rect_stroke(r, 2.0, s, egui::StrokeKind::Middle));
+            out.push(Shape::vline(r.left() + 3.0, r.y_range(), s));
             for dy in [-2.5, 1.0] {
-                p.line_segment([c + v(-1.0, dy), c + v(3.0, dy)], s);
+                out.push(Shape::line_segment([c + v(-1.0, dy), c + v(3.0, dy)], s));
             }
         }
         RailIcon::Search => {
-            p.circle_stroke(c + v(-1.5, -1.5), 5.0, s);
-            p.line_segment([c + v(2.2, 2.2), c + v(6.0, 6.0)], s);
+            out.push(Shape::circle_stroke(c + v(-1.5, -1.5), 5.0, s));
+            out.push(Shape::line_segment([c + v(2.2, 2.2), c + v(6.0, 6.0)], s));
         }
         // Rows of a log, with a bullet each.
         RailIcon::Log => {
             for dy in [-4.5, 0.0, 4.5] {
-                p.circle_filled(c + v(-5.5, dy), 1.1, s.color);
-                p.line_segment([c + v(-2.5, dy), c + v(6.5, dy)], s);
+                out.push(Shape::circle_filled(c + v(-5.5, dy), 1.1, s.color));
+                out.push(Shape::line_segment([c + v(-2.5, dy), c + v(6.5, dy)], s));
             }
         }
         // A pulse line.
         RailIcon::Server => {
             let pts = [v(-7.5, 0.5), v(-4.0, 0.5), v(-2.0, -5.0), v(1.0, 5.5), v(3.0, 0.5), v(7.5, 0.5)];
-            p.line(pts.iter().map(|d| c + *d).collect(), s);
+            out.push(Shape::line(pts.iter().map(|d| c + *d).collect(), s));
         }
         // A gear: ring, hub and eight teeth.
         RailIcon::Settings => {
-            p.circle_stroke(c, 4.6, s);
-            p.circle_stroke(c, 1.8, s);
+            out.push(Shape::circle_stroke(c, 4.6, s));
+            out.push(Shape::circle_stroke(c, 1.8, s));
             for k in 0..8 {
                 let a = k as f32 * std::f32::consts::FRAC_PI_4;
                 let d = v(a.cos(), a.sin());
-                p.line_segment([c + d * 4.6, c + d * 7.0], s);
+                out.push(Shape::line_segment([c + d * 4.6, c + d * 7.0], s));
             }
         }
     }
+    out
 }
 
 #[cfg(test)]
@@ -887,6 +962,27 @@ mod tests {
         assert_eq!(mv(0, 2), Some(3));
         assert_eq!(mv(0, 1), Some(2));
         assert_eq!(mv(1, 1), None);
+    }
+
+    #[test]
+    fn a_closed_folder_shows_its_worst_member() {
+        let s = |v: &[Status]| folder_status(v.iter());
+        assert!(s(&[Status::Ready, Status::Idle]) == Some(&Status::Ready));
+        assert!(s(&[Status::Ready, Status::Connecting]) == Some(&Status::Connecting));
+        assert!(matches!(s(&[Status::Connecting, Status::Failed("x".into()), Status::Ready]), Some(Status::Failed(_))));
+        assert!(s(&[Status::Idle]).is_none());
+    }
+
+    #[test]
+    fn the_explorer_and_connections_buttons_draw_their_own_glyphs() {
+        let s = Stroke::new(1.3, Color32::WHITE);
+        let (ex, co) = (icon_shapes(egui::Pos2::ZERO, RailIcon::Explorer, s), icon_shapes(egui::Pos2::ZERO, RailIcon::Connections, s));
+        // The explorer drew a window with a side panel, the same mark as a sidebar toggle; it is a database now.
+        assert!(!ex.iter().any(|x| matches!(x, egui::Shape::Rect(_))), "the explorer still draws the window glyph");
+        assert!(ex.iter().any(|x| matches!(x, egui::Shape::Path(p) if p.closed)));
+        // Saved connections no longer borrow the database cylinder.
+        assert!(!co.iter().any(|x| matches!(x, egui::Shape::Path(p) if p.closed)), "connections still draw the cylinder");
+        assert_ne!(format!("{ex:?}"), format!("{co:?}"));
     }
 
     #[test]

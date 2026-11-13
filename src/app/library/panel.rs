@@ -43,6 +43,10 @@ pub(in crate::app) struct PanelUi {
     /// Demo only: a menu to open on this node, and a drag held from the first node over the second.
     pub demo_menu: Option<Node>,
     pub demo_drag: Option<(Node, Node)>,
+    /// What a drop where the drag rests would do to the dragged item, as the ghost's badge says it: set by the row under
+    /// the pointer this frame, read by the ghost the next, since the ghost may be drawn before that row.
+    pub badge: Option<&'static str>,
+    pub badge_next: Option<&'static str>,
 }
 
 enum Act {
@@ -74,6 +78,8 @@ enum Act {
     CopyFileText(u64, PathBuf),
     UseOn(u64),
     Unlink(u64),
+    /// A linked folder that is gone: point it at the folder where it is now.
+    Locate(u64),
     /// A drop or a menu move that touches the disk: a script into a linked folder, a file to another folder of its link, or
     /// a file copied into the library.
     Drop(Node, Plan),
@@ -134,6 +140,17 @@ fn plan_drop(lib: &Library, scans: &Scans, item: &Node, target: &Node, pos: Pos)
             None => Err("Drop it on a folder or beside a script."),
         },
         _ => Err("That cannot go there."),
+    }
+}
+
+/// The word the dragged item's ghost carries for a drop `plan`: a script dropped on a linked folder becomes a file there
+/// and leaves the library, a linked file dropped in the library is copied and stays on disk. A move inside the library or
+/// inside one linked folder needs no word.
+fn badge_of(plan: &Plan, item: &Node) -> Option<&'static str> {
+    match (plan, item) {
+        (Plan::Into { .. }, Node::Script(_)) => Some("Move to disk"),
+        (Plan::Out(_), _) => Some("Copy"),
+        _ => None,
     }
 }
 
@@ -377,6 +394,12 @@ fn menu_item(ui: &mut egui::Ui, acts: &mut Vec<Act>, label: &str, key: &str, act
     }
 }
 
+/// The key that deletes the selected row: Cmd+Backspace on macOS, where Backspace alone is a text key and would delete by
+/// accident, and Delete elsewhere.
+fn delete_key() -> &'static str {
+    if cfg!(target_os = "macos") { "Cmd+Backspace" } else { "Delete" }
+}
+
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -393,6 +416,20 @@ fn reveal_label() -> &'static str {
 fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut Vec<Act>) {
     let (lib, links) = (cx.lib, &cx.lib.links);
     lib_menu(ui);
+    // A linked folder that is not there takes no new files and has no folder to show: what is left is finding it again,
+    // reading it again once the drive is back, or letting it go.
+    if let Node::Link(link) = node
+        && cx.scans.get(link).is_some_and(|s| s.missing)
+    {
+        menu_item(ui, acts, "Locate folder\u{2026}", "", Act::Locate(*link));
+        menu_item(ui, acts, "Reload from disk", "", Act::Reload(*link));
+        ui.separator();
+        if danger_item(ui, "Unlink folder").clicked() {
+            acts.push(Act::Unlink(*link));
+            ui.close();
+        }
+        return;
+    }
     let run = kind != "filter";
     let path_of = |link: u64, rel: &Path| links.iter().find(|l| l.id == link).map(|l| if rel.as_os_str().is_empty() { l.path.clone() } else { l.path.join(rel) }).unwrap_or_default();
     match node {
@@ -488,7 +525,8 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
             _ => {}
         }
         ui.separator();
-        if danger_item(ui, if linked_file { "Move to Trash\u{2026}" } else { "Delete\u{2026}" }).clicked() {
+        // No ellipsis: it acts at once and the toast offers Undo.
+        if danger_item(ui, if linked_file { "Move to Trash" } else { "Delete" }).on_hover_text(delete_key()).clicked() {
             acts.push(Act::Delete(node.clone()));
             ui.close();
         }
@@ -598,6 +636,7 @@ impl App {
             return;
         }
 
+        st.badge = st.badge_next.take();
         if st.sel.as_ref().is_some_and(|n| !rows.iter().any(|r| r.node == *n)) && st.rename.is_none() {
             st.sel = None;
         }
@@ -766,7 +805,7 @@ impl App {
             if k(none, Key::F2) {
                 acts.push(Act::Rename(n.clone()));
             }
-            if (k(none, Key::Delete) || k(none, Key::Backspace)) && (n.is_saved() || matches!(n, Node::File { .. })) {
+            if (k(egui::Modifiers::COMMAND, Key::Backspace) || k(none, Key::Delete)) && (n.is_saved() || matches!(n, Node::File { .. })) {
                 acts.push(Act::Delete(n.clone()));
             }
             let open = at.is_some_and(|i| rows[i].open);
@@ -1042,6 +1081,7 @@ impl App {
                 None => {}
             },
             Act::UseOn(link) => self.open_link_dialog(Some(link)),
+            Act::Locate(link) => self.open_locate_dialog(link),
             Act::Unlink(link) => {
                 self.unlink(link);
                 st.open.retain(|n| !matches!(n, Node::Link(l) | Node::Dir { link: l, .. } | Node::File { link: l, .. } if *l == link));
@@ -1304,16 +1344,34 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     if has_menu(&row.node) {
         r.context_menu(|ui| node_menu(ui, cx, &row.node, &look.kind, acts));
     }
+    // A folder that is not found says where it was looked for.
+    let r = match &row.node {
+        Node::Link(id) if look.warn => match cx.lib.links.iter().find(|l| l.id == *id) {
+            Some(l) => r.on_hover_text(format!("Not found at {}", l.path.display())),
+            None => r,
+        },
+        _ => r,
+    };
 
     // Dragging a folder, a script or a linked file, and what a drag over this row would do.
     if let Some(item) = drag_item(&row.node) {
-        // The ghost is the row itself: its glyph and name, without the indent.
+        let badge = st.badge;
+        // The ghost is the row itself: its glyph and name, without the indent, and a badge when the drop copies the item
+        // or writes it to disk, so a drag says what it will do before it is let go.
         drag_source_with(ui, &r, item, |p, g| {
             let cy = g.center().y;
             glyph(p, egui::pos2(g.left() + 30.0, cy), gcol);
             let name = p.layout_job(LayoutJob::single_section(look.name.clone(), ui_fmt(TXT_BODY, BRIGHT(), if is_container { W_MEDIUM } else { 400.0 }, 0.0)));
             let dy = optical_dy(&name);
+            let right = g.left() + 41.0 + name.size().x;
             p.galley(egui::pos2(g.left() + 41.0, cy - name.size().y / 2.0 + dy), name, BRIGHT());
+            if let Some(b) = badge {
+                let bg = p.layout_job(LayoutJob::single_section(b.to_string(), ui_fmt(TXT_CAPTION, PRIMARY(), W_MEDIUM, 0.0)));
+                let pill = egui::Rect::from_min_size(egui::pos2(right + 8.0, cy - 8.0), egui::vec2(bg.size().x + 10.0, 16.0));
+                p.rect_filled(pill, R_SM, tint(PRIMARY(), 36));
+                let bdy = optical_dy(&bg);
+                p.galley(egui::pos2(pill.left() + 5.0, cy - bg.size().y / 2.0 + bdy), bg, PRIMARY());
+            }
         });
     }
     let target_is_folder = matches!(row.node, Node::Folder(_)) || dir_like;
@@ -1324,6 +1382,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let into_closed = target_is_folder && !row.open;
     if let Some(item) = over.as_ref().filter(|i| **i != row.node) {
         let plan = plan_drop(cx.lib, cx.scans, item, &row.node, pos);
+        st.badge_next = plan.as_ref().ok().and_then(|p| badge_of(p, item));
         if plan.is_ok() {
             // The mark follows the plan: a fill for into a folder, else a line at the depth of the row it lands beside.
             let zone = match (pos, &plan) {
@@ -1392,5 +1451,15 @@ mod linked_tests {
         scans.insert(1, crate::library::disk::Scan { missing: true, ..Default::default() });
         assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &Node::Link(1), Pos::Into), Err(MISSING));
         assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Pos::Into), Err(MISSING));
+    }
+
+    #[test]
+    fn a_drag_says_when_it_copies_or_writes_to_disk() {
+        let into = Plan::Into { link: 1, dir: PathBuf::new() };
+        assert_eq!(badge_of(&into, &Node::Script(3)), Some("Move to disk"));
+        assert_eq!(badge_of(&Plan::Out(DropAt::Root), &node_file("a.sql")), Some("Copy"));
+        // Moves that stay where they are kept need no word.
+        assert_eq!(badge_of(&into, &node_file("a.sql")), None);
+        assert_eq!(badge_of(&Plan::Saved(DropAt::Root), &Node::Script(3)), None);
     }
 }

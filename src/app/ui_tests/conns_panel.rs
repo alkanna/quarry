@@ -245,3 +245,105 @@ fn the_edit_dialog_reorders_members_by_dragging_and_esc_cancels_without_closing_
     ui.click("Save");
     assert_eq!(members(&ui, PROD), [12, 13, 11]);
 }
+
+#[test]
+fn a_click_on_a_connection_shows_its_databases() {
+    let Some(mut ui) = panel() else { return };
+    ui.mouse_hold("analytics", 0);
+    // Before, the panel stayed up and only the highlight moved.
+    assert_eq!(ui.app().active, Some(16));
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer, "the click left the Connections panel up");
+}
+
+#[test]
+fn a_hovered_row_shows_its_menu_button_with_browse_databases() {
+    let Some(mut ui) = panel() else { return };
+    ui.show("prod-us");
+    let at = ui.h.get_by_label("prod-us").rect().center();
+    ui.h.hover_at(at);
+    ui.h.run_steps(2);
+    ui.click("More for prod-us");
+    ui.click("Browse databases");
+    assert_eq!((ui.app().active, ui.app().prefs.side_mode()), (Some(12), SideMode::Explorer));
+    // A group row has one too, with the group's menu.
+    ui.h.state_mut().prefs.set_side_mode(SideMode::Connections);
+    ui.show("Group Staging");
+    let at = ui.h.get_by_label("Group Staging").rect().center();
+    ui.h.hover_at(at);
+    ui.h.run_steps(2);
+    ui.click("More for group Staging");
+    ui.click("Delete group");
+    assert!(ui.app().groups.group(STAGE).is_none());
+}
+
+#[test]
+fn the_arrow_keys_walk_the_rows_and_return_opens_a_connection() {
+    let Some(mut ui) = panel() else { return };
+    let focused = |ui: &UiApp, label: &str| ui.h.get_by_label(label).is_focused();
+    let none = egui::Modifiers::NONE;
+    ui.show("Group Staging");
+    ui.h.get_by_label("Group Staging").focus();
+    ui.settle();
+    assert!(focused(&ui, "Group Staging"));
+    // Left folds the group, Right opens it again.
+    ui.key(none, egui::Key::ArrowLeft);
+    assert!(!ui.app().groups.group(STAGE).unwrap().open);
+    ui.key(none, egui::Key::ArrowRight);
+    assert!(ui.app().groups.group(STAGE).unwrap().open);
+    // Down walks into the members, Left from a member goes back up to its group.
+    ui.key(none, egui::Key::ArrowDown);
+    ui.key(none, egui::Key::ArrowDown);
+    assert!(focused(&ui, "reports"), "Down did not reach the second member");
+    ui.key(none, egui::Key::ArrowLeft);
+    assert!(focused(&ui, "Group Staging"));
+    ui.key(none, egui::Key::ArrowDown);
+    ui.key(none, egui::Key::ArrowDown);
+    ui.key(none, egui::Key::Enter);
+    assert_eq!((ui.app().active, ui.app().prefs.side_mode()), (Some(14), SideMode::Explorer));
+}
+
+#[test]
+fn leaving_a_name_field_keeps_what_was_typed() {
+    let Some(mut ui) = panel() else { return };
+    ui.click("New group");
+    ui.show("New group name");
+    ui.type_text("Ops");
+    // A press elsewhere ends the field: before, only Enter made the group.
+    ui.mouse_hold("Group Production", 0);
+    assert!(ui.app().groups.groups.iter().any(|g| g.name == "Ops"), "leaving the field threw the name away");
+    // The same for a rename started with F2.
+    ui.h.get_by_label("Group Local").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::NONE, egui::Key::F2);
+    ui.show("Group name");
+    ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    ui.type_text("Laptop");
+    ui.mouse_hold("Group Production", 0);
+    assert_eq!(ui.app().groups.group(LOCAL).map(|g| g.name.as_str()), Some("Laptop"));
+}
+
+#[test]
+fn a_tag_keeps_its_word_in_an_indented_row() {
+    // A group member in the default sidebar has about 190 px for its name and tag. The tag got 40 % of it, 76 px, which
+    // cut PRODUCTION (about 80 px with its padding) to "PRODU...".
+    assert!(tag_room(190.0) >= 95.0);
+    // A wide row still gives most of its room to the name.
+    assert!(tag_room(400.0) <= 310.0 && 400.0 - tag_room(400.0) >= 90.0);
+}
+
+#[test]
+fn add_connections_filters_by_group_and_takes_one_from_another_group() {
+    let Some(mut ui) = panel() else { return };
+    right_click(&mut ui, "Group Production");
+    ui.click("Edit group…");
+    ui.click("Add connections…");
+    // The list has its own filter, drawn last over the panel's.
+    ui.click_last("Filter connections");
+    ui.type_text("repo");
+    ui.h.run_steps(2);
+    assert!(ui.h.query_all_by_label("sandbox").count() == 1, "the filter left sandbox in the list");
+    ui.click_last("reports");
+    ui.click("Save");
+    assert_eq!(members(&ui, PROD), [11, 12, 13, 14]);
+    assert_eq!(members(&ui, STAGE), [2]);
+}

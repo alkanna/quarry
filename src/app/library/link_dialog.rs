@@ -9,8 +9,10 @@ use db::sql::Engine;
 /// The fields of the Link a folder dialog.
 #[derive(Default)]
 pub(in crate::app) struct LinkForm {
-    /// The link being edited, None when a new one is made. An edit keeps the folder.
+    /// The link being edited, None when a new one is made. An edit keeps the folder, unless it is a locate.
     edit: Option<u64>,
+    /// The edited link's folder is gone and the person is pointing it at the folder where it is now.
+    locate: bool,
     path: String,
     name: String,
     /// The name was typed, so a new folder path no longer renames it.
@@ -18,8 +20,13 @@ pub(in crate::app) struct LinkForm {
     /// "conns", "engine" or "all", as in `Link::on`.
     on: String,
     conns: Vec<u64>,
-    /// The engine "Every ... connection" means: that of the first chosen connection, or of the current tab.
+    /// The engine "Every ... connection" means: that of the first chosen connection, or of the current tab, until the
+    /// folder's files say otherwise.
     engine: Engine,
+    /// The person picked the engine, so the folder's files no longer decide it.
+    engine_set: bool,
+    /// The filter and folded groups of the + Add list.
+    pick: crate::app::conns_panel::ConnsUi,
     sql: bool,
     js: bool,
     json: bool,
@@ -77,12 +84,63 @@ impl LinkForm {
         self.preview = Some((path.into(), scan));
     }
 
-    /// The scan that came back, once the dialog has asked for it. A scan for a path that was changed since is dropped.
+    /// The scan that came back, once the dialog has asked for it. A scan for a path that was changed since is dropped. A
+    /// new link takes the engine its files are written for, unless the person chose one.
     pub(super) fn got_preview(&mut self, scan: disk::Scan) {
         if let Some(p) = self.asking.take() {
+            if self.edit.is_none() && !self.engine_set {
+                self.engine = engine_for(&scan.entries, self.engine);
+            }
             self.preview = Some((p, scan));
         }
     }
+}
+
+/// The engine a folder's scripts are for, by their most common kind: Mongo for filters and pipelines, a SQL engine for
+/// .sql files (the current one when it is SQL, since a .sql file does not say which dialect), else `current`. Shell
+/// scripts run anywhere and do not count.
+fn engine_for(entries: &[disk::Entry], current: Engine) -> Engine {
+    let sql = entries.iter().filter(|e| e.kind == "sql").count();
+    let mongo = entries.iter().filter(|e| matches!(e.kind.as_str(), "filter" | "pipeline")).count();
+    if sql > mongo {
+        if current.is_sql() { current } else { Engine::MySql }
+    } else if mongo > sql {
+        Engine::Mongo
+    } else {
+        current
+    }
+}
+
+/// What "Every ... connection" shows, for each engine.
+fn engine_copy(e: Engine) -> &'static str {
+    match e {
+        Engine::Mongo => "Its .json filters and pipelines and .js scripts",
+        Engine::MySql => "Its .sql and .js files, on MySQL and MariaDB",
+        Engine::Postgres => "Its .sql and .js files, on PostgreSQL",
+    }
+}
+
+/// A warning for a chosen connection on which none of the folder's files would show, such as a folder of .sql files
+/// chosen for a MongoDB connection. None when one shows or there is nothing to show.
+fn unfit_note(entries: &[disk::Entry], name: &str, engine: Engine) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let all = Link { on: "all".into(), ..Default::default() };
+    if entries.iter().any(|e| format::fits(&all, &e.kind, 0, engine)) {
+        return None;
+    }
+    let ext = format::ext_of(&entries[0].rel);
+    let what = if entries.iter().all(|e| format::ext_of(&e.rel) == ext) { format!(".{ext} files") } else { "files".to_string() };
+    let n = entries.len();
+    let (none, show) = if n == 1 { ("The".to_string(), "shows") } else { (format!("None of the {n}"), "show") };
+    let what = if n == 1 { what.trim_end_matches('s').to_string() } else { what };
+    let engine = match engine {
+        Engine::Mongo => "MongoDB",
+        Engine::MySql => "MySQL",
+        Engine::Postgres => "PostgreSQL",
+    };
+    Some(if n == 1 { format!("{none} {what} does not show on {name} ({engine})") } else { format!("{none} {what} {show} on {name} ({engine})") })
 }
 
 /// The summary under the folder field: how many scripts, in how many folders, and the git branch.
@@ -172,16 +230,32 @@ impl App {
         self.modal = Some(Modal::LinkFolder(Box::new(f)));
     }
 
+    /// Opens the dialog on a linked folder that was not found, with its path ready to be changed to where it is now.
+    pub(in crate::app) fn open_locate_dialog(&mut self, link: u64) {
+        self.open_link_dialog(Some(link));
+        if let Some(Modal::LinkFolder(f)) = &mut self.modal {
+            f.locate = true;
+        }
+    }
+
     pub(in crate::app) fn link_dialog(&mut self, ui: &mut egui::Ui, f: &mut LinkForm, keep: &mut bool) {
         ui.set_width(600.0);
-        let edit = f.edit.is_some();
-        let head = if edit { Head::new("Use on connections").sub(f.name.clone()) } else { Head::new("Link a folder").sub("Scripts stay in the folder as plain files you can commit") };
+        // A locate is an edit whose folder can change, so it is looked at and checked like a new one.
+        let edit = f.edit.is_some() && !f.locate;
+        let head = if f.locate {
+            Head::new("Locate folder").sub(format!("{} is not where it was", f.name))
+        } else if edit {
+            Head::new("Use on connections").sub(f.name.clone())
+        } else {
+            Head::new("Link a folder").sub("Scripts stay in the folder as plain files you can commit")
+        };
         dialog_head(ui, &head.glyph(glyphs::link));
         let mut b = body_begin(ui);
         let outer = ui;
-        let ui = &mut b.content_ui;
-        let now = ui.input(|i| i.time);
-
+        let now = outer.input(|i| i.time);
+        // The body scrolls between the head and the foot, so a short window still shows the buttons.
+        let room = (outer.ctx().content_rect().height() - 240.0).max(160.0);
+        egui::ScrollArea::vertical().id_salt("link-body").max_height(room).auto_shrink([false, true]).show(&mut b.content_ui, |ui| {
         form_card(ui, "", "", |rows| {
             rows.row("Folder", "", |ui| {
                 if !edit && ui.button("Choose\u{2026}").clicked() {
@@ -201,7 +275,7 @@ impl App {
             });
             rows.row("Name", "Shown in the library", |ui| {
                 let hint = folder_name(&expand(&f.path));
-                if !f.name_set && !edit {
+                if !f.name_set && f.edit.is_none() {
                     f.name = hint.clone();
                 }
                 let r = ui.add(egui::TextEdit::singleline(&mut f.name).hint_text(hint).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(8, 4)));
@@ -215,6 +289,8 @@ impl App {
         // The scan that fills the summary runs off the UI thread, once the path has rested.
         let path = f.path.trim().to_string();
         let exts = f.exts();
+        // The files the folder shows with the types ticked, for the summary and the warnings under the chosen connections.
+        let shown: Vec<disk::Entry> = f.preview.as_ref().filter(|(p, _)| *p == path).map(|(_, s)| s.entries.iter().filter(|e| exts.contains(&format::ext_of(&e.rel))).cloned().collect()).unwrap_or_default();
         let fresh = f.preview.as_ref().is_some_and(|(p, _)| *p == path);
         if !path.is_empty() && !fresh && f.asking.is_none() && now - f.typed_at >= TYPING_PAUSE {
             f.asking = Some(path.clone());
@@ -232,8 +308,7 @@ impl App {
                 }
                 (Some((p, scan)), false) if *p == path => {
                     // The scan reads every type, so the count follows the file types ticked below.
-                    let mut shown = scan.clone();
-                    shown.entries.retain(|e| exts.contains(&format::ext_of(&e.rel)));
+                    let shown = disk::Scan { entries: shown.clone(), ..scan.clone() };
                     let (dot, text) = summary(&shown);
                     let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(r.center(), 4.0, dot);
@@ -264,18 +339,27 @@ impl App {
                         gone = Some(id);
                     }
                 }
-                let free: Vec<(u64, String)> = self.conns.iter().filter(|c| !f.conns.contains(&c.meta.id)).map(|c| (c.meta.id, c.meta.name.clone())).collect();
-                if !free.is_empty() {
-                    ui.menu_button(RichText::new("+ Add").color(PRIMARY()), |ui| {
+                if self.conns.iter().any(|c| !f.conns.contains(&c.meta.id)) {
+                    use egui::containers::menu::{MenuButton, MenuConfig};
+                    // Stays open while the filter is typed in; a pick closes it.
+                    let menu = MenuButton::from_button(egui::Button::new(RichText::new("+ Add").color(PRIMARY()))).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
+                    menu.ui(ui, |ui| {
                         menu_look(ui);
-                        for (id, name) in &free {
-                            if ui.button(name).clicked() {
-                                if f.conns.is_empty() {
-                                    f.engine = self.conn(*id).map(|c| c.meta.engine).unwrap_or_default();
-                                }
-                                f.conns.push(*id);
+                        ui.set_width(320.0);
+                        crate::app::conns_panel::picker_filter(ui, &mut f.pick.picker_filter, false);
+                        // A whole group at once, for a folder a team uses on all its servers.
+                        let whole: Vec<(String, Vec<u64>)> = self.groups.groups.iter().map(|g| (g.name.clone(), g.members.iter().copied().filter(|m| self.conn(*m).is_some() && !f.conns.contains(m)).collect::<Vec<u64>>())).filter(|(_, m)| !m.is_empty()).collect();
+                        for (name, members) in whole {
+                            if menu_row(ui, &format!("All of {name}"), TEXT(), false, &members.len().to_string()).clicked() {
+                                f.conns.extend(members);
                                 ui.close();
                             }
+                        }
+                        ui.separator();
+                        let picked = egui::ScrollArea::vertical().id_salt("link-add").max_height(280.0).show(ui, |ui| crate::app::conns_panel::picker_list_in(ui, &self.conns, &self.groups, &mut f.pick, None, false, &f.conns, &|_| None)).inner;
+                        if let Some(id) = picked {
+                            f.conns.push(id);
+                            ui.close();
                         }
                     });
                 }
@@ -283,11 +367,25 @@ impl App {
             if let Some(id) = gone {
                 f.conns.retain(|c| *c != id);
             }
+            for id in &f.conns {
+                if let Some(c) = self.conn(*id)
+                    && let Some(note) = unfit_note(&shown, &c.meta.name, c.meta.engine)
+                {
+                    field_note(ui, &note, WARNING());
+                }
+            }
             ui.add_space(6.0);
         }
         ui.add_space(6.0);
-        if radio_card(ui, w, on == "engine", &format!("Every {} connection", engine_name(f.engine)), "Matches the dialect of the .sql files").clicked() {
+        if radio_card(ui, w, on == "engine", &format!("Every {} connection", engine_name(f.engine)), engine_copy(f.engine)).clicked() {
             on = "engine".into();
+        }
+        if on == "engine" {
+            ui.add_space(6.0);
+            let was = f.engine;
+            segmented(ui, &mut f.engine, &[(Engine::MySql, "MySQL or MariaDB"), (Engine::Postgres, "PostgreSQL"), (Engine::Mongo, "MongoDB")]);
+            f.engine_set |= f.engine != was;
+            ui.add_space(6.0);
         }
         ui.add_space(6.0);
         if radio_card(ui, w, on == "all", "Every connection", "A script opens on the connection of the current tab").clicked() {
@@ -309,13 +407,15 @@ impl App {
                 r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "Follow changes"));
             });
         });
+        });
         b.end(outer);
         let ui = outer;
 
         let dir = expand(&f.path);
         let found = f.preview.as_ref().is_some_and(|(p, s)| *p == f.path.trim() && !s.missing);
         let canon = f.preview.as_ref().filter(|(p, _)| *p == f.path.trim()).and_then(|(_, s)| s.canon.clone());
-        let clash = (!edit).then(|| clash(&self.library.links, &self.lib_ui.scans, &dir, canon.as_deref()).map(|l| l.name.clone())).flatten();
+        let others: Vec<Link> = self.library.links.iter().filter(|l| Some(l.id) != f.edit).cloned().collect();
+        let clash = (!edit).then(|| clash(&others, &self.lib_ui.scans, &dir, canon.as_deref()).map(|l| l.name.clone())).flatten();
         let problem = if f.path.trim().is_empty() {
             Some("Choose a folder".to_string())
         } else if let Some(n) = clash {
@@ -331,7 +431,7 @@ impl App {
         };
         let mut save = false;
         dialog_foot(ui, |ui| {
-            save = ui.add_enabled(problem.is_none(), primary_button(ui, if edit { "Save" } else { "Link folder" }, PRIMARY())).clicked();
+            save = ui.add_enabled(problem.is_none(), primary_button(ui, if f.edit.is_some() { "Save" } else { "Link folder" }, PRIMARY())).clicked();
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
@@ -348,8 +448,12 @@ impl App {
                 None => self.library.links.push(link),
             }
             self.save_library();
+            // A folder that moved is read from scratch: the old scan said it was missing.
+            if f.locate {
+                self.lib_ui.scans.remove(&id);
+            }
             self.lib_ui.rescan.insert(id);
-            self.ok(if edit { format!("{name} updated.") } else { format!("Linked {name}.") });
+            self.ok(if f.locate { format!("{name} found.") } else if edit { format!("{name} updated.") } else { format!("Linked {name}.") });
             *keep = false;
         }
     }
@@ -358,6 +462,40 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entries(files: &[&str]) -> Vec<disk::Entry> {
+        files.iter().map(|f| disk::Entry { rel: f.into(), mtime: std::time::SystemTime::UNIX_EPOCH, len: 1, kind: format::kind_of_ext(&format::ext_of(std::path::Path::new(f))).unwrap_or("filter").into(), head: String::new(), target: Default::default() }).collect()
+    }
+
+    #[test]
+    fn a_new_link_takes_the_engine_its_files_are_for() {
+        let sql = entries(&["a.sql", "b.sql", "c.js"]);
+        // From a Mongo tab, a folder of .sql files is for a SQL engine, never MongoDB.
+        assert_eq!(engine_for(&sql, Engine::Mongo), Engine::MySql);
+        assert_eq!(engine_for(&sql, Engine::Postgres), Engine::Postgres);
+        assert_eq!(engine_for(&entries(&["f.json", "g.json", "a.sql"]), Engine::MySql), Engine::Mongo);
+        assert_eq!(engine_for(&entries(&["c.js"]), Engine::Postgres), Engine::Postgres);
+        let mut f = LinkForm { engine: Engine::Mongo, ..Default::default() };
+        f.asking = Some("/q".into());
+        f.got_preview(disk::Scan { entries: sql.clone(), ..Default::default() });
+        assert_eq!(f.engine, Engine::MySql);
+        // A choice the person made stays.
+        let mut f = LinkForm { engine: Engine::Mongo, engine_set: true, asking: Some("/q".into()), ..Default::default() };
+        f.got_preview(disk::Scan { entries: sql, ..Default::default() });
+        assert_eq!(f.engine, Engine::Mongo);
+    }
+
+    #[test]
+    fn a_chosen_connection_that_would_show_nothing_is_warned_about() {
+        let sql = entries(&["a.sql", "b.sql"]);
+        assert_eq!(unfit_note(&sql, "Local sample", Engine::Mongo).as_deref(), Some("None of the 2 .sql files show on Local sample (MongoDB)"));
+        assert_eq!(unfit_note(&entries(&["a.sql"]), "Local sample", Engine::Mongo).as_deref(), Some("The .sql file does not show on Local sample (MongoDB)"));
+        assert_eq!(unfit_note(&sql, "shop", Engine::MySql), None);
+        // A shell script shows anywhere, and an empty folder warns of nothing.
+        assert_eq!(unfit_note(&entries(&["a.sql", "b.js"]), "Local sample", Engine::Mongo), None);
+        assert_eq!(unfit_note(&[], "Local sample", Engine::Mongo), None);
+        assert_eq!(engine_copy(Engine::Mongo), "Its .json filters and pipelines and .js scripts");
+    }
 
     #[test]
     fn a_folder_linked_under_another_spelling_is_a_clash() {

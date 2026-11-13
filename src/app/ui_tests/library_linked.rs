@@ -300,7 +300,7 @@ fn deleting_a_file_moves_it_to_the_trash_and_undo_puts_its_bytes_back() {
     let h = panel_app(&dir, &[("a.sql", "select 1")]);
     let mut ui = UiApp { h };
     ui.click("queries");
-    ui.lk_menu("a.sql", "Move to Trash\u{2026}");
+    ui.lk_menu("a.sql", "Move to Trash");
     io(&mut ui.h);
     assert!(!dir.join("a.sql").exists());
     assert!(ui.app().lib_ui.scans[&1].entries.is_empty());
@@ -573,4 +573,118 @@ fn saving_over_a_linked_file_flags_the_tabs_on_it_and_undo_brings_the_old_bytes_
     ui.h.state_mut().apply_restore(id);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 9");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_missing_folder_offers_locate_reload_and_unlink_and_locate_points_it_at_the_new_place() {
+    let dir = temp_dir("locate");
+    let moved = temp_dir("locate-new");
+    put(&moved, "a.sql", "select 1");
+    let mut h = panel_app(&dir, &[]);
+    h.state_mut().lib_ui.scans.insert(1, disk::Scan { missing: true, ..Default::default() });
+    h.run_steps(3);
+    let mut ui = UiApp { h };
+    ui.show("queries (not found)");
+    let at = ui.h.get_by_label("queries (not found)").rect().center();
+    ui.h.hover_at(at);
+    ui.h.run_steps(2);
+    ui.click("More for queries");
+    // A folder that is not there takes no new files.
+    assert!(!ui.lk_shown("New script"), "the menu of a missing folder still offers new files");
+    ui.show("Reload from disk");
+    ui.show("Unlink folder");
+    ui.click("Locate folder\u{2026}");
+    ui.show("Locate folder");
+    ui.click("Folder path");
+    ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    ui.type_text(&moved.to_string_lossy());
+    ui.show("1 script in 1 folder");
+    ui.click("Save");
+    let l = ui.app().library.links[0].clone();
+    assert_eq!((l.id, l.path.clone(), l.name.as_str()), (1, moved.clone(), "queries"));
+    assert!(ui.app().modal.is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&moved).unwrap();
+}
+
+#[test]
+fn unlink_says_how_many_tabs_it_unbound_and_undo_binds_them_again() {
+    let dir = temp_dir("unlink");
+    let mut h = bound_app(&dir, "select 1", false);
+    h.state_mut().library.recent.push(ScriptRef::File { link: 1, rel: "a.sql".into() });
+    h.state_mut().unlink(1);
+    let a = h.state();
+    assert!(a.library.links.is_empty() && a.tabs[0].script.is_none() && a.library.recent.is_empty());
+    assert!(a.last_problem().contains("1 tab was unbound"), "{}", a.last_problem());
+    let id = a.restores.last().map(|r| r.0).expect("an Undo for the unlink");
+    h.state_mut().apply_restore(id);
+    let a = h.state();
+    assert_eq!(a.library.links.iter().map(|l| l.id).collect::<Vec<_>>(), [1]);
+    assert!(matches!(a.tabs[0].script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: 1, rel }) if rel == Path::new("a.sql")));
+    assert_eq!(a.library.recent, [ScriptRef::File { link: 1, rel: "a.sql".into() }]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn moves_and_copies_say_where_the_result_went() {
+    let dir = temp_dir("where");
+    let h = panel_app(&dir, &[("a.sql", "select 1"), ("sub/b.sql", "select 2")]);
+    let mut ui = UiApp { h };
+    ui.h.state_mut().move_linked_file(1, Path::new("a.sql"), Path::new("sub"));
+    assert!(ui.app().last_problem().contains("Moved a.sql to queries / sub / a.sql"), "{}", ui.app().last_problem());
+    ui.h.state_mut().file_to_quarry(1, Path::new("sub/b.sql"), crate::library::ops::DropAt::Root);
+    io(&mut ui.h);
+    assert!(ui.app().last_problem().contains("Copied b to the top of the library"), "{}", ui.app().last_problem());
+    let a = ui.h.state_mut();
+    a.library.scripts.push(crate::library::Script { id: 70, name: "Revenue".into(), kind: "sql".into(), body: "select 3".into(), conn: 1, ..Default::default() });
+    a.script_to_link(70, 1, Path::new("sub")).expect("a file");
+    assert!(a.last_problem().contains("to disk as queries / sub / Revenue.sql"), "{}", a.last_problem());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_link_dialog_warns_when_a_chosen_connection_shows_none_of_the_files_and_adds_whole_groups() {
+    let dir = temp_dir("unfit");
+    put(&dir, "a.sql", "select 1");
+    put(&dir, "b.sql", "select 2");
+    let mut ui = UiApp { h: harness() };
+    let a = ui.h.state_mut();
+    a.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Idle));
+    for id in [2, 3] {
+        a.conns.push(Conn::new(ConnMeta { id, name: format!("shop-{id}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    }
+    let g = a.groups.new_group("Shops");
+    let all = a.conn_ids();
+    a.groups.place(2, Place::Into(g, None), &all);
+    a.groups.place(3, Place::Into(g, None), &all);
+    a.active = Some(1);
+    a.open_link_dialog(None);
+    ui.fill("Folder path", &dir.to_string_lossy());
+    ui.show("2 scripts in 1 folder");
+    ui.show("None of the 2 .sql files show on Local sample (MongoDB)");
+    // The folder holds .sql files, so "Every ... connection" means a SQL engine, not the Mongo tab it was opened from.
+    ui.show("Every MySQL or MariaDB connection");
+    ui.click("+ Add");
+    ui.click("All of Shops");
+    ui.h.run_steps(3);
+    assert!(matches!(&ui.app().modal, Some(Modal::LinkFolder(_))));
+    ui.click("Remove Local sample");
+    ui.click("Link folder");
+    assert_eq!(ui.app().library.links[0].conns, [2, 3]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_link_dialog_keeps_its_buttons_on_a_short_window() {
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 560.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
+    let a = h.state_mut();
+    a.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    a.active = Some(1);
+    a.open_link_dialog(None);
+    let mut ui = UiApp { h };
+    ui.h.run_steps(6);
+    ui.show("Link folder");
+    let foot = ui.h.get_by_label("Link folder").rect();
+    let head = ui.h.get_by_label("Folder path").rect();
+    assert!(foot.bottom() <= 560.0 && head.top() >= 0.0, "the dialog runs off a 560 px window: path at {head:?}, button at {foot:?}");
 }

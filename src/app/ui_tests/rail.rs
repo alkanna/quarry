@@ -148,3 +148,40 @@ fn a_tile_dropped_among_open_members_joins_at_that_place() {
     ui.wait("alpha to join", |a| a.groups.groups[0].members.contains(&5));
     assert_eq!(ui.app().groups.groups[0].members, [6, 5, 7]);
 }
+
+/// Opens the menu of a rail tile with a right click.
+fn right_click(ui: &mut UiApp, label: &str) {
+    ui.show(label);
+    let at = ui.h.get_by_label(label).rect().center();
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+}
+
+#[test]
+fn a_folder_menu_disconnects_its_members_and_stops_folding() {
+    let Some(mut ui) = demo_ui(with_group) else { return };
+    right_click(&mut ui, "Fleet folder");
+    ui.click("Don't fold in the rail");
+    assert!(!ui.app().groups.groups[0].fold_rail);
+    // The members are tiles of their own now.
+    ui.show("Switch to beta");
+    assert!(ui.h.query_all_by_label("Fleet folder").next().is_none());
+    // Folded again, Disconnect all closes both members and the folder leaves the rail.
+    ui.h.state_mut().groups.groups[0].fold_rail = true;
+    right_click(&mut ui, "Fleet folder");
+    ui.click("Disconnect all");
+    assert!([6, 7].iter().all(|id| ui.app().conn(*id).is_some_and(|c| c.status == Status::Idle)));
+    ui.h.run_steps(3);
+    assert!(ui.h.query_all_by_label("Fleet folder").next().is_none());
+}
+
+#[test]
+fn a_folder_menu_opens_the_folder_and_edits_the_group() {
+    let Some(mut ui) = demo_ui(with_group) else { return };
+    right_click(&mut ui, "Fleet folder");
+    ui.click("Open");
+    assert!(ui.app().rail_open.contains(&1));
+    right_click(&mut ui, "Fleet folder");
+    ui.click("Edit group\u{2026}");
+    assert!(matches!(ui.app().modal, Some(Modal::GroupEdit(_))));
+}

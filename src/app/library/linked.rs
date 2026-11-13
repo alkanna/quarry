@@ -64,6 +64,12 @@ pub(in crate::app) fn set_bound_text(t: &mut Tab, text: &str, parsed: Option<&fo
     }
 }
 
+/// Where a file below a link is, for a message: the link's name and the folders inside it, as "queries / reports / a.sql".
+fn link_place(l: &crate::library::Link, rel: &std::path::Path) -> String {
+    let name = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
+    std::iter::once(name).chain(rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned())).collect::<Vec<_>>().join(" / ")
+}
+
 fn file_label(rel: &std::path::Path) -> String {
     rel.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string()
 }
@@ -734,6 +740,9 @@ impl App {
         self.drop_entry(link, rel);
         self.add_entry(link, &new_rel);
         self.save_library();
+        if let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() {
+            self.ok(format!("Moved {name} to {}.", link_place(&l, &new_rel)));
+        }
         Some(new_rel)
     }
 
@@ -775,7 +784,7 @@ impl App {
         if let Some((folders, scripts)) = ops::delete(&mut self.library, &Node::Script(id)) {
             self.forget_scripts(&[id]);
             self.save_library();
-            self.toast_restore(format!("Moved \"{}\" to {} as {}.", s.name, l.name, file_label(&rel)), Restore::Saved { scripts, folders, written: Some((link, rel.clone(), bytes.clone())) });
+            self.toast_restore(format!("Moved \"{}\" to disk as {}. It left the library.", s.name, link_place(&l, &rel)), Restore::Saved { scripts, folders, written: Some((link, rel.clone(), bytes.clone())) });
         }
         Some(rel)
     }
@@ -802,25 +811,64 @@ impl App {
         }
         self.lib_ui.panel.sel = Some(Node::Script(id));
         self.save_library();
-        self.ok(format!("Copied {name} to the library. The file stays in the folder."));
+        let folder = self.library.scripts.iter().find(|s| s.id == id).and_then(|s| crate::library::tree::live_parent(&self.library, s.folder));
+        let place = ops::folder_path(&self.library, folder);
+        let place = if place.is_empty() { "the top of the library".to_string() } else { place };
+        self.ok(format!("Copied {name} to {place}. The file stays in the folder."));
     }
 
-    /// Unlink: the link and what Quarry remembers of it go, the files stay on disk. Tabs bound to its files keep their text.
+    /// Unlink: the link and what Quarry remembers of it go, the files stay on disk. Tabs bound to its files keep their text
+    /// and are unbound, and the toast says how many, with an Undo that links the folder again and binds them back.
     pub(in crate::app) fn unlink(&mut self, link: u64) {
-        let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() else { return };
+        let Some(at) = self.library.links.iter().position(|l| l.id == link) else { return };
         self.library.reserve_ids();
-        self.library.links.retain(|x| x.id != link);
+        let l = self.library.links.remove(at);
+        let recent: Vec<(usize, ScriptRef)> = self.library.recent.iter().enumerate().filter(|(_, r)| matches!(r, ScriptRef::File { link: x, .. } if *x == link)).map(|(i, r)| (i, r.clone())).collect();
         self.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: x, .. } if *x == link));
+        let mut tabs = Vec::new();
         for t in &mut self.tabs {
-            if matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: x, .. }) if *x == link) {
-                t.script = None;
+            if matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: x, .. }) if *x == link)
+                && let Some(b) = t.script.take()
+            {
+                tabs.push((t.uid, b));
             }
         }
         self.lib_ui.scans.remove(&link);
         self.lib_ui.changed.retain(|(x, _)| *x != link);
         self.lib_ui.baseline.retain(|(x, _), _| *x != link);
         self.save_library();
-        self.ok(format!("Unlinked {}. Its files stay on disk.", if l.name.is_empty() { l.path.display().to_string() } else { l.name }));
+        let name = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
+        let unbound = match tabs.len() {
+            0 => String::new(),
+            1 => " 1 tab was unbound.".to_string(),
+            n => format!(" {n} tabs were unbound."),
+        };
+        self.toast_restore(format!("Unlinked {name}. Its files stay on disk.{unbound}"), Restore::Link { link: l, at, tabs, recent });
+    }
+
+    /// Undo of Unlink: the link goes back where it was, with its recent files, and the tabs that still show no other script
+    /// are bound to their files again. Their disk state is checked at the scan that follows.
+    pub(in crate::app) fn relink(&mut self, l: crate::library::Link, at: usize, tabs: Vec<(u64, Bound)>, recent: Vec<(usize, ScriptRef)>) {
+        let (id, name) = (l.id, if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() });
+        if self.library.links.iter().any(|x| x.id == id) {
+            return;
+        }
+        self.library.links.insert(at.min(self.library.links.len()), l);
+        for (i, r) in recent {
+            if !self.library.recent.contains(&r) {
+                let i = i.min(self.library.recent.len());
+                self.library.recent.insert(i, r);
+            }
+        }
+        self.library.recent.truncate(crate::library::RECENT_MAX);
+        for (uid, b) in tabs {
+            if let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid && t.script.is_none() && t.view == b.view) {
+                t.script = Some(b);
+            }
+        }
+        self.save_library();
+        self.rescan_link(id);
+        self.ok(format!("{name} is linked again."));
     }
 }
 

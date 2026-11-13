@@ -136,6 +136,12 @@ pub(super) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w
     r.left()
 }
 
+/// How wide a tag badge may grow in a row `span` wide. The name keeps about 90 px, so in an indented group member a tag
+/// such as PRODUCTION shows whole instead of cut to "PRODU...", and a wide row still keeps most of its room for the name.
+pub(super) fn tag_room(span: f32) -> f32 {
+    (span - 90.0).max(span * 0.4)
+}
+
 /// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
 pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
     paint_name_tag_hl(p, x, cy, name, font, color, tag, &[]);
@@ -143,7 +149,7 @@ pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: 
 
 /// `paint_name_tag` with the byte ranges of `name` that a filter matched drawn on `HIGHLIGHT()`.
 pub(super) fn paint_name_tag_hl(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str, hl: &[(usize, usize)]) {
-    let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, x.span() * 0.4) - 8.0 };
+    let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, tag_room(x.span())) - 8.0 };
     let g = truncated_hl(p, name, font, color, name_right - x.min, hl);
     p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
 }
@@ -183,8 +189,13 @@ pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Respo
 
 /// `conn_row` indented by `indent`, with the matched byte ranges of the name highlighted, and optionally draggable.
 pub(super) fn conn_row_in(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool) -> egui::Response {
+    conn_row_room(ui, c, active, indent, hl, drag, 0.0)
+}
+
+/// `conn_row_in` that keeps `room` px free at its right end for the row's own buttons.
+pub(super) fn conn_row_room(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool, room: f32) -> egui::Response {
     let sense = if drag { Sense::click_and_drag() } else { Sense::click() };
-    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| paint_conn_row(p, r, c, active, hl))
+    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| paint_conn_row(p, r.with_max_x(r.right() - room), c, active, hl))
 }
 
 /// The inside of a connection row: status dot, name and tag, address. Also the ghost of a dragged row.

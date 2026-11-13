@@ -25,6 +25,8 @@ pub(super) enum Restore {
     /// A linked file the Save dialog wrote over: what it held before and what was written. Undo puts the old bytes back
     /// only while the file still holds the written ones, so an edit made since is never lost.
     Replaced { link: u64, path: PathBuf, old: Vec<u8>, new: Vec<u8> },
+    /// An unlinked folder, its place in the list, the tabs it unbound (by uid) and its recent files with their places.
+    Link { link: crate::library::Link, at: usize, tabs: Vec<(u64, Bound)>, recent: Vec<(usize, crate::library::ScriptRef)> },
 }
 
 impl App {
@@ -110,6 +112,7 @@ impl App {
                     Err(e) => self.err(format!("Could not restore {}: {e}", path.display())),
                 }
             }
+            Restore::Link { link, at, tabs, recent } => self.relink(link, at, tabs, recent),
             Restore::Replaced { link, path, old, new } => {
                 let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
                 if !std::fs::read(&path).is_ok_and(|now| now == new) {
@@ -201,8 +204,11 @@ mod tests {
         // Since then: the group was renamed, 3 joined it, and 2 was removed from the app.
         a.groups.group_mut(g).unwrap().name = "Prod".into();
         a.groups.place(3, Place::Into(g, None), &all);
+        // Removing a connection prunes it from the groups, as Danger::RemoveConnection does.
         a.conns.retain(|c| c.meta.id != 2);
         a.rail_order.retain(|c| *c != 2);
+        let alive = a.conn_ids();
+        a.groups.prune(&alive);
         undo_last(a);
         let alive = a.conn_ids();
         assert_eq!(a.groups.group(g).map(|x| (x.name.as_str(), x.members.clone())), Some(("Prod", vec![3])));

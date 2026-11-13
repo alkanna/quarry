@@ -160,7 +160,7 @@ fn a_script_moves_to_a_folder_from_its_menu() {
 #[test]
 fn deleting_a_script_can_be_undone() {
     let Some(mut ui) = demo_ui(load) else { return };
-    ui.row_menu("Slow orders lookup", "Delete…");
+    ui.row_menu("Slow orders lookup", "Delete");
     assert!(!ui.app().library.scripts.iter().any(|s| s.name == "Slow orders lookup"));
     assert!(!ui.shown("Slow orders lookup"));
     ui.click_last("Undo");
@@ -248,7 +248,7 @@ fn a_deleted_script_unbinds_its_tab_and_its_id_is_never_given_again() {
     ui.settle();
     let tab = ui.app().cur;
     assert!(ui.app().tabs[tab].script.as_ref().is_some_and(|b| b.r == ScriptRef::Saved(14)));
-    ui.row_menu("Slow orders lookup", "Delete…");
+    ui.row_menu("Slow orders lookup", "Delete");
     let a = ui.app();
     assert!(a.tabs[tab].script.is_none(), "the tab of a deleted script is unbound");
     assert!(!a.library.recent.contains(&ScriptRef::Saved(14)));
@@ -270,4 +270,25 @@ fn the_scope_control_spans_the_panel_in_two_equal_halves() {
     assert!((one.width() - all.width()).abs() < 1.0, "halves {} and {}", one.width(), all.width());
     // The sidebar is 250 wide less its margins: two hugging labels come to far less.
     assert!(one.width() + all.width() > 200.0, "the control spans {}", one.width() + all.width());
+}
+
+#[test]
+fn backspace_alone_never_deletes_and_the_delete_keys_do_with_an_undo() {
+    let Some(mut ui) = demo_ui(load) else { return };
+    ui.click("Slow orders lookup");
+    // Plain Backspace is a text key on macOS: a stray press must not delete a script.
+    ui.key(egui::Modifiers::NONE, egui::Key::Backspace);
+    assert!(ui.app().library.scripts.iter().any(|s| s.name == "Slow orders lookup"), "Backspace deleted the script");
+    ui.key(egui::Modifiers::COMMAND, egui::Key::Backspace);
+    assert!(!ui.app().library.scripts.iter().any(|s| s.name == "Slow orders lookup"));
+    ui.click_last("Undo");
+    assert_eq!(ui.script("Slow orders lookup").id, 14);
+    ui.click("Top customers");
+    ui.key(egui::Modifiers::NONE, egui::Key::Delete);
+    assert!(!ui.app().library.scripts.iter().any(|s| s.name == "Top customers"));
+    // The menu item acts at once, so it has no ellipsis.
+    ui.hover_row("Monthly revenue");
+    ui.click("More for Monthly revenue");
+    ui.show("Delete");
+    assert!(!ui.shown("Delete\u{2026}"));
 }

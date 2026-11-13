@@ -17,6 +17,8 @@ pub(super) struct GroupForm {
     pub(super) members: Vec<u64>,
     /// The name field takes focus once, when the dialog opens.
     pub(super) focus: bool,
+    /// The filter and folded groups of the Add connections list.
+    pub(super) pick: super::conns_panel::ConnsUi,
 }
 
 const MEMBER_H: f32 = 44.0;
@@ -27,7 +29,7 @@ impl App {
         let Some(g) = self.groups.group(group) else { return };
         let alive = self.conn_ids();
         let members = g.members.iter().copied().filter(|c| alive.contains(c)).collect();
-        self.modal = Some(Modal::GroupEdit(Box::new(GroupForm { id: g.id, name: g.name.clone(), color: g.color.clone(), fold_rail: g.fold_rail, members, focus: true })));
+        self.modal = Some(Modal::GroupEdit(Box::new(GroupForm { id: g.id, name: g.name.clone(), color: g.color.clone(), fold_rail: g.fold_rail, members, focus: true, ..Default::default() })));
     }
 
     pub(super) fn group_dialog(&mut self, ui: &mut egui::Ui, f: &mut GroupForm, keep: &mut bool) {
@@ -54,7 +56,7 @@ impl App {
                     toggle(ui, &mut f.fold_rail).widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "Fold in the rail"));
                 });
             });
-            members_card(ui, f, &self.conns);
+            members_card(ui, f, &self.conns, &self.groups);
         });
         let mut save = false;
         let mut delete = false;
@@ -106,7 +108,7 @@ impl App {
 
 /// The CONNECTIONS card: one row per member, then the button that adds more. The whole row drags to reorder, and
 /// Alt+Up or Alt+Down moves the focused one.
-fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
+fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn], groups: &Groups) {
     card_caption(ui, "CONNECTIONS", "drag to reorder");
     let mut remove = None;
     let mut mv = None;
@@ -158,7 +160,7 @@ fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
         if !members.is_empty() {
             rule_line(ui);
         }
-        add_row(ui, f, conns);
+        add_row(ui, f, conns, groups);
     });
     ui.add_space(16.0);
     if let Some(m) = mv {
@@ -174,9 +176,9 @@ fn rule_line(ui: &mut egui::Ui) {
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(0.5, LINE()));
 }
 
-/// "+ Add connections…": a list of the connections that are not members, each added with a click. They leave their old
-/// group when the form is saved.
-fn add_row(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
+/// "+ Add connections…": the connections that are not members, filtered and under their groups like the explorer's
+/// picker, each added with a click. They leave their old group when the form is saved, and their row says so.
+fn add_row(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn], groups: &Groups) {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
     ui.painter().rect_filled(rect, 0, hover_fill(state_of(&r)));
     paint_plus_at(ui.painter(), egui::pos2(rect.left() + 18.0, rect.center().y), PRIMARY());
@@ -188,17 +190,17 @@ fn add_row(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
     egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().min(420.0)).show(|ui| {
         menu_look(ui);
         ui.spacing_mut().item_spacing.y = 2.0;
-        let rest: Vec<&Conn> = conns.iter().filter(|c| !f.members.contains(&c.meta.id)).collect();
-        if rest.is_empty() {
+        if conns.iter().all(|c| f.members.contains(&c.meta.id)) {
             ui.label(RichText::new("Every connection is in this group.").color(MUTED()));
+            return;
         }
-        egui::ScrollArea::vertical().id_salt("group-add").max_height(260.0).show(ui, |ui| {
-            for c in rest {
-                if conn_row(ui, c, false).clicked() {
-                    f.members.push(c.meta.id);
-                }
-            }
-        });
+        super::conns_panel::picker_filter(ui, &mut f.pick.picker_filter, false);
+        let me = f.id;
+        let note = |c: &Conn| groups.group_of(c.meta.id).filter(|g| g.id != me).map(|g| format!("in {}, moves here", g.name));
+        let added = egui::ScrollArea::vertical().id_salt("group-add").max_height(300.0).show(ui, |ui| super::conns_panel::picker_list_in(ui, conns, groups, &mut f.pick, None, false, &f.members, &note)).inner;
+        if let Some(id) = added {
+            f.members.push(id);
+        }
     });
 }
 

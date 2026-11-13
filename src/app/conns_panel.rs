@@ -192,6 +192,15 @@ enum PanelAct {
     Remove(u64),
     FoldAll,
     Cloud,
+    /// Show the connection's databases: it becomes the active one and the sidebar shows the explorer.
+    Browse(u64),
+}
+
+/// A row the arrow keys move between: its widget id and what Left and Right do on it.
+#[derive(Clone, Copy)]
+enum Nav {
+    Group { id: u64, open: bool },
+    Conn { group: Option<u64> },
 }
 
 /// What the rows read while they are drawn.
@@ -267,7 +276,12 @@ impl App {
 
     fn apply_panel_act(&mut self, a: PanelAct) {
         match a {
-            PanelAct::Activate(id) => self.activate(id),
+            // A click picks the connection and shows its databases, like a pick in the explorer's picker; the panel
+            // would otherwise stay up with nothing on screen changed but a highlight.
+            PanelAct::Activate(id) | PanelAct::Browse(id) => {
+                self.activate(id);
+                self.show_sidebar();
+            }
             PanelAct::Toggle(g) => {
                 if let Some(g) = self.groups.group_mut(g) {
                     g.open = !g.open;
@@ -308,32 +322,8 @@ impl App {
                     self.save_groups();
                 }
             }
-            PanelAct::ConnectAll(g) => {
-                let ids: Vec<u64> = self.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
-                for id in ids {
-                    if self.conn(id).is_some_and(|c| matches!(c.status, Status::Idle | Status::Failed(_))) && !self.demo {
-                        self.connect(id);
-                    }
-                }
-            }
-            PanelAct::DisconnectAll(g) => {
-                let Some(group) = self.groups.group(g) else { return };
-                let (ids, name) = (group.members.clone(), group.name.clone());
-                let mut n = 0;
-                for id in ids {
-                    if !self.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting)) {
-                        continue;
-                    }
-                    if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
-                        (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
-                        c.forget_lists();
-                    }
-                    self.pg_tables_asked.forget(id, None, None);
-                    n += 1;
-                }
-                // One message for the whole group, where `disconnect` would raise one per connection.
-                self.ok(if n == 1 { format!("Disconnected 1 connection in {name}") } else { format!("Disconnected {n} connections in {name}") });
-            }
+            PanelAct::ConnectAll(g) => self.connect_group(g),
+            PanelAct::DisconnectAll(g) => self.disconnect_group(g),
             PanelAct::NewConnIn(g) => {
                 self.new_conn_modal();
                 if let Some(Modal::Conn(f)) = &mut self.modal {
@@ -367,6 +357,36 @@ impl App {
             }
             PanelAct::Cloud => self.open_cloud_browser(false),
         }
+    }
+
+    /// Connects every member of a group that is not open yet. The Connections panel and the rail's folder menu share it.
+    pub(super) fn connect_group(&mut self, g: u64) {
+        let ids: Vec<u64> = self.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
+        for id in ids {
+            if self.conn(id).is_some_and(|c| matches!(c.status, Status::Idle | Status::Failed(_))) && !self.demo {
+                self.connect(id);
+            }
+        }
+    }
+
+    /// Closes every open member of a group, with one message for the whole group.
+    pub(super) fn disconnect_group(&mut self, g: u64) {
+        let Some(group) = self.groups.group(g) else { return };
+        let (ids, name) = (group.members.clone(), group.name.clone());
+        let mut n = 0;
+        for id in ids {
+            if !self.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting)) {
+                continue;
+            }
+            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
+                (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
+                c.forget_lists();
+            }
+            self.pg_tables_asked.forget(id, None, None);
+            n += 1;
+        }
+        // One message for the whole group, where `disconnect` would raise one per connection.
+        self.ok(if n == 1 { format!("Disconnected 1 connection in {name}") } else { format!("Disconnected {n} connections in {name}") });
     }
 
     /// Deletes a group. Its members are in no group afterwards, and the toast offers Undo.
@@ -439,6 +459,7 @@ impl App {
 fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>) {
     let filtering = !cx.toks.is_empty();
     let ctx = ui.ctx().clone();
+    let mut nav: Vec<(egui::Id, Nav)> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         match row {
             CRow::Caption { text, note } => {
@@ -471,14 +492,21 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
             }
             CRow::Group { id, open, shown, total } => {
                 let Some(g) = cx.groups.group(*id) else { continue };
-                group_row(ui, g, (*open, *shown, *total), cx, st, acts, &ctx, rows, i);
+                if let Some(rid) = group_row(ui, g, (*open, *shown, *total), cx, st, acts, &ctx, rows, i) {
+                    nav.push((rid, Nav::Group { id: *id, open: *open }));
+                }
             }
             CRow::Conn { id, group, .. } => {
                 let Some(c) = cx.conns.iter().find(|c| c.meta.id == *id) else { continue };
                 let color = group.and_then(|g| cx.groups.group(g)).map(|g| group_color(&g.color));
                 let hl = if filtering { hl_ranges(&c.meta.name, cx.toks) } else { Vec::new() };
                 let on = cx.active == Some(c.meta.id);
-                let r = conn_row_in(ui, c, on, if color.is_some() { MEMBER_INDENT } else { 0.0 }, &hl, !filtering);
+                // The row's own id, known before it is drawn, so a focused row can make room for its menu button.
+                let rid = ui.next_auto_id();
+                let dots_id = egui::Id::unique(("conn-dots", c.meta.id));
+                let hot = row_hot(ui, &ctx, rid, dots_id, 48.0);
+                let r = conn_row_room(ui, c, on, if color.is_some() { MEMBER_INDENT } else { 0.0 }, &hl, !filtering, if hot { DOTS_ROOM } else { 0.0 });
+                nav.push((r.id, Nav::Conn { group: *group }));
                 if let Some(col) = color {
                     ui.painter().vline(r.rect.left() + GUIDE_X, r.rect.y_range().expand(1.0), Stroke::new(1.0, tint(col, 128)));
                 }
@@ -489,15 +517,76 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 drag_source_with(ui, &r, DragItem::Conn(c.meta.id), |p, rect| paint_conn_row(p, egui::Rect::from_min_max(rect.min + egui::vec2(12.0, 0.0), rect.max - egui::vec2(8.0, 0.0)), c, false, &[]));
                 drop_target(ui, &r, rows, i, cx, acts);
                 conn_menu(&r, c, group.is_some(), acts);
+                if hot {
+                    let dots = row_dots(ui, dots_id, r.rect, &format!("More for {}", c.meta.name));
+                    egui::Popup::menu(&dots).width(220.0).show(|ui| conn_menu_items(ui, c, group.is_some(), acts));
+                }
             }
         }
     }
+    arrow_keys(ui, &nav, acts);
     // The room under the last row takes a connection out to the end of the loose ones.
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), Sense::hover());
     if !filtering && let Some(m) = held(&ctx) && r.contains_pointer() {
         paint_spot(ui.painter(), rect.with_max_y(rect.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, rect.left() + 8.0, MEMBER_INDENT);
         if r.dnd_release_payload::<DragItem>().is_some() {
             acts.push(PanelAct::Move(m, Place::Loose(None)));
+        }
+    }
+}
+
+/// Room a row keeps at its right end for its menu button.
+const DOTS_ROOM: f32 = 28.0;
+
+/// Whether the row about to be drawn with id `rid` and height `h` shows its menu button: the pointer is on it, it has the
+/// keyboard focus, or its menu is open. Never during a drag, where the button would hide the drop marks.
+fn row_hot(ui: &egui::Ui, ctx: &egui::Context, rid: egui::Id, dots: egui::Id, h: f32) -> bool {
+    let est = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
+    held(ctx).is_none() && (ui.rect_contains_pointer(est) || ui.memory(|m| m.has_focus(rid) || m.has_focus(dots)) || egui::Popup::is_id_open(ctx, dots.with("popup")))
+}
+
+/// The quiet dots button at the right end of a row, so its menu is found without a right click.
+fn row_dots(ui: &mut egui::Ui, id: egui::Id, row: egui::Rect, name: &str) -> egui::Response {
+    let at = egui::Rect::from_center_size(egui::pos2(row.right() - 16.0, row.center().y), egui::vec2(22.0, 22.0));
+    let r = ui.interact(at, id, Sense::click());
+    let state = state_of(&r);
+    ui.painter().rect_filled(at, R_SM, hover_fill(state));
+    paint_dots(ui.painter(), at.center(), if state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, &r, at, R_SM as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    r.on_hover_text("More").on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Up and Down move between the rows, Right opens a folded group, Left folds an open one or goes up to a member's group.
+/// Return is the row's own click, which egui gives a focused widget. The focused row keeps the arrows, so egui does not
+/// also move the focus to whatever widget lies in that direction.
+fn arrow_keys(ui: &mut egui::Ui, nav: &[(egui::Id, Nav)], acts: &mut Vec<PanelAct>) {
+    let Some(i) = nav.iter().position(|(id, _)| ui.memory(|m| m.has_focus(*id))) else { return };
+    let arrows = egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() };
+    ui.memory_mut(|m| m.set_focus_lock_filter(nav[i].0, arrows));
+    let key = |ui: &mut egui::Ui, k: Key| ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, k));
+    let focus = |ui: &mut egui::Ui, id: egui::Id| ui.memory_mut(|m| m.request_focus(id));
+    if key(ui, Key::ArrowDown) {
+        if let Some((id, _)) = nav.get(i + 1) {
+            focus(ui, *id);
+        }
+    } else if key(ui, Key::ArrowUp) {
+        if let Some((id, _)) = i.checked_sub(1).and_then(|j| nav.get(j)) {
+            focus(ui, *id);
+        }
+    } else if key(ui, Key::ArrowRight) {
+        if let Nav::Group { id, open: false } = nav[i].1 {
+            acts.push(PanelAct::Toggle(id));
+        }
+    } else if key(ui, Key::ArrowLeft) {
+        match nav[i].1 {
+            Nav::Group { id, open: true } => acts.push(PanelAct::Toggle(id)),
+            Nav::Conn { group: Some(g) } => {
+                if let Some((id, _)) = nav[..i].iter().rev().find(|(_, n)| matches!(n, Nav::Group { id, .. } if *id == g)) {
+                    focus(ui, *id);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -539,9 +628,10 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
     }
 }
 
-/// The group row: chevron, folder, name, the dots of its open members when closed, the count. Returns nothing; clicks,
-/// the menu, F2 and the inline rename are handled here.
-fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) {
+/// The group row: chevron, folder, name, the dots of its open members when closed, the count. Returns the row's id for the
+/// arrow keys, or None while it is renamed; clicks, the menu, F2 and the inline rename are handled here.
+#[allow(clippy::too_many_arguments)]
+fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) -> Option<egui::Id> {
     let col = group_color(&g.color);
     let filtering = !cx.toks.is_empty();
     let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
@@ -559,10 +649,10 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
             if focus {
                 e.request_focus();
             }
-            let enter = ui.input(|inp| inp.key_pressed(Key::Enter));
+            // Leaving the field keeps the name, as in the Library; only Esc throws it away.
             let esc = ui.input(|inp| inp.key_pressed(Key::Escape));
             if e.lost_focus() || esc {
-                if enter && !esc {
+                if !esc {
                     acts.push(PanelAct::Rename(g.id, text.clone()));
                 }
                 st.rename = None;
@@ -571,13 +661,15 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
         r
     } else {
         let label = format!("Group {}", g.name);
+        let dots_id = egui::Id::unique(("group-dots", g.id));
+        let hot = row_hot(ui, ctx, ui.next_auto_id(), dots_id, GROUP_H);
         let r = side_row(ui, GROUP_H, 0.0, false, &label, |p, rect| {
             let cy = rect.center().y;
             chevron(p, egui::pos2(rect.left() + 6.0, cy), open, FAINT());
             paint_folder(p, egui::pos2(rect.left() + 24.0, cy), col, true);
             let count = if filtering { shown.to_string() } else { total.to_string() };
             let cg = p.layout_no_wrap(count, FontId::proportional(TXT_CAPTION), FAINT());
-            let mut right = rect.right() - 2.0;
+            let mut right = rect.right() - 2.0 - if hot { DOTS_ROOM } else { 0.0 };
             p.galley(egui::pos2(right - cg.size().x, cy - cg.size().y / 2.0), cg.clone(), FAINT());
             right -= cg.size().x + 8.0;
             for dot in &dots {
@@ -606,8 +698,13 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
             st.focus_edit = true;
         }
         r.context_menu(|ui| group_menu(ui, g, cx, st, acts));
+        if hot {
+            let dots = row_dots(ui, dots_id, r.rect, &format!("More for group {}", g.name));
+            egui::Popup::menu(&dots).width(250.0).show(|ui| group_menu(ui, g, cx, st, acts));
+        }
         r
     };
+    let nav_id = (!renaming).then_some(r.id);
     drop_target(ui, &r, rows, i, cx, acts);
     // A drag that rests on a closed group opens it, so a connection can be dropped among its members.
     let held_over = !open && !filtering && held(ctx).is_some() && r.contains_pointer();
@@ -635,6 +732,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
             });
         });
     }
+    nav_id
 }
 
 /// The menu of a group row.
@@ -685,34 +783,41 @@ fn group_menu(ui: &mut egui::Ui, g: &Group, cx: &Cx, st: &mut ConnsUi, acts: &mu
     }
 }
 
-/// The menu of a connection row.
+/// The menu of a connection row, on a right click.
 fn conn_menu(r: &egui::Response, c: &Conn, grouped: bool, acts: &mut Vec<PanelAct>) {
+    r.context_menu(|ui| conn_menu_items(ui, c, grouped, acts));
+}
+
+/// What the right click and the dots button of a connection row offer.
+fn conn_menu_items(ui: &mut egui::Ui, c: &Conn, grouped: bool, acts: &mut Vec<PanelAct>) {
     let id = c.meta.id;
     let open = matches!(c.status, Status::Ready | Status::Connecting);
-    r.context_menu(|ui| {
-        menu_look(ui);
-        if ui.button(if open { "Reconnect" } else { "Connect" }).clicked() {
-            acts.push(PanelAct::Connect(id));
-            ui.close();
-        }
-        if open && ui.button("Disconnect").clicked() {
-            acts.push(PanelAct::Disconnect(id));
-            ui.close();
-        }
-        if ui.button("Edit connection…").clicked() {
-            acts.push(PanelAct::EditConn(id));
-            ui.close();
-        }
-        if grouped && ui.button("Remove from group").clicked() {
-            acts.push(PanelAct::Ungroup(id));
-            ui.close();
-        }
-        ui.separator();
-        if danger_item(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
-            acts.push(PanelAct::Remove(id));
-            ui.close();
-        }
-    });
+    menu_look(ui);
+    if ui.button("Browse databases").clicked() {
+        acts.push(PanelAct::Browse(id));
+        ui.close();
+    }
+    if ui.button(if open { "Reconnect" } else { "Connect" }).clicked() {
+        acts.push(PanelAct::Connect(id));
+        ui.close();
+    }
+    if open && ui.button("Disconnect").clicked() {
+        acts.push(PanelAct::Disconnect(id));
+        ui.close();
+    }
+    if ui.button("Edit connection…").clicked() {
+        acts.push(PanelAct::EditConn(id));
+        ui.close();
+    }
+    if grouped && ui.button("Remove from group").clicked() {
+        acts.push(PanelAct::Ungroup(id));
+        ui.close();
+    }
+    ui.separator();
+    if danger_item(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
+        acts.push(PanelAct::Remove(id));
+        ui.close();
+    }
 }
 
 /// The field for a new group, with the color it will get. Returns true once it is done, by Enter or by leaving it.
@@ -727,10 +832,10 @@ fn new_group_field(ui: &mut egui::Ui, text: &mut String, focus: &mut bool, group
     if std::mem::take(focus) {
         e.request_focus();
     }
-    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+    // Leaving the field makes the group, as Enter does; only Esc throws the name away. An empty name makes nothing.
     let esc = ui.input(|i| i.key_pressed(Key::Escape));
     if e.lost_focus() || esc {
-        if enter && !esc {
+        if !esc {
             acts.push(PanelAct::NewGroup(text.clone()));
         }
         return true;
@@ -783,8 +888,16 @@ pub(super) fn picker_filter(ui: &mut egui::Ui, text: &mut String, focus: bool) {
 
 /// The picker's list: the connections under group captions that fold. Returns the connection clicked.
 pub(super) fn picker_list(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups, st: &mut ConnsUi, active: Option<u64>, scroll_to_active: bool) -> Option<u64> {
+    picker_list_in(ui, conns, groups, st, active, scroll_to_active, &[], &|_| None)
+}
+
+/// `picker_list` for a dialog that adds connections: the ones in `skip` are left out (a group with none left goes too), and
+/// `note` puts a line at the right of a row, such as where the connection moves from.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn picker_list_in(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups, st: &mut ConnsUi, active: Option<u64>, scroll_to_active: bool, skip: &[u64], note: &dyn Fn(&Conn) -> Option<String>) -> Option<u64> {
     let toks = tokens(&st.picker_filter);
     let rows = panel_rows(conns, groups, &st.picker_filter, |g| !st.picker_closed.contains(&g.id));
+    let left = |g: &Group| g.members.iter().any(|m| !skip.contains(m) && conns.iter().any(|c| c.meta.id == *m));
     let mut pick = None;
     let mut fold = None;
     let mut any = false;
@@ -792,6 +905,9 @@ pub(super) fn picker_list(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups, st
         match row {
             CRow::Group { id, open, shown, total } => {
                 let Some(g) = groups.group(*id) else { continue };
+                if !left(g) {
+                    continue;
+                }
                 any = true;
                 let col = group_color(&g.color);
                 let n = if toks.is_empty() { *total } else { *shown };
@@ -809,11 +925,17 @@ pub(super) fn picker_list(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups, st
                 }
             }
             CRow::Conn { id, group, .. } => {
-                let Some(c) = conns.iter().find(|c| c.meta.id == *id) else { continue };
+                let Some(c) = conns.iter().find(|c| c.meta.id == *id).filter(|c| !skip.contains(&c.meta.id)) else { continue };
                 any = true;
                 let on = active == Some(c.meta.id);
                 let hl = hl_ranges(&c.meta.name, &toks);
-                let r = conn_row_in(ui, c, on, if group.is_some() { 10.0 } else { 0.0 }, &hl, false);
+                let line = note(c).map(|t| ui.painter().layout_no_wrap(t, FontId::proportional(TXT_CAPTION), WARNING()));
+                let room = line.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+                let r = conn_row_room(ui, c, on, if group.is_some() { 10.0 } else { 0.0 }, &hl, false, room);
+                if let Some(g) = line {
+                    let at = egui::pos2(r.rect.right() - 8.0 - g.size().x, r.rect.center().y - g.size().y / 2.0);
+                    ui.painter().galley(at, g, WARNING());
+                }
                 if on && scroll_to_active {
                     r.scroll_to_me(Some(egui::Align::Center));
                 }
