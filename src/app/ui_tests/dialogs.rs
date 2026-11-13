@@ -183,3 +183,24 @@ fn the_close_button_of_an_agent_approval_denies_it() {
     assert_eq!(ui.app().agents.answered.len(), 1, "the close button did nothing");
     assert!(matches!(ui.app().agents.answered[0].1, crate::app::agents::Answer::Deny), "the close button did not deny");
 }
+
+#[test]
+fn a_short_dialog_after_a_tall_one_shrinks_to_its_content() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_demo();
+        a.demo_dialog("unlock");
+    }) else {
+        return;
+    };
+    // Every modal shares this Area, so it carries the last dialog's size into the next one.
+    let id = egui::Id::unique(("quarry-layer", "modal"));
+    let height = |ui: &UiApp| ui.h.ctx.memory(|m| m.area_rect(id)).expect("no modal area").height();
+    ui.settle();
+    let short = height(&ui);
+    ui.h.state_mut().demo_dialog("save");
+    ui.settle();
+    assert!(height(&ui) > short + 40.0, "the save dialog is not taller than the unlock one, so this test proves nothing");
+    ui.h.state_mut().demo_dialog("unlock");
+    ui.settle();
+    assert!((height(&ui) - short).abs() < 2.0, "the unlock dialog kept the save dialog's height: {} against {short}", height(&ui));
+}
