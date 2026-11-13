@@ -149,7 +149,7 @@ fn a_script_moves_to_a_folder_from_its_menu() {
     ui.hover_row("Slow orders lookup");
     ui.click("More for Slow orders lookup");
     ui.click("Move to folder");
-    ui.click("Maintenance");
+    ui.click_last("Maintenance");
     assert_eq!(ui.script("Slow orders lookup").folder, Some(3));
     // The folder it went into is open, so the move shows.
     assert!(ui.app().lib_ui.panel.open.contains(&Node::Folder(3)));
@@ -162,7 +162,7 @@ fn deleting_a_script_can_be_undone() {
     ui.row_menu("Slow orders lookup", "Delete…");
     assert!(!ui.app().library.scripts.iter().any(|s| s.name == "Slow orders lookup"));
     assert!(!ui.shown("Slow orders lookup"));
-    ui.click("Undo");
+    ui.click_last("Undo");
     assert_eq!(ui.script("Slow orders lookup").id, 14);
     assert!(ui.shown("Slow orders lookup"));
 }
