@@ -416,7 +416,8 @@ impl App {
         };
         let (mut start, mut back, mut unlock) = (false, false, false);
         ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // One button high: a bare right to left layout fills the height the dialog's scroll area offers, the whole window.
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.spacing().interact_size.y), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = if rep.is_some() { format!("Import {} rows", group(&rows.to_string())) } else { "Import".to_string() };
             let r = ui.add_enabled(blocked.is_none(), primary_button(ui, label, PRIMARY()));
             start = r.clicked();

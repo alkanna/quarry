@@ -142,8 +142,7 @@ impl App {
         }
         let mut keep = true;
         let (mut clear, mut undo, mut reveal) = (false, None, false);
-        let screen = ctx.content_rect();
-        let width = 760.0f32.min(screen.width() - 40.0);
+        let width = fit_width(ctx, 800.0) - 40.0;
         let names: HashMap<u64, String> = self.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
         let connected = match self.agents.sessions.as_slice() {
             [] => None,

@@ -1415,6 +1415,11 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
 
 /// Side padding of a dialog's header, body and footer bands.
 pub(crate) const DIALOG_PAD: f32 = 20.0;
+/// The least room kept between the window's edge and a dialog, window, popover or menu. egui cannot draw outside the
+/// window, so anything taller is capped to the window less this on both sides and scrolls inside.
+pub(crate) const DIALOG_MARGIN: f32 = 24.0;
+/// The shortest a capped dialog body or popover list gets, so a tiny window still shows a few rows of it.
+pub(crate) const FIT_MIN_H: f32 = 64.0;
 /// The tinted square holding a dialog header's glyph.
 pub(crate) const HEAD_TILE: f32 = 34.0;
 /// A form card row with only a label, and one with a hint under the label.

@@ -414,7 +414,10 @@ impl App {
                 sel = sel.saturating_sub(1);
             }
             ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 0.5, Stroke::new(1.0, RAISED_LINE()));
-            egui::ScrollArea::vertical().max_height(LIST_MAX_H).min_scrolled_height(LIST_MAX_H).auto_shrink([false, true]).show(ui, |ui| {
+            // The list stops above the window's margin with the footer under it, however short the window is.
+            let list_h = (ui.ctx().content_rect().bottom() - DIALOG_MARGIN - ui.cursor().top() - PALETTE_FOOT_H).clamp(FIT_MIN_H, LIST_MAX_H);
+            ui.set_max_height(list_h + PALETTE_FOOT_H);
+            egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                 ui.add_space(6.0);
                 if n == 0 {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), EMPTY_LIST_H), Sense::hover());

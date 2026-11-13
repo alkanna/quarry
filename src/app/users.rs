@@ -49,7 +49,7 @@ impl App {
         let screen = ctx.content_rect();
         let conn_name = self.conn_name(conn);
         let r = banded(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.6).clamp(600.0, 900.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.6).clamp(600.0, 900.0)));
             dialog_head_with(ui, &Head::new("Users and roles").sub(conn_name).glyph(glyphs::user), |ui| {
                 if ui.button("Refresh").clicked() {
                     u.users = None;

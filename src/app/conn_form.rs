@@ -666,7 +666,7 @@ impl App {
         if let Some((req, info)) = self.test_info.take() {
             f.take_test_info(req, info);
         }
-        ui.set_width(800.0);
+        ui.set_width(fit_width(ui.ctx(), 800.0));
         let tabs = conn_tabs(f.engine);
         let labels: Vec<&str> = tabs.iter().map(|t| t.1).collect();
         let cloud_on = f.cloud_on().is_some();

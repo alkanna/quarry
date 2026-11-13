@@ -12,13 +12,14 @@ pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce
     use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
+        let room = popup_room(ui.ctx(), button_anchor(ui));
         MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
             // A shortcut opened a window over the page: close, or the menu keeps taking its keys and focus.
             if ui.data(|d| d.get_temp::<bool>(window_over_page_id())).unwrap_or(false) {
                 return ui.close();
             }
             menu_look(ui);
-            content(ui)
+            capped_scroll(ui, room, content)
         }).0
     }).inner
 }
@@ -35,8 +36,28 @@ pub(crate) fn set_window_over_page(ctx: &egui::Context, open: bool) {
 /// Menu content that scrolls once it is taller than the window. egui keeps a popup inside the
 /// window, so a taller one is cut off at the edge with its last items out of reach.
 pub(crate) fn menu_scroll<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let max_h = ui.ctx().content_rect().height() - 24.0;
-    egui::ScrollArea::vertical().max_height(max_h).show(ui, add).inner
+    let room = ui.ctx().content_rect().height() - 2.0 * DIALOG_MARGIN;
+    capped_scroll(ui, room, add)
+}
+
+/// Popup content no taller than `room`, scrolling past it. The popup's area offers its last size as the room, which
+/// would keep a list that grows squeezed into it, so the height is set from `room` first.
+fn capped_scroll<R>(ui: &mut egui::Ui, room: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let chrome = ui.spacing().menu_margin.sum().y + 2.0;
+    let max_h = (room - chrome).max(FIT_MIN_H);
+    ui.set_max_height(max_h);
+    egui::ScrollArea::vertical().id_salt("menu-fit").max_height(max_h).show(ui, add).inner
+}
+
+/// Where a menu button about to be added at the cursor will sit, one button high, before egui places it.
+fn button_anchor(ui: &egui::Ui) -> egui::Rect {
+    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(0.0, BUTTON_H))
+}
+
+/// The most a popup under or over `anchor` may take: the larger of the two sides, inside the window's margin.
+fn popup_room(ctx: &egui::Context, anchor: egui::Rect) -> f32 {
+    let screen = ctx.content_rect();
+    (anchor.top() - screen.top()).max(screen.bottom() - anchor.bottom()) - DIALOG_MARGIN
 }
 
 /// Menu and dropdown items: tight corners, no outline, and a hover fill that shows on the raised
@@ -440,8 +461,10 @@ fn on_fill(fill: Color32) -> Color32 {
 }
 
 /// The padded dialog frame the value editors keep; every other dialog is `banded`, whose bands lay out their own edges.
-pub(crate) fn dialog(id: egui::Id) -> egui::Modal {
-    egui::Modal::new(id).frame(dialog_frame().inner_margin(18))
+pub(crate) fn dialog(id: egui::Id) -> super::dialog::Dialog {
+    const PAD: i8 = 18;
+    // The padding and the 1 px border, on both sides.
+    super::dialog::Dialog::new(egui::Modal::new(id).frame(dialog_frame().inner_margin(PAD)), 2.0 * (PAD as f32 + 1.0))
 }
 
 /// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
@@ -531,9 +554,10 @@ pub(crate) fn icon_menu(ui: &mut egui::Ui, paint: fn(&egui::Painter, egui::Pos2,
         if sticky {
             b = b.config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
         }
+        let room = popup_room(ui.ctx(), button_anchor(ui));
         let (r, _) = b.ui(ui, |ui| {
             menu_look(ui);
-            content(ui)
+            capped_scroll(ui, room, content)
         });
         let color = if r.hovered() || r.is_pointer_button_down_on() { BRIGHT() } else { MUTED() };
         paint(ui.painter(), r.rect.center(), color);
@@ -873,7 +897,8 @@ pub(crate) fn popover<R>(r: &egui::Response, w: f32, open_first: bool, add: impl
         open = !open;
     }
     let out = if open {
-        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(add)
+        let room = popup_room(&ctx, r.rect);
+        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(|ui| capped_scroll(ui, room, add))
     } else {
         None
     };

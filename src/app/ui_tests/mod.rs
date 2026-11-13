@@ -13,6 +13,7 @@ mod demo_states;
 mod dialogs;
 mod journeys;
 mod dnd;
+mod fit;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;

@@ -68,12 +68,12 @@ impl App {
         // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
         let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel, p.lock_scroll_axis, p.vim));
         let before = saved(&self.prefs);
-        let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "modal"))).frame(dialog_frame()).show(ctx, |ui| {
+        let r = banded(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
             let screen = ui.ctx().content_rect();
-            let w = SETTINGS_W.min(screen.width() - 40.0);
-            let body_h = (screen.height() - 220.0).clamp(240.0, 480.0);
+            let w = SETTINGS_W.min(screen.width() - 2.0 * DIALOG_MARGIN - 2.0);
             ui.set_width(w);
             dialog_head(ui, &Head::new("Settings").sub("Changes are saved right away").glyph(glyphs::sliders));
+            let body_h = (screen.height() - 220.0).clamp(240.0, 480.0).min(body_room(ui, 0.0));
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 // Wide fonts such as OpenDyslexic need a wider list than Inter does.

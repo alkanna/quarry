@@ -519,7 +519,7 @@ impl App {
         let screen = ctx.content_rect();
         let count = w.list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.accounts.len());
         let r = banded(egui::Id::unique(("quarry-layer", "sql-users-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.75).clamp(820.0, 1080.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.75).clamp(820.0, 1080.0)));
             let mut sub = if product.is_empty() { conn_name.clone() } else { format!("{conn_name}  ·  {product}") };
             if let Some(n) = count {
                 sub = format!("{sub}  ·  {}", crate::app::sql::create::plural(n as u64, "account"));
@@ -529,7 +529,7 @@ impl App {
                     acts.push(Act::Refresh);
                 }
             });
-            let body_h = (screen.height() - 260.0).clamp(380.0, 620.0);
+            let body_h = (screen.height() - 260.0).clamp(380.0, 620.0).min(body_room(ui, 0.0));
             dialog_flush(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;

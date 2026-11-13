@@ -175,7 +175,7 @@ impl App {
         let mut keep = true;
         let (mut import, mut export) = (false, false);
         let screen = ctx.content_rect();
-        let width = 1080.0f32.min(screen.width() - 40.0);
+        let width = fit_width(ctx, 1080.0);
         let body_h = (screen.height() - 200.0).clamp(300.0, 520.0);
         let scopes: Vec<(Option<u64>, String)> = std::iter::once((None, "All connections".to_string())).chain(self.conns.iter().filter(|c| self.agents.cfg.conn(c.meta.id).is_some() || w.scope == Some(c.meta.id)).map(|c| (Some(c.meta.id), c.meta.name.clone()))).collect();
         let layer = egui::Id::unique(("quarry-layer", "agents-rules"));

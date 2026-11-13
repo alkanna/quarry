@@ -528,7 +528,7 @@ impl App {
         let mut acts = Acts::default();
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(760.0, 1100.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
             const TABS: [(PgTab, &str); 4] = [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks")];
             let labels = TABS.map(|t| t.1);
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
