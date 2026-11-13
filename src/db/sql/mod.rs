@@ -17,6 +17,7 @@ pub mod lex;
 pub mod format;
 pub mod value;
 pub mod check;
+pub(in crate::db) mod agent;
 
 /// What the key picker learns about the table a foreign key points at on its first lookup, sent back with the next
 /// ones so they skip the catalog: the column that reads as a row's name, and whether the table is too big to scan.

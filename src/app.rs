@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod agents;
 mod aggregate;
 mod auto_update;
 mod chrome;
@@ -247,6 +248,8 @@ pub struct App {
     /// Nothing is read from or written to disk or the keychain. True in the demo and in tests; `demo` alone means fake offline data.
     ephemeral: bool,
     tool: Option<ToolRun>,
+    /// AI agents: saved settings, the link listener and connected sessions.
+    agents: agents::AgentsState,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
     /// The current scroll gesture for `prefs.lock_scroll_axis`: distance so far, locked axis (true is vertical) and last scroll time.
@@ -385,6 +388,7 @@ impl App {
             demo,
             ephemeral: demo,
             tool: None,
+            agents: Default::default(),
             width_cache: HashMap::new(),
             frame_ms: 0.0,
             scroll_gesture: Default::default(),
@@ -564,6 +568,7 @@ impl App {
             for id in open {
                 app.connect(id);
             }
+            app.agents_start();
             if app.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
@@ -694,6 +699,9 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Here rather than in ui(): eframe skips ui() while the window is minimised or covered, and agent calls
+        // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
+        self.poll(ctx);
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
         // frames ask for focus once the window is visible (a no-op when it already has it).
@@ -722,7 +730,6 @@ impl eframe::App for App {
             eprintln!("frame_ms {:.3}", self.frame_ms);
         }
         let ctx = ui.ctx().clone();
-        self.poll(&ctx);
         self.lock_scroll_axis(&ctx);
         self.stop_hidden_watches();
         self.remember_tabs();
@@ -766,7 +773,12 @@ impl eframe::App for App {
         self.tool_window(&ctx);
         // After the modals, so a browser opened from the connection form draws over it.
         self.cloud_browser_window(&ctx);
+        // Opened from Settings, so after the modals to draw over them.
+        self.agents_rules_window(&ctx);
+        self.agents_activity_window(&ctx);
         self.toasts(&ctx);
+        // Last: an agent call waiting for an answer stacks above everything, Settings included.
+        self.agents_approval(&ctx);
         self.screenshot(&ctx);
     }
 }

@@ -7,6 +7,7 @@ impl App {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
+                Msg::Agent(ev) => self.on_agent(ctx, ev),
                 Msg::SqlConnected { conn, attempt, res } => self.on_sql_connected(conn, attempt, res),
                 Msg::SqlCols { req, cols, pk, estimated, matched } => {
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
@@ -649,8 +650,14 @@ impl App {
                 self.err(e);
             }
         }
-        if let Some(u) = undo {
-            self.push_undo(u);
+        // An agent's change never joins the user's list; its undo goes back to its Activity entry.
+        match undo {
+            Some(u) if u.agent.is_some() => {
+                let id = u.agent.unwrap_or_default();
+                self.agent_keep_undo(id, db::AgentUndo::Sql(u));
+            }
+            Some(u) => self.push_undo(u),
+            None => {}
         }
         // The worker only knows the database and collection, so a same-named
         // collection on another connection may reload too, which is harmless.
@@ -706,6 +713,9 @@ impl App {
     pub(super) fn reload_of(&mut self, i: usize) {
         if self.demo {
             return;
+        }
+        if let Some(t) = self.tabs.get_mut(i) {
+            t.agent_changed = false;
         }
         if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
             return self.reload_sql(i);

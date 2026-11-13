@@ -23,7 +23,7 @@ pub(in crate::db::sql) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -
 }
 
 pub(in crate::db::sql) fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: crate::db::sql::write::SqlUndo::Alter(Box::new(u)), ids: Default::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: crate::db::sql::write::SqlUndo::Alter(Box::new(u)), ids: Default::default() } }
 }
 
 /// Runs a recorded undo after checking the table is still as the change left it. The answer is the same as for
@@ -301,12 +301,12 @@ pub(in crate::db::sql) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo
     }
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let res = crate::db::sql_scope(db.conn, &schema, undo_trigger_job(db, &schema, &table, &u, read_only)).await;
-    let keep = res.is_err().then(|| UndoAction { at, ..trigger_undo_action(conn, &schema, &table, u) });
+    let keep = res.is_err().then(|| UndoAction { agent: None, at, ..trigger_undo_action(conn, &schema, &table, u) });
     Msg::SqlAltered { conn, database: String::new(), schema, table, res, undo: keep, sql_mode: None, alter: false, unsure: false }
 }
 
 pub(super) fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: crate::db::sql::write::SqlUndo::Trigger(Box::new(u)), ids: Default::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: crate::db::sql::write::SqlUndo::Trigger(Box::new(u)), ids: Default::default() } }
 }
 
 /// The count of orphan rows on PostgreSQL and a few of them, from reads of their own.

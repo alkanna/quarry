@@ -227,6 +227,13 @@ impl App {
         if let Ok(cat) = std::env::var("QUARRY_TEST_SETTINGS") {
             self.modal = Some(Modal::Settings);
             self.settings_cat = settings::SettingsCat::named(&cat);
+            if self.settings_cat == settings::SettingsCat::Agents {
+                self.agents_demo();
+            }
+        }
+        // QUARRY_TEST_AGENTS=<view> fills the AI agents windows with made-up calls, see agents/demo.rs.
+        if let Ok(v) = std::env::var("QUARRY_TEST_AGENTS") {
+            self.agents_demo_view(&v);
         }
         // Test switch: show the Shell view with a finished run in the demo picture.
         if std::env::var("QUARRY_TEST_SHELL").is_ok() {

@@ -478,7 +478,7 @@ fn change_failed(f: Fail, undo: bool) -> String {
 }
 
 fn undo_action(db: &Db, conn: u64, schema: &str, table: &str, u: TrigUndo, ids: write::PgIds) -> UndoAction {
-    UndoAction { at: std::time::Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo: write::SqlUndo::Trigger(Box::new(u)), ids } }
+    UndoAction { agent: None, at: std::time::Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo: write::SqlUndo::Trigger(Box::new(u)), ids } }
 }
 
 /// Runs a recorded undo in one transaction, after checking the trigger and its function are as the change left them.
@@ -495,7 +495,7 @@ pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_o
     let res: Res<String> = out.map(|_| p.said.clone()).map_err(|f| change_failed(f, true));
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit is
     // the one that failed, when it may have run.
-    let keep = (res.is_err() && !unsure).then(|| UndoAction { at, ..undo_action(db, conn, &schema, &table, u, ids) });
+    let keep = (res.is_err() && !unsure).then(|| UndoAction { agent: None, at, ..undo_action(db, conn, &schema, &table, u, ids) });
     Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res, undo: keep, sql_mode: None, alter: false, unsure }
 }
 

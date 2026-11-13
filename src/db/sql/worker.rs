@@ -348,7 +348,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
 /// schema that comes earlier on the editor's path could then make the name resolve to a domain of their own, whose CHECK
 /// would run with the editor's privileges. With the path reduced to pg_catalog every user type comes back as `schema.type`.
 /// It runs in a read-only transaction of its own that is always rolled back, so a pooler never sees the setting leave it.
-async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
+pub(super) async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
     // Quarry's own query, no user text, so the connection goes back to the pool.
     let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
     let mut conn = pools.acquire(db.opts.database()).await?;

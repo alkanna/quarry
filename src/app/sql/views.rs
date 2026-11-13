@@ -81,6 +81,7 @@ impl App {
             self.tm().unwrap().page = 0;
             self.reload();
         }
+        self.agent_notice(ui);
         ui.add_space(10.0);
         let t = self.t().unwrap();
         let grouped = t.sql.as_ref().and_then(|s| s.matched);

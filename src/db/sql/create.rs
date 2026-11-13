@@ -650,7 +650,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
 }
 
 fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo, ids: Default::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo, ids: Default::default() } }
 }
 
 /// The part of a table undo that runs with the table locked: it must still be the table the create made,
@@ -812,7 +812,7 @@ impl Worker {
             return self.spawn_sql(db.conn, &scope, super::pg::create::undo(db.clone(), a, read_only));
         }
         self.spawn_sql(db.conn, &scope, async move {
-            let UndoAction { at, conn, db: schema, coll: table, kind } = a;
+            let UndoAction { at, conn, db: schema, coll: table, kind, .. } = a;
             let made = match &kind {
                 UndoKind::Sql { undo: SqlUndo::CreatedTable { made }, .. } => made.clone(),
                 _ => None,
@@ -824,7 +824,7 @@ impl Worker {
             };
             let said = if table.is_empty() { format!("Removed database {schema}") } else { format!("Removed table {table}") };
             let (res, dbs) = split(res.map(|(_, l)| l), said);
-            let undo = (!undone).then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind });
+            let undo = (!undone).then(|| UndoAction { agent: None, at, conn, db: schema.clone(), coll: table.clone(), kind });
             // A refused undo changes nothing, so the app has nothing to refresh.
             Msg::SqlDdl { conn, database: String::new(), schema, table, what, res, undo, dbs, sql_mode: None }
         });

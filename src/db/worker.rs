@@ -485,7 +485,7 @@ impl Worker {
             let (res, undo) = match t.c().insert_one(d).await {
                 Ok(r) => (
                     Ok(format!("Inserted document {}", short(&r.inserted_id))),
-                    Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
+                    Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
                 ),
                 Err(err) => (Err(e(err)), None),
             };
@@ -512,7 +512,7 @@ impl Worker {
                 Ok(r) if r.deleted_count == 0 => (Err(CONFLICT.into()), None),
                 Ok(_) => (
                     Ok("Deleted 1 document".into()),
-                    record_undo.then(|| UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Delete { old } }),
+                    record_undo.then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Delete { old } }),
                 ),
                 Err(err) => (Err(e(err)), None),
             }
@@ -523,18 +523,11 @@ impl Worker {
     /// Undo restores exactly the ones that went, never ones changed or removed meanwhile.
     pub fn delete_docs(&self, conn: u64, t: Target, old: Vec<Document>) {
         self.write(t.at(), async move {
-            let c = t.c();
             let total = old.len();
-            let mut gone = Vec::new();
-            for d in old {
-                match c.delete_one(unchanged(&d)).await {
-                    Ok(r) if r.deleted_count == 1 => gone.push(d),
-                    Ok(_) => {}
-                    Err(err) => {
-                        let undo = (!gone.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::DeleteMany { old: gone.clone() } });
-                        return (Err(format!("Stopped after deleting {}: {}", gone.len(), e(err))), undo);
-                    }
-                }
+            let (gone, err) = delete_unchanged(&t.c(), old, None).await;
+            if let Some(err) = err {
+                let undo = (!gone.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::DeleteMany { old: gone.clone() } });
+                return (Err(format!("Stopped after deleting {}: {err}", gone.len())), undo);
             }
             let skipped = total - gone.len();
             if gone.is_empty() {
@@ -544,7 +537,7 @@ impl Worker {
             if skipped > 0 {
                 msg += &format!(", {skipped} skipped because they changed or were already deleted");
             }
-            (Ok(msg), Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
+            (Ok(msg), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
         });
     }
 
@@ -929,13 +922,13 @@ impl Worker {
                                 let done = inserted_before(&err, chunk.len());
                                 ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
                                 let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
-                                let undo = (!ids.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
+                                let undo = (!ids.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
                                 return (Err(msg), undo);
                             }
                         }
                     }
                     let n = ids.len();
-                    (Ok(format!("Imported {n} documents")), Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
+                    (Ok(format!("Imported {n} documents")), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
                 }
                 Some(key) => {
                     let (mut matched, mut upserted) = (0u64, 0u64);
@@ -1080,7 +1073,7 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
         Ok(r) if r.matched_count == 0 => (Err(CONFLICT.into()), None),
         Ok(_) => (
             Ok(format!("Saved document {}", short(&id))),
-            record_undo.then(|| UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Update { old, new } }),
+            record_undo.then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Update { old, new } }),
         ),
         Err(err) => (Err(e(err)), None),
     }
@@ -1138,6 +1131,24 @@ pub(crate) fn rename_filter(filter: Document, to: &str) -> Document {
 }
 
 pub const CONFLICT: &str = "Not saved: this document changed on the server since you opened it. Reload and try again.";
+
+/// Deletes each document only while the server still holds it exactly as read, and returns the ones that went, which
+/// are the only ones an undo may bring back. A document changed or removed meanwhile is skipped. Stops at the first
+/// server error, or at `until`, and says why. Shared by the user's delete of selected documents and agent deletes.
+pub(crate) async fn delete_unchanged(c: &mongodb::Collection<Document>, old: Vec<Document>, until: Option<Instant>) -> (Vec<Document>, Option<String>) {
+    let mut gone = Vec::new();
+    for d in old {
+        if until.is_some_and(|u| Instant::now() >= u) {
+            return (gone, Some("Stopped at the time limit".into()));
+        }
+        match c.delete_one(unchanged(&d)).await {
+            Ok(r) if r.deleted_count == 1 => gone.push(d),
+            Ok(_) => {}
+            Err(err) => return (gone, Some(e(err))),
+        }
+    }
+    (gone, None)
+}
 
 /// Matches the document only while every field is still exactly as we last read it,
 /// so a concurrent change by someone else is never silently overwritten.

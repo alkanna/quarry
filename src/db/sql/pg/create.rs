@@ -1257,7 +1257,7 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
 }
 
 fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
 }
 
 fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
@@ -1358,7 +1358,7 @@ impl Worker {
 /// Undoes a create of a database, schema or table (`sql_undo_create` hands PostgreSQL's here). Only an empty, unchanged object goes. A
 /// refused undo hands the entry back, so it stays in the list with the reason.
 pub(in crate::db::sql) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
-    let UndoAction { at, conn, db: schema, coll: table, kind } = a;
+    let UndoAction { at, conn, db: schema, coll: table, kind, .. } = a;
     let UndoKind::Sql { database, cols, undo, ids } = kind else { return Msg::SqlDdl { conn, database: String::new(), schema, table, what: Ddl::DroppedTable, res: Err("Not a create".into()), undo: None, dbs: None, sql_mode: None } };
     let (what, res, dbs, said) = match &undo {
         SqlUndo::CreatedDb { oid, baseline } => {
@@ -1369,7 +1369,7 @@ pub(in crate::db::sql) async fn undo(db: Db, a: UndoAction, read_only: bool) -> 
         SqlUndo::PgCreatedTable { oid, state } => (Ddl::DroppedTable, undo_table(&db, &schema, &table, &Made { oid: oid.clone(), state: state.clone() }, read_only).await, None, format!("Removed table {table}")),
         _ => (Ddl::DroppedTable, Err("Not a create".into()), None, String::new()),
     };
-    let kept = res.is_err().then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo, ids } });
+    let kept = res.is_err().then(|| UndoAction { agent: None, at, conn, db: schema.clone(), coll: table.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo, ids } });
     // A refused undo changes nothing, so the app has nothing to refresh.
     Msg::SqlDdl { conn, database, schema, table, what, res: res.map(|_| said), undo: kept, dbs, sql_mode: None }
 }

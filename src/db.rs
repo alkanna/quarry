@@ -8,6 +8,7 @@ use mongodb::Client;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+mod agent;
 mod analysis;
 mod code;
 pub(crate) mod dates;
@@ -22,6 +23,7 @@ pub mod sql;
 pub mod copy;
 mod tools;
 mod worker;
+pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
 pub use analysis::*;
 pub use code::*;
 pub use dates::*;
@@ -183,6 +185,9 @@ pub enum UndoKind {
 }
 
 pub struct UndoAction {
+    /// The Agent activity entry of a change an agent made. Such an action never joins the user's undo list: when its
+    /// undo fails and hands it back, it goes back to that entry.
+    pub agent: Option<u64>,
     pub at: Instant,
     pub conn: u64,
     pub db: String,
@@ -200,6 +205,8 @@ pub enum ExplainOf {
 pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
     Connected { conn: u64, attempt: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    /// The AI agents link: its state, sessions, and calls the App answers through the oneshot inside.
+    Agent(AgentEvent),
     /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
     SqlConnected { conn: u64, attempt: u64, res: Res<(sql::Db, Vec<String>, Option<Way>)> },
     /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.

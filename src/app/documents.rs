@@ -445,6 +445,7 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(TEXT())).wrap());
             });
         }
+        self.agent_notice(ui);
         ui.add_space(10.0);
         let t = self.t().unwrap();
         let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);

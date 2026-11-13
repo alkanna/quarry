@@ -13,11 +13,13 @@
 
 ![Documents view](docs/documents.png)
 
-## Why Quarry
+## About
 
-**It is native.** Quarry is one Rust binary, a download of about 25 MB, drawn on the GPU with [egui](https://github.com/emilk/egui). There is no Electron and no web view. Database work never runs on the UI thread, so the window stays responsive while a slow query is out, and result pages are held as raw BSON, which takes about a tenth of the memory of decoded documents.
+Quarry is free and open source under the [MIT license](LICENSE). There is no paid edition.
 
-Measured on an M1 Pro with `bench.py`, on a full page of 1,000 rows:
+**It is a native app.** Quarry is a single Rust binary, about 25 MB to download, and it draws its own window on the GPU with [egui](https://github.com/emilk/egui). There is no Electron and no web view. Database work never runs on the UI thread, so the window keeps responding while a slow query is out. Result pages are held as raw BSON, which takes about a tenth of the memory of decoded documents.
+
+Here is what `bench.py` measures on an M1 Pro, with a full page of 1,000 rows open:
 
 | | MongoDB documents | SQL rows |
 |---|---|---|
@@ -28,30 +30,46 @@ Measured on an M1 Pro with `bench.py`, on a full page of 1,000 rows:
 
 With nothing open, the footprint is 33 MB.
 
-**It is hard to break production with.** Every connection opens read-only until you unlock it. Edits are staged as drafts, previewed, saved together and can be undone, and a save never overwrites a change someone else made in the meantime.
+**It is careful with production.** Every connection opens read-only and stays that way until you unlock it. Edits start as drafts: you preview them, save them together, and can undo them. A save never overwrites a change someone else made in the meantime.
 
-**It is one tool for four engines.** MongoDB, MySQL (5.7 to 9), MariaDB (10.6+) and PostgreSQL (13+) open side by side in tabs, with the same shortcuts, the same editing model and the same admin windows. One shell script can read from several of them at once.
+Read-only mode blocks what Quarry sends. A server function that writes by itself still runs with your role's rights, so use a read-only role where that matters.
+
+**It handles four engines.** MongoDB, MySQL (5.7 to 9), MariaDB (10.6+) and PostgreSQL (13+) open side by side in tabs, with the same shortcuts, the same editing model and the same admin windows. One shell script can read from several of them at once.
 
 ## Features
 
-- Query MongoDB with `find` and `aggregate`, with a preview after each pipeline stage, explain plans and copy as code.
-- Query SQL with typed filter rules or a full editor: several statements at once, autocomplete, Format, Explain and Stop.
-- Keep saved queries, history and a query log.
-- Script in JavaScript on [Bun](https://bun.sh), across Mongo and SQL connections in the same script.
-- Edit structure: indexes, columns, foreign keys, triggers and validators.
-- Administer servers: status, sessions with Kill or Cancel, users, roles and privileges on every engine.
-- Import and export JSON, CSV, TSV and SQL dumps, compare and sync collections, and run MongoDB dump and restore.
-- Connect through SSH tunnels, SOCKS5 and TLS, with client certificates on PostgreSQL. Passwords stay in the system keychain.
-- Pick a Google Cloud SQL instance from your gcloud account, and Quarry runs the Cloud SQL Auth Proxy for you.
-- Work from the keyboard: Cmd+K searches every connection and runs commands, Cmd+/ lists every shortcut.
-- Read comfortably: 17 themes, larger text, OpenDyslexic, a soft background and a reading line for wide tables.
-
-Read-only mode blocks what Quarry sends. A server function that writes by itself still runs with your role's rights, so use a read-only role where that matters.
+- Query MongoDB with `find` and `aggregate`. Each pipeline stage has a preview, and there are explain plans and copy as code.
+- Query SQL with typed filter rules or a full editor that runs several statements at once, with autocomplete, Format, Explain and Stop.
+- Saved queries, history and a query log.
+- Scripts in JavaScript on [Bun](https://bun.sh). One script can use Mongo and SQL connections together.
+- Structure editing: indexes, columns, foreign keys, triggers and validators.
+- Server administration on every engine: status, sessions with Kill or Cancel, users, roles and privileges.
+- Import and export of JSON, CSV, TSV and SQL dumps, compare and sync for collections, and MongoDB dump and restore.
+- Connections through SSH tunnels, SOCKS5 and TLS, with client certificates on PostgreSQL. Passwords stay in the system keychain.
+- Google Cloud SQL: pick an instance from your gcloud account, and Quarry runs the Cloud SQL Auth Proxy for you.
+- Keyboard: Cmd+K searches every connection and runs commands, Cmd+/ lists every shortcut.
+- Reading: 17 themes, larger text, OpenDyslexic, a soft background and a reading line for wide tables.
+- A built-in MCP server for AI agents, with permissions per connection, approvals and data scrubbing. See [AI agents](#ai-agents).
 
 | | |
 |---|---|
 | ![SQL Query with several statements](docs/sql-query.png) | ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) |
 | ![A shell script reading a SQL and a MongoDB connection](docs/shell-attach.png) | ![PostgreSQL roles and privileges](docs/pg-roles.png) |
+
+## AI agents
+
+Quarry has a built-in [MCP](https://modelcontextprotocol.io) server, so agents such as Claude Code, Claude Desktop, Cursor and Codex can query and change your databases through it. It is off until you turn it on in Settings > AI agents, which also shows the command that adds Quarry to each client. For Claude Code on macOS:
+
+```sh
+claude mcp add --scope user quarry -- /Applications/Quarry.app/Contents/MacOS/quarry mcp
+```
+
+The agent works through the open Quarry window, so Quarry has to be running, and nothing it does goes around your settings:
+
+- A connection is not shared until you share it, for reading or for reading and writing. An agent's writes also need the connection unlocked, like yours.
+- For each connection, reading, changing data, changing structure and running scripts are each set to Never, Ask or Allow. Ask shows the call in Quarry, with what it would touch, before it runs. Structure changes and shell scripts always ask.
+- Secrets and personal data are scrubbed before anything leaves Quarry. Secrets are hidden everywhere; personal data can still be queried but comes back masked. Your own rules add field paths, field names, regexes and value detectors.
+- Changes made by an agent can be undone from the Activity window, within a size limit, and every call is kept in an audit log on disk.
 
 ## Install
 
