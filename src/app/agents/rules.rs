@@ -309,7 +309,6 @@ impl App {
         });
         ui.add_space(6.0);
         let mut flip = None;
-        let mut moved = None;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -354,7 +353,7 @@ impl App {
             w.sel = None;
         }
         let mut flip = None;
-        let mut moved = None;
+        let mut moved: Option<dnd::Move> = None;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             let full = ui.available_width();
