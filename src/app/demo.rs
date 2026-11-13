@@ -340,7 +340,7 @@ impl App {
         }
     }
 
-    fn demo_dialog(&mut self, which: &str) {
+    pub(super) fn demo_dialog(&mut self, which: &str) {
         let sel = self.tabs[1].sel.clone();
         let docs: Vec<Document> = self.tabs[1].decoded_docs().into_iter().take(3).collect();
         self.modal = Some(match which {

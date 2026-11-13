@@ -223,6 +223,7 @@ impl App {
         chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
         paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connections"));
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
         }

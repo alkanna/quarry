@@ -285,9 +285,18 @@ impl App {
         let mut always = true;
         form_card(ui, "Options", "", |rows| {
             rows.full(|ui| {
+                // A hairline between the two columns, so each switch reads with the label on its left.
+                let mid = ui.max_rect().center().x;
+                let top = ui.cursor().top();
                 ui.columns(2, |c| {
+                    c[0].set_max_width(c[0].available_width() - 18.0);
+
                     let opt = |ui: &mut egui::Ui, on: &mut bool, enabled: bool, title: &str, hint: &str, tip: &str| {
                         ui.horizontal(|ui| {
+                            // The right column starts after the divider.
+                            if ui.min_rect().left() > mid {
+                                ui.add_space(14.0);
+                            }
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 ui.label(medium(RichText::new(title).size(TXT_BODY).color(BRIGHT())));
@@ -317,6 +326,8 @@ impl App {
                         opt(&mut c[1], &mut f.owners, !filtered, "Set owners", "ALTER ... OWNER TO for each object", "ALTER ... OWNER TO for everything the file makes. Off, everything belongs to the role that runs the file.");
                     }
                 });
+                let bottom = ui.cursor().top() - 10.0;
+                ui.painter().vline(mid, egui::Rangef::new(top, bottom), Stroke::new(1.0, RAISED_LINE()));
             });
         });
         // The file name carries the choice, so the path and the switch cannot disagree.
@@ -542,6 +553,16 @@ impl App {
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None, bytes: None },
         ];
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into(), size_req: 0 })));
+    }
+}
+
+#[cfg(test)]
+impl DumpForm {
+    pub(in crate::app) fn path(&self) -> &str {
+        &self.path
+    }
+    pub(in crate::app) fn whole(&self) -> bool {
+        self.what == What::Whole
     }
 }
 
