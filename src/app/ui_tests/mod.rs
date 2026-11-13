@@ -9,6 +9,7 @@ mod agents;
 mod agents_windows;
 mod calendar;
 mod dialogs;
+mod dnd;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
