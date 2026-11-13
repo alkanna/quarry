@@ -344,9 +344,10 @@ impl App {
     /// Where the memory goes, by what holds it, estimated from the rows and texts kept. Empty lines are left out.
     // ponytail: undo history and suggestion caches are left out as small; add a line if one grows.
     pub(super) fn mem_parts(&self) -> Vec<(&'static str, usize)> {
-        let cur = self.tabs.get(self.cur).map_or(0, Tab::mem);
-        let open: usize = self.tabs.iter().map(Tab::mem).sum();
-        let log: usize = db::log().iter().map(|e| e.cmd.len() + e.db.len() + e.name.len() + e.err.as_ref().map_or(0, String::len)).sum();
+        let sizes: Vec<usize> = self.tabs.iter().map(Tab::mem).collect();
+        let cur = sizes.get(self.cur).copied().unwrap_or(0);
+        let open: usize = sizes.iter().sum();
+        let log: usize = db::log().iter().map(|e| std::mem::size_of::<db::LogEntry>() + e.cmd.len() + e.db.len() + e.name.len() + e.err.as_ref().map_or(0, String::len)).sum();
         let parts = [("Current tab", cur), ("Other open tabs", open - cur), ("Closed tabs kept to reopen", self.closed.iter().map(Tab::mem).sum()), ("Query log", log)];
         parts.into_iter().filter(|p| p.1 > 0).collect()
     }
@@ -356,6 +357,9 @@ impl App {
         ui.add_space(6.0);
         let parts = self.mem_parts();
         let known: usize = parts.iter().map(|p| p.1).sum();
+        // The lines are estimates of heap bytes and the total is resident memory, so they can pass it; a remainder of
+        // zero would then read as exact, so it is left out.
+        let rest = total.map(|t| t as usize).filter(|&t| t > known).map(|t| t - known);
         let mono = FontId::monospace(TXT_CAPTION);
         egui::Grid::new("mem-tip").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
             let line = |ui: &mut egui::Ui, what: &str, n: usize| {
@@ -366,13 +370,13 @@ impl App {
             for (what, n) in &parts {
                 line(ui, what, *n);
             }
-            if let Some(t) = total {
-                line(ui, "Everything else", (t as usize).saturating_sub(known));
+            if let Some(rest) = rest {
+                line(ui, "Everything else", rest);
             }
         });
-        if total.is_some() {
+        if rest.is_some() {
             ui.add_space(4.0);
-            ui.label(RichText::new("Everything else is the app itself, fonts, GPU textures, and memory already freed that the system has not taken back yet.").size(TXT_CAPTION).color(FAINT()));
+            ui.label(RichText::new("Everything else is the app itself, fonts, GPU textures, data not listed above, and memory already freed that the system has not taken back yet.").size(TXT_CAPTION).color(FAINT()));
         }
     }
 
