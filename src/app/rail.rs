@@ -159,6 +159,16 @@ impl App {
                                 dnd::reorder(ui, egui::Id::unique(("rail-capsule", *gid)), dnd::Items::vertical(&msizes).keys(&mkeys), |ui, i, mst| {
                                     let m = members[i];
                                     dnd::carry(ui.ctx(), mst, || DragItem::Conn(m));
+                                    // The lifted tile stays inside its folder, so once the pointer leaves the folder a
+                                    // ghost of the tile follows it to show where it is being carried.
+                                    if mst.lifted
+                                        && ui.ctx().input(|i| i.pointer.any_down())
+                                        && !dnd::drag_cancelled(ui.ctx())
+                                        && let Some(p) = ui.ctx().pointer_latest_pos().filter(|p| !list.expand(6.0).contains(*p))
+                                        && let Some(c) = self.conn(m)
+                                    {
+                                        ghost_tile(ui, p, c);
+                                    }
                                     let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 4.0), egui::vec2(28.0, 28.0));
                                     let target = (!mst.busy).then_some(DropOn::Member { id: m, gid: *gid });
                                     self.conn_tile(ui, at, m, mst.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
@@ -500,6 +510,21 @@ fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
     order.retain(|c| *c != conn);
     let at = order.iter().position(|c| *c == anchor).map_or(order.len(), |i| i + after as usize);
     order.insert(at, conn);
+}
+
+/// A tile carried beside the pointer at `p`: its engine logo on a raised square, painted without a widget so it never
+/// covers the drop targets under the pointer.
+fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
+    let ctx = ui.ctx();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("rail-ghost")));
+    let rect = egui::Rect::from_min_size(p + egui::vec2(10.0, 6.0), egui::vec2(28.0, 28.0));
+    painter.add(ui.visuals().popup_shadow.as_shape(rect, R_MD));
+    painter.rect(rect, R_MD, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+    let mark = engine_mark(c.meta.engine, &c.server.product).0;
+    if let Some(tex) = engine_logo(ctx, mark) {
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        painter.image(tex.id(), egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)), uv, mark_color(mark));
+    }
 }
 
 /// A tile's slot in the rail list: the 28 px tile and the 8 px gap, half above and half below it.
