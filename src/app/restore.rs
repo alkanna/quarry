@@ -9,6 +9,8 @@ use crate::library::{Folder, Script};
 pub(super) enum Restore {
     /// A deleted group, with where it stood in the list. Its members left the group when it went.
     Group { g: Group, at: usize },
+    /// The groups as they were before a change that created or moved into one, such as a drop on the rail.
+    Groups(Box<Groups>),
     /// Deleted library scripts and the folders that held them.
     Saved { scripts: Vec<Script>, folders: Vec<Folder> },
     /// A file moved to the trash, with the bytes it held.
@@ -24,6 +26,14 @@ impl App {
                 self.groups.restore(g, at, &alive);
                 self.save_groups();
                 self.ok(format!("Group {name} is back."));
+            }
+            Restore::Groups(before) => {
+                // Connections removed since are pruned so the snapshot never brings a dead id back.
+                self.groups = *before;
+                let alive = self.conn_ids();
+                self.groups.prune(&alive);
+                self.save_groups();
+                self.ok("Grouping undone.");
             }
             Restore::Saved { scripts, folders } => {
                 let n = scripts.len();
