@@ -478,6 +478,8 @@ impl App {
         let mut reopen = false;
         let mut search = None;
         let mut tab_move: Option<dnd::Move> = None;
+        // Move left or Move right picked in a tab's menu.
+        let mut menu_move: Option<dnd::Move> = None;
         let has_closed = !self.closed.is_empty();
         const TAB_MIN_W: f32 = 120.0;
         const PLUS_W: f32 = 32.0;
@@ -607,6 +609,10 @@ impl App {
                             if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
                                 reopen = true;
                             }
+                            ui.separator();
+                            if let Some(mv) = dnd::move_items(ui, n, i, &[], true) {
+                                menu_move = Some(mv);
+                            }
                         });
                         if xresp.clicked() || resp.middle_clicked() {
                             close = Some(i);
@@ -637,7 +643,7 @@ impl App {
             }
         });
         });
-        if let Some(m) = tab_move {
+        if let Some(m) = tab_move.or(menu_move) {
             // The current tab stays current wherever it or the others move; nothing else is kept by tab index.
             let c = self.cur;
             self.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };

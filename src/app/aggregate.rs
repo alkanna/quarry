@@ -48,7 +48,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                     }
                 });
                 if n > 1 {
-                    ui.label(RichText::new("Drag to reorder").size(TXT_SMALL).color(FAINT()));
+                    ui.label(RichText::new("Drag or Alt+Up/Down to reorder").size(TXT_SMALL).color(FAINT()));
                 }
             });
         });
@@ -213,12 +213,21 @@ impl App {
                             let sizes: Vec<f32> = t.stages.iter().map(|s| heights.get(&s.uid).copied().unwrap_or(160.0)).collect();
                             let keys: Vec<egui::Id> = t.stages.iter().map(|s| egui::Id::unique(("stage", s.uid))).collect();
                             let mut grew = false;
-                            let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+                            let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
                                 let s = &mut t.stages[i];
                                 if st.lifted {
                                     return lifted_stage(ui, i, s);
                                 }
                                 let top = ui.max_rect().top();
+                                // The header strip is the card's own focusable widget, under the operator menu and the
+                                // switch, so Tab or a click on it gives the card the focus that Alt+Up and Alt+Down move,
+                                // and a right click on it offers Move up and Move down.
+                                let strip = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), top + 6.0), egui::vec2(ui.max_rect().width(), 34.0));
+                                let head = ui.interact(strip, ui.scope_id().with("stage-head"), Sense::click());
+                                head.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Stage {} {}", i + 1, s.op)));
+                                if head.clicked() {
+                                    head.request_focus();
+                                }
                                 // A selectable label would take a drag that starts on it for selecting its text.
                                 ui.style_mut().interaction.selectable_labels = false;
                                 ui.add_space(6.0);
@@ -228,7 +237,7 @@ impl App {
                                     heights.insert(s.uid, h);
                                     grew = true;
                                 }
-                                ui.response()
+                                head
                             });
                             if grew {
                                 ui.ctx().request_repaint();

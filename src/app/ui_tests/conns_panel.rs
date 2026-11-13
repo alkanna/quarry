@@ -263,6 +263,8 @@ fn a_hovered_row_shows_its_menu_button_with_browse_databases() {
     ui.h.hover_at(at);
     ui.h.run_steps(2);
     ui.click("More for prod-us");
+    let w = ui.h.get_by_label("Browse databases").rect().width();
+    assert!(w < 320.0, "the row menu is {w} px wide");
     ui.click("Browse databases");
     assert_eq!((ui.app().active, ui.app().prefs.side_mode()), (Some(12), SideMode::Explorer));
     // A group row has one too, with the group's menu.

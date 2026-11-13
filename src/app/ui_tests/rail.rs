@@ -161,6 +161,9 @@ fn right_click(ui: &mut UiApp, label: &str) {
 fn a_folder_menu_disconnects_its_members_and_stops_folding() {
     let Some(mut ui) = demo_ui(with_group) else { return };
     right_click(&mut ui, "Fleet folder");
+    // The standard menu look: proportional text in a menu that hugs its items, not a value list across the window.
+    let w = ui.h.get_by_label("Don't fold in the rail").rect().width();
+    assert!(w < 320.0, "the folder menu is {w} px wide");
     ui.click("Don't fold in the rail");
     assert!(!ui.app().groups.groups[0].fold_rail);
     // The members are tiles of their own now.

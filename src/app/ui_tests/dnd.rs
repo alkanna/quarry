@@ -157,3 +157,49 @@ fn alt_arrow_moves_the_focused_header() {
     want.swap(k, k + 1);
     assert_eq!(shown(&ui), want, "Alt+Right did not move the focused header");
 }
+
+#[test]
+fn the_shortcut_list_names_the_keyboard_moves() {
+    assert!(SHORTCUTS.iter().any(|(k, what)| k.starts_with("Alt+Up/Down") && what.contains("Move the focused row")), "Alt+arrows are missing from the shortcut list");
+}
+
+/// Opens the right-click menu of the widget named `label`.
+fn menu_of(ui: &mut UiApp, label: &str) {
+    ui.show(label);
+    let at = ui.h.get_by_label(label).rect().center();
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+}
+
+#[test]
+fn a_tab_moves_from_its_menu() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let colls = |a: &App| a.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
+    assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
+    menu_of(&mut ui, "Tab customers");
+    ui.click("Move right");
+    assert_eq!(colls(ui.app()), ["orders", "customers", "events"]);
+    menu_of(&mut ui, "Tab customers");
+    let w = ui.h.get_by_label("Move left").rect().width();
+    assert!(w < 320.0, "the tab menu is {w} px wide");
+    ui.click("Move left");
+    assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
+}
+
+#[test]
+fn a_group_member_moves_from_its_menu() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_demo();
+        a.demo_conns("edit");
+    }) else {
+        return;
+    };
+    let form = |a: &App| match &a.modal {
+        Some(Modal::GroupEdit(f)) => Some(f.members.clone()),
+        _ => None,
+    };
+    assert_eq!(form(ui.app()), Some(vec![11, 12, 13]));
+    menu_of(&mut ui, "Member billing");
+    ui.click("Move up");
+    assert_eq!(form(ui.app()), Some(vec![11, 13, 12]));
+}

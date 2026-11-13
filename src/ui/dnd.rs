@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use super::theme::*;
-use super::widgets::{focus_ring, side_row_sense};
+use super::widgets::{focus_ring, menu_look, side_row_sense};
 use eframe::egui::{self, FontId, Sense, Stroke};
 use std::time::Duration;
 
@@ -112,17 +112,25 @@ pub(crate) struct Items<'a> {
     keys: Option<&'a [egui::Id]>,
     blocks: &'a [usize],
     into: Option<&'a [bool]>,
+    menu: bool,
 }
 
 impl<'a> Items<'a> {
     /// A column of items as wide as the space left.
     pub(crate) fn vertical(sizes: &'a [f32]) -> Self {
-        Self { axis: Axis::Vertical, sizes, cross: None, keys: None, blocks: &[], into: None }
+        Self { axis: Axis::Vertical, sizes, cross: None, keys: None, blocks: &[], into: None, menu: false }
     }
 
     /// A row of items `height` tall.
     pub(crate) fn horizontal(sizes: &'a [f32], height: f32) -> Self {
-        Self { axis: Axis::Horizontal, sizes, cross: Some(height), keys: None, blocks: &[], into: None }
+        Self { axis: Axis::Horizontal, sizes, cross: Some(height), keys: None, blocks: &[], into: None, menu: false }
+    }
+
+    /// Gives each item a right-click menu with Move up and Move down (left and right for a row), for a list whose items
+    /// have no menu of their own. A list with one calls `move_items` inside it instead.
+    pub(crate) fn menu(mut self) -> Self {
+        self.menu = true;
+        self
     }
 
     /// One stable key per item, such as a column name or a connection id. Each item's `Ui` is keyed by it, so its
@@ -176,12 +184,44 @@ impl Move {
         if self.to > self.from { self.to + 1 } else { self.to }
     }
 
+    /// Moves the item in `v`. A `to` past the end is the end, so a list that shrank since the move was made still takes
+    /// it; a move into an item is the caller's to apply.
     pub(crate) fn apply<T>(self, v: &mut Vec<T>) {
-        if !self.into && self.from < v.len() && self.to < v.len() {
+        if !self.into && self.from < v.len() {
             let x = v.remove(self.from);
-            v.insert(self.to, x);
+            v.insert(self.to.min(v.len()), x);
         }
     }
+}
+
+/// "Move up" and "Move down" (or left and right) for item `k` of `n` in a menu, with the Alt+arrow keys that do the
+/// same as their shortcut text, so a list that drags to reorder can also be reordered without a drag or a key. Returns
+/// the move picked.
+pub(crate) fn move_items(ui: &mut egui::Ui, n: usize, k: usize, blocks: &[usize], horizontal: bool) -> Option<Move> {
+    let steps = if horizontal { [("Move left", "Alt+Left", -1), ("Move right", "Alt+Right", 1)] } else { [("Move up", "Alt+Up", -1), ("Move down", "Alt+Down", 1)] };
+    let mut out = None;
+    for (label, key, step) in steps {
+        let to = key_move(blocks, n, k, step);
+        if ui.add_enabled(to.is_some(), egui::Button::new(label).shortcut_text(key)).clicked() {
+            out = to.map(|to| Move { from: k, to, into: false });
+            ui.close();
+        }
+    }
+    out
+}
+
+/// One id per item from its name, telling apart items that share a name (two columns of one name in a result or an
+/// index) by how many came before, so `reorder` never gives two items one id.
+pub(crate) fn unique_keys<T: std::hash::Hash + Eq>(salt: &str, items: &[T]) -> Vec<egui::Id> {
+    let mut seen: std::collections::HashMap<&T, usize> = std::collections::HashMap::new();
+    items
+        .iter()
+        .map(|t| {
+            let n = seen.entry(t).or_insert(0);
+            *n += 1;
+            egui::Id::unique((salt, t, *n))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -338,7 +378,7 @@ pub(crate) fn paint_spot(p: &egui::Painter, rect: egui::Rect, spot: Spot, x0: f3
 /// scroll area the list scrolls, faster the closer the pointer. Esc, or a release away from the list, cancels and the
 /// item lands back in its slot.
 pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: impl FnMut(&mut egui::Ui, usize, ItemState) -> egui::Response) -> Option<Move> {
-    let Items { axis, sizes, cross, keys, blocks, into } = items;
+    let Items { axis, sizes, cross, keys, blocks, into, menu } = items;
     let n = sizes.len();
     let ctx = ui.ctx().clone();
     let key = |k: usize| keys.and_then(|v| v.get(k).copied()).unwrap_or_else(|| egui::Id::unique(k));
@@ -484,6 +524,17 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
         focus_ring(ui, &r, r.rect, R_SM as f32);
         if r.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if menu {
+            r.context_menu(|ui| {
+                menu_look(ui);
+                if let Some(mv) = move_items(ui, n, k, blocks, matches!(axis, Axis::Horizontal))
+                    && out.is_none()
+                {
+                    out = Some(mv);
+                    m.epoch = m.epoch.wrapping_add(1);
+                }
+            });
         }
         if r.has_focus() && out.is_none() {
             let step = ctx.input_mut(|i| if i.consume_key(egui::Modifiers::ALT, back) { -1 } else if i.consume_key(egui::Modifiers::ALT, fwd) { 1 } else { 0 });
@@ -717,6 +768,53 @@ mod tests {
         assert_eq!(drag_in_list(0, 88.0, &[false, false, true, false]), Some(Move { from: 0, to: 2, into: false }));
         // Back where it started: nothing.
         assert_eq!(drag_in_list(1, 46.0, &[false; 4]), None);
+    }
+
+    #[test]
+    fn a_move_past_the_end_lands_last_and_names_alike_get_their_own_keys() {
+        let mut v = vec!['a', 'b', 'c'];
+        Move { from: 0, to: 7, into: false }.apply(&mut v);
+        assert_eq!(v, ['b', 'c', 'a'], "a move past the end was dropped");
+        Move { from: 0, to: 1, into: true }.apply(&mut v);
+        assert_eq!(v, ['b', 'c', 'a']);
+        Move { from: 5, to: 0, into: false }.apply(&mut v);
+        assert_eq!(v, ['b', 'c', 'a']);
+        let k = unique_keys("cols", &["id", "name", "id"]);
+        assert!(k[0] != k[2] && k[0] != k[1]);
+        assert_eq!(k[0], unique_keys("cols", &["id"])[0], "the first of a name keeps its key");
+    }
+
+    #[test]
+    fn a_list_that_shrinks_during_a_drag_lets_go_without_a_move() {
+        use std::cell::{Cell, RefCell};
+        let (out, top, n) = (Cell::new(None), RefCell::new(None), Cell::new(4usize));
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(200.0, 200.0)).build_ui(|ui| {
+            *top.borrow_mut() = Some(ui.cursor().min);
+            let sizes = vec![30.0; n.get()];
+            if let Some(m) = reorder(ui, egui::Id::unique("dnd-shrink"), Items::vertical(&sizes), |ui, _, _| ui.response()) {
+                out.set(Some(m));
+            }
+        });
+        h.step();
+        let top = top.borrow().unwrap();
+        let start = top + egui::vec2(50.0, 3.0 * 30.0 + 15.0);
+        let end = egui::pos2(start.x, top.y + 10.0);
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        h.hover_at(start);
+        h.step();
+        h.input_mut().events.push(button(start, true));
+        h.step();
+        for i in 1..=6 {
+            h.hover_at(start.lerp(end, i as f32 / 6.0));
+            h.step();
+        }
+        // A scan or a poll took rows away while the last one was held.
+        n.set(2);
+        h.step();
+        h.input_mut().events.push(button(end, false));
+        h.run_steps(3);
+        drop(h);
+        assert_eq!(out.get(), None);
     }
 
     #[test]

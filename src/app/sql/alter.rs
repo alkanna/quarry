@@ -824,9 +824,10 @@ impl App {
                 // The key's column order matters, so the rows drag to reorder, or Alt+Up and Alt+Down on the focused one.
                 let mut remove = None;
                 let sizes = vec![BUTTON_H + 6.0; f.def.cols.len()];
-                let keys: Vec<egui::Id> = f.def.cols.iter().map(|c| egui::Id::unique(("idx-col", c.name.as_str()))).collect();
+                let names: Vec<&str> = f.def.cols.iter().map(|c| c.name.as_str()).collect();
+                let keys = dnd::unique_keys("idx-col", &names);
                 let cols = &mut f.def.cols;
-                let moved = dnd::reorder(ui, egui::Id::unique("idx-cols"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+                let moved = dnd::reorder(ui, egui::Id::unique("idx-cols"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
                     let c = &mut cols[i];
                     let r = ui.interact(ui.max_rect(), ui.scope_id().with("row"), Sense::click());
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Index column {}", c.name)));

@@ -45,3 +45,19 @@ fn a_stage_moves_by_dragging_its_card_and_esc_cancels() {
     ui.type_text("x");
     assert!(ui.app().tabs[1].stages[0].text.contains('x'), "a click in the editor did not focus it");
 }
+
+#[test]
+fn a_stage_header_takes_the_focus_and_moves_by_keyboard_or_its_menu() {
+    let Some(mut ui) = demo_ui(three_stages) else { return };
+    ui.show("Stage 1 $match");
+    // Before, a card had no widget that could hold the focus, so Alt+arrows never reached it.
+    ui.h.get_by_label("Stage 1 $match").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
+    assert_eq!(ops(&ui), ["$group", "$match", "$sort"]);
+    let at = head_of(&ui, 3);
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+    ui.click("Move up");
+    assert_eq!(ops(&ui), ["$group", "$sort", "$match"]);
+}

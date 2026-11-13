@@ -370,7 +370,7 @@ impl App {
             }
             // Rules apply in order, so the rows drag to reorder, or Alt+Up and Alt+Down on the focused one.
             let sizes = vec![RULE_ROW_H; list.len()];
-            moved = dnd::reorder(ui, egui::Id::unique(("agents-rules", scope)), dnd::Items::vertical(&sizes), |ui, i, st| {
+            moved = dnd::reorder(ui, egui::Id::unique(("agents-rules", scope)), dnd::Items::vertical(&sizes).menu(), |ui, i, st| {
                 let r = &list[i];
                 let slot = ui.max_rect();
                 if !st.lifted {

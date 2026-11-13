@@ -98,7 +98,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 36] = [
+const SHORTCUTS: [(&str, &str); 38] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -121,6 +121,8 @@ const SHORTCUTS: [(&str, &str); 36] = [
     ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret, or the selected script of the Library panel"),
     ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
     ("Esc", "Close or deselect"),
+    ("Alt+Up/Down (Left/Right)", "Move the focused row, column, tab or stage; their right-click menus have Move up and Move down"),
+    ("Cmd+Backspace, Delete", "Delete the selected script or folder of the Library panel; the toast offers Undo"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
     ("Cmd+L", "Show or hide the query log"),

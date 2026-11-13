@@ -868,10 +868,20 @@ fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Opt
         if resp.double_clicked() {
             hit.double = Some(r);
         }
-        if let Some(m) = menu.as_mut() {
+        // A grid whose rows drag also moves them from the row menu, for a person who cannot drag or does not know Alt+arrows.
+        let can_move = keyed && !st.busy;
+        if menu.is_some() || can_move {
             resp.context_menu(|ui| {
                 menu_look(ui);
-                m(ui, r);
+                if let Some(m) = menu.as_mut() {
+                    m(ui, r);
+                    if can_move {
+                        ui.separator();
+                    }
+                }
+                if can_move && let Some(mv) = dnd::move_items(ui, rows, r, &[], false) {
+                    hit.moved = Some(mv);
+                }
             });
         }
         resp
@@ -887,7 +897,7 @@ fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Opt
                     draw_row(ui, row, r, st, &mut hit)
                 })
             });
-            hit.moved = moved;
+            hit.moved = moved.or(hit.moved);
         }
         None => {
             for r in 0..rows {
@@ -905,11 +915,22 @@ fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Opt
 /// staged to be dropped keeps its place in the server's order, so its mark shows where it is.
 fn rows_in_staged_order(d: &Structure, staged: &[Change]) -> Vec<usize> {
     let after = db::sql::ddl::columns_after(d, staged);
-    let renamed = |c: &Column| staged.iter().rev().find_map(|ch| match ch {
-        Change::Modify { from, def, .. } if *from == c.name => Some(def.name.clone()),
-        _ => None,
-    });
-    let mut out: Vec<usize> = after.iter().filter_map(|n| d.columns.iter().position(|c| renamed(c).as_ref().unwrap_or(&c.name) == n)).collect();
+    // The name each column ends with, following its renames in order, or None once it is dropped. Matching on the last
+    // rename alone, or on the server name, gave a staged name to a dropped column that had it, so the live column's row
+    // went to the dropped one's place.
+    let final_of = |c: &Column| -> Option<String> {
+        let mut n = c.name.clone();
+        for ch in staged {
+            match ch {
+                Change::Drop(x) if *x == n => return None,
+                Change::Modify { from, def, .. } if *from == n => n = def.name.clone(),
+                _ => {}
+            }
+        }
+        Some(n)
+    };
+    let finals: Vec<Option<String>> = d.columns.iter().map(final_of).collect();
+    let mut out: Vec<usize> = after.iter().filter_map(|n| finals.iter().position(|f| f.as_deref() == Some(n.as_str()))).collect();
     for i in 0..d.columns.len() {
         if !out.contains(&i) {
             out.insert(i.min(out.len()), i);
@@ -1048,6 +1069,26 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_renamed_to_a_dropped_name_keeps_its_own_row() {
+        use db::sql::ddl::{ColDef, Pos};
+        let col = |n: &str| Column { name: n.into(), ..Default::default() };
+        let d = Structure { columns: vec![col("c"), col("a"), col("b")], ..Default::default() };
+        // c is dropped, then a takes its name and moves after b.
+        let staged = vec![Change::Drop("c".into()), Change::Modify { from: "a".into(), def: ColDef::new("c", "INT"), pos: Pos::After("b".into()) }];
+        assert_eq!(db::sql::ddl::columns_after(&d, &staged), ["b", "c"]);
+        // b, then a (now c), with the dropped c kept at its server place.
+        assert_eq!(rows_in_staged_order(&d, &staged), [0, 2, 1]);
+        // A plain rename and a drop, and no staged change.
+        let staged = vec![Change::Modify { from: "b".into(), def: ColDef::new("bb", "INT"), pos: Pos::Keep }, Change::Drop("a".into())];
+        assert_eq!(rows_in_staged_order(&d, &staged), [0, 1, 2]);
+        assert_eq!(rows_in_staged_order(&d, &[]), [0, 1, 2]);
+        let mut seen = rows_in_staged_order(&d, &staged);
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "a column shown twice");
+    }
 
     #[test]
     fn postgres_extra_names_identity_and_generated_columns() {

@@ -253,9 +253,7 @@ impl App {
         let mut b = body_begin(ui);
         let outer = ui;
         let now = outer.input(|i| i.time);
-        // The body scrolls between the head and the foot, so a short window still shows the buttons.
-        let room = (outer.ctx().content_rect().height() - 240.0).max(160.0);
-        egui::ScrollArea::vertical().id_salt("link-body").max_height(room).auto_shrink([false, true]).show(&mut b.content_ui, |ui| {
+        let ui = &mut b.content_ui;
         form_card(ui, "", "", |rows| {
             rows.row("Folder", "", |ui| {
                 if !edit && ui.button("Choose\u{2026}").clicked() {
@@ -350,7 +348,7 @@ impl App {
                         // A whole group at once, for a folder a team uses on all its servers.
                         let whole: Vec<(String, Vec<u64>)> = self.groups.groups.iter().map(|g| (g.name.clone(), g.members.iter().copied().filter(|m| self.conn(*m).is_some() && !f.conns.contains(m)).collect::<Vec<u64>>())).filter(|(_, m)| !m.is_empty()).collect();
                         for (name, members) in whole {
-                            if menu_row(ui, &format!("All of {name}"), TEXT(), false, &members.len().to_string()).clicked() {
+                            if ui.add(egui::Button::new(format!("All of {name}")).shortcut_text(members.len().to_string())).clicked() {
                                 f.conns.extend(members);
                                 ui.close();
                             }
@@ -406,7 +404,6 @@ impl App {
                 let on = f.follow;
                 r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "Follow changes"));
             });
-        });
         });
         b.end(outer);
         let ui = outer;

@@ -85,7 +85,7 @@ fn search_path(ui: &mut egui::Ui, f: &mut ConnForm) {
         let sizes = vec![PATH_ROW_H; names.len()];
         let keys: Vec<egui::Id> = names.iter().map(|n| egui::Id::unique(("pg-path", n.as_str()))).collect();
         let (tested, known) = (f.pg_tested && !f.pg_schemas.is_empty(), &f.pg_schemas);
-        moved = dnd::reorder(ui, egui::Id::unique("pg-path-reorder"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+        moved = dnd::reorder(ui, egui::Id::unique("pg-path-reorder"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
             let name = &names[i];
             let r = ui.interact(ui.max_rect(), ui.scope_id().with("row"), Sense::click());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Schema {name}")));

@@ -121,7 +121,7 @@ fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn], groups: &G
         let sizes = vec![MEMBER_H; members.len()];
         let keys: Vec<egui::Id> = members.iter().map(|c| egui::Id::unique(("member", c.meta.id))).collect();
         let id = ui.make_persistent_id("group-members");
-        mv = dnd::reorder(ui, id, dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+        mv = dnd::reorder(ui, id, dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
             let c = members[i];
             let rect = ui.max_rect();
             let r = ui.interact(rect, ui.scope_id().with("row"), Sense::click());

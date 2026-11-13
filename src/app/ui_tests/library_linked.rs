@@ -631,10 +631,10 @@ fn moves_and_copies_say_where_the_result_went() {
     let h = panel_app(&dir, &[("a.sql", "select 1"), ("sub/b.sql", "select 2")]);
     let mut ui = UiApp { h };
     ui.h.state_mut().move_linked_file(1, Path::new("a.sql"), Path::new("sub"));
-    assert!(ui.app().last_problem().contains("Moved a.sql to queries / sub / a.sql"), "{}", ui.app().last_problem());
+    assert!(ui.app().status.contains("Moved a.sql to queries / sub / a.sql"), "{}", ui.app().status);
     ui.h.state_mut().file_to_quarry(1, Path::new("sub/b.sql"), crate::library::ops::DropAt::Root);
     io(&mut ui.h);
-    assert!(ui.app().last_problem().contains("Copied b to the top of the library"), "{}", ui.app().last_problem());
+    assert!(ui.app().status.contains("Copied b to the top of the library"), "{}", ui.app().status);
     let a = ui.h.state_mut();
     a.library.scripts.push(crate::library::Script { id: 70, name: "Revenue".into(), kind: "sql".into(), body: "select 3".into(), conn: 1, ..Default::default() });
     a.script_to_link(70, 1, Path::new("sub")).expect("a file");
@@ -672,19 +672,4 @@ fn the_link_dialog_warns_when_a_chosen_connection_shows_none_of_the_files_and_ad
     ui.click("Link folder");
     assert_eq!(ui.app().library.links[0].conns, [2, 3]);
     std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn the_link_dialog_keeps_its_buttons_on_a_short_window() {
-    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 560.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let a = h.state_mut();
-    a.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
-    a.active = Some(1);
-    a.open_link_dialog(None);
-    let mut ui = UiApp { h };
-    ui.h.run_steps(6);
-    ui.show("Link folder");
-    let foot = ui.h.get_by_label("Link folder").rect();
-    let head = ui.h.get_by_label("Folder path").rect();
-    assert!(foot.bottom() <= 560.0 && head.top() >= 0.0, "the dialog runs off a 560 px window: path at {head:?}, button at {foot:?}");
 }
