@@ -761,12 +761,7 @@ pub(crate) fn table_glyph(p: &egui::Painter, c: egui::Pos2, color: Color32) {
 }
 
 pub(crate) fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
-    let pts = if open {
-        vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]
-    } else {
-        vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(3.0, 0.0), c + egui::vec2(-2.0, 4.0)]
-    };
-    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+    super::fold::chevron(p, c, if open { 1.0 } else { 0.0 }, color);
 }
 
 /// The first, previous, "n / total", next and last control shared by every paged result, with

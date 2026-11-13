@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot};
+use crate::ui::fold;
 
 /// Whether the rail shows the Connections button.
 pub(super) const READY: bool = true;
@@ -18,6 +19,12 @@ const GUIDE_X: f32 = 14.0;
 const MEMBER_INDENT: f32 = 20.0;
 /// One dot per open member on a closed group, at most this many.
 const DOTS_MAX: usize = 5;
+const CONN_H: f32 = 48.0;
+
+/// The id a group's open and close animation goes by.
+fn fold_id(g: u64) -> egui::Id {
+    egui::Id::unique(("conn-group-fold", g))
+}
 
 /// What the Connections panel remembers while the app runs.
 #[derive(Default)]
@@ -244,7 +251,15 @@ impl App {
 
         let toks = tokens(&self.conns_ui.filter);
         let all = self.conn_ids();
-        let rows = panel_rows(&self.conns, &self.groups, &self.conns_ui.filter, |g| g.open);
+        let ctx = ui.ctx().clone();
+        // A group still closing keeps its members in the list until they have folded away, while its own row reads closed
+        // for the keys, the drops and the dots.
+        let mut rows = panel_rows(&self.conns, &self.groups, &self.conns_ui.filter, |g| g.open || fold::openness(&ctx, fold_id(g.id), false) > 0.0);
+        for r in &mut rows {
+            if let CRow::Group { id, open, .. } = r {
+                *open = !toks.is_empty() || self.groups.group(*id).is_some_and(|g| g.open);
+            }
+        }
         let foot_h = 48.0;
         let room = (ui.available_height() - foot_h).max(80.0);
         egui::ScrollArea::vertical().id_salt("conns-panel").auto_shrink(false).max_height(room).show(ui, |ui| {
@@ -265,11 +280,11 @@ impl App {
             acts.push(PanelAct::NewConnIn(None));
         }
         for a in acts {
-            self.apply_panel_act(a);
+            self.apply_panel_act(&ctx, a);
         }
     }
 
-    fn apply_panel_act(&mut self, a: PanelAct) {
+    fn apply_panel_act(&mut self, ctx: &egui::Context, a: PanelAct) {
         match a {
             // A click picks the connection and shows its databases, like a pick in the explorer's picker; the panel
             // would otherwise stay up with nothing on screen changed but a highlight.
@@ -280,6 +295,7 @@ impl App {
             PanelAct::Toggle(g) => {
                 if let Some(g) = self.groups.group_mut(g) {
                     g.open = !g.open;
+                    fold::start(ctx, fold_id(g.id), g.open);
                     self.save_groups();
                 }
             }
@@ -287,6 +303,9 @@ impl App {
                 // One press folds everything; with all folded already, the next one opens everything.
                 let any_open = self.groups.groups.iter().any(|g| g.open);
                 for g in &mut self.groups.groups {
+                    if g.open == any_open {
+                        fold::start(ctx, fold_id(g.id), !any_open);
+                    }
                     g.open = !any_open;
                 }
                 self.save_groups();
@@ -449,12 +468,53 @@ impl App {
     }
 }
 
-/// The rows, top to bottom, with their menus and drops.
+/// The rows, top to bottom, with their menus and drops. A group's members are drawn in its fold, which grows and shrinks
+/// as the group opens and closes; the members of a group still closing are only drawn, since for the keys and the drops
+/// the group is closed.
 fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>) {
     let filtering = !cx.toks.is_empty();
     let ctx = ui.ctx().clone();
     let mut nav: Vec<(egui::Id, Nav)> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
+    let mut i = 0;
+    while i < rows.len() {
+        let CRow::Group { id, open, .. } = rows[i] else {
+            draw_row(ui, rows, i, cx, st, acts, &ctx, &mut nav, 1.0);
+            i += 1;
+            continue;
+        };
+        let t = if filtering { 1.0 } else { fold::openness(&ctx, fold_id(id), open) };
+        draw_row(ui, rows, i, cx, st, acts, &ctx, &mut nav, t);
+        i += 1;
+        let end = i + rows[i..].iter().take_while(|r| matches!(r, CRow::Conn { group: Some(g), .. } | CRow::Hint(g) if *g == id)).count();
+        let gap = ui.spacing().item_spacing.y;
+        let guess: f32 = rows[i..end].iter().map(|r| if matches!(r, CRow::Hint(_)) { HINT_H } else { CONN_H } + gap).sum();
+        let from = i;
+        fold::body(ui, fold_id(id), t, guess, open, |ui| {
+            // Rows of a closing group stay out of the arrow keys, which must not land on a row about to vanish.
+            let mut gone = Vec::new();
+            for k in from..end {
+                draw_row(ui, rows, k, cx, st, acts, &ctx, if open { &mut nav } else { &mut gone }, 1.0);
+            }
+        });
+        i = end;
+    }
+    arrow_keys(ui, &nav, acts);
+    // The room under the last row takes a connection out to the end of the loose ones.
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), Sense::hover());
+    if !filtering && let Some(m) = held(&ctx) && r.contains_pointer() {
+        paint_spot(ui.painter(), rect.with_max_y(rect.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, rect.left() + 8.0, MEMBER_INDENT);
+        if r.dnd_release_payload::<DragItem>().is_some() {
+            acts.push(PanelAct::Move(m, Place::Loose(None)));
+        }
+    }
+}
+
+/// One row with its menu and drop. `t` is how far open a group row's fold is, for its chevron.
+#[allow(clippy::too_many_arguments)]
+fn draw_row(ui: &mut egui::Ui, rows: &[CRow], i: usize, cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, nav: &mut Vec<(egui::Id, Nav)>, t: f32) {
+    let filtering = !cx.toks.is_empty();
+    let row = &rows[i];
+    {
         match row {
             CRow::Caption { text, note } => {
                 let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), CAPTION_H), Sense::hover());
@@ -485,20 +545,20 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 drop_target(ui, &r, rows, i, cx, acts);
             }
             CRow::Group { id, open, shown, total } => {
-                let Some(g) = cx.groups.group(*id) else { continue };
-                if let Some(rid) = group_row(ui, g, (*open, *shown, *total), cx, st, acts, &ctx, rows, i) {
+                let Some(g) = cx.groups.group(*id) else { return };
+                if let Some(rid) = group_row(ui, g, (*open, t, *shown, *total), cx, st, acts, ctx, rows, i) {
                     nav.push((rid, Nav::Group { id: *id, open: *open }));
                 }
             }
             CRow::Conn { id, group, .. } => {
-                let Some(c) = cx.conns.iter().find(|c| c.meta.id == *id) else { continue };
+                let Some(c) = cx.conns.iter().find(|c| c.meta.id == *id) else { return };
                 let color = group.and_then(|g| cx.groups.group(g)).map(|g| group_color(&g.color));
                 let hl = if filtering { hl_ranges(&c.meta.name, cx.toks) } else { Vec::new() };
                 let on = cx.active == Some(c.meta.id);
                 // The row's own id, known before it is drawn, so a focused row can make room for its menu button.
                 let rid = ui.next_auto_id();
                 let dots_id = egui::Id::unique(("conn-dots", c.meta.id));
-                let hot = row_hot(ui, &ctx, rid, dots_id, 48.0);
+                let hot = row_hot(ui, ctx, rid, dots_id, CONN_H);
                 let r = conn_row_room(ui, c, on, if color.is_some() { MEMBER_INDENT } else { 0.0 }, &hl, !filtering, if hot { DOTS_ROOM } else { 0.0 });
                 nav.push((r.id, Nav::Conn { group: *group }));
                 if let Some(col) = color {
@@ -516,15 +576,6 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                     egui::Popup::menu(&dots).width(220.0).show(|ui| conn_menu_items(ui, c, group.is_some(), acts));
                 }
             }
-        }
-    }
-    arrow_keys(ui, &nav, acts);
-    // The room under the last row takes a connection out to the end of the loose ones.
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), Sense::hover());
-    if !filtering && let Some(m) = held(&ctx) && r.contains_pointer() {
-        paint_spot(ui.painter(), rect.with_max_y(rect.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, rect.left() + 8.0, MEMBER_INDENT);
-        if r.dnd_release_payload::<DragItem>().is_some() {
-            acts.push(PanelAct::Move(m, Place::Loose(None)));
         }
     }
 }
@@ -598,8 +649,8 @@ fn held(ctx: &egui::Context) -> Option<u64> {
 
 /// Marks a row as a drop target while a connection is dragged over it and, on release, asks for the move.
 fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &Cx, acts: &mut Vec<PanelAct>) {
-    // Indexes of a filtered list are not places in the full one.
-    if !cx.toks.is_empty() {
+    // Indexes of a filtered list are not places in the full one, and a row of a closing group is no longer in the list.
+    if !cx.toks.is_empty() || !ui.is_enabled() {
         return;
     }
     let Some(m) = held(ui.ctx()).filter(|_| r.contains_pointer()) else { return };
@@ -625,7 +676,7 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
 /// The group row: chevron, folder, name, the dots of its open members when closed, the count. Returns the row's id for the
 /// arrow keys, or None while it is renamed; clicks, the menu, F2 and the inline rename are handled here.
 #[allow(clippy::too_many_arguments)]
-fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) -> Option<egui::Id> {
+fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) -> Option<egui::Id> {
     let col = group_color(&g.color);
     let filtering = !cx.toks.is_empty();
     let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
@@ -633,7 +684,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
     let renaming = st.rename.as_ref().is_some_and(|(id, _)| *id == g.id);
     let r = if renaming {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GROUP_H), Sense::hover());
-        chevron(ui.painter(), egui::pos2(rect.left() + 14.0, rect.center().y), open, FAINT());
+        fold::chevron(ui.painter(), egui::pos2(rect.left() + 14.0, rect.center().y), t, FAINT());
         paint_folder(ui.painter(), egui::pos2(rect.left() + 32.0, rect.center().y), col, true);
         let field = egui::Rect::from_min_max(egui::pos2(rect.left() + 46.0, rect.top() + 2.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
         let focus = std::mem::take(&mut st.focus_edit);
@@ -659,7 +710,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, shown, total): (bool, usize, u
         let hot = row_hot(ui, ctx, ui.next_auto_id(), dots_id, GROUP_H);
         let r = side_row(ui, GROUP_H, 0.0, false, &label, |p, rect| {
             let cy = rect.center().y;
-            chevron(p, egui::pos2(rect.left() + 6.0, cy), open, FAINT());
+            fold::chevron(p, egui::pos2(rect.left() + 6.0, cy), t, FAINT());
             paint_folder(p, egui::pos2(rect.left() + 24.0, cy), col, true);
             let count = if filtering { shown.to_string() } else { total.to_string() };
             let cg = p.layout_no_wrap(count, FontId::proportional(TXT_CAPTION), FAINT());

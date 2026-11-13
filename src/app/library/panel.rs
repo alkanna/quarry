@@ -2,8 +2,9 @@
 //! a search, a preview card, and the menus and drags that organize them. The rows come from `library::tree::flatten`, the
 //! changes go through `library::ops`, and a script leaves for a tab through `open_script`.
 //!
-//! Rows are drawn with `show_rows`, so nothing here holds a reference into `self` across a frame: the drawing collects
-//! `Act`s and `apply` runs them once the panel is done.
+//! Only the rows in view are drawn, so nothing here holds a reference into `self` across a frame: the drawing collects
+//! `Act`s and `apply` runs them once the panel is done. Rows are one height, and their places follow from their index
+//! except while a folder opens or closes, when `tree::lay_out` places them.
 #![allow(dead_code)]
 
 use super::*;
@@ -13,6 +14,7 @@ use crate::library::tree::{self, Node, Pos, Row, Scans};
 use crate::library::{Library, ScriptRef};
 use std::path::{Path, PathBuf};
 use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, side_row_drag};
+use crate::ui::fold;
 use super::open::How;
 
 /// Whether the rail shows the Library button.
@@ -24,6 +26,11 @@ const INDENT: f32 = 16.0;
 const PREVIEW_DEFAULT: f32 = 196.0;
 const PREVIEW_MIN: f32 = 130.0;
 const TREE_MIN: f32 = 120.0;
+
+/// The id a folder's open and close animation goes by.
+fn fold_id(n: &Node) -> egui::Id {
+    egui::Id::unique(("lib-fold", n))
+}
 
 /// What the panel remembers while the app runs. Folders open or closed are not saved: a fresh start shows them closed.
 #[derive(Default)]
@@ -47,6 +54,8 @@ pub(in crate::app) struct PanelUi {
     /// the pointer this frame, read by the ghost the next, since the ghost may be drawn before that row.
     pub badge: Option<&'static str>,
     pub badge_next: Option<&'static str>,
+    /// Folders a person opened or closed that may still be moving.
+    pub folding: HashSet<Node>,
 }
 
 enum Act {
@@ -221,6 +230,8 @@ struct RowCx<'a> {
     /// The item being dragged, if a drag of a script or folder is on.
     drag: Option<Node>,
     demo_drag: Option<&'a (Node, Node)>,
+    /// How far open each moving folder is drawn, for its chevron.
+    folds: &'a HashMap<Node, f32>,
 }
 
 struct Look {
@@ -629,6 +640,33 @@ impl App {
 
         let engine = scope_conn.and_then(|c| self.conn(c)).map(|c| c.meta.engine);
         let rows = tree::flatten(&self.library, &self.lib_ui.scans, scope_conn, engine, &st.query, &st.open);
+        // The folders still moving and how far open each is. A search shows its folders open at once.
+        let searching = !st.query.trim().is_empty();
+        let mut folds: HashMap<Node, f32> = HashMap::new();
+        st.folding.retain(|n| {
+            let open = st.open.contains(n);
+            let t = fold::openness(&ctx, fold_id(n), open);
+            let moving = !searching && if open { t < 1.0 } else { t > 0.0 };
+            if moving {
+                folds.insert(n.clone(), t);
+            }
+            moving
+        });
+        // A closing folder keeps its children on screen until it has closed. They are drawn from a list of their own, so
+        // the keys, the selection and the drops only ever see the folder closed.
+        let closing: Vec<Node> = folds.keys().filter(|n| !st.open.contains(*n)).cloned().collect();
+        let drawn_closing = (!closing.is_empty()).then(|| {
+            let mut open = st.open.clone();
+            open.extend(closing.iter().cloned());
+            let mut v = tree::flatten(&self.library, &self.lib_ui.scans, scope_conn, engine, &st.query, &open);
+            for r in &mut v {
+                r.open &= st.open.contains(&r.node);
+            }
+            v
+        });
+        let drawn: &[Row] = drawn_closing.as_deref().unwrap_or(&rows);
+        let live: Option<HashSet<&Node>> = drawn_closing.as_ref().map(|_| rows.iter().map(|r| &r.node).collect());
+        let laid = (!folds.is_empty()).then(|| tree::lay_out(drawn, ROW_H, |n| folds.get(n).copied()));
         if rows.is_empty() && st.query.trim().is_empty() {
             self.library_empty(ui, active, active_name.as_deref(), all, acts);
             return;
@@ -682,8 +720,10 @@ impl App {
             // Esc drops the payload; drag_cancelled keeps the marks off until the button comes up.
             drag: egui::DragAndDrop::payload::<DragItem>(&ctx).filter(|_| !drag_cancelled(&ctx)).and_then(|d| item_node(&d)),
             demo_drag: demo_drag.as_ref(),
+            folds: &folds,
         };
-        let total = rows.len();
+        let total = drawn.len();
+        let height = laid.as_ref().map_or(total as f32 * ROW_H, |l| l.height);
         let mut area = egui::ScrollArea::vertical().id_salt("library-tree").auto_shrink([false, false]).max_height(tree_h);
         if let Some(y) = st.scroll_set.take() {
             area = area.vertical_scroll_offset(y);
@@ -691,10 +731,37 @@ impl App {
         let out = ui
             .scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                area.show_rows(ui, ROW_H, total, |ui, range| {
+                area.show_viewport(ui, |ui, view| {
                     auto_scroll_while_dragging(ui);
-                    for i in range {
-                        draw_row(ui, &cx, st, &rows[i], acts);
+                    ui.set_height(height);
+                    let origin = ui.max_rect().min;
+                    let w = ui.max_rect().width();
+                    // Only the rows in view are drawn, which keeps a linked folder of thousands of files cheap. At rest
+                    // a row's place is its index; while folders move, each row has its place and the line that hides it.
+                    let shown: Vec<usize> = match &laid {
+                        None => {
+                            let first = ((view.min.y / ROW_H).floor().max(0.0) as usize).min(total);
+                            (first..((view.max.y / ROW_H).ceil() as usize + 1).min(total)).collect()
+                        }
+                        Some(l) => (0..total).filter(|&i| l.top[i] < view.max.y && l.top[i] + ROW_H > view.min.y && l.clip[i] > l.top[i]).collect(),
+                    };
+                    for i in shown {
+                        let (top, cut, fade) = laid.as_ref().map_or((i as f32 * ROW_H, f32::INFINITY, 1.0), |l| (l.top[i], l.clip[i], l.fade[i]));
+                        let rect = egui::Rect::from_min_size(origin + egui::vec2(0.0, top), egui::vec2(w, ROW_H));
+                        let mut row_ui = ui.new_child(egui::UiBuilder::new().id_salt(&drawn[i].node).max_rect(rect).layout(*ui.layout()));
+                        if cut.is_finite() {
+                            let mut clip = row_ui.clip_rect();
+                            clip.max.y = clip.max.y.min(origin.y + cut);
+                            row_ui.set_clip_rect(clip);
+                            row_ui.multiply_opacity(fade);
+                        }
+                        // A child of a closing folder is only drawn; it is gone from the tree already.
+                        if live.as_ref().is_some_and(|l| !l.contains(&drawn[i].node)) {
+                            let o = row_ui.opacity();
+                            row_ui.disable();
+                            row_ui.set_opacity(o);
+                        }
+                        draw_row(&mut row_ui, &cx, st, &drawn[i], acts);
                     }
                 })
             })
@@ -703,7 +770,7 @@ impl App {
         st.view_h = out.inner_rect.height();
 
         // The space below the last row takes drops that move an item out of its folder.
-        let used = (total as f32 * ROW_H - st.scroll_y).max(0.0);
+        let used = (height - st.scroll_y).max(0.0);
         let zone = egui::Rect::from_min_max(egui::pos2(out.inner_rect.left(), out.inner_rect.top() + used), out.inner_rect.right_bottom());
         if zone.height() > 6.0 && cx.drag.is_some() {
             let r = ui.interact(zone, egui::Id::unique("library-root-drop"), Sense::hover());
@@ -926,9 +993,12 @@ impl App {
             }
             Act::SaveCurrent => self.save_script(),
             Act::Toggle(n) => {
-                if !st.open.remove(&n) {
-                    st.open.insert(n);
+                let open = !st.open.remove(&n);
+                if open {
+                    st.open.insert(n.clone());
                 }
+                fold::start(ctx, fold_id(&n), open);
+                st.folding.insert(n);
             }
             Act::Rename(n) => {
                 let name = match &n {
@@ -1035,7 +1105,12 @@ impl App {
                 st.sel = Some(Node::Folder(id));
                 st.rename = Some((Node::Folder(id), name, true));
             }
-            Act::FoldAll => st.open.clear(),
+            Act::FoldAll => {
+                for n in st.open.drain() {
+                    fold::start(ctx, fold_id(&n), false);
+                    st.folding.insert(n);
+                }
+            }
             Act::Scope(all) => {
                 self.prefs.lib_scope_all = all;
                 self.save_prefs();
@@ -1202,6 +1277,8 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let ctx = ui.ctx().clone();
     let look = cx.look(row);
     let indent = INDENT * row.depth as f32;
+    // How far the chevron has turned: a moving folder's openness, else its state.
+    let turn = cx.folds.get(&row.node).copied().unwrap_or(if row.open { 1.0 } else { 0.0 });
     let (glyph, gcol): (glyphs::Glyph, Color32) = match &row.node {
         Node::Folder(_) | Node::Dir { .. } => (if row.open { glyphs::folder_open } else { glyphs::folder }, MUTED()),
         Node::Link(_) => (glyphs::link, if look.warn { ALERT() } else { C_LINK() }),
@@ -1212,7 +1289,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
         let x = rect.left() + 8.0 + indent;
         if n.is_container() {
-            chevron(ui.painter(), egui::pos2(x + 7.0, rect.center().y), row.open, FAINT());
+            fold::chevron(ui.painter(), egui::pos2(x + 7.0, rect.center().y), turn, FAINT());
         }
         glyph(ui.painter(), egui::pos2(x + 22.0, rect.center().y), gcol);
         let er = egui::Rect::from_min_max(egui::pos2(x + 33.0, rect.top() + 2.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 2.0));
@@ -1258,7 +1335,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         }
         let x = inner.left();
         if is_container {
-            chevron(p, egui::pos2(x + 7.0, cy), row.open, if hovered { MUTED() } else { FAINT() });
+            fold::chevron(p, egui::pos2(x + 7.0, cy), turn, if hovered { MUTED() } else { FAINT() });
         }
         glyph(p, egui::pos2(x + 22.0, cy), gcol);
         let tools_w = if show_tools { 52.0 } else { 0.0 };
@@ -1303,6 +1380,10 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let rect = r.rect;
     if dim {
         ui.painter().rect_filled(rect, R_SM, tint(PANEL(), 150));
+    }
+    // A row of a closing folder is only drawn: no tools, menu, drag or drop.
+    if !ui.is_enabled() {
+        return;
     }
 
     // Hover tools: Run and the dots menu for a script, new folder and the dots menu for a folder.
@@ -1411,6 +1492,8 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let resting = over.as_ref().is_some_and(|i| *i != row.node) && into_closed && pos == Pos::Into;
     if hover_open(&ctx, r.id.with("dnd-open"), resting) {
         st.open.insert(row.node.clone());
+        fold::start(&ctx, fold_id(&row.node), true);
+        st.folding.insert(row.node.clone());
     }
 
     // Demo: a drag held over a folder, drawn without a pointer.

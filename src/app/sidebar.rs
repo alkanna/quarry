@@ -1,6 +1,12 @@
 //! The sidebar: connection picker, database tree and the jump palette.
 
 use super::*;
+use crate::ui::fold;
+
+/// The id a database's open and close animation in the explorer goes by.
+fn db_fold_id(conn: u64, db: &str) -> egui::Id {
+    egui::Id::unique(("db-fold", conn, db))
+}
 
 /// How well one lowercase query token matches one lowercase name.
 pub(super) fn seg_score(t: &str, s: &str) -> Option<u32> {
@@ -563,8 +569,11 @@ impl App {
                 }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
+                // A filter shows its databases open at once; a click opens or closes one with an animation.
+                let fid = db_fold_id(id, db_name);
+                let t = if filter.is_empty() { fold::openness(ui.ctx(), fid, is_open) } else { 1.0 };
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, db_name, |p, r| {
-                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, FAINT());
+                    fold::chevron(p, egui::pos2(r.left() + 4.0, r.center().y), t, FAINT());
                     p.text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { TEXT() });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::monospace(TXT_CAPTION), FAINT());
                 });
@@ -657,7 +666,8 @@ impl App {
                         side.push(SideAct::DropDb(db_name.clone()));
                     }
                 });
-                if is_open {
+                let guess = (matches.len() + 1) as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
+                fold::body(ui, fid, t, guess, is_open, |ui| {
                     if pg && let Some(p) = self.pg_schema_row(ui, c, db_name, picked) {
                         pick_schema = Some((db_name.clone(), p));
                     }
@@ -827,7 +837,7 @@ impl App {
                         });
                     }
                     ui.add_space(4.0);
-                }
+                });
             }
         }
         if revealed {
@@ -855,8 +865,12 @@ impl App {
         if let Some((d, schema)) = pick_schema {
             self.pg_set_schema(id, &d, schema);
         }
-        if let Some(d) = toggle && !self.open_dbs.remove(&(id, d.clone())) {
-            self.open_dbs.insert((id, d));
+        if let Some(d) = toggle {
+            let open = !self.open_dbs.remove(&(id, d.clone()));
+            fold::start(ui.ctx(), db_fold_id(id, &d), open);
+            if open {
+                self.open_dbs.insert((id, d));
+            }
         }
         if let Some((s, how)) = open {
             self.open_collection(s, how);

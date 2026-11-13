@@ -496,7 +496,7 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
         if t >= 1.0 {
             m.settle = None;
         } else {
-            let e = 1.0 - (1.0 - t).powi(3);
+            let e = super::fold::ease_out(t);
             lifted = Some((s.index, s.at + (starts[s.index] - s.at) * e));
             ctx.request_repaint();
         }

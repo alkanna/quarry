@@ -1069,6 +1069,8 @@ pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
 }
 
 pub(crate) const SIDEBAR_W: f32 = 250.0;
+/// How long a folder takes to open or close, in seconds: about as long as the rows of a drag take to slide aside.
+pub(crate) const FOLD_S: f32 = 0.15;
 
 // Type scale: every text size in the app is one of these.
 /// Small caps headers over a sidebar panel or a group ("DATABASE EXPLORER", "LIBRARY") and the faint counts on tree rows.

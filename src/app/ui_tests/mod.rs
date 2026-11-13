@@ -14,6 +14,7 @@ mod dialogs;
 mod journeys;
 mod dnd;
 mod fit;
+mod fold;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;

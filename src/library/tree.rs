@@ -257,9 +257,88 @@ pub fn flatten(lib: &Library, scans: &Scans, conn: Option<u64>, engine: Option<E
     out
 }
 
+/// Where rows `h` tall sit while folders open or close: each row's top, the line below which it is hidden (the bottom of
+/// the folder still moving around it), and how far open that folder is, for a fade. A folder `f` open takes `f` of the
+/// height of what it holds and the rows after it move up by the rest. The rows are the drawn ones, so a closing
+/// folder's children are in them until it has closed.
+#[derive(Debug, Default)]
+pub struct Laid {
+    pub top: Vec<f32>,
+    pub clip: Vec<f32>,
+    pub fade: Vec<f32>,
+    pub height: f32,
+}
+
+/// Lays out `rows`, given how far open each moving folder is (`frac`, None for one at rest).
+pub fn lay_out(rows: &[Row], h: f32, frac: impl Fn(&Node) -> Option<f32>) -> Laid {
+    let n = rows.len();
+    let mut out = Laid { top: vec![0.0; n], clip: vec![f32::INFINITY; n], fade: vec![1.0; n], height: 0.0 };
+    out.height = lay(rows, 0, None, 0.0, h, &frac, &mut out).1;
+    out
+}
+
+/// Lays out the rows from `i` on that sit below `parent`'s depth, from `y0` down. Returns where they end and their height.
+fn lay(rows: &[Row], mut i: usize, parent: Option<usize>, y0: f32, h: f32, frac: &dyn Fn(&Node) -> Option<f32>, out: &mut Laid) -> (usize, f32) {
+    let mut y = y0;
+    while i < rows.len() && parent.is_none_or(|d| rows[i].depth > d) {
+        let depth = rows[i].depth;
+        let f = frac(&rows[i].node).unwrap_or(1.0).clamp(0.0, 1.0);
+        out.top[i] = y;
+        y += h;
+        i += 1;
+        if i < rows.len() && rows[i].depth > depth {
+            let (next, full) = lay(rows, i, Some(depth), y, h, frac, out);
+            if f < 1.0 {
+                let bottom = y + full * f;
+                for k in i..next {
+                    out.clip[k] = out.clip[k].min(bottom);
+                    out.fade[k] *= f;
+                }
+            }
+            y += full * f;
+            i = next;
+        }
+    }
+    (i, y - y0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moving_folder_takes_its_share_of_what_it_holds_and_the_rows_below_follow() {
+        let row = |id: u64, depth: usize| Row { node: Node::Folder(id), depth, open: true, hit: false, count: 0 };
+        // 1 holds 2 (which holds 3) and 4; 5 is at the top level after it.
+        let rows = [row(1, 0), row(2, 1), row(3, 2), row(4, 1), row(5, 0)];
+        let at_rest = lay_out(&rows, 10.0, |_| None);
+        assert_eq!(at_rest.top, vec![0.0, 10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(at_rest.height, 50.0);
+        assert!(at_rest.clip.iter().all(|c| c.is_infinite()) && at_rest.fade.iter().all(|f| *f == 1.0));
+
+        let half = lay_out(&rows, 10.0, |n| (*n == Node::Folder(1)).then_some(0.5));
+        // Its three rows keep their places under it, cut off half way down, and 5 moves up by the other half.
+        assert_eq!(half.top, vec![0.0, 10.0, 20.0, 30.0, 25.0]);
+        assert_eq!(half.clip[1..4], [25.0, 25.0, 25.0]);
+        assert!(half.clip[0].is_infinite() && half.clip[4].is_infinite());
+        assert_eq!(half.fade, vec![1.0, 0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(half.height, 35.0);
+
+        // A folder moving inside one moving folder: 2 is half open, so 1 holds 2.5 rows and shows half of them.
+        let both = lay_out(&rows, 10.0, |n| match n {
+            Node::Folder(1) | Node::Folder(2) => Some(0.5),
+            _ => None,
+        });
+        assert_eq!(both.top[3], 25.0, "4 follows 2's half open child");
+        assert_eq!(both.clip[2], 22.5_f32.min(25.0), "3 is cut by the nearer of the two folds");
+        assert_eq!(both.fade[2], 0.25);
+        assert_eq!(both.top[4], 22.5);
+        assert_eq!(both.height, 32.5);
+
+        let shut = lay_out(&rows, 10.0, |n| (*n == Node::Folder(1)).then_some(0.0));
+        assert_eq!(shut.top[4], 10.0);
+        assert!(shut.clip[1..4].iter().zip(&shut.top[1..4]).all(|(c, t)| c <= t), "nothing of a closed folder shows");
+    }
 
     fn lib() -> Library {
         let folder = |id, name: &str, parent| Folder { id, name: name.into(), parent };

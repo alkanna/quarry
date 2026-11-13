@@ -1,7 +1,12 @@
 //! The activity rail: a thin column of icons left of the sidebar for the app's panels.
 
 use super::*;
-use crate::ui::dnd;
+use crate::ui::{dnd, fold};
+
+/// The id a rail folder's open and close animation goes by.
+fn fold_id(gid: u64) -> egui::Id {
+    egui::Id::unique(("rail-fold", gid))
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum RailIcon {
@@ -87,11 +92,21 @@ impl App {
         // Leaves room for the Settings button, which sits at the bottom of the rail.
         let room = (ui.available_height() - 36.0).max(28.0);
         let items = rail_items(&self.rail_order, &self.groups);
-        let sizes: Vec<f32> = items
+        let ctx = ui.ctx().clone();
+        // How far open each folder is drawn. Its slot grows with it, so the reorder engine moves the tiles below smoothly.
+        let opens: Vec<f32> = items
             .iter()
             .map(|it| match it {
-                RailItem::Folder { gid, members } if self.rail_open.contains(gid) => capsule_h(members.len()),
-                _ => SLOT,
+                RailItem::Folder { gid, .. } => fold::openness(&ctx, fold_id(*gid), self.rail_open.contains(gid)),
+                RailItem::Conn(_) => 0.0,
+            })
+            .collect();
+        let sizes: Vec<f32> = items
+            .iter()
+            .zip(&opens)
+            .map(|(it, e)| match it {
+                RailItem::Folder { members, .. } => SLOT + (capsule_h(members.len()) - SLOT) * e,
+                RailItem::Conn(_) => SLOT,
             })
             .collect();
         let keys: Vec<egui::Id> = items
@@ -135,8 +150,10 @@ impl App {
                         if holds_active {
                             tip.push_str(" \u{b7} holds the active connection");
                         }
-                        if open_now {
-                            let span = egui::Rect::from_min_max(tile.min, egui::pos2(tile.right(), tile.bottom() + members.len() as f32 * MEMBER_SLOT));
+                        let e = opens[k];
+                        let full = members.len() as f32 * MEMBER_SLOT;
+                        if e > 0.0 {
+                            let span = egui::Rect::from_min_max(tile.min, egui::pos2(tile.right(), tile.bottom() + full * e));
                             ui.painter().rect_filled(span.expand2(egui::vec2(3.0, 3.0)), R_LG, tint(color, 36));
                         }
                         let (r, rect) = folder_tile(ui, tile, &g.name, color, open_now, &marks, &tip, (!open_now).then_some(worst).flatten(), holds_active && !open_now);
@@ -169,8 +186,22 @@ impl App {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
                             tile_drop(ui, &r, rect, top, &self.groups, &mut drops);
                         }
-                        if open_now {
-                            let list = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom()), egui::vec2(28.0, members.len() as f32 * MEMBER_SLOT));
+                        if e > 0.0 && e < 1.0 {
+                            // Opening or closing: the members slide out from under the tile as the capsule grows, and
+                            // back under it as it shrinks. They are only drawn until the folder has settled open.
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom()), egui::vec2(28.0, full))));
+                            let mut clip = ui.clip_rect();
+                            clip.min.y = clip.min.y.max(tile.bottom());
+                            clip.max.y = clip.max.y.min(tile.bottom() + full * e);
+                            child.set_clip_rect(clip);
+                            child.disable();
+                            child.set_opacity(e);
+                            for (i, m) in members.iter().enumerate() {
+                                let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 4.0 + i as f32 * MEMBER_SLOT - (1.0 - e) * full), egui::vec2(28.0, 28.0));
+                                self.conn_tile(&mut child, at, *m, true, None, &mut pick, &mut act, &mut drops);
+                            }
+                        } else if open_now {
+                            let list = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom()), egui::vec2(28.0, full));
                             let msizes = vec![MEMBER_SLOT; members.len()];
                             let mkeys: Vec<egui::Id> = members.iter().map(|m| egui::Id::unique(("rail-member", *m))).collect();
                             let mv = put_at(ui, list, |ui| {
@@ -204,10 +235,8 @@ impl App {
         if let Some(id) = pick {
             self.active = Some(id);
         }
-        if let Some(gid) = toggle
-            && !self.rail_open.remove(&gid)
-        {
-            self.rail_open.insert(gid);
+        if let Some(gid) = toggle {
+            self.toggle_rail_folder(&ctx, gid);
         }
         // All of them change state after the frame was drawn.
         if toggle.is_some() || !drops.is_empty() || outer.is_some() || inner.is_some() {
@@ -228,11 +257,7 @@ impl App {
             }
         }
         match folder_act {
-            Some((gid, 0)) => {
-                if !self.rail_open.remove(&gid) {
-                    self.rail_open.insert(gid);
-                }
-            }
+            Some((gid, 0)) => self.toggle_rail_folder(&ctx, gid),
             Some((gid, 1)) => self.connect_group(gid),
             Some((gid, 2)) => self.disconnect_group(gid),
             Some((gid, 3)) => self.edit_group(gid),
@@ -258,6 +283,15 @@ impl App {
             Some((id, _)) => self.disconnect(id),
             None => {}
         }
+    }
+
+    /// Opens or closes a folder in the rail, with its animation.
+    fn toggle_rail_folder(&mut self, ctx: &egui::Context, gid: u64) {
+        let open = !self.rail_open.remove(&gid);
+        if open {
+            self.rail_open.insert(gid);
+        }
+        fold::start(ctx, fold_id(gid), open);
     }
 
     /// One connection's tile in `rect` with its context menu and, given a `target`, the drop target it is. None when the

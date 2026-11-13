@@ -3,6 +3,7 @@ pub mod complete;
 pub mod dialog;
 pub mod dnd;
 pub mod editor;
+pub mod fold;
 pub mod glyphs;
 pub mod js_doc;
 pub mod js_elide;
