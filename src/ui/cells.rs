@@ -93,6 +93,16 @@ impl<'a> Val<'a> {
         }
     }
 
+    /// Checked without decoding a raw value, so it can run for every cell on screen.
+    pub(crate) fn is_null(self) -> bool {
+        matches!(self, Val::B(Bson::Null) | Val::R(RawBsonRef::Null))
+    }
+
+    /// The whole value of a cell that may be missing, which reads as NULL.
+    pub(crate) fn owned(v: Option<Self>) -> Bson {
+        v.map_or(Bson::Null, |v| v.bson().into_owned())
+    }
+
     /// The whole value. A raw object or array gets decoded, so this is for one value at a time,
     /// not for every cell on every frame.
     pub(crate) fn bson(self) -> Cow<'a, Bson> {

@@ -131,10 +131,10 @@ pub(super) fn optimal_width(ui: &egui::Ui, docs: Rows, col: &str, header: &str, 
 }
 
 /// Width kept at the right of a foreign key cell for its link.
-const FK_W: f32 = 22.0;
+pub(super) const FK_W: f32 = 22.0;
 
 /// The small link at the right edge of a foreign key cell: a box with an arrow leaving it, painted as shapes.
-fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::structure::ForeignKey) -> egui::Response {
+pub(super) fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::structure::ForeignKey) -> egui::Response {
     let area = egui::Rect::from_min_max(egui::pos2(cell.right() - FK_W, cell.top()), cell.right_bottom());
     let r = ui.interact(area, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Open the row in {}", fk.ref_table));
     let btn = egui::Rect::from_center_size(area.center(), egui::vec2(16.0, 16.0));
@@ -152,6 +152,28 @@ fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::stru
     p.line_segment([b + egui::vec2(-3.5, 0.0), b], stroke);
     p.line_segment([b + egui::vec2(0.0, 3.5), b], stroke);
     r
+}
+
+/// The eye at the right of a hovered cell, left of its key link when `inset` makes room for one. It opens the whole
+/// value to read, which needs no write access, unlike a double click. Drawn and clickable only while the pointer is on
+/// the cell, over the end of its text, and never for NULL. Returns the value when it was clicked.
+pub(super) fn view_button(ui: &mut egui::Ui, cell: egui::Rect, inset: f32, v: Option<Val>, salt: impl std::hash::Hash + std::fmt::Debug, name: impl Fn() -> String) -> Option<Bson> {
+    let v = v.filter(|v| !v.is_null())?;
+    if !ui.rect_contains_pointer(cell) || ui.ctx().any_popup_open() {
+        return None;
+    }
+    let area = egui::Rect::from_min_max(egui::pos2(cell.right() - inset - FK_W, cell.top()), egui::pos2(cell.right() - inset, cell.bottom()));
+    // The id is hashed here, for the one hovered cell, rather than for every cell on screen.
+    let r = ui.interact(area, ui.scope_id().with(salt), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("View the whole value");
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name()));
+    let btn = egui::Rect::from_center_size(area.center(), egui::vec2(18.0, 16.0));
+    // Opaque first, so the end of the value under it does not show through.
+    ui.painter().rect_filled(btn, R_SM, PANEL());
+    let state = state_of(&r);
+    ui.painter().rect_filled(btn, R_SM, hover_fill(state));
+    paint_eye(ui.painter(), btn.center(), if state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, &r, btn, R_SM as f32);
+    r.clicked().then(|| v.bson().into_owned())
 }
 
 /// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
@@ -531,6 +553,7 @@ impl App {
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
         let menu = self.row_menu_kind(agg);
+        let mut view: Option<(String, Bson)> = None;
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
@@ -722,14 +745,25 @@ impl App {
                                 cr = cr.on_hover_text(why.as_str());
                             }
                             // Added after the cell so it takes the click; a NULL points to nothing and gets no link.
-                            if let (Some(k), Some(val)) = (fk_of[ci], v) && !matches!(*val.bson(), Bson::Null) {
+                            if let (Some(k), Some(val)) = (fk_of[ci], v) && !val.is_null() {
                                 let fr = fk_link(ui, cell, ui.scope_id().with(("fk", i, ci)), &fks[k]);
                                 if fr.clicked() {
                                     fk_open = Some((i, k));
                                 }
                             }
+                            // After the cell and the key link, so it takes the click on its own spot.
+                            if let Some(val) = view_button(ui, cell, if fk_of[ci].is_some() { FK_W } else { 0.0 }, v, ("eye", i, ci), || format!("View {c} row {}", base + i as u64 + 1)) {
+                                if sql {
+                                    view = Some((c.clone(), val));
+                                } else {
+                                    cell_acts.push((i, vec![TreeAct::ShowFull(c.clone(), val)]));
+                                }
+                            }
                             if cr.double_clicked() && sql_grouped {
                                 drill = Some(i);
+                            } else if cr.double_clicked() && sql && agg {
+                                // A query's answer is only read, so a double click opens the value in full.
+                                view = Some((c.clone(), Val::owned(v)));
                             } else if cr.double_clicked() {
                                 edit_cell = Some((i, c.clone()));
                             } else if cr.clicked() {
@@ -762,16 +796,23 @@ impl App {
                                         }
                                     });
                                 });
-                            } else if menu != RowMenu::None {
+                            } else if sql || menu != RowMenu::None {
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
-                                    if !agg {
-                                        if ui.button("Edit full document as JSON…").clicked() {
-                                            acts.push(TreeAct::EditDoc);
+                                    // A query's answer is only read: its cells offer their value, not an edit.
+                                    if sql {
+                                        if super::sql::view::read_menu(ui, v) {
+                                            view = Some((c.clone(), Val::owned(v)));
                                         }
-                                        ui.separator();
+                                    } else if !agg && ui.button("Edit full document as JSON…").clicked() {
+                                        acts.push(TreeAct::EditDoc);
                                     }
-                                    row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
+                                    if menu != RowMenu::None {
+                                        if sql || !agg {
+                                            ui.separator();
+                                        }
+                                        row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
+                                    }
                                 });
                             }
                             if !acts.is_empty() {
@@ -803,6 +844,9 @@ impl App {
                 }
             });
         });
+        if let Some((c, v)) = view {
+            self.sql_view_value(&c, &v);
+        }
         if let Some((c, w)) = resized {
             self.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
         }

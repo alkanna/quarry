@@ -91,6 +91,7 @@ pub(in crate::app) struct RowForm {
 #[derive(Clone, Copy)]
 pub(in crate::app) enum CellAct {
     CopyValue,
+    View,
     SetNull,
     FilterValue,
 }
@@ -100,7 +101,7 @@ pub(in crate::app) fn is_numeric(k: Kind) -> bool {
 }
 
 /// Text for the editor of a `kind` column: what the cell shows, as typed back it parses to the same value.
-fn edit_text(b: &Bson, kind: Kind) -> String {
+pub(in crate::app) fn edit_text(b: &Bson, kind: Kind) -> String {
     match b {
         Bson::Null => "NULL".into(),
         Bson::String(s) if value::text_like(kind) && value::null_like(s) => format!("'{s}'"),
@@ -119,6 +120,9 @@ pub(in crate::app) fn sql_cell_menu(ui: &mut egui::Ui, nullable: bool, editable:
     let mut act = None;
     if ui.button("Copy value").clicked() {
         act = Some(CellAct::CopyValue);
+    }
+    if ui.button("View value…").clicked() {
+        act = Some(CellAct::View);
     }
     if ui.add_enabled(nullable && editable, egui::Button::new("Set NULL")).on_disabled_hover_text(if nullable { "This cell cannot be edited" } else { "This column does not allow NULL" }).clicked() {
         act = Some(CellAct::SetNull);
@@ -1090,14 +1094,10 @@ impl App {
             let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
             match a {
                 CellAct::CopyValue => {
-                    ctx.copy_text(match &v {
-                        Bson::Null => String::new(),
-                        // The value itself: the quotes the editor adds around a text null are not part of it.
-                        Bson::String(s) => s.clone(),
-                        other => edit_text(other, Kind::Text),
-                    });
+                    ctx.copy_text(super::view::plain_text(&v));
                     self.ok("Copied the value");
                 }
+                CellAct::View => self.sql_view_value(&col, &v),
                 CellAct::SetNull => {
                     if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
                         return self.warn(why);

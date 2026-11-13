@@ -15,6 +15,57 @@ pub(crate) fn looks_like(text: &str) -> bool {
     t.starts_with('{') && t.ends_with('}') || t.starts_with('[') && t.ends_with(']')
 }
 
+/// JSON laid out one member per line, two spaces deep. Only whitespace changes: numbers and strings stay as written,
+/// where a parse and print would round big numbers and drop trailing zeros.
+pub(crate) fn pretty(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+    let mut chars = text.trim().chars().peekable();
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.extend(std::iter::repeat_n("  ", depth));
+    };
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            (esc, in_str) = (!esc && c == '\\', esc || c != '"');
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                // An empty object or array stays on its line.
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+                if chars.peek().is_some_and(|n| matches!((c, n), ('{', '}') | ('[', ']'))) {
+                    out.push(chars.next().unwrap_or_default());
+                } else {
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Members drawn per object or array; the rest are counted, since every open row is laid out on every frame.
 const MAX_ROWS: usize = 500;
 
@@ -158,5 +209,14 @@ mod tests {
         assert!(super::parse(&ctx, id, "42").is_err());
         assert!(!super::looks_like("plain text") && super::looks_like("  [1] "));
         assert!(!super::looks_like("[draft] Ship Friday") && !super::looks_like("{not closed"));
+    }
+
+    #[test]
+    fn pretty_only_moves_whitespace() {
+        let src = r#"{"id":123456789012345678901234,"price":1.50,"s":"a, \"b\": [c]","e":{},"l":[ ]}"#;
+        let out = super::pretty(src);
+        assert_eq!(out, "{\n  \"id\": 123456789012345678901234,\n  \"price\": 1.50,\n  \"s\": \"a, \\\"b\\\": [c]\",\n  \"e\": {},\n  \"l\": []\n}");
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(squash(&out), squash(src));
     }
 }
