@@ -81,7 +81,7 @@ fn deleting_a_group_frees_its_members_and_undo_puts_it_back() {
     assert!(ui.app().groups.loose_order(&ui.app().conn_ids()).contains(&14));
     // The members are in the loose list now, under the caption.
     ui.show("reports");
-    ui.click("Undo");
+    ui.click_last("Undo");
     assert_eq!(members(&ui, STAGE), [2, 14]);
     assert_eq!(ui.app().groups.groups.iter().map(|g| g.id).collect::<Vec<_>>(), [PROD, STAGE, LOCAL]);
 }
@@ -138,7 +138,7 @@ fn the_edit_dialog_renames_recolors_reorders_and_removes_members() {
     ui.click("Group name");
     ui.type_text(" EU");
     ui.click("Remove prod-us from the group");
-    ui.click("Fold in the rail");
+    ui.click_last("Fold in the rail");
     ui.drag("Member billing", "Member prod-eu", 0.1, 1);
     ui.click("Save");
     let g = ui.app().groups.group(PROD).unwrap().clone();
@@ -174,7 +174,7 @@ fn delete_group_in_the_dialog_deletes_it_with_an_undo() {
     ui.click("Edit group…");
     ui.click("Delete group");
     assert!(ui.app().groups.group(STAGE).is_none() && ui.app().modal.is_none());
-    ui.click("Undo");
+    ui.click_last("Undo");
     assert!(ui.app().groups.group(STAGE).is_some());
 }
 
