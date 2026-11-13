@@ -98,7 +98,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 33] = [
+const SHORTCUTS: [(&str, &str); 36] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -129,8 +129,11 @@ const SHORTCUTS: [(&str, &str); 33] = [
     ("Tab", "Show the selected SQL row as a record, one line per column; Esc closes it"),
     ("Vim motions", "Modal editing in the code editors, turned on in Settings > Editing"),
     ("Cmd+S", "Save the script to the library, or write the library script or file it came from"),
-    ("Return", "Open the selected script of the Library panel"),
-    ("Alt+Return", "Open the selected script of the Library panel in a new tab"),
+    ("Cmd+Shift+S", "Save the script to the library as a new one"),
+    ("Cmd+O", "Pick a script of the library for this view"),
+    ("Cmd+Shift+L", "Show the Library panel and move the keys to it"),
+    ("Enter", "Open the selected script of the Library panel"),
+    ("Alt+Enter", "Open the selected script of the Library panel in a new tab"),
     ("F2", "Rename the selected script or folder of the Library panel"),
 ];
 

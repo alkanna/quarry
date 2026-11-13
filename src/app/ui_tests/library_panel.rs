@@ -29,7 +29,8 @@ impl UiApp {
     /// while the pointer is still there.
     fn hover_row(&mut self, name: &str) {
         self.show(name);
-        let at = self.h.get_by_label(name).rect().center();
+        // The tab a script was opened in carries its name too; the tree is drawn first.
+        let at = self.h.get_all_by_label(name).next().unwrap().rect().center();
         self.h.hover_at(at);
         self.h.run_steps(2);
     }

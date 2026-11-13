@@ -31,12 +31,19 @@ pub(super) enum Cmd {
     Reopen,
     Undo,
     Shortcuts,
+    SaveToLibrary,
+    LinkFolder,
+    ShowLibrary,
+    NewGroup,
+    EditGroup(u64),
 }
 
 #[derive(Clone)]
 enum Act {
     Jump(Jump),
     Cmd(Cmd),
+    /// A script of the library or a linked file: Return opens it, Cmd+Enter runs it.
+    Script(crate::library::ScriptRef),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -194,6 +201,17 @@ impl App {
                 add(&g, Row { tag: c.meta.tag.clone(), ..Row::cmd("Read-only: allow writes\u{2026}", Glyph::Lock, "", Cmd::AllowWrites) });
             }
         }
+        let g = "Library";
+        if self.tab_text().is_some() {
+            add(g, Row::cmd("Save to library\u{2026}", Glyph::Prompt, keys(false, false, "S"), Cmd::SaveToLibrary));
+        }
+        add(g, Row::cmd("Show the library", Glyph::Prompt, keys(true, false, "L"), Cmd::ShowLibrary));
+        add(g, Row::cmd("Link a folder\u{2026}", Glyph::Prompt, "", Cmd::LinkFolder));
+        let g = "Connection groups";
+        add(g, Row::cmd("New group", Glyph::Prompt, "", Cmd::NewGroup));
+        for gr in &self.groups.groups {
+            add(g, Row::cmd(&format!("Edit group {}\u{2026}", gr.name), Glyph::Prompt, "", Cmd::EditGroup(gr.id)));
+        }
         let g = "Quarry";
         add(g, Row::cmd("New connection\u{2026}", Glyph::Prompt, keys(false, false, "N"), Cmd::NewConn));
         add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
@@ -256,6 +274,34 @@ impl App {
         rest.sort_by_key(|r| kind(r).0);
         for r in rest {
             push(&mut out, kind(&r).1, r);
+        }
+        // Library scripts and linked files whose name matches, after the places: Return opens one, Cmd+Enter runs it.
+        let mut scripts: Vec<(u32, Row)> = Vec::new();
+        for s in &self.library.scripts {
+            if let Some(score) = name_score(tok, &s.name) {
+                let folder = crate::library::ops::folder_path(&self.library, s.folder);
+                let conn = self.conn(s.conn).map_or("removed connection", |c| c.meta.name.as_str());
+                let sub = if folder.is_empty() { conn.to_string() } else { format!("{conn} \u{203a} {folder}") };
+                scripts.push((score, Row { sub, meta: s.kind.clone(), ..Row { act: Act::Script(crate::library::ScriptRef::Saved(s.id)), ..Row::cmd(&s.name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
+            }
+        }
+        for l in &self.library.links {
+            let Some(scan) = self.lib_ui.scans.get(&l.id) else { continue };
+            let lname = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
+            for e in &scan.entries {
+                let name = e.rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if let Some(score) = name_score(tok, &name) {
+                    let sub = match e.rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        Some(p) => format!("{lname} \u{203a} {}", p.display()),
+                        None => lname.clone(),
+                    };
+                    scripts.push((score, Row { sub, meta: e.kind.clone(), ..Row { act: Act::Script(crate::library::ScriptRef::File { link: l.id, rel: e.rel.clone() }), ..Row::cmd(&name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
+                }
+            }
+        }
+        scripts.sort_by_key(|s| std::cmp::Reverse(s.0));
+        for (_, r) in scripts.into_iter().take(6) {
+            push(&mut out, "Scripts", r);
         }
         let mut cmds: Vec<(u32, Row)> = self.commands().into_iter().filter_map(|(_, r)| name_score(tok, &r.name).map(|s| (s, r))).collect();
         cmds.sort_by_key(|c| std::cmp::Reverse(c.0));
@@ -321,6 +367,15 @@ impl App {
             Cmd::Reopen => self.reopen_tab(),
             Cmd::Undo => self.modal = Some(Modal::Undo),
             Cmd::Shortcuts => self.shortcuts_modal(),
+            Cmd::SaveToLibrary => self.save_script(),
+            Cmd::LinkFolder => self.open_link_dialog(None),
+            Cmd::ShowLibrary => self.focus_library(),
+            Cmd::NewGroup => {
+                let id = self.groups.new_group("New group");
+                self.save_groups();
+                self.edit_group(id);
+            }
+            Cmd::EditGroup(id) => self.edit_group(id),
             _ => {}
         }
     }
@@ -331,8 +386,9 @@ impl App {
         let top = ctx.content_rect().height() * 0.14;
         let id = egui::Id::unique(("quarry-layer", "palette"));
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
-        // The pick, and whether it opens in a new tab.
+        // The pick, and whether it opens in a new tab. Cmd+Enter on a script runs it instead.
         let mut pick: Option<(Act, bool)> = None;
+        let mut run = false;
         let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
             ui.set_width(PAL_W);
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -385,6 +441,7 @@ impl App {
             });
             if enter || cmd_enter {
                 pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| (r.act.clone(), new_tab || cmd_enter));
+                run = cmd_enter;
             }
             palette_footer(ui, cmds, new_tab);
         });
@@ -396,6 +453,10 @@ impl App {
                     self.jump(j, if new && !open { Open::NewTab } else { Open::Here })
                 }
                 Act::Cmd(c) => self.run_cmd(c),
+                Act::Script(r) => {
+                    use crate::app::library::open::How;
+                    self.open_script(&r, if run { How::Run } else if new { How::NewTab } else { How::Here })
+                }
             }
         } else if !r.should_close() && self.modal.is_none() {
             self.modal = Some(Modal::Palette { query, sel, cmds, new_tab });

@@ -319,6 +319,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
 fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "SELECT 1;\nDELETE FROM carts WHERE id = 1", "shop", "");
+    ui.h.state_mut().status.clear();
     open(&mut ui, id, How::Run);
     assert!(sql_of(ui.app()).query.contains("DELETE FROM carts"));
     assert!(!said(ui.app(), "Offline demo"), "it ran: {}", ui.app().last_problem());
@@ -349,6 +350,7 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
 fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let id = add(ui.h.state_mut(), "pipeline", 1, "Totals", "[{ $group: { _id: '$status', n: { $sum: 1 } } }]", "shop", "orders");
+    ui.h.state_mut().status.clear();
     open(&mut ui, id, How::Here);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$group")));
     assert!(!said(ui.app(), "nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
@@ -491,7 +493,7 @@ fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
     ui.h.hover_at(at);
     ui.h.run_steps(2);
     ui.click("More for Top customers");
-    for item in ["Open", "Open in a new tab", "Run all", "Move to folder"] {
+    for item in ["Open", "Open in a new tab", "Run all", "Duplicate"] {
         ui.show(item);
         let w = ui.h.get_by_label(item).rect().width();
         assert!(w <= max && w >= 120.0, "{item} is {w} px wide");
@@ -510,7 +512,7 @@ fn a_script_opens_on_another_connection_from_its_menu() {
     ui.h.hover_at(at);
     ui.h.run_steps(2);
     ui.click("More for Top customers");
-    ui.click("Open on");
+    ui.click_contains("Open on");
     ui.click("shop-staging");
     let a = ui.app();
     assert!(a.tabs.len() > tabs || a.t().is_some_and(|t| t.sel.conn == 4));

@@ -363,9 +363,10 @@ fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui:
     let r = ui.add(b);
     if checked {
         paint_check(ui.painter(), egui::pos2(r.rect.right() - 14.0, r.rect.center().y), TEXT());
-        let label = label.to_string();
-        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, true, label.clone()));
     }
+    // egui names a button by all its text, shortcut included; the item is named by its label alone.
+    let (label, enabled) = (label.trim().to_string(), ui.is_enabled());
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, enabled, checked, label.clone()));
     r
 }
 

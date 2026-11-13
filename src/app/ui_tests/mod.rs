@@ -18,6 +18,7 @@ mod conns_panel;
 mod library_linked;
 mod library_open;
 mod library_panel;
+mod library_picker;
 mod library_save;
 mod mongo_edit;
 mod pg_roles;
