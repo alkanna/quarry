@@ -188,3 +188,44 @@ fn a_folder_menu_opens_the_folder_and_edits_the_group() {
     ui.click("Edit group\u{2026}");
     assert!(matches!(ui.app().modal, Some(Modal::GroupEdit(_))));
 }
+
+/// The Mongo demo plus 40 Ready connections, more tiles than the rail has room for.
+fn crowded(a: &mut App) {
+    a.load_demo();
+    for i in 0..40 {
+        a.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("c{i}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+    }
+}
+
+#[test]
+fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
+    let Some(mut ui) = demo_ui(crowded) else { return };
+    ui.show("Switch to c39");
+    let rect = |ui: &UiApp, label: &str| ui.h.get_by_label_contains(label).rect();
+    let (top, bottom) = (rect(&ui, "Server status").bottom(), rect(&ui, "Settings (Cmd+,)").top());
+    let settings = rect(&ui, "Settings (Cmd+,)");
+    assert!(settings.bottom() <= 900.0, "Settings is off screen at {settings:?}");
+    let first = rect(&ui, "Switch to c0");
+    assert!(first.top() >= top && first.bottom() <= bottom, "the first tile starts in view, at {first:?}");
+    assert!(rect(&ui, "Switch to c39").top() > bottom, "the last tile starts below the fold");
+    // A wheel turn over the tiles brings the last one into view and takes the first out of it.
+    ui.h.hover_at(first.center());
+    ui.h.step();
+    for _ in 0..10 {
+        ui.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -400.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown, modifiers: egui::Modifiers::NONE });
+        ui.h.step();
+    }
+    ui.h.run_steps(8);
+    let last = rect(&ui, "Switch to c39");
+    assert!(last.top() >= top && last.bottom() <= bottom, "the last tile scrolled into view, at {last:?} between {top} and {bottom}");
+    assert!(rect(&ui, "Switch to c0").bottom() < top, "the first tile scrolled out of view");
+    assert_eq!(rect(&ui, "Settings (Cmd+,)"), settings, "Settings stays put");
+    // And back up.
+    for _ in 0..10 {
+        ui.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 400.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown, modifiers: egui::Modifiers::NONE });
+        ui.h.step();
+    }
+    ui.h.run_steps(8);
+    let first = rect(&ui, "Switch to c0");
+    assert!(first.top() >= top && first.bottom() <= bottom, "the first tile scrolled back, at {first:?}");
+}
