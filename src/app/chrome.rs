@@ -49,7 +49,7 @@ impl App {
                 script: t.script.as_ref().map(|b| b.r.clone()),
             })
             .collect();
-        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting))).collect();
+        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
         if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;

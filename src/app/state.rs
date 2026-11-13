@@ -78,6 +78,18 @@ pub(super) enum Status {
     Failed(String),
 }
 
+impl Status {
+    /// Open or on its way: the connection has a tile in the rail and can be disconnected.
+    pub(super) fn is_open(&self) -> bool {
+        matches!(self, Status::Ready | Status::Connecting)
+    }
+
+    /// Not open, so Connect starts it.
+    pub(super) fn can_connect(&self) -> bool {
+        matches!(self, Status::Idle | Status::Failed(_))
+    }
+}
+
 pub(super) struct Conn {
     pub(super) meta: ConnMeta,
     pub(super) client: Option<Client>,

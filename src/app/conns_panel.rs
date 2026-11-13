@@ -376,7 +376,7 @@ impl App {
     pub(super) fn connect_group(&mut self, g: u64) {
         let ids: Vec<u64> = self.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
         for id in ids {
-            if self.conn(id).is_some_and(|c| matches!(c.status, Status::Idle | Status::Failed(_))) && !self.demo {
+            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.demo {
                 self.connect(id);
             }
         }
@@ -388,15 +388,9 @@ impl App {
         let (ids, name) = (group.members.clone(), group.name.clone());
         let mut n = 0;
         for id in ids {
-            if !self.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting)) {
-                continue;
+            if self.conn(id).is_some_and(|c| c.status.is_open()) && self.drop_session(id).is_some() {
+                n += 1;
             }
-            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
-                (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
-                c.forget_lists();
-            }
-            self.pg_tables_asked.forget(id, None, None);
-            n += 1;
         }
         // One message for the whole group, where `disconnect` would raise one per connection.
         self.ok(if n == 1 { format!("Disconnected 1 connection in {name}") } else { format!("Disconnected {n} connections in {name}") });
@@ -679,7 +673,7 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
 fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) -> Option<egui::Id> {
     let col = group_color(&g.color);
     let filtering = !cx.toks.is_empty();
-    let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
+    let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).filter(|c| c.status.is_open()).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
     let hl = if filtering { hl_ranges(&g.name, cx.toks) } else { Vec::new() };
     let renaming = st.rename.as_ref().is_some_and(|(id, _)| *id == g.id);
     let r = if renaming {
@@ -802,8 +796,8 @@ fn group_menu(ui: &mut egui::Ui, g: &Group, cx: &Cx, st: &mut ConnsUi, acts: &mu
     }
     ui.separator();
     let members: Vec<&Conn> = g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).collect();
-    let can_connect = members.iter().any(|c| matches!(c.status, Status::Idle | Status::Failed(_)));
-    let can_disconnect = members.iter().any(|c| matches!(c.status, Status::Ready | Status::Connecting));
+    let can_connect = members.iter().any(|c| c.status.can_connect());
+    let can_disconnect = members.iter().any(|c| c.status.is_open());
     if ui.add_enabled(can_connect, egui::Button::new("Connect all")).clicked() {
         acts.push(PanelAct::ConnectAll(g.id));
         ui.close();
@@ -836,7 +830,7 @@ fn conn_menu(r: &egui::Response, c: &Conn, grouped: bool, acts: &mut Vec<PanelAc
 /// What the right click and the dots button of a connection row offer.
 fn conn_menu_items(ui: &mut egui::Ui, c: &Conn, grouped: bool, acts: &mut Vec<PanelAct>) {
     let id = c.meta.id;
-    let open = matches!(c.status, Status::Ready | Status::Connecting);
+    let open = c.status.is_open();
     menu_look(ui);
     if ui.button("Browse databases").clicked() {
         acts.push(PanelAct::Browse(id));

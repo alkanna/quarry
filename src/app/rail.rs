@@ -79,7 +79,7 @@ impl App {
     /// members, and a connection dragged in from the sidebar lands here, through the same `tile_drop` targets. Such a
     /// drop wins over the move the list would make, since it is the more precise of the two.
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
-        let open: Vec<u64> = self.conns.iter().filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).map(|c| c.meta.id).collect();
+        let open: Vec<u64> = self.conns.iter().filter(|c| c.status.is_open()).map(|c| c.meta.id).collect();
         sync_order(&mut self.rail_order, &open);
         // A deleted group's id is given to the next new one, which must not show open for it.
         let groups = &self.groups;
@@ -169,7 +169,7 @@ impl App {
                         if r.clicked() {
                             toggle = Some(*gid);
                         }
-                        let can_connect = g.members.iter().filter_map(|m| self.conn(*m)).any(|c| matches!(c.status, Status::Idle | Status::Failed(_)));
+                        let can_connect = g.members.iter().filter_map(|m| self.conn(*m)).any(|c| c.status.can_connect());
                         r.context_menu(|ui| {
                             menu_look(ui);
                             for (n, label, on) in [(0u8, if open_now { "Close" } else { "Open" }, true), (1, "Connect all", can_connect), (2, "Disconnect all", true), (3, "Edit group\u{2026}", true), (4, "Don't fold in the rail", true)] {
@@ -407,12 +407,19 @@ impl App {
 
     /// Drops the session but keeps the saved connection, which then leaves the rail.
     pub(super) fn disconnect(&mut self, id: u64) {
-        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
+        if let Some(name) = self.drop_session(id) {
+            self.ok(format!("Disconnected from {name}"));
+        }
+    }
+
+    /// Closes the connection's session and forgets what was listed on it. Returns its name, or None when it is gone.
+    pub(super) fn drop_session(&mut self, id: u64) -> Option<String> {
+        let c = self.conns.iter_mut().find(|c| c.meta.id == id)?;
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
         c.forget_lists();
-        self.pg_tables_asked.forget(id, None, None);
         let name = c.meta.name.clone();
-        self.ok(format!("Disconnected from {name}"));
+        self.pg_tables_asked.forget(id, None, None);
+        Some(name)
     }
 }
 
