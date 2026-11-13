@@ -580,6 +580,10 @@ pub(crate) fn ac_input_with(
     pair: bool,
     show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
 ) -> (egui::text_edit::TextEditOutput, bool, bool) {
+    // Esc into Vim's Normal mode closes the list too: nothing is typed there for it to complete.
+    if ac.id == Some(id) && crate::ui::vim::normal(ui.ctx(), id) {
+        ac.close();
+    }
     let open = ac.id == Some(id) && !ac.items.is_empty();
     let mut pick = None;
     let mut moved = false;

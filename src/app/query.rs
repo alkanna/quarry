@@ -281,7 +281,10 @@ impl App {
             }
             suggest(b, kind, paths, fields)
         };
-        let (out, picked) = ac_field(ui, id, text, ac, &compute, |ui, text, open| {
+        // In Normal mode Vim takes Enter as a motion, so it is read first to keep Enter running the query.
+        let normal_enter = crate::ui::vim::normal(ui.ctx(), id) && ui.memory(|m| m.has_focus(id)) && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+        let (out, picked) = crate::ui::vim::wrap_with(ui, id, text, |ui, text| {
+            ac_field(ui, id, text, ac, &compute, |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
                 .frame(frame)
@@ -293,6 +296,7 @@ impl App {
                 .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter))
                 .layouter(&mut code_layout)
                 .show(ui)
+            })
         });
         typed.edit = edited.take();
         let here = out.cursor_range.filter(|r| r.is_empty() && kind == FieldKind::Query && out.response.has_focus()).and_then(|r| {
@@ -325,7 +329,7 @@ impl App {
             }
         }
         typed.field = here.map(|h| h.0);
-        !picked && out.response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift)
+        !picked && out.response.has_focus() && (normal_enter || ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift))
     }
 
     /// The library list of a SQL connection's scripts.

@@ -89,7 +89,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 28] = [
+const SHORTCUTS: [(&str, &str); 29] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -118,6 +118,7 @@ const SHORTCUTS: [(&str, &str); 28] = [
     ("Cmd+/", "This list"),
     ("Ctrl+Space", "Suggestions in a query or SQL field, also where none show by themselves"),
     ("Tab", "Show the selected SQL row as a record, one line per column; Esc closes it"),
+    ("Vim motions", "Modal editing in the code editors, turned on in Settings > Editing"),
 ];
 
 pub struct App {
@@ -710,6 +711,7 @@ impl eframe::App for App {
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
         self.poll(ctx);
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
+        crate::ui::vim::set_on(ctx, self.prefs.vim);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
         // frames ask for focus once the window is visible (a no-op when it already has it).
         if ctx.cumulative_frame_nr() < 3 && crate::takes_focus() {

@@ -78,16 +78,18 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::vertical().id_salt(("trigger-body-scroll", salt)).max_height(height).auto_shrink([false, true]).show(ui, |ui| {
-            let out = egui::TextEdit::multiline(text)
-                .id(id)
-                .font(FontId::monospace(TXT_SMALL))
-                .frame(gutter_frame())
-                .desired_width(f32::INFINITY)
-                .min_size(egui::vec2(0.0, 96.0))
-                .interactive(editable)
-                .lock_focus(true)
-                .layouter(&mut layout)
-                .show(ui);
+            let out = crate::ui::vim::wrap(ui, id, text, |ui, text| {
+                egui::TextEdit::multiline(text)
+                    .id(id)
+                    .font(FontId::monospace(TXT_SMALL))
+                    .frame(gutter_frame())
+                    .desired_width(f32::INFINITY)
+                    .min_size(egui::vec2(0.0, 96.0))
+                    .interactive(editable)
+                    .lock_focus(true)
+                    .layouter(&mut layout)
+                    .show(ui)
+            });
             changed = out.response.changed();
             out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, editable, "Trigger body"));
             paint_gutter(ui, &out, None);

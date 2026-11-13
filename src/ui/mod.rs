@@ -10,4 +10,5 @@ pub mod pickers;
 pub mod sql_complete;
 pub mod sql_words_pg;
 pub mod theme;
+pub mod vim;
 pub mod widgets;

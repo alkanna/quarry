@@ -258,14 +258,18 @@ pub(crate) fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, on: bool) -> egui
 pub(crate) fn badge(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
     let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), mono_fmt(10.0, fg, W_SEMIBOLD)));
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 16.0, 18.0), Sense::click());
-    let state = state_of(&r);
-    ui.painter().rect_filled(rect, R_SM, tint(fg, [31, 51, 71][state]));
-    let dy = optical_dy(&g);
-    ui.painter().galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, fg);
+    paint_badge(ui.painter(), rect, g, fg, [31, 51, 71][state_of(&r)]);
     focus_ring(ui, &r, rect, R_SM as f32);
     let enabled = ui.is_enabled();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The look of `badge` without the widget: a tinted rect with its label centered on the ink.
+pub(crate) fn paint_badge(p: &egui::Painter, rect: egui::Rect, g: std::sync::Arc<egui::Galley>, fg: Color32, alpha: u8) {
+    p.rect_filled(rect, R_SM, tint(fg, alpha));
+    let dy = optical_dy(&g);
+    p.galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, fg);
 }
 
 pub(crate) fn paint_kbd(p: &egui::Painter, rect: egui::Rect, g: std::sync::Arc<egui::Galley>) {
