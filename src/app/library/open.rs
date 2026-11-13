@@ -92,6 +92,8 @@ pub(in crate::app) struct Pending {
     pub attempt: u64,
     /// Egui time the wait started while the connection was not connecting, for the time limit.
     pub since: Option<f64>,
+    /// The connection was seen connecting since, so a failure now is news even on the same attempt.
+    pub seen_connecting: bool,
     pub name: String,
 }
 
@@ -322,7 +324,8 @@ impl App {
         }
         if !status_ready && !self.demo {
             let uid = self.t().map(|t| t.uid);
-            self.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, name: s.name.clone() });
+            let seen_connecting = self.conn(s.conn).is_some_and(|c| c.status == Status::Connecting);
+            self.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, seen_connecting, name: s.name.clone() });
             // activate connects only an idle connection; a failed one is tried again.
             if self.conn(s.conn).is_some_and(|c| matches!(c.status, Status::Failed(_))) {
                 self.connect(s.conn);

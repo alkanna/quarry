@@ -119,15 +119,16 @@ impl App {
         // Files of the linked folders used on this connection, of this view's kind; a filter or pipeline file that names a
         // collection shows only on that collection.
         let engine = self.conn(conn).map(|c| c.meta.engine);
-        let files: Vec<(u64, &crate::library::disk::Entry)> = lib
-            .links
-            .iter()
-            .filter(|l| engine.is_some_and(|e| crate::library::format::fits(l, kind.kind(), conn, e)))
-            .filter_map(|l| self.lib_ui.scans.get(&l.id).map(|s| (l.id, s)))
-            .flat_map(|(id, s)| s.entries.iter().map(move |e| (id, e)))
-            .filter(|(_, e)| e.kind == kind.kind() && (matches!(kind, PickKind::Sql | PickKind::Shell) || ((e.target.coll.is_empty() || e.target.coll == coll) && (e.target.db.is_empty() || e.target.db == db))))
-            .collect();
-        let count = lib.scripts.iter().filter(|s| fits(s)).count() + files.len();
+        // An iterator, so a closed picker only counts them: the views ask for this every frame.
+        let files = || {
+            lib.links
+                .iter()
+                .filter(|l| engine.is_some_and(|e| crate::library::format::fits(l, kind.kind(), conn, e)))
+                .filter_map(|l| self.lib_ui.scans.get(&l.id).map(|s| (l.id, s)))
+                .flat_map(|(id, s)| s.entries.iter().map(move |e| (id, e)))
+                .filter(|(_, e)| e.kind == kind.kind() && (matches!(kind, PickKind::Sql | PickKind::Shell) || ((e.target.coll.is_empty() || e.target.coll == coll) && (e.target.db.is_empty() || e.target.db == db))))
+        };
+        let count = lib.scripts.iter().filter(|s| fits(s)).count() + files().count();
         let bound = self.t().and_then(|t| t.script.as_ref().filter(|b| b.view == t.view).map(|b| (b.r.clone(), super::linked::bound_text(t).is_some_and(|x| x != b.base))));
         let bound = bound.map(|(r, edited)| (self.chip_text(&r), edited));
         if !picker_open(ctx) {
@@ -142,11 +143,11 @@ impl App {
             rows.push(PickRow { r: ScriptRef::Saved(s.id), name: s.name.clone(), first, hay });
         }
         let mut linked = Vec::new();
-        for (link, e) in &files {
+        for (link, e) in files() {
             let name = e.rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let hay = format!("{} {}", e.rel.to_string_lossy(), e.head.chars().take(200).collect::<String>()).to_lowercase();
             linked.push(rows.len());
-            rows.push(PickRow { r: ScriptRef::File { link: *link, rel: e.rel.clone() }, name, first: first_line(kind.kind(), &e.head), hay });
+            rows.push(PickRow { r: ScriptRef::File { link, rel: e.rel.clone() }, name, first: first_line(kind.kind(), &e.head), hay });
         }
         let recent: Vec<usize> = lib.recent.iter().filter_map(|r| match r {
             ScriptRef::Saved(id) => index.get(id).copied(),

@@ -643,7 +643,10 @@ impl App {
         let held = lib.scripts.iter().map(|s| s.conn).chain(lib.links.iter().flat_map(|l| l.conns.iter().copied()));
         let groups = self.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.groups.loose.iter().copied());
         let prefs = self.prefs.open_tabs.iter().map(|t| t.conn).chain(self.prefs.open_conns.iter().copied()).chain(self.prefs.last_conn);
-        let history = self.prefs.history.keys().filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
+        // Per-connection settings are keyed "{conn}/...".
+        let p = &self.prefs;
+        let keyed = p.history.keys().chain(p.shell_histories.keys()).chain(p.cols.keys()).chain(p.schema_maps.keys()).chain(p.relations.keys());
+        let history = keyed.filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
         self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).max().unwrap_or(0) + 1
     }
 

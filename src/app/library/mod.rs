@@ -137,12 +137,13 @@ impl App {
         }
         if connecting {
             if let Some(q) = self.lib_ui.pending.as_mut() {
-                q.since = None;
+                (q.since, q.seen_connecting) = (None, true);
             }
             return;
         }
-        // The failure the connection had when the script was asked for is not news: only a new attempt that fails is.
-        if failed && attempt != p.attempt {
+        // The failure the connection had when the script was asked for is not news: only a new attempt that fails is, or the
+        // one that was under way.
+        if failed && (attempt != p.attempt || p.seen_connecting) {
             self.lib_ui.pending = None;
             return self.warn(format!("{} was not opened: {cname} failed to connect.", p.name));
         }

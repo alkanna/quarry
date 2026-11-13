@@ -524,7 +524,8 @@ impl App {
         if ctx.input(|i| i.pointer.any_pressed()) && ctx.pointer_interact_pos().is_some_and(|p| !ui.max_rect().contains(p)) {
             st.focus = false;
         }
-        if ctx.text_edit_focused() {
+        // The tree's own rename field is not the page taking the keys: after Enter the arrows walk the tree again.
+        if ctx.text_edit_focused() && st.rename.is_none() {
             st.focus = false;
         }
 

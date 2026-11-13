@@ -420,6 +420,79 @@ fn a_connection_that_never_starts_connecting_drops_the_wait() {
 }
 
 #[test]
+fn a_connection_that_was_connecting_and_fails_says_so_at_once() {
+    let (mut ui, _) = waiting(Status::Connecting);
+    assert!(ui.app().lib_ui.pending.is_some());
+    // The same attempt fails: it was under way when the script was asked for, so this failure is news.
+    set_status(&mut ui, Status::Failed("refused".into()), 0);
+    assert!(ui.app().lib_ui.pending.is_none());
+    assert_eq!(count_toasts(ui.app(), "failed to connect"), 1, "{}", ui.app().last_problem());
+}
+
+#[test]
+fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
+    let Some(mut ui) = demo_ui(|a| {
+        sql_query(a);
+        a.demo_library("panel");
+    }) else { return };
+    writable(&mut ui, 3, false);
+    let on = ui.app().runs_on(&ScriptRef::Saved(10));
+    assert!(on.contains("Runs on shop-prod") && on.contains("shop") && on.contains("read-only"), "{on}");
+    ui.show(&on);
+    // The active connection is another one, but the tab on screen is on shop-prod: the panel scopes to the tab's.
+    {
+        let a = ui.h.state_mut();
+        a.conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
+        a.active = Some(1);
+    }
+    ui.settle();
+    assert_eq!(ui.app().lib_conn(), Some(3));
+    ui.show("Monthly revenue");
+}
+
+#[test]
+fn a_migration_that_brings_nothing_still_writes_the_library_so_it_never_runs_again() {
+    let mut ui = UiApp { h: harness() };
+    let a = ui.h.state_mut();
+    a.prefs.library.insert("junk".into(), vec![SavedQuery { name: "x".into(), ..Default::default() }]);
+    assert_eq!(a.library.v, 0);
+    a.migrate_library();
+    assert!(a.library.scripts.is_empty());
+    assert_eq!(a.library.v, 1, "library.json was not written");
+}
+
+#[test]
+fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
+    let Some(mut ui) = demo_ui(|a| {
+        sql_query(a);
+        a.demo_library("panel");
+    }) else { return };
+    {
+        let st = &mut ui.h.state_mut().lib_ui.panel;
+        (st.sel, st.focus) = (Some(crate::library::tree::Node::Script(11)), true);
+    }
+    ui.settle();
+    ui.key(egui::Modifiers::NONE, egui::Key::F2);
+    ui.key(CMD, egui::Key::A);
+    ui.type_text("Best customers");
+    ui.key(egui::Modifiers::NONE, egui::Key::Enter);
+    assert!(ui.app().library.scripts.iter().any(|s| s.id == 11 && s.name == "Best customers"));
+    let before = ui.app().lib_ui.panel.sel.clone();
+    ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+    assert_ne!(ui.app().lib_ui.panel.sel, before, "the arrows stopped walking the tree after the rename");
+    // Focus reaching a row from the keyboard selects it and hands the tree the keys.
+    {
+        let st = &mut ui.h.state_mut().lib_ui.panel;
+        (st.sel, st.focus) = (None, false);
+    }
+    ui.settle();
+    ui.h.get_by_label("Monthly revenue").focus();
+    ui.settle();
+    let st = &ui.app().lib_ui.panel;
+    assert!(st.focus && st.sel == Some(crate::library::tree::Node::Script(10)), "{:?} {}", st.sel, st.focus);
+}
+
+#[test]
 fn a_failed_connection_is_tried_again_and_warns_once_when_it_fails_again() {
     let (mut ui, _) = waiting(Status::Failed("refused".into()));
     // The old failure is not news: the script waits for the new attempt.
