@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.45.0](https://github.com/alkanna/quarry/compare/v0.44.0...v0.45.0) (2026-11-13)
+
+
+### Features
+
+* opt-in Vim motions in the code editors ([#223](https://github.com/alkanna/quarry/issues/223)) ([91f9681](https://github.com/alkanna/quarry/commit/91f9681051b7f2675b29e176ee635d3685c97dd4))
+* the memory readout's tooltip shows where the memory is, by category ([#220](https://github.com/alkanna/quarry/issues/220)) ([29a5256](https://github.com/alkanna/quarry/commit/29a5256af773e526a134061b2127517ad819936a))
+* the Run button's tip picks the statement to run, and Tab opens a Query result row as a record ([#226](https://github.com/alkanna/quarry/issues/226)) ([ceef429](https://github.com/alkanna/quarry/commit/ceef4290f43f2d76c05a9a8d9ff2ae19b2a141a5))
+
+
+### Bug Fixes
+
+* dialog footers stay one button high and keep the dialog's padding ([#224](https://github.com/alkanna/quarry/issues/224)) ([f910013](https://github.com/alkanna/quarry/commit/f91001350aeb775b880aa76c4762c908f6304fa8))
+* macOS keeps every saved secret in one Keychain item, so a launch asks for access once ([#225](https://github.com/alkanna/quarry/issues/225)) ([af2de63](https://github.com/alkanna/quarry/commit/af2de631345d72992a8cafe6dc2e53a952b5da2d))
+
 ## [0.44.0](https://github.com/alkanna/quarry/compare/v0.43.0...v0.44.0) (2026-11-13)
 
 
