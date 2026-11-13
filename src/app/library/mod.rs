@@ -27,6 +27,17 @@ pub(super) struct LibUi {
     pub(in crate::app) panel: panel::PanelUi,
 
     // B2: link scans in flight, conflicts and the Link a folder dialog.
+    /// The last scan of each link, by link id. Entries keep their modified time and length, so a rescan reuses what did not change.
+    pub(super) scans: HashMap<u64, crate::library::disk::Scan>,
+    /// Links with a scan running, so each has at most one.
+    pub(super) scanning: HashSet<u64>,
+    /// Egui time each link was last scanned.
+    pub(super) scan_at: HashMap<u64, f64>,
+    /// Links to scan at the next frame, whatever the timer says.
+    pub(super) rescan: HashSet<u64>,
+    pub(super) was_focused: bool,
+    /// The scans are set by hand, as the demo does, and nothing reads the disk.
+    pub(super) frozen: bool,
 }
 
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to
@@ -68,8 +79,9 @@ impl App {
 
     /// Called every frame from `logic()`: scheduled library work, such as opening a script once its connection is ready
     /// and rescanning linked folders. Timers use egui time and anything that changes asks for a repaint.
-    pub(super) fn library_tick(&mut self, _ctx: &egui::Context) {
+    pub(super) fn library_tick(&mut self, ctx: &egui::Context) {
         self.library_pending();
+        self.linked_tick(ctx);
     }
 
     /// Opens the script that waited for its connection, once the connection is ready.
