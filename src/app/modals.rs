@@ -124,7 +124,7 @@ impl App {
                 Modal::FkEdit(f) => self.fk_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.set_width(480.0);
-                    dialog_head(ui, &Head::new("Type to confirm").sub("This changes many documents at once").glyph(glyphs::warn).tone(ALERT()));
+                    dialog_head(ui, &Head::new("Type to confirm").glyph(glyphs::warn).tone(ALERT()));
                     dialog_body(ui, |ui| {
                         ui.add(egui::Label::new(RichText::new(title.as_str()).color(TEXT())).wrap());
                         ui.add_space(12.0);

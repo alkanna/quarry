@@ -27,11 +27,12 @@ pub(crate) struct Head<'a> {
     tabs: &'a [&'a str],
     tab: usize,
     dim: &'a [bool],
+    closable: bool,
 }
 
 impl<'a> Head<'a> {
     pub(crate) fn new(title: impl Into<String>) -> Self {
-        Self { title: title.into(), sub: String::new(), glyph: None, tone: None, tabs: &[], tab: 0, dim: &[] }
+        Self { title: title.into(), sub: String::new(), glyph: None, tone: None, tabs: &[], tab: 0, dim: &[], closable: true }
     }
     /// The context line under the title: the connection, the engine, a count.
     pub(crate) fn sub(mut self, sub: impl Into<String>) -> Self {
@@ -51,6 +52,11 @@ impl<'a> Head<'a> {
     pub(crate) fn tabs(mut self, tabs: &'a [&'a str], active: usize) -> Self {
         self.tabs = tabs;
         self.tab = active;
+        self
+    }
+    /// No close button, for a window that cannot close yet (a tool still running).
+    pub(crate) fn no_close(mut self) -> Self {
+        self.closable = false;
         self
     }
     /// Tabs whose settings do not apply right now, drawn faint but still clickable.
@@ -88,10 +94,12 @@ pub(crate) fn dialog_head_with(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let r = close_x(ui);
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close dialog"));
-                if r.on_hover_text("Close (Esc)").clicked() {
-                    ui.close();
+                if h.closable {
+                    let r = close_x(ui);
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close dialog"));
+                    if r.on_hover_text("Close (Esc)").clicked() {
+                        ui.close();
+                    }
                 }
                 right(ui);
             });
@@ -319,12 +327,7 @@ pub(crate) fn banner(ui: &mut egui::Ui, tone: Notice, lead: &str, msg: &str, act
         Notice::Ok => (SUCCESS(), super::glyphs::check),
     };
     let mut clicked = false;
-    egui::Frame::new()
-        .fill(tint(col, 20))
-        .stroke(Stroke::new(1.0, tint(col, 84)))
-        .corner_radius(R_BAR)
-        .inner_margin(egui::Margin { left: 12, right: 8, top: 8, bottom: 8 })
-        .show(ui, |ui| {
+    banner_frame(col).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.set_min_height(BUTTON_H);
@@ -346,6 +349,11 @@ pub(crate) fn banner(ui: &mut egui::Ui, tone: Notice, lead: &str, msg: &str, act
         });
     ui.add_space(14.0);
     clicked
+}
+
+/// The tinted frame of a banner in `col`, for notices that lay out their own text.
+pub(crate) fn banner_frame(col: Color32) -> egui::Frame {
+    egui::Frame::new().fill(tint(col, 20)).stroke(Stroke::new(1.0, tint(col, 84))).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 8, top: 8, bottom: 8 })
 }
 
 /// One of a set of exclusive choices that each need a line of explanation: a card with a radio mark, a title and a
@@ -462,18 +470,18 @@ pub(crate) fn code_card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut
     r
 }
 
-/// A folding statement preview: a header row with a chevron, the title, a count and the first statement cut to one
-/// line; `body` draws the full text when open. Opens by itself when `changed` turns true.
+/// A folding statement preview: a header row with a chevron, the title, a count and `first` cut to one line (the first
+/// statement, or why there is none); `body` draws the full text when open. Opens by itself each time the count goes
+/// from none to some, so a new set of changes is always shown once; the user can close it again.
 pub(crate) fn sql_drawer(ui: &mut egui::Ui, id: egui::Id, title: &str, count: usize, first: &str, body: impl FnOnce(&mut egui::Ui)) {
     let open_id = id.with("open");
-    let seen_id = id.with("seen");
+    let last_id = id.with("last");
     let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
-    // The first change opens the drawer once; the user can close it again.
-    let seen = ui.data(|d| d.get_temp::<bool>(seen_id)).unwrap_or(false);
-    if count > 0 && !seen {
+    let last = ui.data(|d| d.get_temp::<usize>(last_id)).unwrap_or(0);
+    if count > 0 && last == 0 {
         open = true;
-        ui.data_mut(|d| d.insert_temp(seen_id, true));
     }
+    ui.data_mut(|d| d.insert_temp(last_id, count));
     egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
@@ -496,7 +504,7 @@ pub(crate) fn sql_drawer(ui: &mut egui::Ui, id: egui::Id, title: &str, count: us
         let pill = egui::Rect::from_min_size(egui::pos2(rect.left() + 42.0 + tw, rect.center().y - 9.0), egui::vec2(ng.size().x + 12.0, 18.0));
         p.rect_filled(pill, 9.0, tint(MUTED(), 40));
         galley_at(p, pill.left() + 6.0, rect.center().y, ng, MUTED());
-        let line = if count == 0 { "-- No changes yet" } else { first.lines().next().unwrap_or("") };
+        let line = if first.is_empty() { "-- No changes yet" } else { first.lines().next().unwrap_or("") };
         let room = rect.right() - 14.0 - (pill.right() + 16.0);
         if room > 40.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(line.to_string(), egui::FontId::monospace(TXT_SMALL), FAINT());

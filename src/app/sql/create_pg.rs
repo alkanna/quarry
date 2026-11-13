@@ -538,9 +538,6 @@ impl App {
         });
         let ok = writable && built.is_ok();
         dialog_foot(ui, |ui| {
-            if !writable {
-                foot_note(ui, NOTE_DB);
-            }
             if ui.add_enabled(ok, primary_button(ui, "Create schema", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
                     self.worker.pg_create_schema(f.conn, sql.at(&f.database), f.name.clone(), !writable);
@@ -549,6 +546,10 @@ impl App {
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
+            }
+            // Last: the note takes the left side, and the buttons placed after it would land left of the dialog.
+            if !writable {
+                foot_note(ui, NOTE_DB);
             }
         });
     }

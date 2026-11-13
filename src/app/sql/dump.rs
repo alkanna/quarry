@@ -87,18 +87,6 @@ pub(in crate::app) struct RunForm {
 }
 
 /// Today as YYYY-MM-DD in UTC, for a default file name.
-/// "210 MB", in the largest unit that keeps a number of at least 1.
-fn human_size(b: u64) -> String {
-    let units = ["bytes", "KB", "MB", "GB", "TB"];
-    let mut v = b as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < units.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 { format!("{b} bytes") } else if v < 10.0 { format!("{v:.1} {}", units[i]) } else { format!("{v:.0} {}", units[i]) }
-}
-
 fn today() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
     let (y, m, d) = db::civil_from_days(days);
@@ -106,8 +94,7 @@ fn today() -> String {
 }
 
 impl App {
-    /// Opens the dump dialog for a database, in the schema its switcher shows on PostgreSQL. `table` is the open table whose
-    /// filter the first choice offers.
+    /// Puts the table sizes the server sent into the open Export dialog they were asked for.
     pub(in crate::app) fn sql_sizes_done(&mut self, req: u64, res: db::Res<Vec<(String, u64)>>) {
         // Sizes are an extra: a refusal leaves the estimate out.
         let (Some(Modal::SqlDump(f)), Ok(sizes)) = (self.modal.as_mut(), res) else { return };
@@ -119,6 +106,8 @@ impl App {
         }
     }
 
+    /// Opens the dump dialog for a database, in the schema its switcher shows on PostgreSQL. `table` is the open table whose
+    /// filter the first choice offers.
     pub(in crate::app) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
         let schema = self.ns_of(conn, &db).to_string();
         self.open_sql_dump_in(conn, db, schema, table)
@@ -208,7 +197,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             let whole_desc = format!("{} tables{}", f.rows.len() - views, if views > 0 { format!(", {views} views") } else { String::new() });
-            let r = radio_card(ui, cw, f.what == What::Whole, if pg { "Whole database" } else { "Whole database" }, &if pg { format!("{whole_desc}, every schema") } else { whole_desc });
+            let r = radio_card(ui, cw, f.what == What::Whole, "Whole database", &if pg { format!("{whole_desc}, every schema") } else { whole_desc });
             if r.on_hover_text(if pg { "Every table, view, type, sequence, function and extension of every schema, as the server has them now" } else { "Every table with its rows" }).clicked() {
                 f.what = What::Whole;
                 for r in &mut f.rows {
@@ -305,8 +294,9 @@ impl App {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let r = ui.add_enabled_ui(enabled, |ui| toggle(ui, on)).inner;
                                 r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, *on, title));
+                                // A disabled switch shows only a disabled-hover text, and that is where the reason is.
                                 if !tip.is_empty() {
-                                    r.on_hover_text(tip);
+                                    if enabled { r.on_hover_text(tip) } else { r.on_disabled_hover_text(tip) };
                                 }
                             });
                         });
@@ -371,7 +361,7 @@ impl App {
             let n = if filtered { 1 } else { f.rows.iter().filter(|r| r.on && !(r.view && !f.extras)).count() };
             // The tables as they sit on the server; the file is usually smaller than that, and much smaller compressed.
             let bytes: u64 = if filtered { 0 } else { f.rows.iter().filter(|r| r.on && r.content && !r.view).filter_map(|r| r.bytes).sum() };
-            let size = if bytes > 0 { format!("  ·  {} on the server", human_size(bytes)) } else { String::new() };
+            let size = if bytes > 0 { format!("  ·  {} on the server", human_bytes(bytes as usize)) } else { String::new() };
             foot_note(ui, &format!("{}{}{size}", crate::app::sql::create::plural(n as u64, "table"), if total > 0 { format!("  ·  about {} rows", group(&total.to_string())) } else { String::new() }));
         });
         if go {
@@ -538,7 +528,7 @@ impl App {
     /// QUARRY_TEST_SQL=dump: the Export dialog of the design with the shop database.
     pub(in crate::app) fn demo_sql_dump(&mut self) {
         let conn = self.t().map_or(0, |t| t.sel.conn);
-        let row = |name: &str, on: bool, content: bool, rows: u64| Row { name: name.into(), view: false, on, structure: on, content, drop: false, rows: Some(rows), bytes: Some(rows * 180) };
+        let row = |name: &str, on: bool, content: bool, rows: u64| Row { name: name.into(), view: false, on, structure: on, content, drop: false, rows: Some(rows), bytes: None };
         let rows = vec![
             row("customers", true, true, 1284),
             row("order_items", true, true, 8902),
@@ -596,15 +586,5 @@ mod tests {
         assert!(!tab_gone(&sel("shop", ""), &dbs, "shop", t), "a Query tab of the database stays");
         assert!(!tab_gone(&sel("other", "items"), &dbs, "shop", t), "tables of other databases were not read");
         assert!(!tab_gone(&sel("shop", "items"), &dbs, "shop", None));
-    }
-}
-
-#[cfg(test)]
-mod size_tests {
-    #[test]
-    fn sizes_read_in_the_largest_unit() {
-        assert_eq!(super::human_size(512), "512 bytes");
-        assert_eq!(super::human_size(1536), "1.5 KB");
-        assert_eq!(super::human_size(220 * 1024 * 1024), "220 MB");
     }
 }

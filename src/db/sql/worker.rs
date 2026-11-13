@@ -704,7 +704,6 @@ impl Worker {
         });
     }
 
-    /// Tables sorted, and which of them are views.
     /// The size on disk of each table of a schema, data and indexes together, for the Export dialog's estimate.
     pub fn sql_table_sizes(&self, req: u64, db: Db, schema: String) {
         self.spawn(async move {
@@ -716,6 +715,7 @@ impl Worker {
         });
     }
 
+    /// Tables sorted, and which of them are views.
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
             let database = db.pg_database();

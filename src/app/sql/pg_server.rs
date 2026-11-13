@@ -358,10 +358,11 @@ fn text_at(ui: &egui::Ui, x: f32, w: f32, cy: f32, h: f32, s: &str, color: Color
     place(ui, egui::Rect::from_min_max(egui::pos2(x, cy - h / 2.0), egui::pos2(x + w, cy + h / 2.0)), s, font, color, right, PAD);
 }
 
-/// A note above the list: a tinted box with the text and an optional button, true when the button was clicked.
+/// A note above the list whose text is laid out by `add` (several styled pieces), on the frame of the shared
+/// `banner`; true when the button was clicked.
 fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui), button: Option<&str>) -> bool {
     let mut clicked = false;
-    egui::Frame::new().fill(tint(color, 20)).stroke(Stroke::new(1.0, tint(color, 84))).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 8, top: 7, bottom: 7 }).show(ui, |ui| {
+    crate::ui::dialog::banner_frame(color).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.set_min_height(26.0);
@@ -515,22 +516,19 @@ impl App {
             let labels = TABS.map(|t| t.1);
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
             let picked = dialog_head(ui, &Head::new("Server").sub(subtitle(&s, &name, product.trim())).glyph(glyphs::server).tabs(&labels, active));
-            {
-                for (tab, _) in TABS.iter().copied().filter(|t| picked.is_some_and(|i| TABS[i].0 == t.0)) {
-                    if s.tab != tab {
-                        s.tab = tab;
-                        match tab {
-                            PgTab::Overview => s.ov_next = None,
-                            PgTab::Activity | PgTab::Locks => s.act_next = None,
-                            PgTab::Settings => {}
-                        }
-                        // Locks is about the blockers, so it asks for them at once.
-                        if tab == PgTab::Locks {
-                            s.blk_at = None;
-                        }
-                        s.confirm = None;
-                    }
+            if let Some(i) = picked && TABS[i].0 != s.tab {
+                let tab = TABS[i].0;
+                s.tab = tab;
+                match tab {
+                    PgTab::Overview => s.ov_next = None,
+                    PgTab::Activity | PgTab::Locks => s.act_next = None,
+                    PgTab::Settings => {}
                 }
+                // Locks is about the blockers, so it asks for them at once.
+                if tab == PgTab::Locks {
+                    s.blk_at = None;
+                }
+                s.confirm = None;
             }
             let max = screen.height() - 400.0;
             dialog_pane(ui, |ui| {

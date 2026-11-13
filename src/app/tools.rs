@@ -25,14 +25,17 @@ impl App {
         }
         let Some(t) = &mut self.tool else { return };
         let mut close = false;
-        banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
+        let running = t.done.is_none();
+        let r = banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
             ui.set_width(660.0);
             let sub = match &t.done {
                 None => "Running…".to_string(),
                 Some(Ok(_)) => "Finished".to_string(),
                 Some(Err(_)) => "Failed".to_string(),
             };
-            dialog_head(ui, &Head::new(t.title.as_str()).sub(sub).glyph(glyphs::code));
+            // While the tool runs it is stopped, not closed, so there is no close button until it ends.
+            let head = Head::new(t.title.as_str()).sub(sub).glyph(glyphs::code);
+            dialog_head(ui, &if running { head.no_close() } else { head });
             dialog_pane(ui, |ui| {
                 match &t.done {
                     Some(Ok(m)) => {
@@ -69,7 +72,7 @@ impl App {
                 });
             });
         });
-        if close {
+        if close || (!running && r.should_close()) {
             self.tool = None;
         }
     }

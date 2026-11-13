@@ -217,8 +217,8 @@ impl App {
                     spin(ui);
                     ui.label(RichText::new("Reading the columns of the table").color(MUTED()));
                 });
-                ui.add_space(8.0);
-                if dialog_foot(ui, |ui| ui.button("Cancel").clicked()) {
+                b.end(outer);
+                if dialog_foot(outer, |ui| ui.button("Cancel").clicked()) {
                     *keep = false;
                 }
                 return;

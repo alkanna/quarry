@@ -169,3 +169,17 @@ fn the_connections_menu_keeps_its_actions_on_screen_with_many_connections() {
     ui.click("cluster-39");
     assert_eq!(ui.app().active, Some(139), "the last connection could not be picked");
 }
+
+#[test]
+fn the_close_button_of_an_agent_approval_denies_it() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_demo();
+        a.agents_demo_view("approval");
+    }) else {
+        return;
+    };
+    ui.show("Allow once");
+    ui.click("Close dialog");
+    assert_eq!(ui.app().agents.answered.len(), 1, "the close button did nothing");
+    assert!(matches!(ui.app().agents.answered[0].1, crate::app::agents::Answer::Deny), "the close button did not deny");
+}

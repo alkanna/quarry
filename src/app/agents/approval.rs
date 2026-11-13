@@ -65,7 +65,7 @@ impl App {
         let large_change = p.map_or(0, |p| p.large_change);
         let undo_docs = self.agents.cfg.limits.undo_docs;
         let client = if ask.client.is_empty() { "An agent".to_string() } else { ask.client.clone() };
-        top_banded(ctx, id).show(ctx, |ui| {
+        let r = top_banded(ctx, id).show(ctx, |ui| {
             ui.set_width(w + 40.0);
             let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
             let sub = if total > 1 { format!("AI agent  ·  1 of {total} waiting") } else { "AI agent  ·  asks before it acts".to_string() };
@@ -183,6 +183,10 @@ impl App {
                 });
             }
         });
+        // The header's close button answers like Esc.
+        if answer.is_none() && r.should_close() {
+            answer = Some(if ask.gone { Answer::Close } else { Answer::Deny });
+        }
         // The countdown, and Allow waking up.
         ctx.request_repaint_after(if awake { Duration::from_millis(500) } else { WAKE.saturating_sub(now.saturating_duration_since(shown)) });
         if let Some(a) = answer {

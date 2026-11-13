@@ -312,7 +312,7 @@ fn password_age(ident: &str, today: i64) -> Option<i64> {
 fn statements(ui: &mut egui::Ui, id: &str, title: &str, text: Result<String, String>) {
     let (count, first) = match &text {
         Ok(t) => (t.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("--")).count(), t.lines().next().unwrap_or_default().to_string()),
-        Err(_) => (0, String::new()),
+        Err(e) => (0, format!("-- Not valid yet: {e}")),
     };
     ui.add_space(4.0);
     sql_drawer(ui, egui::Id::unique(("sql-users-statements", id)), title, count, &first, |ui| preview_block(ui, text));

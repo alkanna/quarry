@@ -1386,7 +1386,6 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
     }
 }
 
-/// Label column width of dialog form grids, so fields in every section start at the same x.
 /// Side padding of a dialog's header, body and footer bands.
 pub(crate) const DIALOG_PAD: f32 = 20.0;
 /// The tinted square holding a dialog header's glyph.
@@ -1396,6 +1395,7 @@ pub(crate) const CARD_ROW_H: f32 = 40.0;
 pub(crate) const CARD_ROW_HINT_H: f32 = 52.0;
 /// The label column of a form card row.
 pub(crate) const CARD_LABEL_W: f32 = 170.0;
+/// Label column width of dialog form grids, so fields in every section start at the same x.
 pub(crate) const FORM_LABEL_W: f32 = 84.0;
 /// The gap between a form's label column and its fields, which fields that span both columns must add back.
 pub(crate) const FORM_GAP: f32 = 14.0;
