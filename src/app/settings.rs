@@ -165,6 +165,7 @@ impl App {
                             ""
                         };
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
                             ui.label(medium(RichText::new(if light { "Light theme" } else { "Dark theme" }).size(TXT_TITLE).color(BRIGHT())));
                             ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
                         });
