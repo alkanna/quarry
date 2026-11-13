@@ -1721,10 +1721,11 @@ mod tests {
         let Some((w, rx, db, _p)) = live("", "") else { return };
         exec(&w, &_p, "DROP PROCEDURE IF EXISTS quarry_test.p_big");
         exec(&w, &_p, "CREATE PROCEDURE quarry_test.p_big() BEGIN SELECT 1 AS n FROM information_schema.columns a, information_schema.columns b LIMIT 1500; END");
+        // A CALL may write after it selects, so it is read to its end: the grid keeps the cap and the script goes on.
         let sets = run_all(&w, &rx, &db, "CALL p_big(); SELECT 2", false);
-        assert_eq!(sets.len(), 2);
-        assert_eq!((sets[0].rows.len(), sets[0].capped), (RUN_ROWS_MAX, true));
-        assert!(sets[1].error.as_deref().is_some_and(|m| m.contains("row limit")), "{:?}", sets[1].error);
+        assert_eq!(sets[0].rows.len(), RUN_ROWS_MAX);
+        let last = sets.last().unwrap();
+        assert!(last.error.is_none() && last.rows.len() == 1, "{:?}", last.error);
     }
 
     #[test]

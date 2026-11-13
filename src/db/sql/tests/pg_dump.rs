@@ -1294,7 +1294,7 @@ fn live_a_value_that_is_not_utf8_stops_the_dump_and_names_its_table() {
         l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\" TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'")).execute(&l.pool).await }).unwrap_or_else(|x| panic!("{var}: create {name}: {x}"));
         dbs.names.push(name.clone());
         let pool = pool_of(l, &name);
-        sql(l, &pool, r"CREATE TABLE public.raw (id int, s text); INSERT INTO public.raw VALUES (1, 'plain'), (2, E'a\xffb')");
+        sql(l, &pool, r"CREATE TABLE public.raw (id int, s text); INSERT INTO public.raw VALUES (1, 'plain'), (2, convert_from('\x61ff62'::bytea, 'SQL_ASCII'))");
         let path = file(&format!("ascii_{t}"));
         let _ = std::fs::remove_file(&path);
         let e = dump(l, &l.db.at(&name), &plan("public", false, vec![table("raw", false, true, true, false)]), &path).unwrap_err();

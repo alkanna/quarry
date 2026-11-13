@@ -1227,7 +1227,8 @@ fn flush(out: &mut (dyn Write + Send), head: &str, batch: &mut String, n: &mut u
 async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels: &[Rel], types: &[Ty], seqs: &[Seq], cons: &[i64], idxs: &[i64], funcs: &[Func], trig: &[R], pols: &[i64], out: &mut (dyn Write + Send)) -> Res<()> {
     let mut lines: Vec<String> = Vec::new();
     let on = |what: &str, desc: &str| format!("COMMENT ON {what} IS {};\n", pg_lit(desc));
-    for r in cat(c, db, "SELECT n.nspname::text, d.description FROM pg_description d JOIN pg_namespace n ON n.oid = d.objoid WHERE d.classoid = 'pg_namespace'::regclass AND d.objsubid = 0 AND n.nspname::text = ANY($1) ORDER BY n.nspname", &[Arg::Ts(schemas)]).await? {
+    for r in cat(c, db, "SELECT n.nspname::text, d.description FROM pg_description d JOIN pg_namespace n ON n.oid = d.objoid WHERE d.classoid = 'pg_namespace'::regclass AND d.objsubid = 0 AND n.nspname::text = ANY($1) \
+         AND NOT (n.nspname = 'public' AND d.description = 'standard public schema') ORDER BY n.nspname", &[Arg::Ts(schemas)]).await? {
         lines.push(on(&format!("SCHEMA {}", q(&r.s(0))), &r.s(1)));
     }
     let mut ids: Vec<i64> = rels.iter().filter(|r| r.structure).map(|r| r.oid).collect();
