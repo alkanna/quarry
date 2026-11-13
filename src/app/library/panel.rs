@@ -347,7 +347,7 @@ fn run_chip(ui: &mut egui::Ui) -> egui::Response {
     let g = ui.painter().layout_job(LayoutJob::single_section("Run all".into(), ui_fmt(TXT_BODY, Color32::PLACEHOLDER, W_MEDIUM, 0.0)));
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 38.0, BUTTON_H), Sense::click());
     let state = state_of(&r);
-    ui.painter().rect(rect, R_MD, [RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state], Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    ui.painter().rect(rect, R_MD, shade_fill(RAISED(), state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     glyphs::play(ui.painter(), egui::pos2(rect.left() + 17.0, rect.center().y), if state > 0 { BRIGHT() } else { MUTED() });
     let dy = optical_dy(&g);
     ui.painter().galley(egui::pos2(rect.left() + 28.0, rect.center().y - g.size().y / 2.0 + dy), g, TEXT());

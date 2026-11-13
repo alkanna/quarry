@@ -1392,6 +1392,11 @@ pub(crate) fn hover_fill_on(ui: &egui::Ui, state: usize) -> Color32 {
     }
 }
 
+/// An opaque fill by state: `base` at rest, then shaded further when hovered and when pressed.
+pub(crate) fn shade_fill(base: Color32, state: usize) -> Color32 {
+    [base, shade(base, 0.12), shade(base, 0.24)][state]
+}
+
 /// A pressed row inside a raised popup or menu.
 pub(crate) fn menu_pressed() -> Color32 {
     MENU_HOVER().lerp_to_gamma(TEXT(), 0.08)
@@ -1410,7 +1415,7 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
         let c = Color32::from_rgb(r, g, b);
         [base, tint(c, a.saturating_mul(2)), tint(c, a.saturating_mul(3))][k]
     } else {
-        [base, shade(base, 0.12), shade(base, 0.24)][k]
+        shade_fill(base, k)
     }
 }
 

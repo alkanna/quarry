@@ -180,7 +180,7 @@ pub(crate) fn focus_ring(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, ra
 /// accent edge with focus or while its menu is open.
 pub(crate) fn field_frame(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, open: bool) {
     let state = state_of(resp);
-    let fill = [RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state];
+    let fill = shade_fill(RAISED(), state);
     let edge = if open || resp.has_focus() { PRIMARY() } else if state > 0 { MUTED() } else { BORDER() };
     ui.painter().rect(rect, R_MD, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
 }
@@ -624,7 +624,7 @@ pub(crate) fn expand_key(ui: &egui::Ui, id: egui::Id) -> bool {
 pub(crate) fn expand_button() -> impl egui::Widget {
     |ui: &mut egui::Ui| {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(EXPAND_BTN, EXPAND_BTN), Sense::click());
-        let fill = [BORDER(), shade(BORDER(), 0.12), shade(BORDER(), 0.24)][state_of(&r)];
+        let fill = shade_fill(BORDER(), state_of(&r));
         ui.painter().rect_filled(rect, R_SM, fill);
         focus_ring(ui, &r, rect, R_SM as f32);
         let (c, s) = (rect.center(), Stroke::new(1.4, BRIGHT()));
