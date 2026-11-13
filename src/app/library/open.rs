@@ -40,6 +40,70 @@ pub(in crate::app) fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Where a script runs, as `App::script_target` works it out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::app) enum Target {
+    On(u64),
+    /// No connection is the obvious one: the person picks from these.
+    Ask(Vec<u64>),
+    /// Nothing can run it, and why.
+    None(String),
+}
+
+/// Whether a script of `kind` can run on a connection of `engine`: SQL on MySQL, MariaDB and PostgreSQL, filters and
+/// pipelines on MongoDB, Shell scripts on any.
+pub(in crate::app) fn kind_fits(kind: &str, engine: db::sql::Engine) -> bool {
+    match kind {
+        "sql" => engine.is_sql(),
+        "filter" | "pipeline" => !engine.is_sql(),
+        "shell" => true,
+        _ => false,
+    }
+}
+
+fn kind_label(kind: &str) -> &'static str {
+    match kind {
+        "sql" => "SQL script",
+        "filter" => "query",
+        "pipeline" => "pipeline",
+        _ => "Shell script",
+    }
+}
+
+/// The database named in a connection address, such as shop in mysql://app@host:3306/shop?ssl-mode=REQUIRED. Empty
+/// when the address names none.
+pub(in crate::app) fn uri_db(uri: &str) -> String {
+    let Some((_, rest)) = uri.split_once("://") else { return String::new() };
+    // A masked or encoded password may hold a slash, so the host starts after the last @.
+    let host_on = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    let Some((_, path)) = host_on.split_once('/') else { return String::new() };
+    path.split(['?', '#']).next().unwrap_or_default().trim_matches('/').to_string()
+}
+
+/// A script waiting for its connection to be ready, which `library_tick` opens once it is.
+#[derive(Clone, Debug)]
+pub(in crate::app) struct Pending {
+    pub r: ScriptRef,
+    pub how: How,
+    pub conn: u64,
+    /// The tab that was current when it was asked for: a Run becomes a plain open if another tab is current by then.
+    pub uid: Option<u64>,
+    /// The connection's connect attempt when it was asked for, so the failure it had then is not taken for a new one.
+    pub attempt: u64,
+    /// Egui time the wait started while the connection was not connecting, for the time limit.
+    pub since: Option<f64>,
+    pub name: String,
+}
+
+/// The Open on dialog: the connections a script can run on when none is the obvious one.
+pub(in crate::app) struct OpenOnForm {
+    pub r: ScriptRef,
+    pub how: How,
+    pub conns: Vec<u64>,
+    pub sel: Option<u64>,
+    pub name: String,
+}
+
 impl App {
     /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a table's
     /// Content grid and the like).
@@ -79,7 +143,7 @@ impl App {
     }
 
     /// The database a SQL or Shell script opens in: its own when it names one, else the current tab's on the same
-    /// connection, else the first the connection lists.
+    /// connection, else the connection's default.
     fn script_db(&self, conn: u64, wanted: &str) -> String {
         if !wanted.is_empty() {
             return wanted.to_string();
@@ -87,7 +151,75 @@ impl App {
         if let Some(t) = self.t().filter(|t| t.sel.conn == conn && !t.sel.db.is_empty()) {
             return t.sel.db.clone();
         }
-        self.conn(conn).and_then(|c| c.dbs.first().map(|d| d.0.clone())).unwrap_or_default()
+        self.default_db(conn)
+    }
+
+    /// The database a connection opens in when nothing names one: the one in its address, else the first that is not the
+    /// server's own (information_schema, mysql, admin and the like), never simply the first in the list.
+    pub(in crate::app) fn default_db(&self, conn: u64) -> String {
+        let Some(c) = self.conn(conn) else { return String::new() };
+        let dbs: Vec<&str> = c.dbs.iter().map(|d| d.0.as_str()).collect();
+        let named = uri_db(&c.masked_uri);
+        if !named.is_empty() && (dbs.is_empty() || dbs.contains(&named.as_str())) {
+            return named;
+        }
+        let system = |d: &str| ["admin", "local", "config"].contains(&d) || db::sql::create::SYSTEM_SCHEMAS.contains(&d);
+        dbs.iter().find(|d| !system(d)).or(dbs.first()).map(|d| d.to_string()).unwrap_or_default()
+    }
+
+    /// Where a script runs: a saved script on its own connection, a linked file on the current tab's connection when the
+    /// link is used there, else on the active one. When neither fits, the person picks from the connections that do; one is
+    /// never taken at random, since it could be production.
+    pub(in crate::app) fn script_target(&self, r: &ScriptRef) -> Target {
+        match r {
+            ScriptRef::Saved(id) => {
+                let Some(s) = self.library.scripts.iter().find(|s| s.id == *id) else { return Target::None("That script is no longer in the library.".into()) };
+                if self.conn(s.conn).is_some() {
+                    return Target::On(s.conn);
+                }
+                let fit: Vec<u64> = self.conns.iter().filter(|c| kind_fits(&s.kind, c.meta.engine)).map(|c| c.meta.id).collect();
+                if fit.is_empty() { Target::None("The connection of this script was removed, and no other connection can run it.".into()) } else { Target::Ask(fit) }
+            }
+            ScriptRef::File { link, rel } => {
+                let Some(l) = self.library.links.iter().find(|l| l.id == *link) else { return Target::None("That folder is no longer linked.".into()) };
+                let kind = self.file_kind(*link, rel);
+                let fits = |id: u64| self.conn(id).is_some_and(|c| crate::library::format::fits(l, &kind, id, c.meta.engine));
+                if let Some(c) = self.t().map(|t| t.sel.conn).into_iter().chain(self.active).find(|c| fits(*c)) {
+                    return Target::On(c);
+                }
+                let fit: Vec<u64> = self.conns.iter().map(|c| c.meta.id).filter(|c| fits(*c)).collect();
+                if fit.is_empty() { Target::None("No connection this folder is used on can run that file.".into()) } else { Target::Ask(fit) }
+            }
+        }
+    }
+
+    /// "Runs on shop-prod  ·  shop  ·  read-only": where the script would run now, for the preview card and the Run tips.
+    pub(in crate::app) fn runs_on(&self, r: &ScriptRef) -> String {
+        match self.script_target(r) {
+            Target::On(c) => {
+                let wanted = match r {
+                    ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.db.clone()).unwrap_or_default(),
+                    ScriptRef::File { .. } => String::new(),
+                };
+                let db = self.script_db(c, &wanted);
+                let lock = if self.conn_writable(c) { "writable" } else { "read-only" };
+                [format!("Runs on {}", self.conn_name(c)), db, lock.to_string()].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  \u{b7}  ")
+            }
+            Target::Ask(_) => "Asks which connection to run on".into(),
+            Target::None(why) => why,
+        }
+    }
+
+    /// Whether running this script now could change data: a SQL statement that is not a read, a pipeline with a write stage,
+    /// or any Shell script, whose code can do anything.
+    fn script_writes(&self, s: &crate::library::Script) -> bool {
+        match s.kind.as_str() {
+            "sql" => db::sql::lex::read_only_check(&s.body, self.dialect_of(s.conn)).is_err(),
+            "shell" => true,
+            "pipeline" if db::is_shell(&s.body) => db::parse_shell(&s.body).is_ok_and(|sh| matches!(sh.kind, db::ShellKind::Aggregate(p) if db::has_write_stage(&p))),
+            "pipeline" => db::parse_pipeline(&s.body).is_ok_and(|p| db::has_write_stage(&p)),
+            _ => false,
+        }
     }
 
     /// Whether tab `i` is one that opening a script can replace: it holds no text of the person's beyond the script it
@@ -116,7 +248,7 @@ impl App {
             }
         }
         self.library.recent.retain(|r| !gone(r));
-        if self.lib_ui.pending.as_ref().is_some_and(|(r, _)| gone(r)) {
+        if self.lib_ui.pending.as_ref().is_some_and(|p| gone(&p.r)) {
             self.lib_ui.pending = None;
         }
     }
@@ -134,37 +266,74 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
-        match r {
-            ScriptRef::Saved(id) => match self.library.scripts.iter().find(|s| s.id == *id).cloned() {
-                Some(s) => self.open_resolved(r, how, s, None),
-                None => self.warn("That script is no longer in the library."),
-            },
-            // A linked file is read on the worker, as a script of the connection it is opened on, and opens when it is back.
-            ScriptRef::File { link, rel } => self.read_file_job(*link, rel, super::linked::Job::Open { r: r.clone(), how }),
+        match self.script_target(r) {
+            Target::On(c) => self.open_script_on(r, how, c),
+            Target::Ask(conns) => {
+                let name = self.script_name(r);
+                self.modal = Some(Modal::OpenOn(Box::new(OpenOnForm { r: r.clone(), how, conns, name, sel: None })));
+            }
+            Target::None(why) => self.warn(why),
         }
     }
 
-    /// `open_script` once the script is known. `file_meta` is the time and length of a linked file as it was read, which go
-    /// on the tab's binding, so a change on disk is told from the text just read.
+    /// `open_script` on the connection `conn`, which the person picked or the target rule gave.
+    pub(in crate::app) fn open_script_on(&mut self, r: &ScriptRef, how: How, conn: u64) {
+        match r {
+            ScriptRef::Saved(id) => match self.library.scripts.iter().find(|s| s.id == *id).cloned() {
+                Some(mut s) => {
+                    s.conn = conn;
+                    self.open_resolved(r, how, s, None)
+                }
+                None => self.warn("That script is no longer in the library."),
+            },
+            // A linked file is read on the worker, and opens on `conn` when it is back.
+            ScriptRef::File { link, rel } => self.read_file_job(*link, rel, super::linked::Job::Open { r: r.clone(), how, conn }),
+        }
+    }
+
+    /// The name a script shows: a saved script's own, a linked file's file name.
+    pub(in crate::app) fn script_name(&self, r: &ScriptRef) -> String {
+        match r {
+            ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()).unwrap_or_default(),
+            ScriptRef::File { rel, .. } => rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        }
+    }
+
+    /// `open_script` once the script is known, with `s.conn` the connection it opens on. `file_meta` is the time and length
+    /// of a linked file as it was read, which go on the tab's binding, so a change on disk is told from the text just read.
     pub(in crate::app) fn open_resolved(&mut self, r: &ScriptRef, how: How, s: crate::library::Script, file_meta: Option<Option<(std::time::SystemTime, u64)>>) {
         let file = match (r, file_meta) {
             (ScriptRef::File { link, rel }, Some(meta)) => Some((*link, rel.clone(), meta)),
             _ => None,
         };
-        let Some(status_ready) = self.conn(s.conn).map(|c| c.status == Status::Ready) else {
+        let Some((status_ready, engine, cname, attempt)) = self.conn(s.conn).map(|c| (c.status == Status::Ready, c.meta.engine, c.meta.name.clone(), c.attempt)) else {
             return self.warn("The connection of this script was removed. The script stays in the library, but it needs a connection to open.");
         };
+        // Checked before anything opens, so a script of another engine never leaves a half-built tab behind.
+        if !kind_fits(&s.kind, engine) {
+            let what = if engine.is_sql() { "SQL" } else { "MongoDB" };
+            return self.warn(format!("Not opened: \"{}\" is a {}, and {cname} is a {what} connection.", s.name, kind_label(&s.kind)));
+        }
+        if matches!(s.kind.as_str(), "filter" | "pipeline") && (s.coll.is_empty() || s.db.is_empty()) {
+            return self.warn(format!("\"{}\" names no collection. Save it again from the collection it belongs to.", s.name));
+        }
         if !status_ready && !self.demo {
-            self.lib_ui.pending = Some((r.clone(), how));
+            let uid = self.t().map(|t| t.uid);
+            self.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, name: s.name.clone() });
             // activate connects only an idle connection; a failed one is tried again.
             if self.conn(s.conn).is_some_and(|c| matches!(c.status, Status::Failed(_))) {
                 self.connect(s.conn);
             }
             self.activate(s.conn);
+            self.toast_acts(format!("Opening {} when {cname} connects", s.name), vec![("Cancel".into(), crate::app::errors::Act::CancelOpen)]);
             return;
         }
         self.lib_ui.pending = None;
         let new_tab = how == How::NewTab;
+        // Run is "Run all". On a writable connection a script that can change data is opened, not run, with a notice
+        // above the editor, and the person runs it from there. A read-only connection keeps its own gates.
+        let writes = how == How::Run && self.conn_writable(s.conn) && self.script_writes(&s);
+        let run = how == How::Run && !writes;
         match s.kind.as_str() {
             "sql" => {
                 let db = self.script_db(s.conn, &s.db);
@@ -176,16 +345,17 @@ impl App {
                     q.query = s.body.clone();
                     q.caret = 0;
                     q.run_schema = s.schema.clone();
+                    // A reused tab may have been switched to another database; the script runs in its own.
+                    q.run_db = String::new();
                 }
                 self.bind_script(r.clone(), View::Sql, s.body);
-                if how == How::Run {
+                if run {
                     self.sql_run(true, false);
                 }
             }
             "shell" => {
                 let db = self.script_db(s.conn, &s.db);
-                let sql = self.conn(s.conn).is_some_and(|c| c.meta.engine.is_sql());
-                if sql {
+                if engine.is_sql() {
                     self.sql_new_query(s.conn, db);
                 } else {
                     // The Shell needs no collection, so its tab has none and is named for the database.
@@ -194,7 +364,7 @@ impl App {
                 }
                 self.open_in_shell(s.body.clone());
                 self.bind_script(r.clone(), View::Shell, s.body);
-                if how == How::Run {
+                if run {
                     self.run_shell_script();
                 }
             }
@@ -207,6 +377,7 @@ impl App {
                     t.view = View::Documents;
                 }
                 self.bind_script(r.clone(), View::Documents, s.body);
+                // A filter only reads, so it runs on open, as a click on a collection does.
                 self.run_query();
             }
             "pipeline" => {
@@ -217,9 +388,15 @@ impl App {
                     t.view = View::Aggregate;
                 }
                 self.bind_script(r.clone(), View::Aggregate, s.body.clone());
-                self.run_script_pipeline(&s.body);
+                // A pipeline can be heavy, so only Run runs it; Open loads it.
+                if run {
+                    self.run_script_pipeline(&s.body);
+                }
             }
-            other => self.warn(format!("This build does not know scripts of kind \"{other}\".")),
+            other => return self.warn(format!("This build does not know scripts of kind \"{other}\".")),
+        }
+        if writes && let Some(uid) = self.t().map(|t| t.uid) {
+            self.lib_ui.writes.insert(uid);
         }
         if let Some((link, rel, meta)) = file {
             if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
@@ -230,7 +407,7 @@ impl App {
     }
 
     /// Runs a pipeline opened from the library through the Aggregate view's own gate, which asks before a write stage.
-    fn run_script_pipeline(&mut self, text: &str) {
+    pub(in crate::app) fn run_script_pipeline(&mut self, text: &str) {
         if db::is_shell(text) {
             return self.run_shell(text);
         }
@@ -257,8 +434,18 @@ impl App {
         if let Some(ScriptRef::Saved(id)) = bound
             && let Some(i) = self.library.scripts.iter().position(|s| s.id == id)
         {
+            let tab_conn = self.t().map(|t| t.sel.conn);
             let sc = &mut self.library.scripts[i];
             (sc.body, sc.sort, sc.project, sc.updated) = (tt.body.clone(), tt.sort.clone(), tt.project.clone(), now_secs());
+            // The database and collection the tab runs on now are part of what is saved, as the Save dialog keeps them. A script
+            // opened on another connection keeps its own, which name places on its own server.
+            let own = tab_conn == Some(sc.conn);
+            if own && !tt.db.is_empty() {
+                (sc.db, sc.schema) = (tt.db.clone(), tt.schema.clone());
+            }
+            if own && !tt.coll.is_empty() {
+                sc.coll = tt.coll.clone();
+            }
             let name = sc.name.clone();
             self.bind_script(ScriptRef::Saved(id), tt.view, tt.body.clone());
             self.ok(format!("Saved \"{name}\""));
@@ -273,6 +460,114 @@ impl App {
     pub(in crate::app) fn warn_plain_password(&mut self, tt: &TabText) {
         if tt.kind == "sql" && !db::redact_sql(&tt.body).1.is_empty() {
             self.warn("Saved, but the script holds a password in plain text in the library file.");
+        }
+    }
+
+    /// What shows above a script's editor: the conflict of a linked file changed on disk, and the notice of a script that
+    /// Run opened instead of running because it can write.
+    pub(in crate::app) fn script_banners(&mut self, ui: &mut egui::Ui) {
+        self.conflict_banner(ui);
+        self.writes_banner(ui);
+    }
+
+    /// "This script writes": Run all from the library opened the script on a writable connection without running it. Run all
+    /// here runs it through the view's own gates (the Shell and a pipeline with a write stage still ask first).
+    fn writes_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(t) = self.t() else { return };
+        if !self.lib_ui.writes.contains(&t.uid) {
+            return;
+        }
+        let (uid, view, conn) = (t.uid, t.view, t.sel.conn);
+        let cname = self.conn_name(conn);
+        let mut act = 0;
+        banner_frame(WARNING()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.set_min_height(BUTTON_H);
+                glyph_icon(ui, glyphs::warn, WARNING(), 16.0);
+                ui.add_space(4.0);
+                ui.label(semibold(RichText::new("This script writes").size(TXT_BODY).color(BRIGHT())));
+                ui.label(RichText::new(format!("{cname} is writable, so it was opened, not run.")).size(TXT_BODY).color(TEXT()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if quiet(ui, "Dismiss").clicked() {
+                        act = 2;
+                    }
+                    if primary(ui, "Run all", WARNING()).on_hover_text("Runs the whole script through the usual checks").clicked() {
+                        act = 1;
+                    }
+                });
+            });
+        });
+        ui.add_space(10.0);
+        if act == 0 {
+            return;
+        }
+        self.lib_ui.writes.remove(&uid);
+        if act == 1 {
+            match view {
+                View::Sql => self.sql_run(true, false),
+                View::Shell => self.run_shell_script(),
+                View::Aggregate => {
+                    let text = self.t().map(|t| t.agg_txt.clone()).unwrap_or_default();
+                    self.run_script_pipeline(&text);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Open on: the connections a script can run on, grouped as the Connections panel groups them, when no tab or active
+    /// connection is the obvious one. Nothing is preselected, so a production connection is never a default.
+    pub(in crate::app) fn open_on_dialog(&mut self, ui: &mut egui::Ui, f: &mut OpenOnForm, keep: &mut bool) {
+        ui.set_width(460.0);
+        let verb = if f.how == How::Run { "Run all" } else { "Open" };
+        dialog_head(ui, &Head::new("Which connection?").sub(f.name.clone()).glyph(glyphs::plug));
+        // Grouped by the connection groups, in their order, then the connections in no group.
+        let mut sections: Vec<(String, Vec<u64>)> = Vec::new();
+        for g in &self.groups.groups {
+            let ids: Vec<u64> = g.members.iter().copied().filter(|c| f.conns.contains(c)).collect();
+            if !ids.is_empty() {
+                sections.push((g.name.to_uppercase(), ids));
+            }
+        }
+        let loose: Vec<u64> = f.conns.iter().copied().filter(|c| self.groups.group_of(*c).is_none()).collect();
+        if !loose.is_empty() {
+            sections.push((if sections.is_empty() { String::new() } else { "NOT IN A GROUP".into() }, loose));
+        }
+        let mut go = false;
+        dialog_body(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("open-on").max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                let w = ui.available_width();
+                for (title, ids) in &sections {
+                    if !title.is_empty() {
+                        card_caption(ui, title, "");
+                    }
+                    for id in ids {
+                        let Some(c) = self.conn(*id) else { continue };
+                        let lock = if c.writable { "writable" } else { "read-only" };
+                        let desc = [c.meta.tag.as_str(), c.masked_uri.as_str(), lock].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  \u{b7}  ");
+                        let r = radio_card(ui, w, f.sel == Some(*id), &c.meta.name, &desc);
+                        if r.clicked() {
+                            f.sel = Some(*id);
+                        }
+                        if r.double_clicked() {
+                            (f.sel, go) = (Some(*id), true);
+                        }
+                        ui.add_space(6.0);
+                    }
+                }
+            });
+        });
+        dialog_foot(ui, |ui| {
+            go |= ui.add_enabled(f.sel.is_some(), primary_button(ui, verb, PRIMARY())).clicked();
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
+        });
+        if let (true, Some(c)) = (go, f.sel) {
+            *keep = false;
+            let (r, how) = (f.r.clone(), f.how);
+            self.open_script_on(&r, how, c);
         }
     }
 }

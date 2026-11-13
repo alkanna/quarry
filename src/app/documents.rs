@@ -270,7 +270,7 @@ impl App {
         let y = tabs.response.rect.bottom() - 0.5;
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE()));
         ui.add_space(12.0);
-        self.conflict_banner(ui);
+        self.script_banners(ui);
         match view {
             View::Documents if sql => self.sql_content(ui),
             View::Structure => self.sql_structure_view(ui),

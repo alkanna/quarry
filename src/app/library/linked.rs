@@ -17,8 +17,8 @@ pub(in crate::app) use crate::library::disk::{FileOut, Loaded, SaveOut, read_scr
 /// A linked-file job running on the worker, by id in `LibUi::jobs`: what to do with its answer. Tabs are named by their
 /// `uid`, since the tab list can change before the answer comes back.
 pub(in crate::app) enum Job {
-    /// Open a file into a tab.
-    Open { r: ScriptRef, how: super::open::How },
+    /// Open a file into a tab on the connection `conn`, picked when it was asked for.
+    Open { r: ScriptRef, how: super::open::How, conn: u64 },
     /// Copy a file into the library, at `at`.
     Copy { link: u64, rel: PathBuf, at: DropAt },
     /// Reload: the tab takes the file's text.
@@ -32,7 +32,7 @@ pub(in crate::app) enum Job {
 }
 
 /// The text of the view a tab's script is bound to.
-fn bound_text(t: &Tab) -> Option<String> {
+pub(in crate::app) fn bound_text(t: &Tab) -> Option<String> {
     let b = t.script.as_ref()?;
     Some(match b.view {
         View::Sql => t.sql.as_ref()?.query.clone(),
@@ -44,7 +44,7 @@ fn bound_text(t: &Tab) -> Option<String> {
 }
 
 /// Puts `text` in the view a tab's script is bound to. A filter file also sets the sort and projection.
-fn set_bound_text(t: &mut Tab, text: &str, parsed: Option<&format::Parsed>) {
+pub(in crate::app) fn set_bound_text(t: &mut Tab, text: &str, parsed: Option<&format::Parsed>) {
     let Some(view) = t.script.as_ref().map(|b| b.view) else { return };
     match view {
         View::Sql => {
@@ -150,14 +150,14 @@ impl App {
     pub(in crate::app) fn file_done(&mut self, job: u64, out: FileOut) {
         let Some(job) = self.lib_ui.jobs.remove(&job) else { return };
         match (job, out) {
-            (Job::Open { r, how }, FileOut::Read(res)) => {
+            (Job::Open { r, how, conn }, FileOut::Read(res)) => {
                 let ScriptRef::File { link, rel } = &r else { return };
-                match res.map_err(|e| format!("Could not open {}: {e}", file_label(rel))).and_then(|l| self.file_script_from(*link, rel, l)) {
+                match res.map_err(|e| format!("Could not open {}: {e}", file_label(rel))).and_then(|l| self.file_script_from(*link, rel, l, Some(conn))) {
                     Ok((s, meta)) => self.open_resolved(&r, how, s, Some(meta)),
                     Err(e) => self.warn(e),
                 }
             }
-            (Job::Copy { link, rel, at }, FileOut::Read(res)) => match res.map_err(|e| format!("Could not open {}: {e}", file_label(&rel))).and_then(|l| self.file_script_from(link, &rel, l)) {
+            (Job::Copy { link, rel, at }, FileOut::Read(res)) => match res.map_err(|e| format!("Could not open {}: {e}", file_label(&rel))).and_then(|l| self.file_script_from(link, &rel, l, None)) {
                 Ok((s, _)) => self.copy_into_library(s, &rel, at),
                 Err(e) => self.warn(e),
             },
@@ -168,11 +168,17 @@ impl App {
                         return;
                     }
                     let Some(t) = self.tab_by_uid(uid).map(|i| &mut self.tabs[i]) else { return };
+                    // Reload throws the tab's edits away, so the toast keeps them for Undo.
+                    let mine = bound_text(t).filter(|m| *m != now.text);
                     set_bound_text(t, &now.text, now.parsed.as_ref());
                     if let Some(b) = t.script.as_mut() {
                         (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
                     }
                     self.mark_seen(link, &rel, now.meta);
+                    match mine {
+                        Some(text) => self.toast_restore(format!("{} reloaded from disk.", file_label(&rel)), Restore::TabText { uid, text }),
+                        None => self.ok(format!("{} reloaded from disk.", file_label(&rel))),
+                    }
                 }
                 Err(e) => self.err(format!("Could not read {}: {e}", file_label(&rel))),
             },
@@ -289,7 +295,8 @@ impl App {
 
     /// The file under tab `i` changed on disk. The rule, in order:
     /// 1. the text is the one the tab was opened or saved with: only the remembered time changes;
-    /// 2. the tab holds no edits and the link follows changes: the tab takes the new text;
+    /// 2. the tab holds no edits and the link follows changes: the tab takes the new text. A tab restored at launch has no
+    ///    time on its binding and its base is only the text it held, which may be edits, so it never reloads by itself;
     /// 3. otherwise the tab keeps its text and shows the conflict banner.
     /// `now` is the file as the scan read it on the worker.
     fn file_changed(&mut self, i: usize, link: u64, rel: &std::path::Path, now: Loaded) {
@@ -304,7 +311,7 @@ impl App {
             let b = t.script.as_mut().unwrap();
             (b.disk, b.conflict) = (now.meta, None);
             true
-        } else if mine == b.base && follow {
+        } else if mine == b.base && follow && b.disk.is_some() {
             set_bound_text(t, &now.text, now.parsed.as_ref());
             let b = t.script.as_mut().unwrap();
             (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
@@ -377,8 +384,8 @@ impl App {
                 ui.label(semibold(RichText::new(format!("{name} changed on disk")).size(TXT_BODY).color(BRIGHT())));
                 ui.label(RichText::new("This tab has unsaved edits").size(TXT_BODY).color(TEXT()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (n, label, tip) in [(3, "Compare", "See what differs"), (2, "Keep mine", "Keep your edits; saving then replaces the file"), (1, "Reload", "Replace your edits with the file")] {
-                        if ui.button(label).on_hover_text(tip).clicked() {
+                    for (n, label, tip) in [(3, "Compare", "See what differs"), (2, "Keep mine", "Keep your edits; saving then replaces the file"), (1, "Reload", "Replace your edits with the file. Undo brings them back")] {
+                        if quiet(ui, label).on_hover_text(tip).clicked() {
                             act = n;
                         }
                     }
@@ -520,8 +527,8 @@ impl App {
         found.or_else(|| format::kind_of_ext(&format::ext_of(rel)).map(String::from)).unwrap_or_default()
     }
 
-    /// The connection a linked file opens on: the current tab's, then the active one, then any other, taking the first the
-    /// link is used on and the file can run on.
+    /// The connection a copy of a linked file is kept for in the library: the current tab's, then the active one, then any
+    /// other the link is used on. Nothing runs on it, so unlike opening a file (`script_target`) it never asks.
     pub(in crate::app) fn file_conn(&self, link: u64, rel: &std::path::Path) -> Option<u64> {
         let l = self.library.links.iter().find(|l| l.id == link)?;
         let kind = self.file_kind(link, rel);
@@ -535,20 +542,20 @@ impl App {
         self.run_job(job, move || FileOut::Read(read_script(&path)));
     }
 
-    /// The file `rel`, as `read_script` read it, as the script a tab opens, with the time and length it had. The target is a header the person
-    /// wrote or the keys of a .json file; without one it is the current tab's database on that connection, or the
-    /// connection's first.
-    pub(in crate::app) fn file_script_from(&self, link: u64, rel: &std::path::Path, loaded: Loaded) -> Result<(Script, Meta), String> {
+    /// The file `rel`, as `read_script` read it, as the script a tab opens on `conn` (or the one `file_conn` gives), with the
+    /// time and length it had. The target is a header the person wrote or the keys of a .json file; without one it is the
+    /// current tab's database on that connection, or the connection's default.
+    pub(in crate::app) fn file_script_from(&self, link: u64, rel: &std::path::Path, loaded: Loaded, conn: Option<u64>) -> Result<(Script, Meta), String> {
         self.library.file_path(link, rel).ok_or("That folder is no longer linked.")?;
         let (kind, tgt, sort, project) = match &loaded.parsed {
             Some(p) => (p.kind.clone(), p.target.clone(), p.sort.clone(), p.project.clone()),
             None => (format::kind_of_ext(&format::ext_of(rel)).unwrap_or("sql").to_string(), format::header(&loaded.text), String::new(), String::new()),
         };
-        let conn = self.file_conn(link, rel).ok_or("No connection this folder is used on can run that file.")?;
+        let conn = conn.or_else(|| self.file_conn(link, rel)).ok_or("No connection this folder is used on can run that file.")?;
         let own = self.t().filter(|t| t.sel.conn == conn);
         let mut db = tgt.db.clone();
         if db.is_empty() {
-            db = own.map(|t| t.sel.db.clone()).filter(|d| !d.is_empty()).or_else(|| self.conn(conn).and_then(|c| c.dbs.first().map(|d| d.0.clone()))).unwrap_or_default();
+            db = own.map(|t| t.sel.db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| self.default_db(conn));
         }
         let mut coll = tgt.coll.clone();
         if matches!(kind.as_str(), "filter" | "pipeline") && coll.is_empty() {

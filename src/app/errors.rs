@@ -60,6 +60,8 @@ pub(super) enum Act {
     Details,
     Copy,
     ShowDup,
+    /// Drops the library script waiting for its connection.
+    CancelOpen,
 }
 
 pub(super) struct Toast {
@@ -377,6 +379,13 @@ impl App {
     /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
     /// read-only connection: a group, saved scripts or a file.
     #[allow(dead_code)]
+    /// A note with buttons that fades like a success, such as a script waiting for its connection with Cancel.
+    pub(super) fn toast_acts(&mut self, s: String, acts: Vec<(String, Act)>) {
+        self.err_seq += 1;
+        self.toasts.retain(|t| !(t.tone == Tone::Ok && t.title == s));
+        self.toasts.push(Toast { id: self.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+    }
+
     pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
         self.toast_restore_edit(s, r, None);
     }
@@ -457,6 +466,7 @@ impl App {
                     ctx.copy_text(details_text(e));
                 }
             }
+            Act::CancelOpen => self.lib_ui.pending = None,
             Act::ShowDup => {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };

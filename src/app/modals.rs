@@ -62,6 +62,7 @@ impl App {
                 Modal::Attach(f) => self.attach_dialog(ui, f, &mut keep),
                 Modal::GroupEdit(f) => self.group_dialog(ui, f, &mut keep),
                 Modal::SaveScript(f) => self.save_dialog(ui, f, &mut keep),
+                Modal::OpenOn(f) => self.open_on_dialog(ui, f, &mut keep),
                 Modal::LinkFolder(f) => self.link_dialog(ui, f, &mut keep),
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();

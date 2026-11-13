@@ -952,6 +952,8 @@ pub(super) enum Modal {
     GroupEdit(Box<super::group_dialog::GroupForm>),
     /// Save the current script to the library.
     SaveScript(Box<super::library::save_dialog::SaveForm>),
+    /// Which connection a library script opens on, when none is the obvious one.
+    OpenOn(Box<super::library::open::OpenOnForm>),
     /// Link a folder on disk to the library.
     LinkFolder(Box<super::library::link_dialog::LinkForm>),
 }

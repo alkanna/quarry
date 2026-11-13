@@ -549,7 +549,9 @@ impl App {
             app.groups = groups;
             app.library = library;
             // The first run with a library: the queries saved in ui.json move over, once. ui.json keeps them as they were.
-            if !library_existed {
+            // A library.json that could not be read at all was moved aside and left an empty library; the old queries are
+            // still in ui.json, so they come over again rather than staying lost.
+            if !library_existed || (broken_library.is_some() && app.library.scripts.is_empty() && app.library.folders.is_empty()) {
                 app.migrate_library();
             }
             // Connections removed since the last run leave their groups, but their scripts stay.

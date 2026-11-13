@@ -19,7 +19,7 @@ pub(super) mod save_dialog;
 pub(super) struct LibUi {
     // B1: the script waiting for its connection to be ready, the folder the Save dialog offers first.
     /// A script asked for while its connection was not ready: opened by `library_tick` once it is, dropped if it fails.
-    pub(super) pending: Option<(ScriptRef, open::How)>,
+    pub(in crate::app) pending: Option<open::Pending>,
     /// The folder the last save went to, which the Save dialog offers first.
     pub(super) last_folder: Option<u64>,
 
@@ -45,6 +45,14 @@ pub(super) struct LibUi {
     /// Linked-file reads and writes running on the worker, by job id, and the last id given.
     pub(in crate::app) jobs: HashMap<u64, linked::Job>,
     pub(super) job_seq: u64,
+
+    // Hardening: the write notice, and the keys that reach the picker and the tree from anywhere.
+    /// Tabs, by uid, that Run opened instead of running because their script can write: they show "This script writes".
+    pub(in crate::app) writes: HashSet<u64>,
+    /// Cmd+O asked for the current view's picker; the picker button opens it when it draws and `pick_acts` clears it.
+    pub(in crate::app) open_picker: bool,
+    /// Cmd+Shift+L asked for the tree: the panel selects its first row if none is selected and takes the keys.
+    pub(in crate::app) focus_tree: bool,
 }
 
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to
@@ -90,36 +98,48 @@ impl App {
     /// Called every frame from `logic()`: scheduled library work, such as opening a script once its connection is ready
     /// and rescanning linked folders. Timers use egui time and anything that changes asks for a repaint.
     pub(super) fn library_tick(&mut self, ctx: &egui::Context) {
-        self.library_pending();
+        self.library_pending(ctx);
         self.linked_tick(ctx);
     }
 
-    /// Opens the script that waited for its connection, once the connection is ready.
-    fn library_pending(&mut self) {
-        let Some((r, how)) = self.lib_ui.pending.clone() else { return };
-        let conn = match &r {
-            ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.conn),
-            ScriptRef::File { link, rel } => self.file_conn(*link, rel),
-        };
-        let Some(conn) = conn.filter(|c| self.conn(*c).is_some()) else {
+    /// Opens the script that waited for its connection, once the connection is ready. A connection that fails on a new
+    /// attempt drops it with one warning; one that never starts connecting (its address could not be read, say) drops it after
+    /// `WAIT_SECS`, so it never opens later out of the blue. A Run becomes a plain open if another tab is current by then.
+    fn library_pending(&mut self, ctx: &egui::Context) {
+        const WAIT_SECS: f64 = 15.0;
+        let Some(p) = self.lib_ui.pending.clone() else { return };
+        let Some(c) = self.conn(p.conn) else {
             self.lib_ui.pending = None;
-            return;
+            return self.warn(format!("{} was not opened: its connection was removed.", p.name));
         };
-        let state = self.conn(conn).map(|c| match c.status {
-            Status::Ready => Some(true),
-            Status::Failed(_) => Some(false),
-            _ => None,
-        });
-        match state.flatten() {
-            Some(true) => {
-                self.lib_ui.pending = None;
-                self.open_script(&r, how);
+        let (ready, connecting, failed, attempt, cname) = (c.status == Status::Ready, c.status == Status::Connecting, matches!(c.status, Status::Failed(_)), c.attempt, c.meta.name.clone());
+        let now = ctx.input(|i| i.time);
+        if ready {
+            self.lib_ui.pending = None;
+            let moved = self.t().map(|t| t.uid) != p.uid;
+            let how = if p.how == open::How::Run && moved { open::How::Here } else { p.how };
+            return self.open_script_on(&p.r, how, p.conn);
+        }
+        if connecting {
+            if let Some(q) = self.lib_ui.pending.as_mut() {
+                q.since = None;
             }
-            Some(false) => {
-                self.lib_ui.pending = None;
-                self.warn("The script was not opened: its connection failed.");
-            }
-            None => {}
+            return;
+        }
+        // The failure the connection had when the script was asked for is not news: only a new attempt that fails is.
+        if failed && attempt != p.attempt {
+            self.lib_ui.pending = None;
+            return self.warn(format!("{} was not opened: {cname} failed to connect.", p.name));
+        }
+        let since = p.since.unwrap_or(now);
+        if let Some(q) = self.lib_ui.pending.as_mut() {
+            q.since = Some(since);
+        }
+        if now - since >= WAIT_SECS {
+            self.lib_ui.pending = None;
+            self.warn(format!("{} was not opened: {cname} did not connect.", p.name));
+        } else {
+            ctx.request_repaint_after(Duration::from_secs_f64(WAIT_SECS - (now - since)));
         }
     }
 
@@ -136,9 +156,9 @@ impl App {
             .map(|(k, v)| (k.clone(), v.iter().map(|q| crate::library::migrate::OldEntry { name: q.name.clone(), filter: q.filter.clone(), sort: q.sort.clone(), project: q.project.clone(), pipeline: q.pipeline.clone(), sql: q.sql.clone() }).collect()))
             .collect();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if crate::library::migrate::migrate_into(&mut self.library, &old, now) > 0 {
-            self.save_library();
-        }
+        // Written even when nothing came over (every key was bad), so library.json exists and this never runs again.
+        crate::library::migrate::migrate_into(&mut self.library, &old, now);
+        self.save_library();
     }
 }
 

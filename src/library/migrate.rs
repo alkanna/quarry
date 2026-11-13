@@ -39,11 +39,13 @@ pub fn migrate_into(lib: &mut Library, old: &[(String, Vec<OldEntry>)], now: u64
             };
             let (db, coll) = if sql_key || kind == "sql" { ("", "") } else { (db, coll) };
             let (sort, project) = if kind == "filter" { (e.sort.clone(), e.project.clone()) } else { Default::default() };
-            if lib.scripts.iter().any(|s| s.conn == conn && s.kind == kind && s.name == e.name && s.body == body && s.db == db && s.coll == coll) {
+            // The old menu let a query be saved with no name; the library lists scripts by name, so it gets one.
+            let name = if e.name.trim().is_empty() { "Untitled".to_string() } else { e.name.clone() };
+            if lib.scripts.iter().any(|s| s.conn == conn && s.kind == kind && s.name == name && s.body == body && s.db == db && s.coll == coll) {
                 continue;
             }
             let id = lib.next_id();
-            lib.scripts.push(Script { id, name: e.name.clone(), kind: kind.into(), body, sort, project, conn, db: db.into(), coll: coll.into(), updated: now, ..Default::default() });
+            lib.scripts.push(Script { id, name, kind: kind.into(), body, sort, project, conn, db: db.into(), coll: coll.into(), updated: now, ..Default::default() });
             added += 1;
         }
     }

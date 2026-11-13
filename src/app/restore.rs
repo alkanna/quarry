@@ -18,6 +18,10 @@ pub(super) enum Restore {
     Saved { scripts: Vec<Script>, folders: Vec<Folder>, written: Option<(u64, PathBuf, Vec<u8>)> },
     /// A file moved to the trash, with the bytes it held.
     File { path: PathBuf, bytes: Vec<u8> },
+    /// The text a tab's script view held before Reload replaced it with the file, by tab uid.
+    TabText { uid: u64, text: String },
+    /// A saved script as it was before a save replaced it.
+    Script(Script),
 }
 
 impl App {
@@ -69,6 +73,20 @@ impl App {
                     }
                 }
                 self.ok(if n == 1 { "Script restored.".to_string() } else { format!("{n} scripts restored.") });
+            }
+            Restore::TabText { uid, text } => {
+                let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid) else { return self.warn("That tab was closed.") };
+                super::library::linked::set_bound_text(t, &text, None);
+                self.ok("Your edits are back.");
+            }
+            Restore::Script(old) => {
+                let name = old.name.clone();
+                match self.library.scripts.iter_mut().find(|s| s.id == old.id) {
+                    Some(s) => *s = old,
+                    None => self.library.restore(Vec::new(), vec![old]),
+                }
+                self.save_library();
+                self.ok(format!("\"{name}\" is back as it was."));
             }
             Restore::File { path, bytes } => {
                 // A name the person has taken again since must not be overwritten by an undo.

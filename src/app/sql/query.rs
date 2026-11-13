@@ -516,6 +516,10 @@ impl App {
             s.run_schema = pg_schema;
         }
         ui.add_space(4.0);
+        // A table's Query view gets these from the view tabs above it; a Query tab of its own has none.
+        if free {
+            self.script_banners(ui);
+        }
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick) = (false, false, false, false, false, None);
         let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
         let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
