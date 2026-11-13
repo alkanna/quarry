@@ -246,8 +246,12 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_AGENTS") {
             self.agents_demo_view(&v);
         }
-        // Test switch: show the Shell view with a finished run in the demo picture.
-        if std::env::var("QUARRY_TEST_SHELL").is_ok() {
+        // Test switch: show the Shell view with a finished run in the demo picture. QUARRY_TEST_VIM shows it too, with
+        // Vim on and the editor in that mode (see vim::demo).
+        if std::env::var("QUARRY_TEST_VIM").is_ok() {
+            self.prefs.vim = true;
+        }
+        if std::env::var("QUARRY_TEST_SHELL").is_ok() || std::env::var("QUARRY_TEST_VIM").is_ok() {
             let t = &mut self.tabs[1];
             t.view = View::Shell;
             t.shell.code = "async function run() {\n  const n = await orders.countDocuments({ status: 'paid' });\n  console.log('paid orders:', n);\n  return await orders.find({ status: 'paid' }).project({ number: 1, total: 1 }).limit(3).toArray();\n}".into();

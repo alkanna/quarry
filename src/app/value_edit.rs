@@ -51,7 +51,7 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
                 if custom { te.layouter(&mut layouter).show(ui) } else { te.show(ui) }
             };
             // Pairing quotes and brackets helps JSON but gets in the way of plain text.
-            let out = if code { with_autopair(ui, id, text, edit) } else { edit(ui, text) };
+            let out = if code { crate::ui::vim::wrap(ui, id, text, |ui, text| with_autopair(ui, id, text, edit)) } else { edit(ui, text) };
             find.reveal(ui, text, &out);
             if out.response.changed() {
                 *dirty = true;

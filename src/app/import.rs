@@ -44,8 +44,8 @@ impl App {
             const IMPORT_SHOW_MAX: usize = 200_000;
             if im.text.len() <= IMPORT_SHOW_MAX {
                 egui::ScrollArea::vertical().id_salt("import-src").max_height(180.0).show(ui, |ui| {
-                    with_autopair(ui, id, &mut im.text, |ui, text| {
-                        egui::TextEdit::multiline(text).id(id).code_editor().hint_text("Paste JSON, JSON Lines or CSV here, or open a file").desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui)
+                    crate::ui::vim::wrap(ui, id, &mut im.text, |ui, text| {
+                        with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("Paste JSON, JSON Lines or CSV here, or open a file").desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui))
                     });
                 });
             } else {

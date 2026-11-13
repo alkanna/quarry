@@ -99,6 +99,41 @@ fn range(sec: usize, prim: usize) -> CCursorRange {
     CCursorRange { primary: CCursor::new(prim), secondary: CCursor::new(sec), h_pos: None }
 }
 
+/// Test switch QUARRY_TEST_VIM=<normal|visual|insert>: focuses this editor in that mode once, for screenshots.
+pub(crate) fn demo(ui: &egui::Ui, id: egui::Id, text: &str) {
+    let ctx = ui.ctx();
+    let Ok(m) = std::env::var("QUARRY_TEST_VIM") else { return };
+    let mut s = load(ctx, id);
+    if !on(ctx) || s.last_focus > 0 {
+        return;
+    }
+    ctx.memory_mut(|mm| mm.request_focus(id));
+    let at = text.find("orders.find").map_or(0, |b| text[..b].chars().count());
+    s.vim.mode = match m.as_str() {
+        "visual" => Mode::Visual,
+        "insert" => Mode::Insert,
+        _ => Mode::Normal,
+    };
+    s.vim.anchor = at;
+    s.cur = if s.vim.mode == Mode::Visual { at + 10 } else { at };
+    // Counts as focused this pass, so `end` keeps the mode instead of starting Normal.
+    s.last_focus = ctx.cumulative_pass_nr();
+    let (a, b) = s.vim.selection(text, s.cur);
+    let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    st.cursor.set_char_range(Some(range(a, b)));
+    st.store(ctx, id);
+    s.wrote = Some((a, b));
+    store(ctx, id, s);
+}
+
+/// `begin`, the editor, then `end`, for editors whose wrappers hand back the TextEdit's output.
+pub(crate) fn wrap(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> TextEditOutput) -> TextEditOutput {
+    begin(ui, id, text);
+    let out = show(ui, text);
+    end(ui, id, &out);
+    out
+}
+
 /// Runs before the editor's wrappers. In Normal and Visual mode it takes the keys, edits `text` and
 /// moves the caret; in Insert mode it only watches for Esc.
 pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {

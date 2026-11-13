@@ -585,6 +585,7 @@ impl App {
                     open_list(ui, id, &s.query, &mut s.bar.ac, &scope, values);
                 }
                 // The suggestions work on the statement under the caret, with the tail after it for aliases.
+                crate::ui::vim::begin(ui, id, &mut s.query);
                 let (out, _) = sql_ac_field(ui, id, &mut s.query, &mut s.bar.ac, &scope, values, &mut s.bar.wants, |ui, text, _| {
                     egui::TextEdit::multiline(text)
                         .id(id)
@@ -597,6 +598,7 @@ impl App {
                         .layouter(&mut layout)
                         .show(ui)
                 });
+                crate::ui::vim::end(ui, id, &out);
                 if let Some(r) = out.cursor_range {
                     s.caret = usize::from(r.primary.index);
                 }

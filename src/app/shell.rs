@@ -646,6 +646,7 @@ impl App {
         let mut sql_need = None;
         let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
+                crate::ui::vim::demo(ui, id, &t.shell.code);
                 crate::ui::vim::begin(ui, id, &mut t.shell.code);
                 let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &compute, |ui, text, _open| {
                     egui::TextEdit::multiline(text)

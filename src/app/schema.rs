@@ -66,7 +66,7 @@ impl App {
             // Apply buttons and the field list stay in the window.
             let max_h = (ui.ctx().content_rect().height() * 0.4).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt("validator-scroll").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                with_autopair(ui, id, &mut s.vtext, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+                crate::ui::vim::wrap(ui, id, &mut s.vtext, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             });
             ui.horizontal(|ui| {
                 apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked();

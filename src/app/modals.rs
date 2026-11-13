@@ -19,7 +19,7 @@ impl App {
                     let id = egui::Id::unique("insert-editor-text");
                     let find = Find::bar(ui, id, text);
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        let out = with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut find.layouter(true)).show(ui));
+                        let out = crate::ui::vim::wrap(ui, id, text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut find.layouter(true)).show(ui)));
                         find.reveal(ui, text, &out);
                     });
                 });
@@ -375,7 +375,7 @@ impl App {
             });
             card_caption(ui, "Pipeline", "runs on every read of the view");
             let id = ui.make_persistent_id("view-pipeline");
-            with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui));
+            crate::ui::vim::wrap(ui, id, pipeline, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui)));
         });
         // Parsed once a frame, for both the footer note and Create.
         let parsed = view.then(|| db::parse_pipeline(pipeline));
@@ -581,7 +581,7 @@ impl App {
                 rows.stacked("Set fields", |ui| {
                     ui.label(RichText::new("Values starting with $ are read as field paths.").size(TXT_SMALL).color(MUTED()));
                     let id = ui.make_persistent_id("um-set");
-                    changed |= with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
+                    changed |= crate::ui::vim::wrap(ui, id, set_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui))).response.changed();
                 });
                 rows.stacked("Remove fields", |ui| {
                     changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(egui::TextStyle::Monospace).hint_text("comma separated paths").desired_width(f32::INFINITY)).changed();

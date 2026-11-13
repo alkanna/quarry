@@ -60,7 +60,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                 ui.set_width(w);
                 let id = egui::Id::unique(("stage-editor", s.uid));
                 let rows = s.text.lines().count().clamp(2, 16);
-                let out = with_autopair(ui, id, &mut s.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui));
+                let out = crate::ui::vim::wrap(ui, id, &mut s.text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
                 if out.response.changed() {
                     acts.push(StageAct::Edited(i));
                 }
@@ -218,7 +218,7 @@ impl App {
                 }
             } else {
                 let id = ui.make_persistent_id("agg-editor");
-                with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+                crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
                 run = run_button(ui, "Run", "⌘↵").on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));

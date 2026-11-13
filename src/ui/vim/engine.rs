@@ -146,6 +146,8 @@ impl Vim {
     pub(crate) fn key(&mut self, text: &mut String, cur: &mut usize, k: K, clip: &mut dyn FnMut() -> Option<String>) -> Out {
         let mut b: Vec<char> = text.chars().collect();
         let mut c = (*cur).min(b.len());
+        // The text can shrink outside Vim (Cmd+Z, a paste), which would leave a Visual end past it.
+        self.anchor = self.anchor.min(b.len());
         let mut out = Out::default();
         self.step(&mut b, &mut c, k, clip, &mut out);
         if out.changed {
