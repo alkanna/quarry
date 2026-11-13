@@ -281,7 +281,7 @@ impl App {
                 let more = if changes.len() > 5 { format!(" +{}", changes.len() - 5) } else { String::new() };
                 ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(TXT_SMALL).color(MUTED()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    save = primary(ui, "Save", PRIMARY()).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
+                    save = primary(ui, "Save", PRIMARY()).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S));
                     discard = ui.button("Discard").clicked();
                     if !self.prefs.always_writable {
                         ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(TXT_SMALL));

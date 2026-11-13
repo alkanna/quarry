@@ -414,7 +414,7 @@ async function run() {
             f.db.clear();
             f.name_set = false;
             // The databases come with the connection, which also opens its SSH tunnel.
-            if self.conn(id).is_some_and(|c| matches!(c.status, Status::Idle | Status::Failed(_))) {
+            if self.conn(id).is_some_and(|c| c.status.can_connect()) {
                 self.connect(id);
             }
         }

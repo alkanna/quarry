@@ -12,13 +12,14 @@ pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce
     use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
+        let room = popup_room(ui.ctx(), button_anchor(ui));
         MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
             // A shortcut opened a window over the page: close, or the menu keeps taking its keys and focus.
             if ui.data(|d| d.get_temp::<bool>(window_over_page_id())).unwrap_or(false) {
                 return ui.close();
             }
             menu_look(ui);
-            content(ui)
+            capped_scroll(ui, room, content)
         }).0
     }).inner
 }
@@ -35,8 +36,33 @@ pub(crate) fn set_window_over_page(ctx: &egui::Context, open: bool) {
 /// Menu content that scrolls once it is taller than the window. egui keeps a popup inside the
 /// window, so a taller one is cut off at the edge with its last items out of reach.
 pub(crate) fn menu_scroll<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let max_h = ui.ctx().content_rect().height() - 24.0;
-    egui::ScrollArea::vertical().max_height(max_h).show(ui, add).inner
+    let room = ui.ctx().content_rect().height() - 2.0 * DIALOG_MARGIN;
+    capped_scroll(ui, room, add)
+}
+
+/// Popup content no taller than `room`, scrolling past it. The popup's area offers its last size as the room, which
+/// would keep a list that grows squeezed into it, so the height is set from `room` first.
+fn capped_scroll<R>(ui: &mut egui::Ui, room: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let chrome = ui.spacing().menu_margin.sum().y + 2.0;
+    let max_h = (room - chrome).max(FIT_MIN_H);
+    // In a child from the cursor down: set_max_height moves the cursor to its Ui's top, so a title drawn above, as
+    // choice_list draws one, would be overlapped by the list.
+    ui.scope(|ui| {
+        ui.set_max_height(max_h);
+        egui::ScrollArea::vertical().id_salt("menu-fit").max_height(max_h).show(ui, add).inner
+    })
+    .inner
+}
+
+/// Where a menu button about to be added at the cursor will sit, one button high, before egui places it.
+fn button_anchor(ui: &egui::Ui) -> egui::Rect {
+    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(0.0, BUTTON_H))
+}
+
+/// The most a popup under or over `anchor` may take: the larger of the two sides, inside the window's margin.
+fn popup_room(ctx: &egui::Context, anchor: egui::Rect) -> f32 {
+    let screen = ctx.content_rect();
+    (anchor.top() - screen.top()).max(screen.bottom() - anchor.bottom()) - DIALOG_MARGIN
 }
 
 /// Menu and dropdown items: tight corners, no outline, and a hover fill that shows on the raised
@@ -104,18 +130,43 @@ pub(crate) fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: i
     });
 }
 
-/// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
-pub(crate) fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
-    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(2).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        quiet_look(ui);
-        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value += 1;
+/// "−  n  +" for a small whole number, one field high. `name` is what a screen reader and the UI tests call it.
+pub(crate) fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, min: usize, max: usize) {
+    // Painted at a fixed height like `segmented`: a Frame in the setting row's centered layout counted each widget's
+    // whole row-high slot, so the well grew to the height of the row's title and description.
+    const PAD: f32 = 2.0;
+    const BTN_W: f32 = 26.0;
+    const VALUE_W: f32 = 34.0;
+    let enabled = ui.is_enabled();
+    let (rect, well) = ui.allocate_exact_size(egui::vec2(2.0 * (BTN_W + PAD) + VALUE_W, BUTTON_H), Sense::hover());
+    ui.painter().rect(rect, R_MD, pal().well, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    let inner = rect.shrink(PAD);
+    let minus = egui::Rect::from_min_size(inner.min, egui::vec2(BTN_W, inner.height()));
+    let plus = egui::Rect::from_min_size(egui::pos2(inner.right() - BTN_W, inner.top()), egui::vec2(BTN_W, inner.height()));
+    for (r, up, can, label) in [(minus, false, *value > min, "Decrease"), (plus, true, *value < max, "Increase")] {
+        let can = enabled && can;
+        let resp = ui.interact(r, well.id.with(label), if can { Sense::click() } else { Sense::hover() });
+        let state = if can { state_of(&resp) } else { 0 };
+        ui.painter().rect_filled(r, R_SM, hover_fill_on(ui, state));
+        // Painted strokes: the font's "+" and "−" sit on the math axis, below center.
+        let (c, s) = (r.center(), Stroke::new(1.5, if !can { FAINT() } else if state > 0 { BRIGHT() } else { MUTED() }));
+        ui.painter().line_segment([c - egui::vec2(4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
+        if up {
+            ui.painter().line_segment([c - egui::vec2(0.0, 4.5), c + egui::vec2(0.0, 4.5)], s);
         }
-        ui.add_sized([34.0, 20.0], egui::Label::new(RichText::new(value.to_string()).font(FontId::monospace(TXT_BODY)).color(BRIGHT())));
-        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value -= 1;
+        focus_ring(ui, &resp, r, R_SM as f32);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, label));
+        if can && resp.clicked() {
+            *value = if up { *value + 1 } else { *value - 1 };
         }
+    }
+    let g = ui.painter().layout_no_wrap(value.to_string(), FontId::monospace(TXT_BODY), BRIGHT());
+    ui.painter().galley(inner.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, BRIGHT());
+    let v = *value as f64;
+    well.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, name);
+        info.value = Some(v);
+        info
     });
 }
 
@@ -159,7 +210,7 @@ pub(crate) fn focus_ring(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, ra
 /// accent edge with focus or while its menu is open.
 pub(crate) fn field_frame(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, open: bool) {
     let state = state_of(resp);
-    let fill = [RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state];
+    let fill = shade_fill(RAISED(), state);
     let edge = if open || resp.has_focus() { PRIMARY() } else if state > 0 { MUTED() } else { BORDER() };
     ui.painter().rect(rect, R_MD, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
 }
@@ -193,13 +244,34 @@ pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, o
 
 /// `segmented` where an option whose flag is false is shown faint and cannot be chosen.
 pub(crate) fn segmented_on<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)]) {
+    segmented_impl(ui, value, options, false);
+}
+
+/// `segmented_on` spanning the width left in `ui`, in equal parts, for a control that heads a panel. A label too long for
+/// its part is cut with an ellipsis.
+pub(crate) fn segmented_fill<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)]) {
+    segmented_impl(ui, value, options, true);
+}
+
+fn segmented_impl<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)], fill: bool) {
     // Painted at a fixed height: a Frame grew with the row, leaving the track taller than its options.
     const PAD: f32 = 2.0;
     const GAP: f32 = 2.0;
     let pad_x = ui.spacing().button_padding.x;
-    let galleys: Vec<_> = options.iter().map(|(v, l, _)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0)))).collect();
-    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect();
-    let total = widths.iter().sum::<f32>() + GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
+    let gaps = GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
+    let part = (ui.available_width() - gaps).max(0.0) / options.len().max(1) as f32;
+    let galleys: Vec<_> = options
+        .iter()
+        .map(|(v, l, _)| {
+            let mut job = egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0));
+            if fill {
+                job.wrap = egui::text::TextWrapping::truncate_at_width((part - pad_x * 2.0).max(0.0));
+            }
+            ui.painter().layout_job(job)
+        })
+        .collect();
+    let widths: Vec<f32> = if fill { vec![part; options.len()] } else { galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect() };
+    let total = widths.iter().sum::<f32>() + gaps;
     let base = ui.next_auto_id();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(total, BUTTON_H), Sense::hover());
     ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
@@ -419,8 +491,8 @@ fn on_fill(fill: Color32) -> Color32 {
 }
 
 /// The padded dialog frame the value editors keep; every other dialog is `banded`, whose bands lay out their own edges.
-pub(crate) fn dialog(id: egui::Id) -> egui::Modal {
-    egui::Modal::new(id).frame(dialog_frame().inner_margin(18))
+pub(crate) fn dialog(id: egui::Id) -> super::dialog::Dialog {
+    super::dialog::Dialog::new(id, dialog_frame().inner_margin(18))
 }
 
 /// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
@@ -494,6 +566,49 @@ pub(crate) fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
 }
 
+/// A quiet square button of `size` with a painted glyph: muted at rest and bright once hovered or pressed.
+pub(crate) fn glyph_button(ui: &mut egui::Ui, size: egui::Vec2, glyph: super::glyphs::Glyph, name: &str, tip: &str) -> egui::Response {
+    let (_, r) = ui.allocate_exact_size(size, Sense::click());
+    glyph_button_on(ui, r, glyph, hover_fill, name, tip)
+}
+
+/// Paints `r` as a glyph button with the background `fill` gives each state, a focus ring, the name assistive tools and
+/// the UI tests find it by, and `tip` on hover.
+pub(crate) fn glyph_button_on(ui: &mut egui::Ui, r: egui::Response, glyph: super::glyphs::Glyph, fill: fn(usize) -> Color32, name: &str, tip: &str) -> egui::Response {
+    let state = state_of(&r);
+    ui.painter().rect_filled(r.rect, R_SM, fill(state));
+    glyph(ui.painter(), r.rect.center(), if state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, &r, r.rect, R_SM as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The fill of a tool square on a hovered row. It shows at rest, since the row behind it already has the hover fill.
+pub(crate) fn row_tool_fill(state: usize) -> Color32 {
+    [tint(TEXT(), 14), tint(TEXT(), 34), tint(TEXT(), 46)][state]
+}
+
+/// Whether the pointer is on the row of height `h` about to be drawn at the cursor, before it is drawn, so the row can
+/// make room for its hover tools.
+pub(crate) fn next_row_hovered(ui: &egui::Ui, h: f32) -> bool {
+    ui.rect_contains_pointer(egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h)))
+}
+
+/// The look of a sidebar menu: the menu fills and a little more room around and between its items.
+pub(crate) fn menu_list(ui: &mut egui::Ui) {
+    menu_look(ui);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+}
+
+/// A menu item that queues `act` and closes the menu when the item `add` draws is clicked.
+pub(crate) fn menu_act<T>(ui: &mut egui::Ui, acts: &mut Vec<T>, act: T, add: impl FnOnce(&mut egui::Ui) -> egui::Response) {
+    if add(ui).clicked() {
+        acts.push(act);
+        ui.close();
+    }
+}
+
 /// A quiet "more actions" menu button. The dots are painted: the ellipsis glyph comes from a
 /// fallback font and sits above the middle of the button.
 pub(crate) fn dots_menu(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
@@ -510,9 +625,10 @@ pub(crate) fn icon_menu(ui: &mut egui::Ui, paint: fn(&egui::Painter, egui::Pos2,
         if sticky {
             b = b.config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
         }
+        let room = popup_room(ui.ctx(), button_anchor(ui));
         let (r, _) = b.ui(ui, |ui| {
             menu_look(ui);
-            content(ui)
+            capped_scroll(ui, room, content)
         });
         let color = if r.hovered() || r.is_pointer_button_down_on() { BRIGHT() } else { MUTED() };
         paint(ui.painter(), r.rect.center(), color);
@@ -536,7 +652,7 @@ pub(crate) fn expand_key(ui: &egui::Ui, id: egui::Id) -> bool {
 pub(crate) fn expand_button() -> impl egui::Widget {
     |ui: &mut egui::Ui| {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(EXPAND_BTN, EXPAND_BTN), Sense::click());
-        let fill = [BORDER(), shade(BORDER(), 0.12), shade(BORDER(), 0.24)][state_of(&r)];
+        let fill = shade_fill(BORDER(), state_of(&r));
         ui.painter().rect_filled(rect, R_SM, fill);
         focus_ring(ui, &r, rect, R_SM as f32);
         let (c, s) = (rect.center(), Stroke::new(1.4, BRIGHT()));
@@ -683,7 +799,13 @@ pub(crate) fn spin_at(ui: &egui::Ui, rect: egui::Rect) {
 
 /// One clickable sidebar row painted by hand, so it reads as a list rather than a form. `label` is its text for screen readers and tests.
 pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+    side_row_sense(ui, Sense::click(), height, indent, active, label, paint)
+}
+
+/// `side_row` with the senses chosen by the caller, which `dnd::side_row_drag` uses to make a row draggable. The row keeps
+/// its own click, right-click and focus either way.
+pub(crate) fn side_row_sense(ui: &mut egui::Ui, sense: Sense, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
     let fill = match (active, state_of(&resp)) {
         (true, 0) => SEL(),
         (true, _) => SEL_HOVER(),
@@ -710,12 +832,7 @@ pub(crate) fn table_glyph(p: &egui::Painter, c: egui::Pos2, color: Color32) {
 }
 
 pub(crate) fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
-    let pts = if open {
-        vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]
-    } else {
-        vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(3.0, 0.0), c + egui::vec2(-2.0, 4.0)]
-    };
-    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+    super::fold::chevron(p, c, if open { 1.0 } else { 0.0 }, color);
 }
 
 /// The first, previous, "n / total", next and last control shared by every paged result, with
@@ -846,7 +963,8 @@ pub(crate) fn popover<R>(r: &egui::Response, w: f32, open_first: bool, add: impl
         open = !open;
     }
     let out = if open {
-        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(add)
+        let room = popup_room(&ctx, r.rect);
+        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(|ui| capped_scroll(ui, room, add))
     } else {
         None
     };

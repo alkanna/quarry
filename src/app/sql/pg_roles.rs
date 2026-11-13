@@ -551,7 +551,7 @@ impl App {
         let mut acts: Vec<Act> = Vec::new();
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "pg-roles-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.8).clamp(860.0, 1240.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.8).clamp(860.0, 1240.0)));
             let who = match (w.cl(), &env.blocked) {
                 (Some(c), Some(_)) if !locked => format!("  ·  signed in as {}", c.me),
                 _ => String::new(),

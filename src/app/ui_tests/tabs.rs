@@ -55,3 +55,34 @@ fn the_memory_tooltip_moves_a_closed_tabs_rows_to_the_reopen_line() {
     assert_eq!(part(a, "Other open tabs"), open - bytes);
     assert_eq!(part(a, "Closed tabs kept to reopen"), closed + bytes);
 }
+
+/// The point `frac` of the way across the tab named `coll`, at its middle height.
+fn across_tab(ui: &UiApp, coll: &str, frac: f32) -> egui::Pos2 {
+    let r = ui.h.get_by_label(&format!("Tab {coll}")).rect();
+    egui::pos2(r.left() + r.width() * frac, r.center().y)
+}
+
+#[test]
+fn a_tab_moves_by_dragging_it_and_stays_current() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
+    ui.mouse_hold("Tab customers", 0);
+    assert_eq!(ui.app().cur, 0, "a click did not pick the tab");
+    let (from, to) = (across_tab(&ui, "customers", 0.5), across_tab(&ui, "events", 0.8));
+    ui.press_and_move(from, to);
+    ui.release(to);
+    assert_eq!(colls(ui.app()), ["orders", "events", "customers"], "the tab did not land after the one it was dropped on");
+    assert_eq!(ui.app().cur, 2, "the dragged tab is no longer the current one");
+    // A click on another tab still picks it, and Esc cancels a drag.
+    ui.mouse_hold("Tab orders", 0);
+    assert_eq!(ui.app().cur, 0);
+    let (from, to) = (across_tab(&ui, "orders", 0.5), across_tab(&ui, "customers", 0.8));
+    ui.press_and_move(from, to);
+    ui.h.key_press(egui::Key::Escape);
+    ui.h.step();
+    ui.release(to);
+    assert_eq!(colls(ui.app()), ["orders", "events", "customers"], "Esc did not cancel the tab drag");
+    // The cross still closes its tab.
+    ui.mouse_hold("Close tab events", 0);
+    assert_eq!(colls(ui.app()), ["orders", "customers"], "the cross did not close the tab");
+}

@@ -1,6 +1,7 @@
 //! The results table and list: columns, widths and painting rows.
 
 use super::*;
+use crate::ui::dnd;
 
 /// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
 #[derive(Default)]
@@ -198,6 +199,13 @@ pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) ->
     out
 }
 
+/// A move in the filtered SHOWN list as the insert-before index into the whole list that `ColAct::MoveTo` takes.
+/// `kept` holds the whole-list index of each row the filter keeps: down a list the column goes after the row it was
+/// dropped past, up a list before it, so the columns the filter hides keep their places.
+fn kept_before(kept: &[usize], m: dnd::Move) -> usize {
+    if m.to > m.from { kept[m.to] + 1 } else { kept[m.to] }
+}
+
 /// How many columns show before the user picks some. SQL tables are narrow enough to show whole,
 /// while Mongo documents can have hundreds of fields.
 fn default_n(sql: bool, setting: usize) -> usize {
@@ -271,14 +279,24 @@ impl App {
                     acts.push(ColAct::Reset);
                 }
                 if !shown_kept.is_empty() {
-                    let last_pin = shown.iter().rposition(|c| prefs.pinned.contains(c));
+                    // The whole row drags. Pinned rows come first, so the pinned block is the first `pins` rows and a row
+                    // stays in its own block, which keeps a drag from pinning or unpinning it.
+                    let pins = shown_kept.iter().filter(|(_, c)| prefs.pinned.contains(c)).count();
+                    let sizes = vec![POP_ROW_H; shown_kept.len()];
+                    let keys: Vec<egui::Id> = shown_kept.iter().map(|(_, c)| egui::Id::unique(("col", c.as_str()))).collect();
+                    let blocks = [pins];
                     egui::ScrollArea::vertical().id_salt("shown").max_height(320.0).show(ui, |ui| {
-                        for &(i, c) in &shown_kept {
+                        let top = ui.cursor().top();
+                        let id = ui.make_persistent_id("shown-reorder");
+                        let mv = dnd::reorder(ui, id, dnd::Items::vertical(&sizes).keys(&keys).blocks(&blocks), |ui, k, st| {
+                            let c = shown_kept[k].1;
                             let (row, hovered) = pop_row(ui, POP_ROW_H);
+                            row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{c} column")));
+                            // Buttons only on the row under a still pointer, never on the one being dragged.
+                            let hovered = hovered && !st.busy;
                             let rect = row.rect;
-                            let grip_rect = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 2.0), egui::vec2(14.0, 26.0));
-                            put_at(ui, grip_rect, |ui| ui.dnd_drag_source(egui::Id::unique(("col-drag", c)), i, grip).response.on_hover_cursor(egui::CursorIcon::Grab));
                             let p = ui.painter().clone();
+                            dnd::grip_dots(&p, egui::pos2(rect.left() + 7.0, rect.center().y), if hovered || st.lifted { MUTED() } else { FAINT() });
                             mono_at(&p, rect.left() + 22.0, rect.center().y, c, BRIGHT());
                             let pinned = prefs.pinned.contains(c);
                             let mut right = rect.right();
@@ -299,20 +317,16 @@ impl App {
                             if !fields.contains(c) {
                                 tag_at(&p, right, rect.center().y, "path", MUTED());
                             }
-                            // Pinned columns sit above a dashed line.
-                            if last_pin == Some(i) && i + 1 < shown.len() {
-                                let y = rect.bottom();
-                                p.extend(egui::Shape::dashed_line(&[egui::pos2(rect.left() + 22.0, y), egui::pos2(rect.right(), y)], Stroke::new(1.0, RAISED_LINE()), 3.0, 3.0));
-                            }
-                            // Drop on the upper half to go before this row, the lower half to go after it.
-                            let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|p| p.y > rect.center().y);
-                            if row.dnd_hover_payload::<usize>().is_some() {
-                                let y = if below { rect.bottom() } else { rect.top() };
-                                ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, PRIMARY()));
-                            }
-                            if let Some(from) = row.dnd_release_payload::<usize>() {
-                                acts.push(ColAct::MoveTo(shown[*from].clone(), i + below as usize));
-                            }
+                            row
+                        });
+                        // Pinned columns sit above a dashed line, which stays put while rows slide because none crosses it.
+                        if pins > 0 && pins < shown_kept.len() {
+                            let (x, y) = (ui.min_rect().x_range(), top + pins as f32 * POP_ROW_H);
+                            ui.painter().extend(egui::Shape::dashed_line(&[egui::pos2(x.min + 22.0, y), egui::pos2(x.max, y)], Stroke::new(1.0, RAISED_LINE()), 3.0, 3.0));
+                        }
+                        if let Some(m) = mv {
+                            let kept: Vec<usize> = shown_kept.iter().map(|(i, _)| *i).collect();
+                            acts.push(ColAct::MoveTo(shown_kept[m.from].1.clone(), kept_before(&kept, m)));
                         }
                     });
                 }
@@ -578,15 +592,31 @@ impl App {
                         check_all = Some(!all);
                     }
                 }
-                let mut x = hr.left() + num_w;
-                for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
-                    let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
+                // Headers drag sideways to reorder the columns, pinned and unpinned each within their own block. The
+                // engine's drag sense sits under the header's click, so a click still opens the column menu, and the
+                // resize edge drawn later stays on top of both. Widget ids come from this scope, as before the engine.
+                let sid = ui.scope_id();
+                let pins = cols.iter().filter(|c| prefs.pinned.contains(c)).count();
+                let keys: Vec<egui::Id> = cols.iter().map(|c| egui::Id::unique(("col", c.as_str()))).collect();
+                let blocks = [pins];
+                let strip = egui::Rect::from_min_size(egui::pos2(hr.left() + num_w, hr.top()), egui::vec2(widths.iter().sum(), hr.height()));
+                let mv = put_at(ui, strip, |ui| dnd::reorder(ui, sid.with("head-reorder"), dnd::Items::horizontal(&widths, hr.height()).keys(&keys).blocks(&blocks), |ui, ci, st| {
+                    let (c, w) = (&cols[ci], &widths[ci]);
+                    let cell = ui.max_rect();
+                    let x = cell.left();
                     let pinned = prefs.pinned.contains(c);
                     let dir = dir_of(c);
+                    if st.lifted {
+                        let label = prefs.label(c);
+                        let g = ui.fonts_mut(|f| f.layout_job(LayoutJob::single_section(label.to_string(), ui_fmt(TXT_CAPTION, BRIGHT(), W_SEMIBOLD, 0.2))));
+                        let gx = align_x(aligns[ci], x, *w, g.size().x);
+                        ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, BRIGHT());
+                        return ui.response();
+                    }
                     // Inset so the resize handles at both edges stay on top for their clicks.
-                    let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), sid.with(("h", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                     hresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, c.as_str()));
-                    let state = state_of(&hresp);
+                    let state = if st.busy { 0 } else { state_of(&hresp) };
                     ui.painter().rect_filled(cell, 0, hover_fill(state));
                     // Sorted in the accent with its direction, pinned in amber, fields missing from
                     // this page faint; hover brightens the rest.
@@ -638,7 +668,7 @@ impl App {
                     head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
-                    let dr = ui.interact(handle, ui.scope_id().with(("w", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn).on_hover_text("Drag to resize, double-click to fit");
+                    let dr = ui.interact(handle, sid.with(("w", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn).on_hover_text("Drag to resize, double-click to fit");
                     if dr.double_clicked() {
                         fit = Some(c.clone());
                     }
@@ -649,7 +679,12 @@ impl App {
                     if dr.drag_stopped() {
                         save_widths = true;
                     }
-                    x += w;
+                    hresp
+                }));
+                // Saved like a move from the column popover, through the same prefs path.
+                if let Some(m) = mv {
+                    let c = cols[m.from].clone();
+                    head_acts.push((c.clone(), HeadAct::Col(ColAct::MoveTo(c, m.before()))));
                 }
                 ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, LINE()));
                 // Laid out once for every empty cell of the page.
@@ -1063,5 +1098,19 @@ mod tests {
         assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
         let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
         assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
+    }
+
+    #[test]
+    fn a_move_in_the_filtered_list_keeps_hidden_columns_in_place() {
+        // The filter keeps whole-list rows 1, 3 and 4.
+        let kept = [1, 3, 4];
+        let mv = |from, to| dnd::Move { from, to, into: false };
+        // Down past row 4: after it.
+        assert_eq!(kept_before(&kept, mv(0, 2)), 5);
+        // Up past row 1: before it.
+        assert_eq!(kept_before(&kept, mv(2, 0)), 1);
+        // With no filter it is the plain insert-before index.
+        assert_eq!(kept_before(&[0, 1, 2, 3], mv(1, 3)), mv(1, 3).before());
+        assert_eq!(kept_before(&[0, 1, 2, 3], mv(3, 0)), mv(3, 0).before());
     }
 }

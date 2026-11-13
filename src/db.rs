@@ -349,6 +349,10 @@ pub enum Msg {
     ToolsInstalled(Res<Option<String>>),
     /// An answer from gcloud for the Cloud SQL browser's load `req`; a downloaded or installed proxy comes with req 0.
     CloudSql { req: u64, found: crate::cloudsql::Found },
+    /// A linked folder scanned off the UI thread.
+    LibScan { link: u64, scan: crate::library::disk::Scan },
+    /// A linked file read, written or moved to the Trash off the UI thread, for the library job `job`.
+    LibFile { job: u64, out: crate::library::disk::FileOut },
 }
 
 /// How to reach the server: directly, through an SSH tunnel, or through a SOCKS5 proxy.

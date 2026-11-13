@@ -75,6 +75,7 @@ enum Icon {
 fn grid_icon(ui: &mut egui::Ui, w: f32, icon: Icon, on: bool, enabled: bool, tip: &str) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 30.0), if enabled { Sense::click() } else { Sense::hover() });
     let r = if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
     let p = ui.painter();
     let down = enabled && r.is_pointer_button_down_on();
     if on {

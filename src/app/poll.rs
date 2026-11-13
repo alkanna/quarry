@@ -229,6 +229,8 @@ impl App {
                     }
                 }
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
+                Msg::LibScan { link, scan } => self.apply_scan(link, scan),
+                Msg::LibFile { job, out } => self.file_done(job, out),
                 Msg::ToolDone(res) => {
                     if let Some(t) = &mut self.tool {
                         t.cancel = None;
@@ -726,6 +728,10 @@ impl App {
         }
         if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
             return self.reload_sql(i);
+        }
+        // A Shell tab opened from the library has no collection to read.
+        if self.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
+            return;
         }
         let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.

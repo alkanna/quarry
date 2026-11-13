@@ -19,6 +19,11 @@ impl App {
                 self.active = self.conns.first().map(|c| c.meta.id);
             }
             self.save_conns();
+            // A removed connection must not linger in a group, where the panel and the rail would count it.
+            let alive = self.conn_ids();
+            if self.groups.prune(&alive) {
+                self.save_groups();
+            }
             return self.ok("Connection removed");
         }
         if let Danger::DeleteRows(sel, rows) = action {

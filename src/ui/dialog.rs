@@ -8,14 +8,150 @@ use super::widgets::*;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 
 /// A dialog without padding on its frame: the bands lay out their own edges.
-pub(crate) fn banded(id: egui::Id) -> egui::Modal {
-    egui::Modal::new(id).frame(dialog_frame())
+pub(crate) fn banded(id: egui::Id) -> Dialog {
+    Dialog::new(id, dialog_frame())
 }
 
-/// `banded` raised above everything else every frame, for windows opened from another window.
-pub(crate) fn top_banded(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
-    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+/// `banded` raised above everything else every frame, for windows opened from another window. Not while a popup is open:
+/// a menu opened inside the window would land under it and its items could not be clicked.
+pub(crate) fn top_banded(ctx: &egui::Context, id: egui::Id) -> Dialog {
+    if !egui::Popup::is_any_open(ctx) {
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+    }
     banded(id)
+}
+
+/// A modal that never grows past the window: egui cannot draw outside it, so a taller dialog lost its footer. Its content
+/// goes in one scroll area capped to the window less `DIALOG_MARGIN` on each side, and the header and footer bands pin
+/// themselves above and below that area, so only the body scrolls. A dialog that fits lays out as before.
+pub(crate) struct Dialog {
+    modal: egui::Modal,
+    /// The frame's border and padding, both sides together.
+    chrome: f32,
+}
+
+impl Dialog {
+    /// A modal `id` drawn in `frame`, whose border and padding the room it fits in leaves out.
+    pub(crate) fn new(id: egui::Id, frame: egui::Frame) -> Self {
+        let m = frame.total_margin();
+        Self { modal: egui::Modal::new(id).frame(frame), chrome: m.left + m.right }
+    }
+
+    pub(crate) fn show<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::ModalResponse<R> {
+        let chrome = self.chrome;
+        self.modal.show(ctx, |ui| fit(ui, chrome, add))
+    }
+}
+
+/// Where the dialog on a layer pins its bands this frame. Set only while its content is drawn.
+#[derive(Clone, Copy)]
+struct Fit {
+    /// The top left of the content, where the header pins.
+    top: egui::Pos2,
+    /// The widest and tallest the scroll area may get: the window's room less the footer.
+    max: egui::Vec2,
+    /// The top of the scrolled content, to tell how tall the body is when the footer comes.
+    content_top: f32,
+    /// The area's clip, so the pinned bands are not cut to the body's viewport.
+    clip: egui::Rect,
+}
+
+/// What the bands measured on one frame, read back on the next.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Bands {
+    head: f32,
+    foot: Option<f32>,
+    width: f32,
+    /// The header's title, to tell when one dialog replaced another in the shared area.
+    key: u64,
+}
+
+fn fit_id(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("dialog-fit")
+}
+
+/// The measures the bands are taking this frame.
+fn bands_now(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("dialog-bands-now")
+}
+
+/// The measures the bands took last frame.
+fn bands_last(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("dialog-bands-last")
+}
+
+fn active_fit(ui: &egui::Ui) -> Option<Fit> {
+    ui.ctx().data(|d| d.get_temp::<Fit>(fit_id(ui.layer_id())))
+}
+
+fn note_bands(ui: &egui::Ui, f: impl FnOnce(&mut Bands)) {
+    let id = bands_now(ui.layer_id());
+    ui.ctx().data_mut(|d| f(d.get_temp_mut_or_default::<Bands>(id)));
+}
+
+/// The top and bottom padding of the footer band.
+const FOOT_PAD_Y: i8 = 12;
+
+/// The height of a `dialog_foot`: one button and the band's padding.
+fn foot_h(ui: &egui::Ui) -> f32 {
+    ui.spacing().interact_size.y + 2.0 * FOOT_PAD_Y as f32
+}
+
+fn fit<R>(ui: &mut egui::Ui, chrome: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let ctx = ui.ctx().clone();
+    let layer = ui.layer_id();
+    let room = (ctx.content_rect().size() - egui::Vec2::splat(2.0 * DIALOG_MARGIN + chrome)).max(egui::Vec2::splat(FIT_MIN_H));
+    let last: Bands = ctx.data(|d| d.get_temp(bands_last(layer))).unwrap_or_default();
+    // A footer seen last frame keeps its height; a first frame assumes the one-button footer most dialogs have.
+    let measured = last.width > 0.0;
+    let foot = last.foot.unwrap_or_else(|| if measured { 0.0 } else { foot_h(ui) });
+    // Every app modal shares one area, which offers its last size as the room for the next frame, so a dialog after a
+    // smaller one would start squeezed into that size. The room comes from the window instead.
+    ui.set_max_width(room.x);
+    ui.set_max_height(room.y);
+    let spacing = ui.spacing().item_spacing;
+    // The scroll area and the footer touch.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let top = ui.cursor().min;
+    let view_h = (room.y - foot).max(FIT_MIN_H);
+    let mut area = egui::ScrollArea::both().id_salt("dialog-fit").max_width(room.x).max_height(view_h).auto_shrink([true, true]);
+    if last.head > 0.0 && last.width > 0.0 {
+        // The bar runs beside the body only, not beside the pinned header.
+        area = area.scroll_bar_rect(egui::Rect::from_min_size(top + egui::vec2(0.0, last.head), egui::vec2(last.width, (view_h - last.head).max(0.0))));
+    }
+    // One area hosts every dialog, so a new one starts at the top rather than at the last one's scroll.
+    let reset_id = layer.id.with("dialog-reset");
+    if !ctx.memory(|m| m.areas().visible_last_frame(&layer)) || ctx.data(|d| d.get_temp::<bool>(reset_id)).unwrap_or(false) {
+        area = area.scroll_offset(egui::Vec2::ZERO);
+    }
+    let clip = ui.clip_rect();
+    ctx.data_mut(|d| d.remove::<Bands>(bands_now(layer)));
+    let out = area.show(ui, |ui| {
+        ui.spacing_mut().item_spacing = spacing;
+        // Set once the scrolled content's top is known, before the bands that read it draw.
+        ctx.data_mut(|d| d.insert_temp(fit_id(layer), Fit { top, max: egui::vec2(room.x, view_h), content_top: ui.cursor().top(), clip }));
+        add(ui)
+    });
+    let mut now: Bands = ctx.data_mut(|d| {
+        d.remove::<Fit>(fit_id(layer));
+        d.remove_temp::<Bands>(bands_now(layer))
+    })
+    .unwrap_or_default();
+    // The output's inner_rect is the room offered before the area shrank to its content; what the area took is the
+    // root's used rect, as nothing else is in it yet.
+    let width = ui.min_rect().width();
+    if let Some(h) = now.foot {
+        ui.allocate_space(egui::vec2(width, h));
+    }
+    now.width = width;
+    ctx.data_mut(|d| {
+        d.insert_temp(bands_last(layer), now);
+        d.insert_temp(reset_id, now.key != last.key);
+    });
+    if now != last {
+        ctx.request_repaint();
+    }
+    out.inner
 }
 
 /// What the header band shows.
@@ -75,6 +211,35 @@ pub(crate) fn dialog_head(ui: &mut egui::Ui, h: &Head) -> Option<usize> {
 pub(crate) fn dialog_head_with(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&mut egui::Ui)) -> Option<usize> {
     // The bands touch: spacing between them would show the frame's fill as a stripe.
     ui.spacing_mut().item_spacing.y = 0.0;
+    let Some(fit) = active_fit(ui) else { return head_band(ui, h, right) };
+    // Pinned at the dialog's top, outside the scrolled content, which keeps only a gap of its height.
+    let mut band = pinned(ui, &fit, fit.top);
+    band.spacing_mut().item_spacing.y = 0.0;
+    let picked = head_band(&mut band, h, right);
+    let hh = band.min_rect().height();
+    ui.add_space(hh);
+    // The body scrolls up under the header, so it must neither paint nor take clicks there.
+    let mut clip = ui.clip_rect();
+    clip.min.y = clip.min.y.max(fit.top.y + hh);
+    ui.set_clip_rect(clip);
+    let key = egui::Id::unique(&h.title).value();
+    note_bands(ui, |b| {
+        b.head = hh;
+        b.key = key;
+    });
+    picked
+}
+
+/// A band pinned at `at`, outside the scroll area, as wide as the dialog and clipped to the area's clip rather than the
+/// body's viewport.
+fn pinned(ui: &mut egui::Ui, fit: &Fit, at: egui::Pos2) -> egui::Ui {
+    let w = ui.max_rect().width().min(fit.max.x);
+    let mut band = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(at, egui::vec2(w, fit.max.y))).layout(egui::Layout::top_down(egui::Align::Min)));
+    band.set_clip_rect(fit.clip);
+    band
+}
+
+fn head_band(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&mut egui::Ui)) -> Option<usize> {
     let mut picked = None;
     let pad = DIALOG_PAD as i8;
     let bottom = if h.tabs.is_empty() { 14 } else { 0 };
@@ -144,8 +309,29 @@ fn rule(ui: &egui::Ui, dy: f32) {
 
 /// The recessed body, scrolling when it is taller than the screen allows.
 pub(crate) fn dialog_body<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    // Inside a `Dialog` the whole body already scrolls between the pinned bands.
+    if active_fit(ui).is_some() {
+        return body_frame(ui, true, add);
+    }
     let max_h = (ui.ctx().content_rect().height() - 240.0).max(160.0);
     body_frame(ui, true, |ui| egui::ScrollArea::vertical().id_salt("dialog-body").max_height(max_h).auto_shrink([false, true]).show(ui, add).inner)
+}
+
+/// `w` or less, so a dialog's width stays inside the window's margin. Windows whose width has a floor take it through
+/// this, or a narrow window scrolls them sideways.
+pub(crate) fn fit_width(ctx: &egui::Context, w: f32) -> f32 {
+    // Less the frame's 1 px border on each side.
+    w.min(ctx.content_rect().width() - 2.0 * DIALOG_MARGIN - 2.0)
+}
+
+/// The height left for a body's own list or pane below the cursor before the dialog's footer, less `below` for what
+/// follows it. Windows size their scroll areas with it, so a window that fits never scrolls as a whole.
+pub(crate) fn body_room(ui: &egui::Ui, below: f32) -> f32 {
+    let room = match active_fit(ui) {
+        Some(fit) => fit.top.y + fit.max.y - ui.cursor().top(),
+        None => ui.ctx().content_rect().height() - 240.0,
+    };
+    (room - below).max(FIT_MIN_H)
 }
 
 /// The recessed body without its own scrolling, for windows that lay out panes and scroll areas themselves.
@@ -608,9 +794,20 @@ pub(crate) fn dialog_done(ui: &mut egui::Ui) -> bool {
 
 /// The footer band laid out freely, for windows whose footer is more than a row of buttons.
 pub(crate) fn dialog_foot_free<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let Some(fit) = active_fit(ui) else { return foot_band(ui, add) };
+    // Pinned where the scroll area will end: the body's height so far, or the most the area may take.
+    let used = ui.min_rect().bottom() - fit.content_top;
+    let mut band = pinned(ui, &fit, egui::pos2(fit.top.x, fit.top.y + used.min(fit.max.y)));
+    let r = foot_band(&mut band, add);
+    let fh = band.min_rect().height();
+    note_bands(ui, |b| b.foot = Some(fh));
+    r
+}
+
+fn foot_band<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     rule(ui, 0.5);
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(DIALOG_PAD as i8, 12))
+        .inner_margin(egui::Margin::symmetric(DIALOG_PAD as i8, FOOT_PAD_Y))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             band_spacing(ui);

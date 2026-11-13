@@ -193,6 +193,23 @@ impl PgServerWin {
         self.rows().iter().find(|r| r.query.contains(tag) && r.active()).map(|r| r.pid)
     }
 
+    /// Asks for the list on the next frame, past the poll interval and the backoff after a failed read, for a UI test that
+    /// waits on a session the server may not have started yet.
+    #[cfg(test)]
+    pub(in crate::app) fn refresh_now(&mut self) {
+        (self.refresh, self.act_next) = (true, None);
+    }
+
+    /// What the Activity tab holds, for a UI test that waits on it: the error of the last read, or how many sessions it listed.
+    #[cfg(test)]
+    pub(in crate::app) fn activity_state(&self) -> String {
+        match &self.act {
+            None => format!("no answer yet (tab {:?}, waiting {})", self.tab, self.act_wait),
+            Some(Err(e)) => format!("the last read failed: {e:?}"),
+            Some(Ok(a)) => format!("{} sessions listed, {} running", a.rows.len(), a.rows.iter().filter(|r| r.active()).count()),
+        }
+    }
+
     /// Whether a Cancel or Terminate waits for its second click, for the UI test.
     #[cfg(test)]
     pub(in crate::app) fn armed(&self) -> bool {
@@ -511,7 +528,7 @@ impl App {
         let mut acts = Acts::default();
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(760.0, 1100.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
             const TABS: [(PgTab, &str); 4] = [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks")];
             let labels = TABS.map(|t| t.1);
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);

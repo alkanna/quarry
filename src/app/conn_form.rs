@@ -635,6 +635,21 @@ fn proxy_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
 }
 
 impl App {
+    /// The id of a new connection: past every id that anything kept still names. A removed connection's scripts, links,
+    /// groups, saved tabs and history stay behind on purpose, and a new connection that took its id would adopt them and run
+    /// its scripts on another server.
+    pub(super) fn next_conn_id(&self) -> u64 {
+        let lib = &self.library;
+        let held = lib.scripts.iter().map(|s| s.conn).chain(lib.links.iter().flat_map(|l| l.conns.iter().copied()));
+        let groups = self.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.groups.loose.iter().copied());
+        let prefs = self.prefs.open_tabs.iter().map(|t| t.conn).chain(self.prefs.open_conns.iter().copied()).chain(self.prefs.last_conn);
+        // Per-connection settings are keyed "{conn}/...".
+        let p = &self.prefs;
+        let keyed = p.history.keys().chain(p.shell_histories.keys()).chain(p.cols.keys()).chain(p.schema_maps.keys()).chain(p.relations.keys());
+        let history = keyed.filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
+        self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).max().unwrap_or(0) + 1
+    }
+
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
         if self.demo {
             paste_seed(ui.ctx(), f);
@@ -651,7 +666,7 @@ impl App {
         if let Some((req, info)) = self.test_info.take() {
             f.take_test_info(req, info);
         }
-        ui.set_width(800.0);
+        ui.set_width(fit_width(ui.ctx(), 800.0));
         let tabs = conn_tabs(f.engine);
         let labels: Vec<&str> = tabs.iter().map(|t| t.1).collect();
         let cloud_on = f.cloud_on().is_some();
@@ -800,7 +815,7 @@ impl App {
             }
         }
         if save {
-            let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
+            let id = f.id.unwrap_or_else(|| self.next_conn_id());
             // Demo ids overlap real ones, so the demo keeps its edits in memory only.
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
@@ -840,6 +855,12 @@ impl App {
                     }
                     self.active = Some(id);
                     self.save_conns();
+                    if let (None, Some(g)) = (f.id, f.group) {
+                        let all = self.conn_ids();
+                        if self.groups.place(id, Place::Into(g, None), &all) {
+                            self.save_groups();
+                        }
+                    }
                     self.connect(id);
                     *keep = false;
                     if let Some(Err(e)) = stored.into_iter().find(|r| r.is_err()) {

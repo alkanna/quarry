@@ -21,6 +21,8 @@ serde_json = "1"
 json5 = "1"
 keyring = "4"
 rfd = "0.17"
+# Deleting a file of a linked folder moves it to the Trash; its bytes are kept for the Undo toast.
+trash = "5"
 dirs = "6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.11"

@@ -19,6 +19,7 @@ mod column_menu;
 mod compare;
 pub(crate) mod config;
 mod conn_form;
+mod conns_panel;
 mod conn_pg_advanced;
 mod danger;
 mod demo;
@@ -28,9 +29,12 @@ mod drafts;
 mod errors;
 mod explain;
 mod export;
+mod group_dialog;
+mod groups;
 mod import;
 mod rail;
 mod indexes;
+mod library;
 mod log;
 mod mem;
 mod modals;
@@ -38,6 +42,7 @@ mod palette;
 mod poll;
 mod query;
 mod relations;
+mod restore;
 mod run;
 mod schema;
 mod server;
@@ -61,6 +66,9 @@ mod watch;
 use column_menu::*;
 use errors::*;
 use config::*;
+use groups::{Group, Groups, Place};
+use restore::Restore;
+use library::picker::{PickKind, picker_button};
 use documents::*;
 use shell::*;
 use shell_attach::*;
@@ -89,7 +97,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 29] = [
+const SHORTCUTS: [(&str, &str); 38] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -109,9 +117,11 @@ const SHORTCUTS: [(&str, &str); 29] = [
     ("PageUp, PageDown", "Previous or next page"),
     ("Enter", "Run the query"),
     ("Cmd+E", "Explain the query, pipeline or SQL statement"),
-    ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret"),
+    ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret, or the selected script of the Library panel"),
     ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
     ("Esc", "Close or deselect"),
+    ("Alt+Up/Down (Left/Right)", "Move the focused row, column, tab or stage"),
+    ("Cmd+Backspace, Delete", "Delete the selected script or folder of the Library panel; the toast offers Undo"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
     ("Cmd+L", "Show or hide the query log"),
@@ -119,6 +129,13 @@ const SHORTCUTS: [(&str, &str); 29] = [
     ("Ctrl+Space", "Suggestions in a query or SQL field, also where none show by themselves"),
     ("Tab", "Show the selected SQL row as a record, one line per column; Esc closes it"),
     ("Vim motions", "Modal editing in the code editors, turned on in Settings > Editing"),
+    ("Cmd+S", "Save the script to the library, or write the library script or file it came from"),
+    ("Cmd+Shift+S", "Save the script to the library as a new one"),
+    ("Cmd+O", "Pick a script of the library for this view"),
+    ("Cmd+Shift+L", "Show the Library panel and move the keys to it"),
+    ("Enter", "Open the selected script of the Library panel"),
+    ("Alt+Enter", "Open the selected script of the Library panel in a new tab"),
+    ("F2", "Rename the selected script or folder of the Library panel"),
 ];
 
 pub struct App {
@@ -177,7 +194,6 @@ pub struct App {
     #[cfg(target_os = "macos")]
     menu_acts: Vec<crate::menu::Act>,
     new_pkg: String,
-    new_lib: String,
     /// Views per namespace, shown differently in the sidebar.
     views: Views,
     /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
@@ -246,6 +262,17 @@ pub struct App {
     reveal: Option<(u64, String, Option<String>)>,
     /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
     rail_order: Vec<u64>,
+    /// Connection groups, from groups.json. Never part of ConnMeta, which an older Quarry rewrites without them.
+    groups: Groups,
+    /// The script library, from library.json.
+    library: crate::library::Library,
+    /// What the Connections panel and the Library panel remember while the app runs.
+    conns_ui: conns_panel::ConnsUi,
+    lib_ui: library::LibUi,
+    /// Group folders opened into a capsule in the rail.
+    rail_open: HashSet<u64>,
+    /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
+    restores: Vec<(u64, Restore)>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     scroll_sel: bool,
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
@@ -348,7 +375,6 @@ impl App {
             #[cfg(target_os = "macos")]
             menu_acts: Vec::new(),
             new_pkg: String::new(),
-            new_lib: String::new(),
             views: Views::default(),
             sql_schema: HashMap::new(),
             sql_rows: HashMap::new(),
@@ -390,6 +416,12 @@ impl App {
             settings_cat: Default::default(),
             reveal: None,
             rail_order: Vec::new(),
+            groups: Groups::default(),
+            library: Default::default(),
+            conns_ui: Default::default(),
+            lib_ui: Default::default(),
+            rail_open: HashSet::new(),
+            restores: Vec::new(),
             scroll_sel: false,
             tab_seen: None,
             demo,
@@ -509,6 +541,22 @@ impl App {
             if app.prefs.look() != Look::default() {
                 style(&cc.egui_ctx, app.prefs.look());
             }
+            let alive: Vec<u64> = metas.iter().map(|m| m.id).collect();
+            let (groups, broken_groups) = groups::load_groups();
+            let library_existed = config_dir().join("library.json").exists();
+            let (library, broken_library) = library::load_library();
+            app.groups = groups;
+            app.library = library;
+            // The first run with a library: the queries saved in ui.json move over, once. ui.json keeps them as they were.
+            // A library.json that could not be read at all was moved aside and left an empty library; the old queries are
+            // still in ui.json, so they come over again rather than staying lost.
+            if library::should_migrate(library_existed, broken_library.is_some(), &app.library) {
+                app.migrate_library();
+            }
+            // Connections removed since the last run leave their groups, but their scripts stay.
+            if app.groups.prune(&alive) {
+                app.save_groups();
+            }
             crate::vault::migrate(&secret_names(metas.iter().map(|m| m.id)));
             for meta in metas {
                 let masked = stored_uri(meta.id).ok().map(|u| db::mask_uri(&u)).unwrap_or_default();
@@ -557,6 +605,12 @@ impl App {
                     t.stages_src = t.agg_txt.clone();
                     t.stages = stages;
                 }
+                // A tab opened from the library is bound to its script again, when the script is still there and the tab
+                // still shows the view the script is written in. Its base is the saved text, so edits made before the
+                // restart still show as edits.
+                if let Some(r) = st.script {
+                    t.script = app.rebind(&t, r);
+                }
                 app.tabs.push(t);
             }
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
@@ -590,7 +644,7 @@ impl App {
                 app.prefs.last_version = current.into();
                 app.save_prefs();
             }
-            let broken: Vec<String> = [broken_conns, broken_prefs].into_iter().flatten().collect();
+            let broken: Vec<String> = [broken_conns, broken_prefs, broken_groups, broken_library].into_iter().flatten().collect();
             if !broken.is_empty() {
                 app.modal = Some(Modal::Text { title: "Some settings could not be loaded".into(), body: broken.join("\n\n"), code: false });
             }
@@ -726,6 +780,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
             ctx.request_repaint();
         }
+        self.library_tick(ctx);
         // Set every frame so connections added or reconnected later need no extra handling.
         if self.prefs.always_writable {
             self.conns.iter_mut().for_each(|c| c.writable = true);
@@ -762,6 +817,8 @@ impl eframe::App for App {
             self.tab_strip(ui);
         }
         egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 })).show(ui, |ui| {
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test-central-left"), ui.max_rect().left() - 20.0));
             if self.tabs.is_empty() {
                 self.welcome(ui);
             } else {

@@ -29,7 +29,8 @@ Read-only mode covers what Quarry sends. A server-side function that writes on i
 
 - MongoDB `find` and `aggregate`, with a preview after each pipeline stage, explain plans and copy as code.
 - SQL through typed filter rules or a full editor that runs several statements in one go, with autocomplete, Format, Explain and Stop.
-- Saved queries, history and a log of every query sent.
+- A script library for every engine, with folders and Cmd+S to save. A folder can be linked to a directory on disk, so a team keeps its `.sql`, `.js` and `.json` scripts in a repo.
+- History and a log of every query sent.
 - Schema analysis of the documents a query matches, group and count on any field, and change streams.
 
 **Scripts**
@@ -53,11 +54,13 @@ Read-only mode covers what Quarry sends. A server-side function that writes on i
 
 - SSH tunnels, SOCKS5 and TLS, with client certificates on PostgreSQL. PgBouncer in transaction mode is supported.
 - Google Cloud SQL: pick an instance from your gcloud account and Quarry runs the Cloud SQL Auth Proxy for you.
+- Colored connection groups in the sidebar, folded into one tile each in the rail. Drag connections in and out of them.
 - Passwords are stored in the system keychain.
 
 **Interface**
 
-- Cmd+K searches every connection and runs commands. Cmd+/ lists every shortcut.
+- Cmd+K searches every connection, saved script and command. Cmd+/ lists every shortcut.
+- Drag to reorder grid columns, tabs, pipeline stages and table columns.
 - 17 themes, larger text, OpenDyslexic, a soft background and a reading line for wide tables.
 
 | | |

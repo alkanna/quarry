@@ -1,6 +1,7 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
 use crate::app::*;
+use crate::ui::dnd;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
@@ -155,6 +156,15 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
     let widths: Vec<f32> = set.cols.iter().zip(wide).map(|(c, &longest)| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0)).collect();
     let lead = CHECK_W + NUM_W;
     let total = lead + widths.iter().sum::<f32>();
+    // The order the columns show in, as indexes into `set.cols`. Headers drag to reorder; the order is kept in memory for
+    // results with the same columns, so the next page or a run again keeps it.
+    let names: Vec<&str> = set.cols.iter().map(|c| c.name.as_str()).collect();
+    let oid = egui::Id::unique(("sql-query-order", &names));
+    // Kept as indexes, since a join can return two columns of one name; one that is not a whole permutation is dropped.
+    let kept: Vec<usize> = ui.ctx().data(|d| d.get_temp(oid)).unwrap_or_default();
+    let mut sorted = kept.clone();
+    sorted.sort_unstable();
+    let order: Vec<usize> = if sorted.iter().copied().eq(0..names.len()) { kept } else { (0..names.len()).collect() };
     let mut out = GridOut::default();
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
@@ -180,7 +190,8 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                             out.check = Some((i, shift));
                         }
                         let mut x = rr.left() + lead;
-                        for (ci, (c, w)) in set.cols.iter().zip(&widths).enumerate() {
+                        for &ci in &order {
+                            let (c, w) = (&set.cols[ci], &widths[ci]);
                             let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
                             x += w;
                             if !ui.is_rect_visible(cell) {
@@ -234,13 +245,35 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
             out.all = Some(!all);
         }
         p.text(egui::pos2(head.left() + CHECK_W + 18.0 - off, head.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
-        let mut x = head.left() + lead - off;
-        for (c, w) in set.cols.iter().zip(&widths) {
-            let g = p.layout_no_wrap(c.name.clone(), FontId::proportional(TXT_SMALL), MUTED());
-            p.galley(egui::pos2(x + 8.0, head.center().y - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
-            x += w;
-        }
         p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, LINE()));
+        // Headers drag sideways to reorder the columns, or Alt+Left and Alt+Right on the focused one.
+        let ow: Vec<f32> = order.iter().map(|&ci| widths[ci]).collect();
+        let keys: Vec<egui::Id> = order.iter().map(|&ci| egui::Id::unique(("sql-query-col", ci))).collect();
+        let strip = egui::Rect::from_min_size(egui::pos2(head.left() + lead - off, head.top()), egui::vec2(ow.iter().sum(), TABLE_HEAD_H));
+        let room = egui::Rect::from_min_max(egui::pos2(head.left() + lead, head.top()), head.max);
+        let mv = put_at(ui, strip, |ui| {
+            ui.set_clip_rect(room.intersect(ui.clip_rect()));
+            dnd::reorder(ui, egui::Id::unique(("sql-query-head", &names)), dnd::Items::horizontal(&ow, TABLE_HEAD_H).keys(&keys), |ui, k, st| {
+                let c = &set.cols[order[k]];
+                let cell = ui.max_rect();
+                let r = ui.interact(cell, ui.scope_id().with("head"), Sense::click());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ColumnHeader, true, format!("Result column {}", c.name)));
+                let state = if st.busy { 0 } else { state_of(&r) };
+                if state > 0 {
+                    ui.painter().rect_filled(cell, 0, hover_fill(state));
+                }
+                let color = if st.lifted || state > 0 { BRIGHT() } else { MUTED() };
+                let g = ui.painter().layout_no_wrap(c.name.clone(), FontId::proportional(TXT_SMALL), color);
+                ui.painter().with_clip_rect(cell.shrink2(egui::vec2(4.0, 0.0)).intersect(ui.clip_rect())).galley(egui::pos2(cell.left() + 8.0, cell.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
+                r
+            })
+        });
+        if let Some(m) = mv {
+            let mut now = order.clone();
+            m.apply(&mut now);
+            ui.ctx().data_mut(|d| d.insert_temp(oid, now));
+            ui.ctx().request_repaint();
+        }
     });
     out
 }
@@ -270,6 +303,18 @@ impl App {
     /// The name a tab shows: its table, or "Query N" for a Query tab that belongs to no table.
     pub(in crate::app) fn tab_name(&self, i: usize) -> String {
         let Some(t) = self.tabs.get(i) else { return String::new() };
+        // A tab opened from the library, or saved to it, is named for its script or file, so Cmd+S writing it back silently
+        // is never a surprise.
+        if let Some(b) = &t.script {
+            let name = self.script_name(&b.r);
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        // A Shell script opened from the library has no collection: the tab is named for its database.
+        if t.sel.coll.is_empty() && t.view == View::Shell {
+            return format!("Shell · {}", t.sel.db);
+        }
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return format!("Query {}", self.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
         }
@@ -425,8 +470,8 @@ impl App {
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
         let title = if free { self.tab_name(self.cur) } else { "Query".into() };
-        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
-        let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
+        let lib_pick = self.pick_data(ui.ctx(), PickKind::Sql);
+        let mut pick_acts = Vec::new();
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
         let dialect = self.sql_dialect();
         let mut pg_schema = t_schema(self.t());
@@ -469,16 +514,20 @@ impl App {
                 })
                 .on_hover_text("History");
                 ui.add_space(6.0);
-                let button = library_menu(ui, &lib, &mut lib_new, LibMenu::Sql(dialect), false, &mut lib_acts);
+                let button = picker_button(ui, &lib_pick, false, &mut pick_acts);
                 self.demo_open_library(ui.ctx(), &button);
+                self.demo_open_picker(ui.ctx(), &button, "picker");
             });
         });
-        self.new_lib = lib_new;
         if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
             // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
             s.run_schema = pg_schema;
         }
         ui.add_space(4.0);
+        // A table's Query view gets these from the view tabs above it; a Query tab of its own has none.
+        if free {
+            self.script_banners(ui);
+        }
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick) = (false, false, false, false, false, None);
         let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
         let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
@@ -528,26 +577,6 @@ impl App {
         if let Some(text) = load {
             self.sql_replace(&ctx, text, None);
         }
-        for a in lib_acts {
-            match a {
-                QAct::Load(q) => self.sql_replace(&ctx, q.sql.unwrap_or_default(), None),
-                QAct::Save(name) => {
-                    let sql = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default();
-                    if sql.trim().is_empty() {
-                        self.warn("Nothing to save: the script is empty.");
-                    } else {
-                        let has_password = !db::redact_sql(&sql).1.is_empty();
-                        self.save_to_library(SavedQuery { name, sql: Some(sql), ..Default::default() });
-                        // Saved as typed, because a script with its password cut out would not run.
-                        if has_password {
-                            self.warn("Saved, but the script holds a password in plain text in the library file.");
-                        }
-                    }
-                }
-                QAct::Delete(name) => self.delete_sql_from_library(&name),
-                _ => {}
-            }
-        }
         if format {
             self.sql_format(&ctx);
         }
@@ -563,6 +592,8 @@ impl App {
         if run || run_all || explain {
             self.sql_run(run_all, explain);
         }
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     pub(in crate::app) fn sql_editor_id(cur: usize) -> egui::Id {
@@ -927,8 +958,12 @@ impl App {
         // QUARRY_TEST_SQL=format shows the same script after Format.
         // QUARRY_TEST_SQL=library has two saved scripts and the menu open.
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
-            let saved = |name: &str, sql: &str| SavedQuery { name: name.into(), sql: Some(sql.into()), ..Default::default() };
-            self.prefs.library.insert(Self::sql_lib_key(3), vec![saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;"), saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;")]);
+            let saved = |name: &str, sql: &str| crate::library::Script { name: name.into(), kind: "sql".into(), body: sql.into(), conn: 3, ..Default::default() };
+            let id = self.library.next_id();
+            self.library.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
+            let id = self.library.next_id();
+            self.library.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
+            self.library.recent = self.library.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
         }
         let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw, db::sql::Dialect::MySql).text } else { raw.to_string() };
         let query = query.as_str();

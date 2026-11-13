@@ -30,9 +30,19 @@ fn sleeper(uri: &str, tag: &str) -> mpsc::Receiver<Result<(), String>> {
 }
 
 /// Waits for the window to list the session tagged `tag`, failing at once with the reason when the session never started.
+/// The window polls every 2 s and backs off 10 s after a failed read, which a loaded machine (the server out of connection
+/// slots, the first read before the session started) can stretch past a fixed wait, so the list is asked for again every
+/// 500 ms and the deadline is a wall clock one, longer than the shared LIMIT.
 fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &str) -> u64 {
     let t = std::time::Instant::now();
+    let mut asked = std::time::Instant::now();
     loop {
+        if asked.elapsed() > Duration::from_millis(500) {
+            asked = std::time::Instant::now();
+            if let Some(s) = ui.h.state_mut().pg_server.as_mut() {
+                s.refresh_now();
+            }
+        }
         ui.h.step();
         if let Some(pid) = listed(ui.app(), tag) {
             return pid;
@@ -40,7 +50,7 @@ fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &st
         if let Ok(r) = rx.try_recv() {
             panic!("the sleeping session ended before it was listed: {r:?}");
         }
-        assert!(t.elapsed() < LIMIT, "timed out waiting for the sleeping session to be listed; last error: {}", ui.app().last_problem());
+        assert!(t.elapsed() < LIMIT * 2, "timed out waiting for the sleeping session to be listed; window: {}; last error: {}", ui.app().pg_server.as_ref().map_or("closed".into(), |s| s.activity_state()), ui.app().last_problem());
         std::thread::sleep(Duration::from_millis(20));
     }
 }

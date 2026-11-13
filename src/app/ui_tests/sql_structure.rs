@@ -169,3 +169,65 @@ fn apply_now_on_a_connection_locked_after_the_dialog_opened_asks_to_unlock() {
         until(fx, ui, "the column to land", |fx| names(fx, &t) == "id,name,qty,extra");
     });
 }
+
+// Offline on the demo's orders table (id, customer_id, status, total, ...), writable: rows drag to stage a move.
+
+fn demo_structure() -> Option<UiApp> {
+    demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_structure_demo("structure");
+    })
+}
+
+/// The staged moves as (column, position).
+fn moves(ui: &UiApp) -> Vec<(String, db::sql::ddl::Pos)> {
+    ui.app().staged().iter().filter_map(|c| match c {
+        db::sql::ddl::Change::Modify { from, pos, .. } => Some((from.clone(), pos.clone())),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn a_column_row_drags_to_stage_a_move_and_esc_cancels() {
+    let Some(mut ui) = demo_structure() else { return };
+    ui.show("columns row 3");
+    ui.drag_esc("columns row 3", "columns row 1", 0.1);
+    assert!(moves(&ui).is_empty(), "Esc staged a move");
+    // A click selects and stages nothing.
+    ui.mouse_hold("columns row 2", 0);
+    assert!(moves(&ui).is_empty(), "a click staged a move");
+    ui.drag("columns row 3", "columns row 1", 0.1, 1);
+    assert_eq!(moves(&ui), [("status".to_string(), db::sql::ddl::Pos::First)], "the drag did not stage status first");
+}
+
+#[test]
+fn alt_down_moves_the_focused_column_row() {
+    let Some(mut ui) = demo_structure() else { return };
+    ui.show("columns row 1");
+    ui.h.get_by_label("columns row 1").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
+    assert_eq!(moves(&ui), [("id".to_string(), db::sql::ddl::Pos::After("customer_id".into()))]);
+    // The row shows where the move put it and keeps the focus, so a second press moves it one place further.
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowDown);
+    assert_eq!(moves(&ui), [("id".to_string(), db::sql::ddl::Pos::After("status".into()))], "a second Alt+Down did not go further");
+}
+
+#[test]
+fn index_columns_drag_to_reorder_in_the_index_dialog() {
+    let Some(mut ui) = demo_structure() else { return };
+    let i = ui.app().structure().and_then(|s| s.indexes.iter().position(|x| x.cols.len() == 2)).expect("an index on two columns");
+    ui.h.state_mut().open_idx_form(Some(i));
+    ui.settle();
+    let cols = |ui: &UiApp| match &ui.app().modal {
+        Some(Modal::IdxEdit(f)) => f.def.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let before = cols(&ui);
+    assert_eq!(before.len(), 2, "the index dialog did not open on two columns");
+    let (a, b) = (format!("Index column {}", before[0]), format!("Index column {}", before[1]));
+    ui.drag_esc(&b, &a, 0.1);
+    assert_eq!(cols(&ui), before, "Esc moved a column or closed the dialog");
+    ui.drag(&b, &a, 0.1, 1);
+    assert_eq!(cols(&ui), [before[1].clone(), before[0].clone()]);
+}

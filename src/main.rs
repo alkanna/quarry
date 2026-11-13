@@ -8,6 +8,7 @@ mod agents;
 mod app;
 mod cloudsql;
 mod db;
+mod library;
 #[cfg(target_os = "macos")]
 mod menu;
 mod ssh;

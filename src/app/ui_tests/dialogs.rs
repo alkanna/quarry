@@ -4,7 +4,8 @@
 use super::*;
 
 fn disabled(ui: &UiApp, label: &str) -> bool {
-    ui.h.get_by_label(label).accesskit_node().is_disabled()
+    // The last match is the topmost one: the page behind a dialog can carry a button of the same name, such as the document view's Duplicate.
+    ui.h.query_all_by_label(label).last().expect("no widget with this name").accesskit_node().is_disabled()
 }
 
 #[test]
@@ -105,9 +106,11 @@ fn the_dump_switches_and_radio_cards_change_the_form() {
         _ => panic!("the dump dialog closed"),
     };
     assert!(!path(&ui).ends_with(".gz"));
-    ui.click("Compress with gzip");
+    // The option row also has a title label of the same name, drawn before its switch.
+    ui.click_last("Compress with gzip");
     assert!(path(&ui).ends_with(".sql.gz"), "the switch did not change the file name: {}", path(&ui));
-    ui.click("Compress with gzip");
+    // The option row also has a title label of the same name, drawn before its switch.
+    ui.click_last("Compress with gzip");
     assert!(path(&ui).ends_with(".sql"), "the switch did not take .gz off: {}", path(&ui));
     ui.click("Whole database");
     assert!(matches!(&ui.app().modal, Some(Modal::SqlDump(f)) if f.whole()), "the radio card did not pick the whole database");
@@ -129,7 +132,7 @@ fn hidden_sleeping_connections_are_counted_and_can_be_shown() {
     assert!(ui.h.query_by_label_contains("sleeping connections hidden").is_some());
     ui.click("Show them");
     assert!(ui.h.query_by_label("Show them").is_none(), "the hidden row stayed after Show them");
-    assert_eq!(ui.h.get_by_label("Hide sleeping").accesskit_node().is_selected(), Some(false), "Hide sleeping is still on");
+    assert_eq!(ui.h.get_by_label("Hide sleeping").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False), "Hide sleeping is still on");
 }
 
 #[test]

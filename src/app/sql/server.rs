@@ -238,7 +238,7 @@ impl App {
         }
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(760.0, 1100.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
             let up = s.uptime.map(|u| format!("  ·  up {}", up_text(u))).unwrap_or_default();
             const TABS: [(SqlServerTab, &str); 4] = [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes")];
             let labels = TABS.map(|t| t.1);

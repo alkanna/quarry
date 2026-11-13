@@ -121,6 +121,32 @@ pub(super) struct UiPrefs {
     pub(super) shell_editor_h: f32,
     /// The version that last ran, to show the changelog once after an update.
     pub(super) last_version: String,
+    /// The sidebar panel: "" for the explorer, "connections" or "library". A string, read by `side_mode`, so a value
+    /// from a newer build opens the explorer instead of making an older one drop ui.json.
+    pub(super) side_panel: String,
+    /// The Library panel lists every connection's scripts instead of the active connection's.
+    pub(super) lib_scope_all: bool,
+    /// Height the person dragged the Library preview card to; 0 uses its default.
+    pub(super) lib_preview_h: f32,
+}
+
+/// What the sidebar shows, picked from the activity rail.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum SideMode {
+    #[default]
+    Explorer,
+    Connections,
+    Library,
+}
+
+impl SideMode {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            SideMode::Explorer => "",
+            SideMode::Connections => "connections",
+            SideMode::Library => "library",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
@@ -142,6 +168,18 @@ impl Appearance {
 }
 
 impl UiPrefs {
+    pub(super) fn side_mode(&self) -> SideMode {
+        match self.side_panel.as_str() {
+            "connections" => SideMode::Connections,
+            "library" => SideMode::Library,
+            _ => SideMode::Explorer,
+        }
+    }
+
+    pub(super) fn set_side_mode(&mut self, m: SideMode) {
+        self.side_panel = m.name().into();
+    }
+
     /// A hand-edited ui.json may hold any number; only the offered sizes are applied.
     pub(super) fn scale(&self) -> f32 {
         if SCALES.iter().any(|s| s.0 == self.ui_scale) { self.ui_scale } else { 1.0 }
@@ -231,6 +269,8 @@ pub(super) struct SavedTab {
     /// The database and PostgreSQL schema the Query view runs in when they are not the tab's own.
     pub(super) run_db: String,
     pub(super) run_schema: String,
+    /// The library script or linked file the tab was opened from, bound again when the tab is restored.
+    pub(super) script: Option<crate::library::ScriptRef>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -243,7 +283,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, vim: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, dark_theme: String::new(), light_theme: String::new(), ui_font: String::new(), data_font: String::new(), soft: false, accent: String::new(), reading_line: false, group_digits: false, lock_scroll_axis: true, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, vim: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, dark_theme: String::new(), light_theme: String::new(), ui_font: String::new(), data_font: String::new(), soft: false, accent: String::new(), reading_line: false, group_digits: false, lock_scroll_axis: true, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new(), side_panel: String::new(), lib_scope_all: false, lib_preview_h: 0.0 }
     }
 }
 
@@ -264,24 +304,82 @@ pub(super) fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std:
     }
 }
 
-/// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of
-/// losing every other one. The whole file is copied to `<name>.bak` first, because the next save
-/// writes back only the entries that parsed.
-pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
-    let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
-    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&b) else { return parse_config(path) };
-    let total = items.len();
+/// Parses the entries of a list one by one, so an entry that no longer parses is skipped instead of losing every other
+/// one. Returns what parsed and the reason of each skip. A file with several lists parses each and reports once through
+/// `skipped_note`.
+pub(crate) fn parse_entries<T: serde::de::DeserializeOwned>(items: Vec<serde_json::Value>) -> (Vec<T>, Vec<String>) {
     let mut errs = Vec::new();
-    let good: Vec<T> = items.into_iter().filter_map(|v| serde_json::from_value(v).map_err(|e| errs.push(e.to_string())).ok()).collect();
+    let good = items.into_iter().filter_map(|v| serde_json::from_value(v).map_err(|e| errs.push(e.to_string())).ok()).collect();
+    (good, errs)
+}
+
+/// The notice for entries skipped (`errs`, out of `total`), after copying the whole file to `<name>.bak`, because the next
+/// save writes back only the entries that parsed. None when nothing was skipped.
+pub(crate) fn skipped_note(path: &std::path::Path, total: usize, errs: &[String]) -> Option<String> {
     if errs.is_empty() {
-        return (good, None);
+        return None;
     }
     let bak = path.with_extension("json.bak");
     let kept = match std::fs::copy(path, &bak) {
         Ok(_) => format!("The full file was kept as {}.", bak.display()),
         Err(e) => format!("Copying it aside failed ({e}); the skipped entries will be lost on the next save."),
     };
-    (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
+    Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; ")))
+}
+
+/// The lists of a config file that is an object, taken one by one by `load_lists`'s builder.
+pub(super) struct Lists {
+    lists: Vec<Vec<serde_json::Value>>,
+    obj: serde_json::Map<String, serde_json::Value>,
+    /// Why entries were skipped, for `skipped_note`. A builder adds its own reasons here.
+    pub(super) errs: Vec<String>,
+}
+
+impl Lists {
+    /// The entries of the `i`th key that parse; the others are counted in `errs`.
+    pub(super) fn take<T: serde::de::DeserializeOwned>(&mut self, i: usize) -> Vec<T> {
+        let (good, errs) = parse_entries(std::mem::take(&mut self.lists[i]));
+        self.errs.extend(errs);
+        good
+    }
+
+    /// A number beside the lists, such as the version, or 0.
+    pub(super) fn num(&self, key: &str) -> u64 {
+        self.obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+}
+
+/// Reads a config file that is an object of the lists `keys`, parsed entry by entry: a bad entry is skipped and the file
+/// copied to `.bak`, never the other entries lost. A file that is not an object at all is moved aside by `parse_config`.
+pub(super) fn load_lists<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path, keys: &[&str], build: impl FnOnce(&mut Lists) -> T) -> (T, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (T::default(), None) };
+    let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
+    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
+    let mut errs = Vec::new();
+    let lists: Vec<Vec<serde_json::Value>> = keys
+        .iter()
+        .map(|k| match obj.remove(*k) {
+            Some(serde_json::Value::Array(a)) => a,
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(_) => {
+                errs.push(format!("{k} is not a list"));
+                Vec::new()
+            }
+        })
+        .collect();
+    let total = lists.iter().map(Vec::len).sum::<usize>() + errs.len();
+    let mut l = Lists { lists, obj, errs };
+    let t = build(&mut l);
+    (t, skipped_note(path, total, &l.errs))
+}
+
+/// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of losing every other one.
+pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&b) else { return parse_config(path) };
+    let total = items.len();
+    let (good, errs) = parse_entries(items);
+    (good, skipped_note(path, total, &errs))
 }
 
 /// Field values kept for suggestions, as BSON so number types come back unchanged. The file is
@@ -365,18 +463,13 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     crate::vault::set(&format!("connection-{id}-{what}"), value).map_err(|e| format!("Could not store the {} in the Keychain: {e}", what.replace('-', " ")))
 }
 
-/// Written beside the file, then renamed over it: a crash mid-write leaves the old file whole
+/// Written beside the file, then renamed over it by `disk::replace_file`: a crash mid-write leaves the old file whole
 /// instead of a truncated one that no longer parses.
 // ponytail: no fsync; ui.json is saved on every keystroke in the query boxes and an fsync on the UI
 // thread stalls typing. Only a power loss right after a save can lose it; sync on a worker if that matters.
 pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{file}.tmp"));
-    let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file)));
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
+    crate::library::disk::replace_file(&dir.join(file), bytes, None)
 }
 
 impl App {
@@ -515,7 +608,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("busy.json").join("keep")).unwrap();
         assert!(write_atomic(&dir, "busy.json", b"x").is_err());
         assert!(dir.join("busy.json").join("keep").is_dir());
-        assert!(!dir.join(".busy.json.tmp").exists());
+        assert!(!dir.join(".busy.json.quarry-tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

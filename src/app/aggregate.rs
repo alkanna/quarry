@@ -1,12 +1,13 @@
 //! The aggregation pipeline builder.
 
 use super::*;
+use crate::ui::dnd;
 
 pub(super) enum StageAct {
     Edited(usize),
     Toggled(usize),
-    /// Move a stage one place, down when true.
-    Move(usize, bool),
+    /// Move the stage at the first index to the second, dragged there.
+    Move(usize, usize),
     Remove(usize),
     Add(String),
     Op(usize, String),
@@ -46,11 +47,8 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                         ui.close();
                     }
                 });
-                if ui.add_enabled(i + 1 < n, egui::Button::new("⏷")).on_hover_text("Move this stage down").clicked() {
-                    acts.push(StageAct::Move(i, true));
-                }
-                if ui.add_enabled(i > 0, egui::Button::new("⏶")).on_hover_text("Move this stage up").clicked() {
-                    acts.push(StageAct::Move(i, false));
+                if n > 1 {
+                    ui.label(RichText::new("Drag or Alt+Up/Down to reorder").size(TXT_SMALL).color(FAINT()));
                 }
             });
         });
@@ -100,6 +98,20 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
     });
 }
 
+/// A stage card while it is dragged: its number, operator and the first lines of its body, painted without the editors
+/// and menus that would otherwise follow the pointer.
+fn lifted_stage(ui: &mut egui::Ui, i: usize, s: &Stage) -> egui::Response {
+    let rect = ui.max_rect().shrink2(egui::vec2(12.0, 6.0));
+    let p = ui.painter().with_clip_rect(rect);
+    let head = p.layout_job(LayoutJob::single_section(format!("{}  {}", i + 1, s.op), mono_fmt(TXT_BODY, if s.on { C_KEYWORD() } else { FAINT() }, W_SEMIBOLD)));
+    let y = rect.top() + 8.0;
+    p.galley(egui::pos2(rect.left(), y), head.clone(), TEXT());
+    let body: String = s.text.lines().take(6).collect::<Vec<_>>().join("\n");
+    let g = p.layout(body, FontId::monospace(TXT_SMALL), MUTED(), rect.width());
+    p.galley(egui::pos2(rect.left(), y + head.size().y + 8.0), g, MUTED());
+    ui.response()
+}
+
 /// The first documents out of a stage, one line each. The whole row toggles the document open
 /// or closed, and several can be open at once.
 pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
@@ -144,11 +156,10 @@ impl App {
     pub(super) fn aggregate(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
-        let key = self.col_key(false);
-        let agg_lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Pipeline);
-        let mut agg_acts = Vec::new();
+        let pick = self.pick_data(ui.ctx(), PickKind::Pipeline);
+        let mut pick_acts = Vec::new();
+        let mut demo_pick = None;
         let mut code_lang = None;
-        let mut agg_new = std::mem::take(&mut self.new_lib);
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
         self.sync_stages();
@@ -174,7 +185,7 @@ impl App {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    library_menu(ui, &agg_lib, &mut agg_new, LibMenu::Pipeline, false, &mut agg_acts);
+                    demo_pick = Some(picker_button(ui, &pick, false, &mut pick_acts));
                 });
             });
             if builder {
@@ -194,9 +205,47 @@ impl App {
                                 });
                             });
                             let n = t.stages.len();
-                            for (i, s) in t.stages.iter_mut().enumerate() {
+                            // Cards drag to reorder with the whole card as the handle; the editor and the sample list
+                            // keep their own drags (select text, scroll). The engine needs each card's height before it
+                            // draws, so it uses the height the card had on the last frame and redraws when it changed.
+                            let hid = egui::Id::unique("stage-heights");
+                            let mut heights: HashMap<u64, f32> = ui.ctx().data(|d| d.get_temp(hid)).unwrap_or_default();
+                            let sizes: Vec<f32> = t.stages.iter().map(|s| heights.get(&s.uid).copied().unwrap_or(160.0)).collect();
+                            let keys: Vec<egui::Id> = t.stages.iter().map(|s| egui::Id::unique(("stage", s.uid))).collect();
+                            let mut grew = false;
+                            let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
+                                let s = &mut t.stages[i];
+                                if st.lifted {
+                                    return lifted_stage(ui, i, s);
+                                }
+                                let top = ui.max_rect().top();
+                                // The header strip is the card's own focusable widget, under the operator menu and the
+                                // switch, so Tab or a click on it gives the card the focus that Alt+Up and Alt+Down move,
+                                // and a right click on it offers Move up and Move down.
+                                let strip = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), top + 6.0), egui::vec2(ui.max_rect().width(), 34.0));
+                                let head = ui.interact(strip, ui.scope_id().with("stage-head"), Sense::click());
+                                head.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Stage {} {}", i + 1, s.op)));
+                                if head.clicked() {
+                                    head.request_focus();
+                                }
+                                // A selectable label would take a drag that starts on it for selecting its text.
+                                ui.style_mut().interaction.selectable_labels = false;
                                 ui.add_space(6.0);
                                 stage_card(ui, i, n, s, auto, &mut sacts);
+                                let h = ui.min_rect().bottom() - top;
+                                if heights.get(&s.uid).is_none_or(|old| (old - h).abs() > 0.5) {
+                                    heights.insert(s.uid, h);
+                                    grew = true;
+                                }
+                                head
+                            });
+                            if grew {
+                                ui.ctx().request_repaint();
+                            }
+                            heights.retain(|uid, _| t.stages.iter().any(|s| s.uid == *uid));
+                            ui.ctx().data_mut(|d| d.insert_temp(hid, heights));
+                            if let Some(m) = mv {
+                                sacts.push(StageAct::Move(m.from, m.to));
                             }
                             ui.add_space(6.0);
                             ui.menu_button(semibold(RichText::new("+ Add stage").color(PRIMARY())), |ui| {
@@ -255,23 +304,11 @@ impl App {
         if builder && unsynced.is_none() {
             self.pump_previews(ui.ctx());
         }
-        self.new_lib = agg_new;
         if let Some(l) = code_lang {
             self.show_code(l, false);
         }
-        for a in agg_acts {
-            match a {
-                QAct::Load(q) => {
-                    self.tabs[self.cur].agg_txt = q.pipeline.unwrap_or_default();
-                    run = true;
-                }
-                QAct::Save(name) => {
-                    let pipeline = Some(self.tabs[self.cur].agg_txt.clone());
-                    self.save_to_library(SavedQuery { name, pipeline, ..Default::default() });
-                }
-                QAct::Delete(name) => self.delete_from_library(&name, true),
-                _ => {}
-            }
+        if let Some(b) = demo_pick {
+            self.demo_open_picker(ui.ctx(), &b, "picker-agg");
         }
         let t = self.tm().unwrap();
         if let (Some(i), false) = (stage, run) && let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
@@ -297,6 +334,8 @@ impl App {
         if !builder || has_results {
             self.results(ui, true);
         }
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
@@ -331,10 +370,10 @@ impl App {
             match a {
                 StageAct::Edited(i) => self.stages_changed(i, true),
                 StageAct::Toggled(i) => self.stages_changed(i, false),
-                StageAct::Move(i, down) => {
-                    let j = if down { i + 1 } else { i.wrapping_sub(1) };
-                    if j < t.stages.len() {
-                        t.stages.swap(i, j);
+                StageAct::Move(i, j) => {
+                    if i < t.stages.len() && j < t.stages.len() && i != j {
+                        let s = t.stages.remove(i);
+                        t.stages.insert(j, s);
                         self.stages_changed(i.min(j), false);
                     }
                 }

@@ -533,6 +533,8 @@ impl App {
             pkg_names.push("_".into());
         }
         let mut new_pkg = std::mem::take(&mut self.new_pkg);
+        let pick = self.pick_data(ui.ctx(), PickKind::Shell);
+        let (mut pick_acts, mut demo_pick) = (Vec::new(), None);
         let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
@@ -551,7 +553,8 @@ impl App {
             ui.add_enabled_ui(running.is_none(), |ui| {
                 run = run_button(ui, "Run", "⌘↵").on_hover_text("Cmd+Enter").clicked();
             });
-            run |= running.is_none() && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+            // With the library picker open, Cmd+Enter runs the script picked there, not this one.
+            run |= running.is_none() && !egui::Popup::is_any_open(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
             stop = quiet_enabled(ui, running.is_some(), "Stop").on_hover_text("End the script and interrupt its running statement").clicked();
             if let Some(at) = running {
                 spin(ui);
@@ -564,7 +567,7 @@ impl App {
             // The pills share what the Attach button and the Packages, History and Help buttons on the right leave.
             let text_w = |t: &str| ui.painter().layout_no_wrap(t.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
             let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
-            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + 3.0 * pad + 110.0;
+            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + text_w(&format!("Library {}", pick.count)) + 4.0 * pad + 110.0;
             let n = 1 + att_pills.len();
             let pill_w = ((ui.available_width() - right) / n as f32 - ui.spacing().item_spacing.x).max(120.0);
             conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false, pill_w);
@@ -598,6 +601,7 @@ impl App {
                     }
                 });
                 sticky_menu(ui, format!("Packages {}", packages.len()), |ui| packages_popover(ui, &mut packages, &mut new_pkg));
+                demo_pick = Some(picker_button(ui, &pick, false, &mut pick_acts));
             });
         });
         ui.add_space(8.0);
@@ -834,6 +838,11 @@ impl App {
         if run {
             self.run_shell_script();
         }
+        if let Some(b) = demo_pick {
+            self.demo_open_picker(ui.ctx(), &b, "picker-shell");
+        }
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     /// QUARRY_TEST_SQL=shell: the SQL shell of the design, with a finished run and its Queries panel.

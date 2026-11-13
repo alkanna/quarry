@@ -78,6 +78,18 @@ pub(super) enum Status {
     Failed(String),
 }
 
+impl Status {
+    /// Open or on its way: the connection has a tile in the rail and can be disconnected.
+    pub(super) fn is_open(&self) -> bool {
+        matches!(self, Status::Ready | Status::Connecting)
+    }
+
+    /// Not open, so Connect starts it.
+    pub(super) fn can_connect(&self) -> bool {
+        matches!(self, Status::Idle | Status::Failed(_))
+    }
+}
+
 pub(super) struct Conn {
     pub(super) meta: ConnMeta,
     pub(super) client: Option<Client>,
@@ -414,6 +426,30 @@ pub(super) struct Tab {
     pub(super) stats_asked: bool,
     /// Set for tabs of a SQL connection, whose rows come from `sql_page` instead of `find`.
     pub(super) sql: Option<Box<SqlTab>>,
+    /// The library script or linked file this tab's editor holds, so Cmd+S writes it back.
+    pub(super) script: Option<Bound>,
+}
+
+/// The tie between a tab and the library script or linked file it was opened from.
+pub(super) struct Bound {
+    pub(super) r: crate::library::ScriptRef,
+    /// The view whose text is the script. Cmd+S in another view of the tab does not write it.
+    pub(super) view: View,
+    /// The text as last opened or saved, to tell an edited tab from a clean one.
+    pub(super) base: String,
+    /// Modified time and length of a linked file when it was last read or written.
+    pub(super) disk: Option<(std::time::SystemTime, u64)>,
+    /// A linked file that changed on disk under an edited tab: the text found there, until the person picks Reload,
+    /// Keep mine or Compare.
+    pub(super) conflict: Option<String>,
+}
+
+/// What a row of the sidebar carries while it is dragged. Dropped on another row, or on a rail tile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DragItem {
+    Conn(u64),
+    Script(crate::library::ScriptRef),
+    Folder(u64),
 }
 
 /// What a SQL tab keeps besides the shared row fields of `Tab`.
@@ -823,6 +859,7 @@ impl Tab {
             stats: None,
             stats_asked: false,
             sql: None,
+            script: None,
         }
     }
 }
@@ -920,6 +957,14 @@ pub(super) enum Modal {
     ColumnCustomize { key: String, agg: bool, col: String, label: String, path: String },
     /// Attach another saved connection to the current Shell tab.
     Attach(Box<super::shell_attach::AttachForm>),
+    /// Edit a connection group.
+    GroupEdit(Box<super::group_dialog::GroupForm>),
+    /// Save the current script to the library.
+    SaveScript(Box<super::library::save_dialog::SaveForm>),
+    /// Which connection a library script opens on, when none is the obvious one.
+    OpenOn(Box<super::library::open::OpenOnForm>),
+    /// Link a folder on disk to the library.
+    LinkFolder(Box<super::library::link_dialog::LinkForm>),
 }
 
 /// A value being edited in place in the document tree.
@@ -1067,6 +1112,8 @@ pub(super) enum ZoneKind {
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    /// A new connection joins this group when it is saved, from "New connection in <group>" in the Connections panel.
+    pub(super) group: Option<u64>,
     pub(super) engine: db::sql::Engine,
     pub(super) addr: db::sql::Addr,
     pub(super) tab: ConnTab,
@@ -1368,9 +1415,6 @@ pub(super) enum QAct {
     Filter(String),
     Sort(String),
     Project(String),
-    Load(SavedQuery),
-    Save(String),
-    Delete(String),
 }
 
 pub(super) enum TreeAct {

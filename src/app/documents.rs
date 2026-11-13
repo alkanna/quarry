@@ -194,7 +194,7 @@ impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         // A Query tab that belongs to no table has no header or view tabs of a table.
-        if t.sql.is_some() && t.sel.coll.is_empty() {
+        if t.sql.is_some() && t.sel.coll.is_empty() && t.view != View::Shell {
             return self.sql_query_view(ui);
         }
         let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
@@ -220,7 +220,8 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(&coll).size(TXT_HEADING).color(BRIGHT())));
+            let heading = if coll.is_empty() { "Shell" } else { coll.as_str() };
+            ui.label(semibold(RichText::new(heading).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
             ui.label(RichText::new(&db).font(FontId::monospace(TXT_SMALL)).color(FAINT()));
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CHIP_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -234,7 +235,8 @@ impl App {
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
-            for (v, label) in if sql { &SQL_VIEWS[..] } else { &MONGO_VIEWS[..] }.iter().copied() {
+            // A tab with no collection (a Shell script opened from the library) has only the views that need none.
+            for (v, label) in if sql { &SQL_VIEWS[..] } else { &MONGO_VIEWS[..] }.iter().copied().filter(|(v, _)| !coll.is_empty() || matches!(v, View::Shell | View::Sql)) {
                 if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
                 }
@@ -268,6 +270,7 @@ impl App {
         let y = tabs.response.rect.bottom() - 0.5;
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE()));
         ui.add_space(12.0);
+        self.script_banners(ui);
         match view {
             View::Documents if sql => self.sql_content(ui),
             View::Structure => self.sql_structure_view(ui),
@@ -296,12 +299,13 @@ impl App {
         let mut run = false;
         let (mut explain, mut help) = (false, false);
         let mut code_lang = None;
+        let mut demo_pick = None;
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
-        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Query);
-        let mut qacts = Vec::new();
-        let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
+        let pick = self.pick_data(ui.ctx(), PickKind::Query);
+        let (mut qacts, mut pick_acts) = (Vec::new(), Vec::new());
+        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
         // Not asked yet (it is, right after this frame) or asked and not back.
         let (asked, waiting, notes) = (&self.values_asked, &self.values_pending, &self.values_note);
         let lookup = |p: &str| {
@@ -336,7 +340,8 @@ impl App {
                         run = true;
                     }
                     vsep(ui, 6.0);
-                    library_menu(ui, &lib, new_lib, LibMenu::Query, true, &mut qacts);
+                    let button = picker_button(ui, &pick, true, &mut pick_acts);
+                    demo_pick.get_or_insert(button);
                     history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });
@@ -412,17 +417,10 @@ impl App {
                 QAct::Filter(v) => t.filter_txt = v,
                 QAct::Sort(v) => t.sort_txt = v,
                 QAct::Project(v) => t.proj_txt = v,
-                QAct::Load(q) => {
-                    t.clear_options();
-                    (t.filter_txt, t.sort_txt, t.proj_txt) = (q.filter, q.sort, q.project);
-                    run = true;
-                }
-                QAct::Save(name) => {
-                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None, sql: None };
-                    self.save_to_library(q);
-                }
-                QAct::Delete(name) => self.delete_from_library(&name, false),
             }
+        }
+        if let Some(b) = demo_pick {
+            self.demo_open_picker(ui.ctx(), &b, "picker-docs");
         }
         if run {
             self.run_query();
@@ -550,6 +548,8 @@ impl App {
         }
         ui.add_space(4.0);
         self.results(ui, false);
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     /// Table or JSON list of the current results, with the open document shown under its row.

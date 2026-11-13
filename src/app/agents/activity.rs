@@ -75,14 +75,7 @@ impl App {
         }
         let dir = crate::agents::link::agents_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let cmd = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(windows) {
-            "explorer"
-        } else {
-            "xdg-open"
-        };
-        if let Err(e) = std::process::Command::new(cmd).arg(&dir).spawn() {
+        if let Err(e) = crate::app::library::linked::reveal(&dir, false) {
             self.err(format!("Could not open {}: {e}", dir.display()));
         }
     }
@@ -149,8 +142,7 @@ impl App {
         }
         let mut keep = true;
         let (mut clear, mut undo, mut reveal) = (false, None, false);
-        let screen = ctx.content_rect();
-        let width = 760.0f32.min(screen.width() - 40.0);
+        let width = fit_width(ctx, 800.0) - 40.0;
         let names: HashMap<u64, String> = self.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
         let connected = match self.agents.sessions.as_slice() {
             [] => None,

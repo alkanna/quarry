@@ -937,6 +937,25 @@ pub(crate) const ACCENTS: [(&str, u32, u32); 6] = [
     ("Violet", 0xa78bfa, 0x6d3fd9),
 ];
 
+/// Colors a connection group can take: name, the shade on dark themes, the shade on light ones. Stored by name in
+/// groups.json, so reordering the list or changing a shade never changes what a group was saved with.
+pub(crate) const GROUP_COLORS: [(&str, u32, u32); 8] = [
+    ("red", 0xef6a6a, 0xc43d3d),
+    ("amber", 0xf2b035, 0xb7791f),
+    ("green", 0x3fc27a, 0x2a8a52),
+    ("teal", 0x2fc4b8, 0x1b8a82),
+    ("blue", 0x5b9cf6, 0x2f6fd0),
+    ("purple", 0xa98bf5, 0x7449d6),
+    ("pink", 0xf07cb8, 0xc22f80),
+    ("gray", 0x8b93a1, 0x6b7280),
+];
+
+/// The color named in a group, in the shade of the current mode. An unknown name, such as one from a newer build, is gray.
+pub(crate) fn group_color(name: &str) -> Color32 {
+    let (_, dark, light) = GROUP_COLORS.iter().find(|c| c.0 == name).unwrap_or(&GROUP_COLORS[GROUP_COLORS.len() - 1]);
+    hex(if is_light() { *light } else { *dark })
+}
+
 /// 0 keeps the theme's accent; i picks ACCENTS[i - 1]. An unknown name keeps the theme's.
 pub(crate) fn accent_index(name: &str) -> usize {
     ACCENTS.iter().position(|a| a.0 == name).map_or(0, |i| i + 1)
@@ -1049,8 +1068,13 @@ pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
 }
 
 pub(crate) const SIDEBAR_W: f32 = 250.0;
+/// How long a folder takes to open or close, in seconds: about as long as the rows of a drag take to slide aside.
+pub(crate) const FOLD_S: f32 = 0.15;
 
 // Type scale: every text size in the app is one of these.
+/// Small caps headers over a sidebar panel or a group ("DATABASE EXPLORER", "LIBRARY") and the faint counts on tree rows.
+pub(crate) const TXT_SECTION: f32 = 10.5;
+
 /// Section captions, badges and hints.
 pub(crate) const TXT_CAPTION: f32 = 11.0;
 
@@ -1368,6 +1392,11 @@ pub(crate) fn hover_fill_on(ui: &egui::Ui, state: usize) -> Color32 {
     }
 }
 
+/// An opaque fill by state: `base` at rest, then shaded further when hovered and when pressed.
+pub(crate) fn shade_fill(base: Color32, state: usize) -> Color32 {
+    [base, shade(base, 0.12), shade(base, 0.24)][state]
+}
+
 /// A pressed row inside a raised popup or menu.
 pub(crate) fn menu_pressed() -> Color32 {
     MENU_HOVER().lerp_to_gamma(TEXT(), 0.08)
@@ -1386,12 +1415,17 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
         let c = Color32::from_rgb(r, g, b);
         [base, tint(c, a.saturating_mul(2)), tint(c, a.saturating_mul(3))][k]
     } else {
-        [base, shade(base, 0.12), shade(base, 0.24)][k]
+        shade_fill(base, k)
     }
 }
 
 /// Side padding of a dialog's header, body and footer bands.
 pub(crate) const DIALOG_PAD: f32 = 20.0;
+/// The least room kept between the window's edge and a dialog, window, popover or menu. egui cannot draw outside the
+/// window, so anything taller is capped to the window less this on both sides and scrolls inside.
+pub(crate) const DIALOG_MARGIN: f32 = 24.0;
+/// The shortest a capped dialog body or popover list gets, so a tiny window still shows a few rows of it.
+pub(crate) const FIT_MIN_H: f32 = 64.0;
 /// The tinted square holding a dialog header's glyph.
 pub(crate) const HEAD_TILE: f32 = 34.0;
 /// A form card row with only a label, and one with a hint under the label.

@@ -1,6 +1,12 @@
 //! The sidebar: connection picker, database tree and the jump palette.
 
 use super::*;
+use crate::ui::fold;
+
+/// The id a database's open and close animation in the explorer goes by.
+fn db_fold_id(conn: u64, db: &str) -> egui::Id {
+    egui::Id::unique(("db-fold", conn, db))
+}
 
 /// How well one lowercase query token matches one lowercase name.
 pub(super) fn seg_score(t: &str, s: &str) -> Option<u32> {
@@ -136,11 +142,44 @@ pub(super) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w
     r.left()
 }
 
+/// How wide a tag badge may grow in a row `span` wide. The name keeps about 90 px, so in an indented group member a tag
+/// such as PRODUCTION shows whole instead of cut to "PRODU...", and a wide row still keeps most of its room for the name.
+pub(super) fn tag_room(span: f32) -> f32 {
+    (span - 90.0).max(span * 0.4)
+}
+
 /// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
 pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
-    let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, x.span() * 0.4) - 8.0 };
-    let g = truncated(p, name, font, color, name_right - x.min);
+    paint_name_tag_hl(p, x, cy, name, font, color, tag, &[]);
+}
+
+/// `paint_name_tag` with the byte ranges of `name` that a filter matched drawn on `HIGHLIGHT()`.
+pub(super) fn paint_name_tag_hl(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str, hl: &[(usize, usize)]) {
+    let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, tag_room(x.span())) - 8.0 };
+    let g = truncated_hl(p, name, font, color, name_right - x.min, hl);
     p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
+}
+
+/// `truncated` with the byte ranges in `hl` on a highlight background. The ranges are sorted and sit on char boundaries.
+pub(super) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32, hl: &[(usize, usize)]) -> std::sync::Arc<egui::Galley> {
+    if hl.is_empty() {
+        return truncated(p, text, font, color, w);
+    }
+    let mut job = LayoutJob::default();
+    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let marked = egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() };
+    let mut at = 0;
+    for &(a, b) in hl {
+        if a < at || b > text.len() || a >= b {
+            continue;
+        }
+        job.append(&text[at..a], 0.0, plain.clone());
+        job.append(&text[a..b], 0.0, marked.clone());
+        at = b;
+    }
+    job.append(&text[at..], 0.0, plain);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
 }
 
 /// Typing "none" means no tag, the same as the None chip.
@@ -149,69 +188,97 @@ pub(super) fn clean_tag(tag: &str) -> &str {
     if t.eq_ignore_ascii_case("none") { "" } else { t }
 }
 
-/// A saved connection in the picker: status, name and tag, then the masked address.
-pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
-    side_row(ui, 48.0, 4.0, active, &c.meta.name, |p, r| {
-        let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
-        p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
-        paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
-        let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
-        let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
-        p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
-    })
+/// A saved connection in a list: status, name and tag, then the masked address. It is indented by `indent`, the matched byte
+/// ranges of the name are highlighted, it is optionally draggable, and it keeps `room` px free at its right end for the
+/// row's own buttons.
+pub(super) fn conn_row_room(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool, room: f32) -> egui::Response {
+    let sense = if drag { Sense::click_and_drag() } else { Sense::click() };
+    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| paint_conn_row(p, r.with_max_x(r.right() - room), c, active, hl))
+}
+
+/// The inside of a connection row: status dot, name and tag, address. Also the ghost of a dragged row.
+pub(super) fn paint_conn_row(p: &egui::Painter, r: egui::Rect, c: &Conn, active: bool, hl: &[(usize, usize)]) {
+    let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
+    p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
+    paint_name_tag_hl(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag, hl);
+    let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
+    let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
+    p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
 }
 
 impl App {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("tree")
+        // Read only by the resize test's probe below.
+        #[cfg_attr(not(test), allow(unused_variables))]
+        let shown = egui::Panel::left("tree")
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
             .resizable(true)
             .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }))
             .show(ui, |ui| {
-                ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
-                ui.add_space(6.0);
-                self.conn_picker(ui);
-                ui.add_space(8.0);
-                let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut self.tree_filter)
-                        .id(egui::Id::unique("tree-filter"))
-                        .hint_text(RichText::new(hint).color(FAINT()))
-                        .desired_width(f32::INFINITY)
-                        .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
-                );
-                if !r.has_focus() && self.tree_filter.is_empty() {
-                    let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
-                    let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
-                    paint_kbd(ui.painter(), kr, g);
+                // The body lives in a child that reports no size back. egui grows a panel to fit content wider than its minimum
+                // but only paints and clips the fill at the clamped width, which left an unpainted band between the sidebar
+                // and the page. The body is clipped at the panel instead, so a row that cannot shrink is cut, never widens it.
+                let room = ui.available_rect_before_wrap();
+                let mut body = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Min)));
+                match self.prefs.side_mode() {
+                    // A panel that is not built yet shows the explorer, so a setting from a newer build never leaves the sidebar empty.
+                    SideMode::Connections if conns_panel::READY => self.conns_panel(&mut body),
+                    SideMode::Library if library::panel::READY => self.library_panel(&mut body),
+                    _ => self.explorer_panel(&mut body),
                 }
-                r.on_hover_text("Press / or Cmd+Shift+F");
-                ui.add_space(14.0);
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
-                let mut new_db = None;
-                ui.horizontal(|ui| {
-                    ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
-                    if let Some((id, writable, pg)) = sql_conn {
-                        // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
-                        let on = writable || pg;
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if plus_button(ui, on).on_hover_text(if writable { "New database…" } else if pg { "New database… (asks to unlock writes first)" } else { "Read-only: unlock writes to create a database" }).clicked() && on {
-                                new_db = Some(id);
-                            }
-                        });
+                ui.allocate_rect(room, Sense::hover());
+            });
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test-sidebar-rect"), shown.response.rect));
+    }
+
+    /// The database explorer: connection picker, tree filter and the tree of the active connection.
+    pub(super) fn explorer_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
+        ui.add_space(6.0);
+        self.conn_picker(ui);
+        ui.add_space(8.0);
+        let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut self.tree_filter)
+                .id(egui::Id::unique("tree-filter"))
+                .hint_text(RichText::new(hint).color(FAINT()))
+                .desired_width(f32::INFINITY)
+                .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
+        );
+        if !r.has_focus() && self.tree_filter.is_empty() {
+            let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
+            let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
+            paint_kbd(ui.painter(), kr, g);
+        }
+        r.on_hover_text("Press / or Cmd+Shift+F");
+        ui.add_space(14.0);
+        let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+        let mut new_db = None;
+        ui.horizontal(|ui| {
+            ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
+            if let Some((id, writable, pg)) = sql_conn {
+                // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
+                let on = writable || pg;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if plus_button(ui, on).on_hover_text(if writable { "New database…" } else if pg { "New database… (asks to unlock writes first)" } else { "Read-only: unlock writes to create a database" }).clicked() && on {
+                        new_db = Some(id);
                     }
                 });
-                if let Some(id) = new_db {
-                    self.side_act(id, SideAct::NewDb);
-                }
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
-            });
+            }
+        });
+        if let Some(id) = new_db {
+            self.side_act(id, SideAct::NewDb);
+        }
+        ui.add_space(2.0);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
     }
 
     pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
-        let cur = self.active.and_then(|id| self.conn(id));
+        // Looked up on the field, not through `conn`, so the popup below can borrow other fields of the app mutably.
+        let cur = self.active.and_then(|id| self.conns.iter().find(|c| c.meta.id == id));
+        let demo_picker = std::mem::take(&mut self.conns_ui.demo_picker);
         let (name, tag, dot) = match cur {
             Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
             None => ("Add a connection".to_string(), String::new(), FAINT()),
@@ -224,6 +291,9 @@ impl App {
         paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connections"));
+        if demo_picker {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+        }
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
         }
@@ -234,7 +304,9 @@ impl App {
         let mut edit = None;
         let mut refresh = None;
         let mut sql_users = None;
-        egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
+        let mut manage = false;
+        // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
@@ -251,16 +323,14 @@ impl App {
             let frame = ui.ctx().cumulative_frame_nr();
             let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
             ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
+            if opened {
+                self.conns_ui.picker_filter.clear();
+            }
+            conns_panel::picker_filter(ui, &mut self.conns_ui.picker_filter, opened);
             egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                for c in &self.conns {
-                    let on = Some(c.meta.id) == self.active;
-                    let r = conn_row(ui, c, on);
-                    if on && opened {
-                        r.scroll_to_me(Some(egui::Align::Center));
-                    }
-                    if r.clicked() {
-                        pick = Some(c.meta.id);
-                    }
+                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, opened) {
+                    pick = Some(id);
+                    ui.close();
                 }
             });
             ui.add_space(4.0);
@@ -268,32 +338,48 @@ impl App {
             ui.add_space(2.0);
             if ui.button("+  New connection…").clicked() {
                 new = true;
+                ui.close();
             }
             if ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
                 cloud = true;
+                ui.close();
+            }
+            if ui.button("Manage groups…").on_hover_text("Open the Connections panel").clicked() {
+                manage = true;
+                ui.close();
             }
             if let Some(c) = cur {
                 if ui.button(format!("Edit \"{}\"…", c.meta.name)).clicked() {
                     edit = Some(c.meta.id);
+                    ui.close();
                 }
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
+                    ui.close();
                 }
                 if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
+                    ui.close();
                 }
                 if c.meta.engine == db::sql::Engine::Postgres && c.status == Status::Ready && ui.button("Roles and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
+                    ui.close();
                 }
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
                 if danger(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
                     remove = Some((c.meta.id, c.meta.name.clone()));
+                    ui.close();
                 }
             }
             ui.add_space(2.0);
         });
+        if manage {
+            self.prefs.set_side_mode(SideMode::Connections);
+            self.prefs.sidebar_hidden = false;
+            self.save_prefs();
+        }
         if let Some(id) = edit {
             self.edit_conn(id);
         }
@@ -373,10 +459,12 @@ impl App {
         }
     }
 
-    /// Opens the explorer if it was collapsed from the rail, remembering that for the next launch.
+    /// Opens the explorer if it was collapsed from the rail or showing another panel, remembering that for the next launch.
+    /// Callers reach for the tree: a jump, `/` or Cmd+Shift+F.
     pub(super) fn show_sidebar(&mut self) {
-        if self.prefs.sidebar_hidden {
+        if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Explorer {
             self.prefs.sidebar_hidden = false;
+            self.prefs.set_side_mode(SideMode::Explorer);
             self.save_prefs();
         }
     }
@@ -483,8 +571,11 @@ impl App {
                 }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
+                // A filter shows its databases open at once; a click opens or closes one with an animation.
+                let fid = db_fold_id(id, db_name);
+                let t = if filter.is_empty() { fold::openness(ui.ctx(), fid, is_open) } else { 1.0 };
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, db_name, |p, r| {
-                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, FAINT());
+                    fold::chevron(p, egui::pos2(r.left() + 4.0, r.center().y), t, FAINT());
                     p.text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { TEXT() });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::monospace(TXT_CAPTION), FAINT());
                 });
@@ -577,7 +668,8 @@ impl App {
                         side.push(SideAct::DropDb(db_name.clone()));
                     }
                 });
-                if is_open {
+                let guess = (matches.len() + 1) as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
+                fold::body(ui, fid, t, guess, is_open, |ui| {
                     if pg && let Some(p) = self.pg_schema_row(ui, c, db_name, picked) {
                         pick_schema = Some((db_name.clone(), p));
                     }
@@ -747,7 +839,7 @@ impl App {
                         });
                     }
                     ui.add_space(4.0);
-                }
+                });
             }
         }
         if revealed {
@@ -775,8 +867,12 @@ impl App {
         if let Some((d, schema)) = pick_schema {
             self.pg_set_schema(id, &d, schema);
         }
-        if let Some(d) = toggle && !self.open_dbs.remove(&(id, d.clone())) {
-            self.open_dbs.insert((id, d));
+        if let Some(d) = toggle {
+            let open = !self.open_dbs.remove(&(id, d.clone()));
+            fold::start(ui.ctx(), db_fold_id(id, &d), open);
+            if open {
+                self.open_dbs.insert((id, d));
+            }
         }
         if let Some((s, how)) = open {
             self.open_collection(s, how);

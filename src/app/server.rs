@@ -173,7 +173,7 @@ impl App {
         let (mut unlock, mut kill) = (false, None);
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(660.0, 1100.0));
+            ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(660.0, 1100.0)));
             let mut refresh = false;
             let picked = dialog_head_with(ui, &Head::new("Server").sub(name.clone()).glyph(glyphs::server).tabs(&["Overview", "Operations"], s.ops_tab as usize), |ui| {
                 refresh = ui.button("Refresh").clicked();

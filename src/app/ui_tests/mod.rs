@@ -6,16 +6,31 @@
 //! Widgets are found by their accessible names (`Response::widget_info`): "{col} row {n}" for a grid
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 mod agents;
+mod aggregate;
 mod agents_windows;
 mod calendar;
+mod demo_states;
 mod dialogs;
+mod journeys;
+mod layout;
+mod dnd;
+mod fit;
+mod fold;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
+mod conns_panel;
+mod library_linked;
+mod library_open;
+mod library_panel;
+mod library_picker;
+mod library_save;
 mod mongo_edit;
 mod pg_roles;
 mod pg_server;
+mod rail;
 mod sidebar;
+mod sidebar_resize;
 mod sql_create;
 mod sql_dump;
 mod sql_edit;
@@ -184,6 +199,16 @@ impl UiApp {
         self.settle();
     }
 
+    /// Waits until a widget whose accessible name contains `part` is on screen, such as a menu item read with its shortcut.
+    pub fn show_contains(&mut self, part: &str) {
+        let t = std::time::Instant::now();
+        while self.h.query_all_by_label_contains(part).next().is_none() {
+            assert!(t.elapsed() < LIMIT, "timed out waiting for a widget with \"{part}\" on screen; last error: {}", self.app().last_problem());
+            self.h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Waits until a widget with this accessible name is on screen.
     pub fn show(&mut self, label: &str) {
         let t = std::time::Instant::now();
@@ -248,6 +273,67 @@ impl UiApp {
     pub fn open_cell(&mut self, col: &str, row: usize) {
         self.double_click_cell(col, row);
         self.wait("the cell editor", |a| a.sql_cell.is_some());
+    }
+
+    /// A mouse drag as a person makes it: press on `from`, move to `to` in steps so egui passes its 6 px drag threshold on the
+    /// way, hold there for `hold_frames` frames (a hover timer such as a folder opening needs time to run), then release.
+    /// `at_frac` is where over the target the pointer rests, from 0.0 at its top edge to 1.0 at its bottom edge. Start and
+    /// target must be more than 6 px apart, or the press stays a click.
+    pub fn drag(&mut self, from: &str, to: &str, at_frac: f32, hold_frames: usize) {
+        self.show(from);
+        self.show(to);
+        let start = self.node(from, Pick::Only).rect().center();
+        let r = self.node(to, Pick::Only).rect();
+        let end = egui::pos2(r.center().x, r.top() + r.height() * at_frac);
+        self.h.hover_at(start);
+        self.h.step();
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        self.h.input_mut().events.push(button(start, true));
+        self.h.step();
+        for i in 1..=6 {
+            self.h.hover_at(start.lerp(end, i as f32 / 6.0));
+            self.h.step();
+        }
+        self.h.run_steps(hold_frames);
+        self.h.input_mut().events.push(button(end, false));
+        self.h.run_steps(4);
+    }
+
+    /// Presses at `from` and moves to `to` in steps, past the drag threshold, leaving the button down.
+    pub fn press_and_move(&mut self, from: egui::Pos2, to: egui::Pos2) {
+        self.h.hover_at(from);
+        self.h.step();
+        self.h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        self.h.step();
+        for i in 1..=6 {
+            self.h.hover_at(from.lerp(to, i as f32 / 6.0));
+            self.h.step();
+        }
+    }
+
+    /// Lets go of the primary button at `at`, then the frames a drop and its landing need.
+    pub fn release(&mut self, at: egui::Pos2) {
+        self.h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        self.h.run_steps(4);
+    }
+
+    /// `drag` that presses Esc before letting go, which must cancel it.
+    pub fn drag_esc(&mut self, from: &str, to: &str, at_frac: f32) {
+        self.show(from);
+        self.show(to);
+        let start = self.node(from, Pick::Only).rect().center();
+        let r = self.node(to, Pick::Only).rect();
+        let end = egui::pos2(r.center().x, r.top() + r.height() * at_frac);
+        self.press_and_move(start, end);
+        self.h.key_press(egui::Key::Escape);
+        self.h.step();
+        self.release(end);
+    }
+
+    /// Presses a key with modifiers and gives the frames its effects need.
+    pub fn key(&mut self, mods: egui::Modifiers, key: egui::Key) {
+        self.h.key_press_modifiers(mods, key);
+        self.settle();
     }
 
     /// Types into the focused widget.
