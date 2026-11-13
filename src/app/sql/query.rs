@@ -102,6 +102,16 @@ pub(in crate::app) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, Stri
     (db, run_db(t))
 }
 
+/// `run_target` of the run whose results are shown, for statements read again from them.
+pub(in crate::app) fn ran_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
+    let Some((rd, rs)) = t.sql.as_ref().and_then(|s| s.ran_in.as_ref()) else { return run_target(t, db) };
+    let d = if rd.is_empty() { t.sel.db.clone() } else { rd.clone() };
+    if db.dialect == db::sql::Dialect::Postgres {
+        return (db.at(&d), run_schema_choice(rs, rd, &t.sel.db, &t.sel.schema));
+    }
+    (db, d)
+}
+
 fn t_schema(t: Option<&Tab>) -> String {
     t.and_then(|t| t.sql.as_ref()).map(|s| s.run_schema.clone()).unwrap_or_default()
 }
@@ -392,7 +402,7 @@ impl App {
         let req = self.req;
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
         // Fresh handles per run, so a Stop pressed for an old run never reaches this one.
-        (s.run_req, s.run) = (req, Default::default());
+        (s.run_req, s.run, s.ran_in) = (req, Default::default(), Some((s.run_db.clone(), s.run_schema.clone())));
         self.worker.sql_run(req, db, ns, text, read_only, 0, s.run.clone());
     }
 
@@ -435,7 +445,7 @@ impl App {
         (s.set_sel, s.sets) = (0, sets);
         // A last page already knows the total; the others ask the server.
         let wants: Vec<(usize, String)> = s.sets.iter().enumerate().filter(|(_, x)| x.page.is_some_and(|p| p.next)).map(|(i, x)| (i, x.stmt.clone())).collect();
-        if let Some((db, ns)) = self.conn(conn).and_then(|c| c.sql.clone()).map(|db| run_target(&self.tabs[ti], db)) {
+        if let Some((db, ns)) = self.conn(conn).and_then(|c| c.sql.clone()).map(|db| ran_target(&self.tabs[ti], db)) {
             for (i, stmt) in wants {
                 self.worker.sql_count(req, i, db.clone(), ns.clone(), stmt);
             }
@@ -456,7 +466,7 @@ impl App {
         let conn = t.sel.conn;
         let Some(stmt) = t.sql.as_ref().filter(|s| s.run_req == 0).and_then(|s| s.sets.get(idx)).map(|x| x.stmt.clone()) else { return };
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
-        let (db, schema) = run_target(&self.tabs[self.cur], db);
+        let (db, schema) = ran_target(&self.tabs[self.cur], db);
         let read_only = !self.conn_writable(conn);
         self.req += 1;
         let req = self.req;

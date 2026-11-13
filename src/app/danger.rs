@@ -59,6 +59,7 @@ impl App {
             match action {
                 Danger::DropDatabase { db, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db);
+                    self.purge_mongo_undo(conn, &db, "");
                     self.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
                     if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
@@ -67,6 +68,7 @@ impl App {
                 }
                 Danger::DropCollAt { db, coll, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
+                    self.purge_mongo_undo(conn, &db, &coll);
                     self.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
                 }
                 Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),

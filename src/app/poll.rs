@@ -563,6 +563,12 @@ impl App {
         t.loading = false;
         match res {
             Ok((docs, count, ms)) => {
+                // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
+                let last = count.saturating_sub(1) / self.page_size();
+                if docs.is_empty() && self.tabs[i].page > last {
+                    self.tabs[i].page = last;
+                    return self.reload_of(i);
+                }
                 let Self { tabs, values, .. } = self;
                 let t = &mut tabs[i];
                 // A query that works again clears an earlier error.
@@ -607,8 +613,12 @@ impl App {
                 }
             }
             Err(e) => {
-                // Old rows under the new query would read as its results.
+                // Old rows under the new query would read as its results. Selection and checks are indexes
+                // into those rows, so they go too, or the next read would open whatever lands at that index.
                 t.docs.clear();
+                t.selected = t.selected.filter(|s| s.0);
+                t.checked.clear();
+                t.expanded.retain(|e| e.0);
                 let what = if t.sql.is_some() { "load the rows" } else { "load the documents" };
                 self.fail_view(i, View::Documents, e, what);
             }
@@ -689,9 +699,10 @@ impl App {
                 self.ok(s);
             }
             Err(e) => {
-                // Keep the edits so nothing typed is lost; the person can reload and redo.
+                // Keep the edits so nothing typed is lost; the person can reload and redo. An edit staged on the
+                // same row while this save was in flight is newer, so it wins over the failed one.
                 if let Some(dr) = dr {
-                    self.drafts.insert(tag, dr);
+                    self.drafts.entry(tag).or_insert(dr);
                 }
                 self.err(e);
             }

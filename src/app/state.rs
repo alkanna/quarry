@@ -479,6 +479,9 @@ pub(super) struct SqlTab {
     pub(super) run_db: String,
     /// PostgreSQL only: the schema the Query view puts first in search_path. Empty keeps the server's own.
     pub(super) run_schema: String,
+    /// `run_db` and `run_schema` as they were when the shown results ran. Paging and export read them, so a
+    /// picker changed afterwards does not send the statement to another database.
+    pub(super) ran_in: Option<(String, String)>,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,

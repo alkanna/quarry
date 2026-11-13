@@ -190,7 +190,7 @@ impl App {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
             let refused = db::sql::lex::read_only_check(&x.stmt, db.dialect).err();
             // The same database and schema the statement ran in, so it reads what the grid showed.
-            let (db, schema) = super::sql::query::run_target(t, db);
+            let (db, schema) = super::sql::query::ran_target(t, db);
             Some(AllRows { db, schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
@@ -404,7 +404,7 @@ impl App {
             return self.warn(why);
         }
         let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-        let (db, schema) = super::sql::query::run_target(t, db);
+        let (db, schema) = super::sql::query::ran_target(t, db);
         let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { fmt, header, table, bs: self.sql_bs() };

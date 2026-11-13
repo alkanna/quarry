@@ -14,6 +14,12 @@ impl App {
         self.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
     }
 
+    /// The MongoDB side of `purge_undo`: undoing a delete after a drop would quietly make the collection again.
+    /// An empty `coll` means the whole database.
+    pub(super) fn purge_mongo_undo(&mut self, conn: u64, db: &str, coll: &str) {
+        self.undo.retain(|a| matches!(a.kind, UndoKind::Sql { .. }) || a.conn != conn || a.db != db || !(coll.is_empty() || a.coll == coll));
+    }
+
     pub(super) fn apply_undo(&mut self, i: usize) {
         self.apply_undo_as(i, false);
     }

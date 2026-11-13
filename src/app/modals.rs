@@ -161,8 +161,8 @@ impl App {
                         if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
                             if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
                                 let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
-                                self.tabs.retain(|t| !(t.sel.conn == *conn && t.sel.db == *db && t.sel.coll == *coll));
-                                self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                                let (c, d, k) = (*conn, db.clone(), coll.clone());
+                                self.remove_tabs(|t| t.sel.conn == c && t.sel.db == d && t.sel.coll == k);
                                 self.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
                             }
                             keep = false;
