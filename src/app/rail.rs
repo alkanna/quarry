@@ -121,7 +121,7 @@ impl App {
         let mut pick = None;
         let mut act = None;
         let mut toggle = None;
-        let mut folder_act: Option<(u64, u8)> = None;
+        let mut folder_acts: Vec<(u64, FolderAct)> = Vec::new();
         let mut drops: Vec<RailDrop> = Vec::new();
         let mut inner: Option<(u64, Vec<u64>, dnd::Move)> = None;
         let mut outer = None;
@@ -170,18 +170,18 @@ impl App {
                         if r.clicked() {
                             toggle = Some(*gid);
                         }
-                        let can_connect = g.members.iter().filter_map(|m| self.conn(*m)).any(|c| c.status.can_connect());
                         r.context_menu(|ui| {
                             menu_look(ui);
-                            for (n, label, on) in [(0u8, if open_now { "Close" } else { "Open" }, true), (1, "Connect all", can_connect), (2, "Disconnect all", true), (3, "Edit group\u{2026}", true), (4, "Don't fold in the rail", true)] {
-                                if n == 3 {
-                                    ui.separator();
-                                }
-                                if ui.add_enabled(on, egui::Button::new(label)).clicked() {
-                                    folder_act = Some((*gid, n));
-                                    ui.close();
-                                }
+                            let gid = *gid;
+                            menu_act(ui, &mut folder_acts, (gid, FolderAct::Toggle), |ui| ui.button(if open_now { "Close" } else { "Open" }));
+                            match conns_panel::connect_all_items(ui, g, &self.conns) {
+                                Some(true) => folder_acts.push((gid, FolderAct::ConnectAll)),
+                                Some(false) => folder_acts.push((gid, FolderAct::DisconnectAll)),
+                                None => {}
                             }
+                            ui.separator();
+                            menu_act(ui, &mut folder_acts, (gid, FolderAct::Edit), |ui| ui.button("Edit group\u{2026}"));
+                            menu_act(ui, &mut folder_acts, (gid, FolderAct::Unfold), |ui| ui.button("Don't fold in the rail"));
                         });
                         if !st.busy {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
@@ -257,31 +257,32 @@ impl App {
                 self.save_groups();
             }
         }
-        match folder_act {
-            Some((gid, 0)) => self.toggle_rail_folder(&ctx, gid),
-            Some((gid, 1)) => self.connect_group(gid),
-            Some((gid, 2)) => self.disconnect_group(gid),
-            Some((gid, 3)) => self.edit_group(gid),
-            Some((gid, _)) => {
-                if let Some(g) = self.groups.group_mut(gid) {
-                    g.fold_rail = false;
-                    let name = g.name.clone();
-                    self.save_groups();
-                    self.ok(format!("{name} shows its connections one by one in the rail. Edit group turns folding back on."));
-                }
-            }
-            None => {}
-        }
-        if folder_act.is_some() {
+        if !folder_acts.is_empty() {
             ui.ctx().request_repaint();
         }
+        for (gid, a) in folder_acts {
+            match a {
+                FolderAct::Toggle => self.toggle_rail_folder(&ctx, gid),
+                FolderAct::ConnectAll => self.connect_group(gid),
+                FolderAct::DisconnectAll => self.disconnect_group(gid),
+                FolderAct::Edit => self.edit_group(gid),
+                FolderAct::Unfold => {
+                    if let Some(g) = self.groups.group_mut(gid) {
+                        g.fold_rail = false;
+                        let name = g.name.clone();
+                        self.save_groups();
+                        self.ok(format!("{name} shows its connections one by one in the rail. Edit group turns folding back on."));
+                    }
+                }
+            }
+        }
         match act {
-            Some((id, 0)) => {
+            Some((id, TileAct::Reconnect)) => {
                 self.active = Some(id);
                 self.connect(id);
             }
-            Some((id, 1)) => self.edit_conn(id),
-            Some((id, _)) => self.disconnect(id),
+            Some((id, TileAct::Edit)) => self.edit_conn(id),
+            Some((id, TileAct::Disconnect)) => self.disconnect(id),
             None => {}
         }
     }
@@ -298,7 +299,7 @@ impl App {
     /// One connection's tile in `rect` with its context menu and, given a `target`, the drop target it is. None when the
     /// connection is gone. A lifted tile floats with the pointer, so it gets no menu.
     #[allow(clippy::too_many_arguments)]
-    fn conn_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, id: u64, lifted: bool, target: Option<DropOn>, pick: &mut Option<u64>, act: &mut Option<(u64, u8)>, drops: &mut Vec<RailDrop>) -> Option<egui::Response> {
+    fn conn_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, id: u64, lifted: bool, target: Option<DropOn>, pick: &mut Option<u64>, act: &mut Option<(u64, TileAct)>, drops: &mut Vec<RailDrop>) -> Option<egui::Response> {
         let c = self.conns.iter().find(|c| c.meta.id == id)?;
         let r = conn_shortcut(ui, rect, c, self.active == Some(id));
         if lifted {
@@ -313,13 +314,13 @@ impl App {
         r.context_menu(|ui| {
             menu_look(ui);
             if ui.button("Reconnect").clicked() {
-                *act = Some((id, 0));
+                *act = Some((id, TileAct::Reconnect));
             }
             if ui.button("Edit connection\u{2026}").clicked() {
-                *act = Some((id, 1));
+                *act = Some((id, TileAct::Edit));
             }
             if danger_item(ui, "Disconnect").clicked() {
-                *act = Some((id, 2));
+                *act = Some((id, TileAct::Disconnect));
             }
         });
         Some(r)
@@ -433,6 +434,25 @@ fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
             order.push(*id);
         }
     }
+}
+
+/// What a folder tile's menu asks for.
+#[derive(Clone, Copy)]
+enum FolderAct {
+    Toggle,
+    ConnectAll,
+    DisconnectAll,
+    Edit,
+    /// Don't fold in the rail.
+    Unfold,
+}
+
+/// What a connection tile's menu asks for.
+#[derive(Clone, Copy)]
+enum TileAct {
+    Reconnect,
+    Edit,
+    Disconnect,
 }
 
 /// What the rail draws, top to bottom: a connection tile or a folded group's tile.
@@ -569,7 +589,7 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, 
     p.rect_filled(rect, R_MD, tint(color, alpha));
     p.rect_filled(egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(2.0, 16.0)), 1, color);
     if open {
-        paint_open_folder(p, rect.center(), color);
+        glyphs::folder_open(p, rect.center(), color);
     } else {
         let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
         for (i, mark) in marks.iter().take(4).enumerate() {
@@ -590,14 +610,6 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, 
     focus_ring(ui, &r, rect, R_MD as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} folder")));
     (r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand), rect)
-}
-
-/// An open folder drawn as shapes, since glyphs from fallback fonts sit off center: the back with its tab and a slanted front.
-fn paint_open_folder(p: &egui::Painter, c: egui::Pos2, color: Color32) {
-    let v = egui::vec2;
-    let s = Stroke::new(1.3, color);
-    p.line(vec![c + v(-6.5, 4.5), c + v(-6.5, -5.0), c + v(-2.5, -5.0), c + v(-1.0, -3.0), c + v(5.0, -3.0), c + v(5.0, -1.0)], s);
-    p.add(egui::Shape::closed_line(vec![c + v(-6.5, 4.5), c + v(-4.5, -1.0), c + v(7.5, -1.0), c + v(5.5, 4.5)], s));
 }
 
 /// The connection a folder's tile sits at: its first open member in rail order, which is not always the group's first.

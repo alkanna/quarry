@@ -2,7 +2,7 @@
 //! reorder them, a button to take one out and one to add more. Nothing is written until Save, so Cancel and Esc leave the
 //! group as it was.
 
-use super::conns_panel::{color_swatches, folder_glyph};
+use super::conns_panel::color_swatches;
 use super::*;
 use crate::ui::dnd;
 
@@ -36,7 +36,7 @@ impl App {
         ui.set_width(520.0);
         let n = f.members.len();
         let sub = format!("{} · {n} connection{}", f.name.trim(), if n == 1 { "" } else { "s" });
-        dialog_head(ui, &Head::new("Edit group").sub(sub).glyph(folder_glyph).tone(group_color(&f.color)));
+        dialog_head(ui, &Head::new("Edit group").sub(sub).glyph(glyphs::folder).tone(group_color(&f.color)));
         dialog_body(ui, |ui| {
             form_card(ui, "", "", |rows| {
                 rows.row("Name", "", |ui| {
@@ -181,7 +181,7 @@ fn rule_line(ui: &mut egui::Ui) {
 fn add_row(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn], groups: &Groups) {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
     ui.painter().rect_filled(rect, 0, hover_fill(state_of(&r)));
-    paint_plus_at(ui.painter(), egui::pos2(rect.left() + 18.0, rect.center().y), PRIMARY());
+    glyphs::plus(ui.painter(), egui::pos2(rect.left() + 18.0, rect.center().y), PRIMARY());
     let g = ui.painter().layout_no_wrap("Add connections…".into(), FontId::proportional(TXT_BODY), PRIMARY());
     ui.painter().galley(egui::pos2(rect.left() + 34.0, rect.center().y - g.size().y / 2.0), g, PRIMARY());
     focus_ring(ui, &r, rect, R_SM as f32);
@@ -202,10 +202,4 @@ fn add_row(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn], groups: &Groups
             f.members.push(id);
         }
     });
-}
-
-fn paint_plus_at(p: &egui::Painter, c: egui::Pos2, col: Color32) {
-    let s = Stroke::new(1.4, col);
-    p.line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
-    p.line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
 }

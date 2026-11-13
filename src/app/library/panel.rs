@@ -344,24 +344,10 @@ impl RowCx<'_> {
     }
 }
 
-/// A 28 px toolbar button with a painted glyph, muted at rest and bright on hover.
-fn tool_button(ui: &mut egui::Ui, glyph: glyphs::Glyph, name: &str, tip: &str) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), Sense::click());
-    ui.painter().rect_filled(rect, R_SM, hover_fill(state_of(&r)));
-    glyph(ui.painter(), rect.center(), if r.hovered() { BRIGHT() } else { MUTED() });
-    focus_ring(ui, &r, rect, R_SM as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-    r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// The small square a hovered row shows at its right end.
 fn row_tool(ui: &mut egui::Ui, id: egui::Id, at: egui::Rect, glyph: glyphs::Glyph, name: &str, tip: &str) -> egui::Response {
     let r = ui.interact(at, id, Sense::click());
-    let state = state_of(&r);
-    ui.painter().rect_filled(at, R_SM, [tint(TEXT(), 14), tint(TEXT(), 34), tint(TEXT(), 46)][state]);
-    glyph(ui.painter(), at.center(), if state > 0 { BRIGHT() } else { MUTED() });
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-    r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    glyph_button_on(ui, r, glyph, row_tool_fill, name, tip)
 }
 
 /// A bordered button with the play mark, for Run in the preview card.
@@ -383,14 +369,6 @@ pub(in crate::app) const MENU_MAX_W: f32 = 260.0;
 /// The longest item label a Library menu shows in full, in characters.
 const MENU_LABEL_MAX: usize = 36;
 
-/// Sets up a Library menu as the app's other menus are (the Connections group menu, the tab and rail menus): the menu
-/// look and their padding. The menu takes the width of its widest item; long labels are cut by `lib_button`.
-fn lib_menu(ui: &mut egui::Ui) {
-    menu_look(ui);
-    ui.spacing_mut().item_spacing.y = 2.0;
-    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
-}
-
 /// One item of a Library menu: the interface font, the shortcut faint on the right, and a check at the right end for an
 /// option that is on, as the other menus draw them.
 fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui::Response {
@@ -411,10 +389,7 @@ fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui:
 }
 
 fn menu_item(ui: &mut egui::Ui, acts: &mut Vec<Act>, label: &str, key: &str, act: Act) {
-    if lib_button(ui, label, key, false).clicked() {
-        acts.push(act);
-        ui.close();
-    }
+    menu_act(ui, acts, act, |ui| lib_button(ui, label, key, false));
 }
 
 /// The key that deletes the selected row: Cmd+Backspace on macOS, where Backspace alone is a text key and would delete by
@@ -438,7 +413,7 @@ fn reveal_label() -> &'static str {
 /// kept by Quarry, but on disk: Rename renames the file and Delete moves it to the Trash.
 fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut Vec<Act>) {
     let (lib, links) = (cx.lib, &cx.lib.links);
-    lib_menu(ui);
+    menu_list(ui);
     // A linked folder that is not there takes no new files and has no folder to show: what is left is finding it again,
     // reading it again once the drive is back, or letting it go.
     if let Node::Link(link) = node
@@ -447,10 +422,7 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
         menu_item(ui, acts, "Locate folder\u{2026}", "", Act::Locate(*link));
         menu_item(ui, acts, "Reload from disk", "", Act::Reload(*link));
         ui.separator();
-        if danger_item(ui, "Unlink folder").clicked() {
-            acts.push(Act::Unlink(*link));
-            ui.close();
-        }
+        menu_act(ui, acts, Act::Unlink(*link), |ui| danger_item(ui, "Unlink folder"));
         return;
     }
     let run = kind != "filter";
@@ -466,7 +438,7 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
             let on = cx.open_on(node);
             if !on.is_empty() {
                 ui.menu_button("Open on", |ui| {
-                    lib_menu(ui);
+                    menu_list(ui);
                     for (i, (group, conns)) in on.iter().enumerate() {
                         if !group.is_empty() {
                             if i > 0 {
@@ -522,13 +494,10 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
         let (label, linked_file) = if matches!(node, Node::File { .. }) { ("Copy to folder", true) } else { ("Move to folder", false) };
         let go = |to: DropAt| if linked_file { Act::Drop(node.clone(), Plan::Out(to)) } else { Act::Move(node.clone(), to) };
         ui.menu_button(label, |ui| {
-            lib_menu(ui);
+            menu_list(ui);
             for (id, depth, name) in ops::folder_list(lib, skip) {
                 let label = format!("{}{}", "    ".repeat(depth), name);
-                if lib_button(ui, &label, "", cur == Some(id)).clicked() {
-                    acts.push(go(DropAt::Into(id)));
-                    ui.close();
-                }
+                menu_act(ui, acts, go(DropAt::Into(id)), |ui| lib_button(ui, &label, "", cur == Some(id)));
             }
             ui.separator();
             if !linked_file {
@@ -549,10 +518,7 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
         }
         ui.separator();
         // No ellipsis: it acts at once and the toast offers Undo.
-        if danger_item(ui, if linked_file { "Move to Trash" } else { "Delete" }).on_hover_text(delete_key()).clicked() {
-            acts.push(Act::Delete(node.clone()));
-            ui.close();
-        }
+        menu_act(ui, acts, Act::Delete(node.clone()), |ui| danger_item(ui, if linked_file { "Move to Trash" } else { "Delete" }).on_hover_text(delete_key()));
     }
 }
 
@@ -600,22 +566,13 @@ impl App {
             ui.label(LayoutJob::single_section("LIBRARY".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = dots_menu(ui, |ui| {
-                    lib_menu(ui);
-                    if lib_button(ui, "Link a folder\u{2026}", "", false).clicked() {
-                        acts.push(Act::Link);
-                        ui.close();
-                    }
-                    if lib_button(ui, "Fold all", "", false).clicked() {
-                        acts.push(Act::FoldAll);
-                        ui.close();
-                    }
-                    if lib_button(ui, "Show all connections", "", all).clicked() {
-                        acts.push(Act::Scope(!all));
-                        ui.close();
-                    }
+                    menu_list(ui);
+                    menu_item(ui, acts, "Link a folder\u{2026}", "", Act::Link);
+                    menu_item(ui, acts, "Fold all", "", Act::FoldAll);
+                    menu_act(ui, acts, Act::Scope(!all), |ui| lib_button(ui, "Show all connections", "", all));
                 });
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Library menu"));
-                if tool_button(ui, glyphs::folder_plus, "New folder", "New folder").clicked() {
+                if glyph_button(ui, egui::vec2(28.0, 24.0), glyphs::folder_plus, "New folder", "New folder").clicked() {
                     acts.push(Act::NewFolder(new_parent));
                 }
             });
@@ -1327,8 +1284,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
 
     let dragging_demo = cx.demo_drag.is_some_and(|(src, _)| *src == row.node);
     let dim = cx.drag.as_ref() == Some(&row.node) || dragging_demo;
-    let rect_est = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
-    let hovered = cx.drag.is_none() && ui.rect_contains_pointer(rect_est);
+    let hovered = cx.drag.is_none() && next_row_hovered(ui, ROW_H);
     let selected = st.sel.as_ref() == Some(&row.node);
     let dots_id = egui::Id::unique(("lib-dots", &row.node));
     let menu_open = egui::Popup::is_id_open(&ctx, dots_id.with("popup")) || st.demo_menu.as_ref() == Some(&row.node);

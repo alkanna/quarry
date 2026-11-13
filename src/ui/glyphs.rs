@@ -159,6 +159,16 @@ pub(crate) fn folder(p: &egui::Painter, c: Pos2, col: Color32) {
     closed(p, c, col, &[(2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (14.0, 5.5), (14.0, 12.5), (2.0, 12.5)]);
 }
 
+/// `folder` filled with a light tint of `col`, for the colored group folders. The outline is not convex, so the fill
+/// is its two convex parts, the tab and the body.
+pub(crate) fn folder_filled(p: &egui::Painter, c: Pos2, col: Color32) {
+    let fill = super::theme::tint(col, 90);
+    let poly = |pts: &[(f32, f32)]| egui::Shape::convex_polygon(pts.iter().map(|&(x, y)| at(c, x, y)).collect(), fill, Stroke::NONE);
+    p.add(poly(&[(2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (2.0, 5.5)]));
+    p.add(poly(&[(2.0, 5.5), (14.0, 5.5), (14.0, 12.5), (2.0, 12.5)]));
+    folder(p, c, col);
+}
+
 pub(crate) fn folder_open(p: &egui::Painter, c: Pos2, col: Color32) {
     line(p, c, col, &[(2.0, 12.5), (2.0, 3.5), (6.5, 3.5), (7.8, 5.5), (13.0, 5.5), (13.0, 7.0)]);
     closed(p, c, col, &[(2.0, 12.5), (4.0, 7.0), (15.0, 7.0), (13.0, 12.5)]);

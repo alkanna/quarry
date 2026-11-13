@@ -217,10 +217,10 @@ impl App {
             ui.label(LayoutJob::single_section("CONNECTIONS".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icon_btn(ui, "New connection", paint_plus).clicked() {
+                if icon_btn(ui, "New connection", glyphs::plus).clicked() {
                     acts.push(PanelAct::NewConnIn(None));
                 }
-                if icon_btn(ui, "New group", paint_new_group).clicked() {
+                if icon_btn(ui, "New group", glyphs::folder_plus).clicked() {
                     self.conns_ui.adding = Some(String::new());
                     self.conns_ui.focus_edit = true;
                 }
@@ -263,7 +263,7 @@ impl App {
         ui.separator();
         ui.add_space(4.0);
         let new = side_row(ui, 30.0, 0.0, false, "New connection…", |p, r| {
-            paint_plus(p, egui::pos2(r.left() + 8.0, r.center().y), PRIMARY());
+            glyphs::plus(p, egui::pos2(r.left() + 8.0, r.center().y), PRIMARY());
             let g = p.layout_no_wrap("New connection".into(), FontId::proportional(TXT_BODY), TEXT());
             p.galley(egui::pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0), g, TEXT());
         });
@@ -571,20 +571,14 @@ const DOTS_ROOM: f32 = 28.0;
 /// Whether the row about to be drawn with id `rid` and height `h` shows its menu button: the pointer is on it, it has the
 /// keyboard focus, or its menu is open. Never during a drag, where the button would hide the drop marks.
 fn row_hot(ui: &egui::Ui, ctx: &egui::Context, rid: egui::Id, dots: egui::Id, h: f32) -> bool {
-    let est = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
-    held(ctx).is_none() && (ui.rect_contains_pointer(est) || ui.memory(|m| m.has_focus(rid) || m.has_focus(dots)) || egui::Popup::is_id_open(ctx, dots.with("popup")))
+    held(ctx).is_none() && (next_row_hovered(ui, h) || ui.memory(|m| m.has_focus(rid) || m.has_focus(dots)) || egui::Popup::is_id_open(ctx, dots.with("popup")))
 }
 
 /// The quiet dots button at the right end of a row, so its menu is found without a right click.
 fn row_dots(ui: &mut egui::Ui, id: egui::Id, row: egui::Rect, name: &str) -> egui::Response {
     let at = egui::Rect::from_center_size(egui::pos2(row.right() - 16.0, row.center().y), egui::vec2(22.0, 22.0));
     let r = ui.interact(at, id, Sense::click());
-    let state = state_of(&r);
-    ui.painter().rect_filled(at, R_SM, hover_fill(state));
-    paint_dots(ui.painter(), at.center(), if state > 0 { BRIGHT() } else { MUTED() });
-    focus_ring(ui, &r, at, R_SM as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-    r.on_hover_text("More").on_hover_cursor(egui::CursorIcon::PointingHand)
+    glyph_button_on(ui, r, paint_dots, hover_fill, name, "More")
 }
 
 /// Up and Down move between the rows, Right opens a folded group, Left folds an open one or goes up to a member's group.
@@ -670,7 +664,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, 
     let r = if renaming {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GROUP_H), Sense::hover());
         fold::chevron(ui.painter(), egui::pos2(rect.left() + 14.0, rect.center().y), t, FAINT());
-        paint_folder(ui.painter(), egui::pos2(rect.left() + 32.0, rect.center().y), col, true);
+        glyphs::folder_filled(ui.painter(), egui::pos2(rect.left() + 32.0, rect.center().y), col);
         let field = egui::Rect::from_min_max(egui::pos2(rect.left() + 46.0, rect.top() + 2.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
         let focus = std::mem::take(&mut st.focus_edit);
         if let Some((_, text)) = st.rename.as_mut() {
@@ -696,7 +690,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, 
         let r = side_row(ui, GROUP_H, 0.0, false, &label, |p, rect| {
             let cy = rect.center().y;
             fold::chevron(p, egui::pos2(rect.left() + 6.0, cy), t, FAINT());
-            paint_folder(p, egui::pos2(rect.left() + 24.0, cy), col, true);
+            glyphs::folder_filled(p, egui::pos2(rect.left() + 24.0, cy), col);
             let count = if filtering { shown.to_string() } else { total.to_string() };
             let cg = p.layout_no_wrap(count, FontId::proportional(TXT_CAPTION), FAINT());
             let mut right = rect.right() - 2.0 - if hot { DOTS_ROOM } else { 0.0 };
@@ -767,9 +761,7 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, 
 
 /// The menu of a group row.
 fn group_menu(ui: &mut egui::Ui, g: &Group, cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>) {
-    menu_look(ui);
-    ui.spacing_mut().item_spacing.y = 2.0;
-    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+    menu_list(ui);
     if ui.add(egui::Button::new("Rename").shortcut_text("F2")).clicked() {
         st.rename = Some((g.id, g.name.clone()));
         st.focus_edit = true;
@@ -786,31 +778,30 @@ fn group_menu(ui: &mut egui::Ui, g: &Group, cx: &Cx, st: &mut ConnsUi, acts: &mu
         ui.close();
     }
     ui.separator();
-    let members: Vec<&Conn> = g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).collect();
-    let can_connect = members.iter().any(|c| c.status.can_connect());
-    let can_disconnect = members.iter().any(|c| c.status.is_open());
-    if ui.add_enabled(can_connect, egui::Button::new("Connect all")).clicked() {
-        acts.push(PanelAct::ConnectAll(g.id));
-        ui.close();
-    }
-    if ui.add_enabled(can_disconnect, egui::Button::new("Disconnect all")).clicked() {
-        acts.push(PanelAct::DisconnectAll(g.id));
-        ui.close();
+    match connect_all_items(ui, g, cx.conns) {
+        Some(true) => acts.push(PanelAct::ConnectAll(g.id)),
+        Some(false) => acts.push(PanelAct::DisconnectAll(g.id)),
+        None => {}
     }
     ui.separator();
-    if ui.button(format!("New connection in {}…", g.name)).clicked() {
-        acts.push(PanelAct::NewConnIn(Some(g.id)));
-        ui.close();
-    }
-    if ui.button("Edit group…").clicked() {
-        acts.push(PanelAct::EditGroup(g.id));
-        ui.close();
-    }
+    menu_act(ui, acts, PanelAct::NewConnIn(Some(g.id)), |ui| ui.button(format!("New connection in {}…", g.name)));
+    menu_act(ui, acts, PanelAct::EditGroup(g.id), |ui| ui.button("Edit group…"));
     ui.separator();
-    if danger_item(ui, "Delete group").clicked() {
-        acts.push(PanelAct::DeleteGroup(g.id));
-        ui.close();
+    menu_act(ui, acts, PanelAct::DeleteGroup(g.id), |ui| danger_item(ui, "Delete group"));
+}
+
+/// Connect all and Disconnect all of a group's menu, each enabled when a member can take it. The rail's folder menu
+/// shows them too. Returns true for Connect all and false for Disconnect all.
+pub(super) fn connect_all_items(ui: &mut egui::Ui, g: &Group, conns: &[Conn]) -> Option<bool> {
+    let members: Vec<&Conn> = g.members.iter().filter_map(|id| conns.iter().find(|c| c.meta.id == *id)).collect();
+    let mut out = None;
+    for (connect, label, on) in [(true, "Connect all", members.iter().any(|c| c.status.can_connect())), (false, "Disconnect all", members.iter().any(|c| c.status.is_open()))] {
+        if ui.add_enabled(on, egui::Button::new(label)).clicked() {
+            out = Some(connect);
+            ui.close();
+        }
     }
+    out
 }
 
 /// The menu of a connection row, on a right click.
@@ -823,31 +814,17 @@ fn conn_menu_items(ui: &mut egui::Ui, c: &Conn, grouped: bool, acts: &mut Vec<Pa
     let id = c.meta.id;
     let open = c.status.is_open();
     menu_look(ui);
-    if ui.button("Browse databases").clicked() {
-        acts.push(PanelAct::Browse(id));
-        ui.close();
+    menu_act(ui, acts, PanelAct::Browse(id), |ui| ui.button("Browse databases"));
+    menu_act(ui, acts, PanelAct::Connect(id), |ui| ui.button(if open { "Reconnect" } else { "Connect" }));
+    if open {
+        menu_act(ui, acts, PanelAct::Disconnect(id), |ui| ui.button("Disconnect"));
     }
-    if ui.button(if open { "Reconnect" } else { "Connect" }).clicked() {
-        acts.push(PanelAct::Connect(id));
-        ui.close();
-    }
-    if open && ui.button("Disconnect").clicked() {
-        acts.push(PanelAct::Disconnect(id));
-        ui.close();
-    }
-    if ui.button("Edit connection…").clicked() {
-        acts.push(PanelAct::EditConn(id));
-        ui.close();
-    }
-    if grouped && ui.button("Remove from group").clicked() {
-        acts.push(PanelAct::Ungroup(id));
-        ui.close();
+    menu_act(ui, acts, PanelAct::EditConn(id), |ui| ui.button("Edit connection…"));
+    if grouped {
+        menu_act(ui, acts, PanelAct::Ungroup(id), |ui| ui.button("Remove from group"));
     }
     ui.separator();
-    if danger_item(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
-        acts.push(PanelAct::Remove(id));
-        ui.close();
-    }
+    menu_act(ui, acts, PanelAct::Remove(id), |ui| danger_item(ui, format!("Remove \"{}\"…", c.meta.name)));
 }
 
 /// The field for a new group, with the color it will get. Returns true once it is done, by Enter or by leaving it.
@@ -855,7 +832,7 @@ fn new_group_field(ui: &mut egui::Ui, text: &mut String, focus: &mut bool, group
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GROUP_H), Sense::hover());
     let next = GROUP_COLORS.iter().map(|c| c.0).find(|c| !groups.groups.iter().any(|g| g.color == *c)).unwrap_or(GROUP_COLORS[groups.groups.len() % GROUP_COLORS.len()].0);
     chevron(ui.painter(), egui::pos2(rect.left() + 6.0, rect.center().y), true, FAINT());
-    paint_folder(ui.painter(), egui::pos2(rect.left() + 24.0, rect.center().y), group_color(next), true);
+    glyphs::folder_filled(ui.painter(), egui::pos2(rect.left() + 24.0, rect.center().y), group_color(next));
     let field = egui::Rect::from_min_max(egui::pos2(rect.left() + 38.0, rect.top() + 2.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0));
     let e = ui.put(field, egui::TextEdit::singleline(text).id(egui::Id::unique("group-new")).hint_text(RichText::new("Group name").color(FAINT())).desired_width(field.width()).margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }));
     e.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "New group name"));
@@ -944,7 +921,7 @@ pub(super) fn picker_list_in(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups,
                 let r = side_row(ui, CAPTION_H + 4.0, 0.0, false, &format!("Fold {}", g.name), |p, rect| {
                     let cy = rect.center().y;
                     chevron(p, egui::pos2(rect.left() + 8.0, cy), *open, FAINT());
-                    paint_folder(p, egui::pos2(rect.left() + 26.0, cy), col, true);
+                    glyphs::folder_filled(p, egui::pos2(rect.left() + 26.0, cy), col);
                     let t = p.layout_job(LayoutJob::single_section(g.name.to_uppercase(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
                     p.galley(egui::pos2(rect.left() + 40.0, cy - t.size().y / 2.0), t, MUTED());
                     let cg = p.layout_no_wrap(n.to_string(), FontId::proportional(TXT_CAPTION), FAINT());
@@ -999,36 +976,6 @@ pub(super) fn picker_list_in(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups,
 
 // Painted icons, since glyphs from fallback fonts sit off center.
 
-/// A folder, filled and outlined in `col` when `filled`.
-pub(super) fn paint_folder(p: &egui::Painter, c: egui::Pos2, col: Color32, filled: bool) {
-    let v = egui::vec2;
-    let tab = egui::Rect::from_min_max(c + v(-6.5, -5.5), c + v(-0.5, -2.0));
-    let body = egui::Rect::from_min_max(c + v(-6.5, -3.5), c + v(6.5, 5.5));
-    let s = Stroke::new(1.3, col);
-    let fill = if filled { tint(col, 90) } else { Color32::TRANSPARENT };
-    p.rect(tab, 1.5, fill, s, egui::StrokeKind::Inside);
-    p.rect(body, 2.0, fill, s, egui::StrokeKind::Inside);
-}
-
-/// The Glyph of the Edit group dialog's tile.
-pub(super) fn folder_glyph(p: &egui::Painter, c: egui::Pos2, col: Color32) {
-    paint_folder(p, c, col, false);
-}
-
-fn paint_plus(p: &egui::Painter, c: egui::Pos2, col: Color32) {
-    let s = Stroke::new(1.4, col);
-    p.line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
-    p.line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
-}
-
-fn paint_new_group(p: &egui::Painter, c: egui::Pos2, col: Color32) {
-    paint_folder(p, c + egui::vec2(-1.5, 0.5), col, false);
-    let s = Stroke::new(1.3, col);
-    let k = c + egui::vec2(5.5, 4.5);
-    p.line_segment([k + egui::vec2(-2.5, 0.0), k + egui::vec2(2.5, 0.0)], s);
-    p.line_segment([k + egui::vec2(0.0, -2.5), k + egui::vec2(0.0, 2.5)], s);
-}
-
 /// Two chevrons pointing at each other, for folding every group.
 fn paint_fold_all(p: &egui::Painter, c: egui::Pos2, col: Color32) {
     let s = Stroke::new(1.4, col);
@@ -1037,15 +984,9 @@ fn paint_fold_all(p: &egui::Painter, c: egui::Pos2, col: Color32) {
     p.add(egui::Shape::line(vec![c + v(-4.0, 5.0), c + v(0.0, 1.5), c + v(4.0, 5.0)], s));
 }
 
-/// A quiet 24 px square button with a painted icon.
-fn icon_btn(ui: &mut egui::Ui, name: &str, paint: fn(&egui::Painter, egui::Pos2, Color32)) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
-    let state = state_of(&r);
-    ui.painter().rect_filled(rect, R_SM, hover_fill(state));
-    paint(ui.painter(), rect.center(), if state > 0 { BRIGHT() } else { MUTED() });
-    focus_ring(ui, &r, rect, R_SM as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
-    r.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand)
+/// A quiet 24 px square button with a painted icon, its name as its tip.
+fn icon_btn(ui: &mut egui::Ui, name: &str, glyph: glyphs::Glyph) -> egui::Response {
+    glyph_button(ui, egui::vec2(24.0, 24.0), glyph, name, name)
 }
 
 #[cfg(test)]

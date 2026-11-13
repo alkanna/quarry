@@ -538,6 +538,49 @@ pub(crate) fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
 }
 
+/// A quiet square button of `size` with a painted glyph: muted at rest and bright once hovered or pressed.
+pub(crate) fn glyph_button(ui: &mut egui::Ui, size: egui::Vec2, glyph: super::glyphs::Glyph, name: &str, tip: &str) -> egui::Response {
+    let (_, r) = ui.allocate_exact_size(size, Sense::click());
+    glyph_button_on(ui, r, glyph, hover_fill, name, tip)
+}
+
+/// Paints `r` as a glyph button with the background `fill` gives each state, a focus ring, the name assistive tools and
+/// the UI tests find it by, and `tip` on hover.
+pub(crate) fn glyph_button_on(ui: &mut egui::Ui, r: egui::Response, glyph: super::glyphs::Glyph, fill: fn(usize) -> Color32, name: &str, tip: &str) -> egui::Response {
+    let state = state_of(&r);
+    ui.painter().rect_filled(r.rect, R_SM, fill(state));
+    glyph(ui.painter(), r.rect.center(), if state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, &r, r.rect, R_SM as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The fill of a tool square on a hovered row. It shows at rest, since the row behind it already has the hover fill.
+pub(crate) fn row_tool_fill(state: usize) -> Color32 {
+    [tint(TEXT(), 14), tint(TEXT(), 34), tint(TEXT(), 46)][state]
+}
+
+/// Whether the pointer is on the row of height `h` about to be drawn at the cursor, before it is drawn, so the row can
+/// make room for its hover tools.
+pub(crate) fn next_row_hovered(ui: &egui::Ui, h: f32) -> bool {
+    ui.rect_contains_pointer(egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h)))
+}
+
+/// The look of a sidebar menu: the menu fills and a little more room around and between its items.
+pub(crate) fn menu_list(ui: &mut egui::Ui) {
+    menu_look(ui);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+}
+
+/// A menu item that queues `act` and closes the menu when the item `add` draws is clicked.
+pub(crate) fn menu_act<T>(ui: &mut egui::Ui, acts: &mut Vec<T>, act: T, add: impl FnOnce(&mut egui::Ui) -> egui::Response) {
+    if add(ui).clicked() {
+        acts.push(act);
+        ui.close();
+    }
+}
+
 /// A quiet "more actions" menu button. The dots are painted: the ellipsis glyph comes from a
 /// fallback font and sits above the middle of the button.
 pub(crate) fn dots_menu(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
