@@ -1101,6 +1101,8 @@ pub(super) enum ZoneKind {
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    /// A new connection joins this group when it is saved, from "New connection in <group>" in the Connections panel.
+    pub(super) group: Option<u64>,
     pub(super) engine: db::sql::Engine,
     pub(super) addr: db::sql::Addr,
     pub(super) tab: ConnTab,

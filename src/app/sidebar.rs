@@ -138,9 +138,36 @@ pub(super) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w
 
 /// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
 pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
+    paint_name_tag_hl(p, x, cy, name, font, color, tag, &[]);
+}
+
+/// `paint_name_tag` with the byte ranges of `name` that a filter matched drawn on `HIGHLIGHT()`.
+pub(super) fn paint_name_tag_hl(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str, hl: &[(usize, usize)]) {
     let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, x.span() * 0.4) - 8.0 };
-    let g = truncated(p, name, font, color, name_right - x.min);
+    let g = truncated_hl(p, name, font, color, name_right - x.min, hl);
     p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
+}
+
+/// `truncated` with the byte ranges in `hl` on a highlight background. The ranges are sorted and sit on char boundaries.
+pub(super) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32, hl: &[(usize, usize)]) -> std::sync::Arc<egui::Galley> {
+    if hl.is_empty() {
+        return truncated(p, text, font, color, w);
+    }
+    let mut job = LayoutJob::default();
+    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let marked = egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() };
+    let mut at = 0;
+    for &(a, b) in hl {
+        if a < at || b > text.len() || a >= b {
+            continue;
+        }
+        job.append(&text[at..a], 0.0, plain.clone());
+        job.append(&text[a..b], 0.0, marked.clone());
+        at = b;
+    }
+    job.append(&text[at..], 0.0, plain);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
 }
 
 /// Typing "none" means no tag, the same as the None chip.
@@ -151,10 +178,16 @@ pub(super) fn clean_tag(tag: &str) -> &str {
 
 /// A saved connection in the picker: status, name and tag, then the masked address.
 pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
-    side_row(ui, 48.0, 4.0, active, &c.meta.name, |p, r| {
+    conn_row_in(ui, c, active, 0.0, &[], false)
+}
+
+/// `conn_row` indented by `indent`, with the matched byte ranges of the name highlighted, and optionally draggable.
+pub(super) fn conn_row_in(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool) -> egui::Response {
+    let sense = if drag { Sense::click_and_drag() } else { Sense::click() };
+    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| {
         let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
         p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
-        paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
+        paint_name_tag_hl(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag, hl);
         let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
         let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
         p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
@@ -219,7 +252,9 @@ impl App {
     }
 
     pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
-        let cur = self.active.and_then(|id| self.conn(id));
+        // Looked up on the field, not through `conn`, so the popup below can borrow other fields of the app mutably.
+        let cur = self.active.and_then(|id| self.conns.iter().find(|c| c.meta.id == id));
+        let demo_picker = std::mem::take(&mut self.conns_ui.demo_picker);
         let (name, tag, dot) = match cur {
             Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
             None => ("Add a connection".to_string(), String::new(), FAINT()),
@@ -232,6 +267,9 @@ impl App {
         paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connections"));
+        if demo_picker {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+        }
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
         }
@@ -242,7 +280,9 @@ impl App {
         let mut edit = None;
         let mut refresh = None;
         let mut sql_users = None;
-        egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
+        let mut manage = false;
+        // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
@@ -259,16 +299,14 @@ impl App {
             let frame = ui.ctx().cumulative_frame_nr();
             let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
             ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
+            if opened {
+                self.conns_ui.picker_filter.clear();
+            }
+            conns_panel::picker_filter(ui, &mut self.conns_ui.picker_filter, opened);
             egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                for c in &self.conns {
-                    let on = Some(c.meta.id) == self.active;
-                    let r = conn_row(ui, c, on);
-                    if on && opened {
-                        r.scroll_to_me(Some(egui::Align::Center));
-                    }
-                    if r.clicked() {
-                        pick = Some(c.meta.id);
-                    }
+                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, opened) {
+                    pick = Some(id);
+                    ui.close();
                 }
             });
             ui.add_space(4.0);
@@ -276,32 +314,48 @@ impl App {
             ui.add_space(2.0);
             if ui.button("+  New connection…").clicked() {
                 new = true;
+                ui.close();
             }
             if ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
                 cloud = true;
+                ui.close();
+            }
+            if ui.button("Manage groups…").on_hover_text("Open the Connections panel").clicked() {
+                manage = true;
+                ui.close();
             }
             if let Some(c) = cur {
                 if ui.button(format!("Edit \"{}\"…", c.meta.name)).clicked() {
                     edit = Some(c.meta.id);
+                    ui.close();
                 }
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
+                    ui.close();
                 }
                 if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
+                    ui.close();
                 }
                 if c.meta.engine == db::sql::Engine::Postgres && c.status == Status::Ready && ui.button("Roles and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
+                    ui.close();
                 }
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
                 if danger(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
                     remove = Some((c.meta.id, c.meta.name.clone()));
+                    ui.close();
                 }
             }
             ui.add_space(2.0);
         });
+        if manage {
+            self.prefs.set_side_mode(SideMode::Connections);
+            self.prefs.sidebar_hidden = false;
+            self.save_prefs();
+        }
         if let Some(id) = edit {
             self.edit_conn(id);
         }

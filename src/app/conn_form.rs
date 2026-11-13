@@ -840,6 +840,12 @@ impl App {
                     }
                     self.active = Some(id);
                     self.save_conns();
+                    if let (None, Some(g)) = (f.id, f.group) {
+                        let all = self.conn_ids();
+                        if self.groups.place(id, Place::Into(g, None), &all) {
+                            self.save_groups();
+                        }
+                    }
                     self.connect(id);
                     *keep = false;
                     if let Some(Err(e)) = stored.into_iter().find(|r| r.is_err()) {
