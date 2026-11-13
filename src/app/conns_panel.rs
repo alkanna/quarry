@@ -130,7 +130,8 @@ pub(super) fn panel_rows(conns: &[Conn], groups: &Groups, filter: &str, open: im
     let toks = tokens(filter);
     let filtering = !toks.is_empty();
     let all: Vec<u64> = conns.iter().map(|c| c.meta.id).collect();
-    let conn = |id: u64| conns.iter().find(|c| c.meta.id == id);
+    let by_id: HashMap<u64, &Conn> = conns.iter().map(|c| (c.meta.id, c)).collect();
+    let conn = |id: u64| by_id.get(&id).copied();
     let mut rows = Vec::new();
     let mut matches = 0;
     for g in &groups.groups {
@@ -197,6 +198,8 @@ enum Nav {
 /// What the rows read while they are drawn.
 struct Cx<'a> {
     conns: &'a [Conn],
+    /// The connections by id, since every row looks one up.
+    by_id: HashMap<u64, &'a Conn>,
     groups: &'a Groups,
     all: &'a [u64],
     active: Option<u64>,
@@ -250,7 +253,7 @@ impl App {
         egui::ScrollArea::vertical().id_salt("conns-panel").auto_shrink(false).max_height(room).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             auto_scroll_while_dragging(ui);
-            let cx = Cx { conns: &self.conns, groups: &self.groups, all: &all, active: self.active, toks: &toks };
+            let cx = Cx { conns: &self.conns, by_id: self.conns.iter().map(|c| (c.meta.id, c)).collect(), groups: &self.groups, all: &all, active: self.active, toks: &toks };
             draw_rows(ui, &rows, &cx, &mut self.conns_ui, &mut acts);
         });
         ui.add_space(4.0);
@@ -530,7 +533,7 @@ fn draw_row(ui: &mut egui::Ui, rows: &[CRow], i: usize, cx: &Cx, st: &mut ConnsU
                 }
             }
             CRow::Conn { id, group, .. } => {
-                let Some(c) = cx.conns.iter().find(|c| c.meta.id == *id) else { return };
+                let Some(c) = cx.by_id.get(id).copied() else { return };
                 let color = group.and_then(|g| cx.groups.group(g)).map(|g| group_color(&g.color));
                 let hl = if filtering { hl_ranges(&c.meta.name, cx.toks) } else { Vec::new() };
                 let on = cx.active == Some(c.meta.id);
@@ -652,7 +655,7 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
 fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, usize, usize), cx: &Cx, st: &mut ConnsUi, acts: &mut Vec<PanelAct>, ctx: &egui::Context, rows: &[CRow], i: usize) -> Option<egui::Id> {
     let col = group_color(&g.color);
     let filtering = !cx.toks.is_empty();
-    let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.conns.iter().find(|c| c.meta.id == *id)).filter(|c| c.status.is_open()).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
+    let dots: Vec<Color32> = if open { Vec::new() } else { g.members.iter().filter_map(|id| cx.by_id.get(id)).filter(|c| c.status.is_open()).take(DOTS_MAX).map(|c| status_color(&c.status)).collect() };
     let hl = if filtering { hl_ranges(&g.name, cx.toks) } else { Vec::new() };
     let renaming = st.rename.as_ref().is_some_and(|(id, _)| *id == g.id);
     let r = if renaming {

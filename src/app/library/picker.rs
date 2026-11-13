@@ -7,7 +7,6 @@ use super::open::How;
 use super::save_dialog::folder_rows;
 use super::*;
 use crate::library::ScriptRef;
-use crate::library::tree::live_parent;
 use std::collections::HashSet;
 
 /// What a view lists: the scripts of its own kind that fit it.
@@ -135,10 +134,13 @@ impl App {
         }
         let mut rows = Vec::new();
         let mut index = std::collections::HashMap::new();
+        // The folder each listed script names, by row, for the counts below.
+        let mut row_folder = Vec::new();
         for s in lib.scripts.iter().filter(|s| fits(s)) {
             let first = first_line(&s.kind, &s.body);
             let hay = format!("{} {}", s.name, s.body.chars().take(200).collect::<String>()).to_lowercase();
             index.insert(s.id, rows.len());
+            row_folder.push(s.folder);
             rows.push(PickRow { r: ScriptRef::Saved(s.id), name: s.name.clone(), first, hay });
         }
         let mut linked = Vec::new();
@@ -152,35 +154,42 @@ impl App {
             ScriptRef::Saved(id) => index.get(id).copied(),
             file => rows.iter().position(|x| x.r == *file),
         }).take(6).collect();
-        let folder_of = |id: u64| lib.scripts.iter().find(|s| s.id == id).and_then(|s| s.folder);
-        let mut folders = Vec::new();
-        for (id, depth) in folder_rows(lib) {
-            let own: Vec<usize> = lib.scripts.iter().filter(|s| live_parent(lib, s.folder) == Some(id)).filter_map(|s| index.get(&s.id).copied()).collect();
-            // The scripts below it count too, so a closed parent still says what it holds.
-            let below = rows.iter().enumerate().filter(|(_, r)| match r.r {
-                ScriptRef::Saved(sid) => {
-                    let mut at = folder_of(sid);
-                    let mut hops = 0;
-                    while let Some(f) = at {
-                        if f == id {
-                            return true;
-                        }
-                        at = lib.folders.iter().find(|x| x.id == f).and_then(|x| x.parent);
-                        hops += 1;
-                        if hops > 32 {
-                            break;
-                        }
-                    }
-                    false
-                }
-                _ => false,
-            }).count();
-            if below > 0 {
-                folders.push(PickFolder { id, depth, name: lib.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default(), count: below, own });
+        // One pass over the scripts and one walk up from each listed one, instead of a pass per folder.
+        let mut parent: HashMap<u64, Option<u64>> = HashMap::new();
+        for f in &lib.folders {
+            parent.entry(f.id).or_insert(f.parent);
+        }
+        let mut own: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut loose = Vec::new();
+        for s in &lib.scripts {
+            let Some(&i) = index.get(&s.id) else { continue };
+            // A script whose folder is gone shows with the loose ones, as in the panel.
+            match s.folder.filter(|f| parent.contains_key(f)) {
+                Some(f) => own.entry(f).or_default().push(i),
+                None => loose.push(i),
             }
         }
-        // A script whose folder is gone shows with the loose ones, as in the panel.
-        let loose: Vec<usize> = lib.scripts.iter().filter(|s| live_parent(lib, s.folder).is_none()).filter_map(|s| index.get(&s.id).copied()).collect();
+        // The scripts below a folder count too, so a closed parent still says what it holds.
+        let mut below: HashMap<u64, usize> = HashMap::new();
+        for at in &row_folder {
+            let mut chain: Vec<u64> = Vec::new();
+            let mut at = *at;
+            // Bounded, since a hand-edited file could hold a loop of folders.
+            while let Some(f) = at.filter(|f| chain.len() <= 32 && !chain.contains(f)) {
+                chain.push(f);
+                at = parent.get(&f).copied().flatten();
+            }
+            for f in chain {
+                *below.entry(f).or_default() += 1;
+            }
+        }
+        let mut folders = Vec::new();
+        for (id, depth) in folder_rows(lib) {
+            if let Some(&count) = below.get(&id).filter(|n| **n > 0) {
+                let name = lib.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
+                folders.push(PickFolder { id, depth, name, count, own: own.remove(&id).unwrap_or_default() });
+            }
+        }
         PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.lib_ui.open_picker, bound }
     }
 

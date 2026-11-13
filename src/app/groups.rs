@@ -52,14 +52,11 @@ impl Groups {
     /// The connections in no group, in the order the panel shows them: the saved `loose` order first, then the rest of
     /// `all` (every connection in saved order), so a connection added since the last save still has a place.
     pub(super) fn loose_order(&self, all: &[u64]) -> Vec<u64> {
-        let grouped = |c: &u64| self.groups.iter().any(|g| g.members.contains(c));
-        let mut out: Vec<u64> = Vec::new();
-        for c in self.loose.iter().chain(all) {
-            if all.contains(c) && !grouped(c) && !out.contains(c) {
-                out.push(*c);
-            }
-        }
-        out
+        // Sets, since the panel asks every frame and every test was a scan of a list.
+        let alive: HashSet<u64> = all.iter().copied().collect();
+        let grouped: HashSet<u64> = self.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
+        let mut seen = HashSet::new();
+        self.loose.iter().chain(all).copied().filter(|c| alive.contains(c) && !grouped.contains(c) && seen.insert(*c)).collect()
     }
 
     /// Moves `conn` to `to`, out of the group it was in. A connection is in at most one group. `all` is every connection,

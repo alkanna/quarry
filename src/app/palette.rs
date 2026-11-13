@@ -289,7 +289,8 @@ impl App {
             let Some(scan) = self.lib_ui.scans.get(&l.id) else { continue };
             let lname = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
             for e in &scan.entries {
-                let name = e.rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                // Borrowed: most files do not match, and only a match needs its name kept.
+                let name = e.rel.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                 if let Some(score) = name_score(tok, &name) {
                     let sub = match e.rel.parent().filter(|p| !p.as_os_str().is_empty()) {
                         Some(p) => format!("{lname} \u{203a} {}", p.display()),
