@@ -193,7 +193,7 @@ fn a_folder_cannot_be_dropped_into_its_own_subfolder() {
     let before = ui.app().library.clone();
     ui.drag("Reports", "Weekly", 0.5, 1);
     assert_eq!(ui.app().library, before);
-    assert!(ui.app().toasts.iter().any(|t| t.title.contains("cannot go into itself")), "{}", ui.app().last_problem());
+    assert!(ui.app().last_problem().contains("cannot go into itself"), "{}", ui.app().last_problem());
 }
 
 #[test]
