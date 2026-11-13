@@ -34,27 +34,34 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
         }
     };
     let rows = rows.unwrap_or(lines.clamp(12, 40));
-    let find = Find::bar(ui, id, text);
-    egui::ScrollArea::both().id_salt(id.with("scroll")).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-        let mut lay = find.layouter(code);
-        let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, w: f32| lay(ui, buf, if wrap { w } else { f32::INFINITY });
-        // The default layouter caches its galley; the custom one rebuilds the whole text every frame, so it is used only when needed.
-        let custom = code || find.open || !wrap;
-        let mut edit = |ui: &mut egui::Ui, text: &mut String| {
-            let te = egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows);
-            if custom { te.layouter(&mut layouter).show(ui) } else { te.show(ui) }
-        };
-        // Pairing quotes and brackets helps JSON but gets in the way of plain text.
-        let out = if code { with_autopair(ui, id, text, edit) } else { edit(ui, text) };
-        find.reveal(ui, text, &out);
-        if out.response.changed() {
-            *dirty = true;
-            ui.data_mut(|d| d.remove::<(usize, usize, usize)>(count_id));
-        }
-        if std::mem::take(focus) {
-            out.response.request_focus();
-        }
-    });
+    // JSON text, typed into any column or field, can be read as a folding tree; edits are made in the text.
+    let json = crate::ui::json_tree::looks_like(text);
+    let tree = crate::ui::json_tree::is_tree(ui, id, text);
+    if tree {
+        crate::ui::json_tree::scrolled(ui, id, text, rows as f32 * ui.text_style_height(&egui::TextStyle::Monospace), max_h);
+    } else {
+        let find = Find::bar(ui, id, text);
+        egui::ScrollArea::both().id_salt(id.with("scroll")).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            let mut lay = find.layouter(code);
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, w: f32| lay(ui, buf, if wrap { w } else { f32::INFINITY });
+            // The default layouter caches its galley; the custom one rebuilds the whole text every frame, so it is used only when needed.
+            let custom = code || find.open || !wrap;
+            let mut edit = |ui: &mut egui::Ui, text: &mut String| {
+                let te = egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows);
+                if custom { te.layouter(&mut layouter).show(ui) } else { te.show(ui) }
+            };
+            // Pairing quotes and brackets helps JSON but gets in the way of plain text.
+            let out = if code { with_autopair(ui, id, text, edit) } else { edit(ui, text) };
+            find.reveal(ui, text, &out);
+            if out.response.changed() {
+                *dirty = true;
+                ui.data_mut(|d| d.remove::<(usize, usize, usize)>(count_id));
+            }
+            if std::mem::take(focus) {
+                out.response.request_focus();
+            }
+        });
+    }
     if let Some(e) = err {
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).wrap());
@@ -73,8 +80,12 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(format!("{chars} characters · {lines} {}", if lines == 1 { "line" } else { "lines" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(4.0);
-        if ui.checkbox(&mut wrap, "Wrap lines").changed() {
+        if !tree && ui.checkbox(&mut wrap, "Wrap lines").changed() {
             ui.data_mut(|d| d.insert_temp(wrap_id, wrap));
+        }
+        if json {
+            ui.add_space(4.0);
+            crate::ui::json_tree::mode_switch(ui, id);
         }
         right_group(ui, |ui| {
             if primary(ui, "Apply", PRIMARY()).on_hover_text("Cmd+Enter").clicked() {
