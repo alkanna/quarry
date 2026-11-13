@@ -290,6 +290,18 @@ impl App {
         self.set_staged(staged);
     }
 
+    /// Stages column `i` moved to where column `to` is, as the Structure grid shows them. The grid lists the table as the
+    /// server has it, so the move is counted in the order the staged changes leave: the column takes `to`'s place there.
+    pub(in crate::app) fn stage_move_column_to(&mut self, i: usize, to: usize) {
+        let Some(st) = self.structure().cloned() else { return };
+        let (Some(a), Some(b)) = (st.columns.get(i), st.columns.get(to)) else { return };
+        let order = ddl::columns_after(&st, self.staged());
+        let at = |name: &str| order.iter().position(|n| *n == self.name_after(name));
+        if let (Some(p), Some(q)) = (at(&a.name), at(&b.name)) {
+            self.stage_move_column(i, q as isize - p as isize);
+        }
+    }
+
     pub(in crate::app) fn open_idx_form(&mut self, i: Option<usize>) {
         let Some(st) = self.structure().cloned() else { return };
         let staged = self.staged().to_vec();

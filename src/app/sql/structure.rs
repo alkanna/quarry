@@ -3,6 +3,7 @@
 //! indexes are edited here through staged changes (`sql_alter.rs`); the other three views stay read-only.
 
 use crate::app::*;
+use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
@@ -60,7 +61,8 @@ pub(in crate::app) enum Act {
     EditColumn(usize),
     DuplicateColumn(usize),
     DropColumn(usize),
-    MoveColumn(usize, isize),
+    /// The column at the first index dragged to the place of the column at the second, in the order shown.
+    MoveColumnTo(usize, usize),
     NewRelation,
     EditRelation(usize),
     DropRelation(usize),
@@ -166,7 +168,7 @@ impl App {
             Act::EditColumn(i) => self.open_col_form(Some(i)),
             Act::DuplicateColumn(i) => self.duplicate_column(i),
             Act::DropColumn(i) => self.stage_drop_column(i),
-            Act::MoveColumn(i, by) => self.stage_move_column(i, by),
+            Act::MoveColumnTo(i, to) => self.stage_move_column_to(i, to),
             Act::NewRelation => self.open_fk_form(None),
             Act::EditRelation(i) => self.open_fk_form(Some(i)),
             Act::DropRelation(i) => self.stage_drop_fk(i),
@@ -211,9 +213,9 @@ impl App {
                 left.push(Act::NewColumn);
             }
             let hint = if on { "Select a column first" } else { why };
-            let moves = [("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))];
             let own = [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn))];
-            for (t, tip, act) in own.into_iter().chain(moves.into_iter().filter(|_| order)) {
+            // Columns move by dragging their row, or Alt+Up and Alt+Down on the focused row.
+            for (t, tip, act) in own {
                 let r = quiet_enabled(ui, on && act.is_some(), t).on_hover_text(tip).on_disabled_hover_text(hint);
                 if let (true, Some(a)) = (r.clicked(), act) {
                     left.push(a);
@@ -238,11 +240,7 @@ impl App {
             let all = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
             let heads: Vec<GCol> = all.into_iter().enumerate().filter(|(i, _)| shown.contains(i)).map(|(_, g)| g).collect();
             let mut menu = |ui: &mut egui::Ui, r: usize| {
-                let mut items = vec![("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r))];
-                if order {
-                    items.extend([("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))]);
-                }
-                for (label, act) in items {
+                for (label, act) in [("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r))] {
                     if ui.add_enabled(editable, egui::Button::new(label)).on_disabled_hover_text(why).clicked() {
                         acts.push(act);
                         ui.close();
@@ -263,13 +261,16 @@ impl App {
                     ui.close();
                 }
             };
-            let hit = grid_ex(
+            // Rows drag only where a move can be staged: a writable table on an engine that keeps column order.
+            let keys: Vec<egui::Id> = d.columns.iter().map(|c| egui::Id::unique(("structure-col", c.name.as_str()))).collect();
+            let drag = (editable && order && !is_view).then_some(keys.as_slice());
+            let hit = grid_drag(
                 ui,
                 "columns",
                 &heads,
                 d.columns.len(),
                 sel[0],
-                |ui, rect, r, c| {
+                &mut |ui, rect, r, c| {
                     if c == 0 {
                         let name = &d.columns[r].name;
                         let mark = if dropped.contains(name) { Some(ALERT()) } else if changed.contains(name) { Some(WARNING()) } else { None };
@@ -280,9 +281,14 @@ impl App {
                     column_cell(ui, rect, &d.columns[r], shown[c], pg)
                 },
                 Some(&mut menu),
+                drag,
             );
             if let Some(r) = hit.click {
                 sel[0] = Some(r);
+            }
+            if let Some(m) = hit.moved {
+                acts.push(Act::MoveColumnTo(m.from, m.to));
+                sel[0] = Some(m.to);
             }
             if let (Some(r), true) = (hit.double, editable) {
                 acts.push(Act::EditColumn(r));
@@ -795,16 +801,24 @@ fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<u
     grid_ex(ui, salt, cols, rows, sel, cell, None).click
 }
 
-/// What a frame of a grid saw: the row clicked (a right click counts, so a menu acts on what it opened over)
-/// and the row double-clicked.
+/// What a frame of a grid saw: the row clicked (a right click counts, so a menu acts on what it opened over),
+/// the row double-clicked and, for a grid whose rows drag, a row let go somewhere else.
 #[derive(Default)]
 struct Hit {
     click: Option<usize>,
     double: Option<usize>,
+    moved: Option<dnd::Move>,
 }
 
-/// `grid` with a double-click and a row menu, which gets the row it opened on.
-fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, mut cell: impl FnMut(&mut egui::Ui, Rect, usize, usize), mut menu: Option<&mut dyn FnMut(&mut egui::Ui, usize)>) -> Hit {
+/// `grid` with a double-click and a row menu, which gets the row it opened on. With `drag` the rows drag to reorder and
+/// Alt+Up or Alt+Down moves the focused one; `keys` are the rows' stable keys.
+#[allow(clippy::too_many_arguments)]
+fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, mut cell: impl FnMut(&mut egui::Ui, Rect, usize, usize), menu: Option<&mut dyn FnMut(&mut egui::Ui, usize)>) -> Hit {
+    grid_drag(ui, salt, cols, rows, sel, &mut cell, menu, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grid_drag(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, cell: &mut dyn FnMut(&mut egui::Ui, Rect, usize, usize), mut menu: Option<&mut dyn FnMut(&mut egui::Ui, usize)>, drag: Option<&[egui::Id]>) -> Hit {
     const NUM: f32 = 40.0;
     let w = ui.available_width();
     let total: f32 = cols.iter().map(|c| c.weight).sum();
@@ -828,15 +842,18 @@ fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Optio
     }
     let stripe = ui.visuals().faint_bg_color;
     let mut hit = Hit::default();
-    for r in 0..rows {
-        let row = Rect::from_min_size(pos2(rect.left(), rect.top() + TABLE_HEAD_H + r as f32 * ROW_H), vec2(w, ROW_H));
+    let mut draw_row = |ui: &mut egui::Ui, row: Rect, r: usize, st: dnd::ItemState, hit: &mut Hit| -> egui::Response {
         let resp = ui.interact(row, ui.scope_id().with(("sql-grid", salt, r)), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, sel == Some(r), format!("{salt} row {}", r + 1)));
-        let fill = if sel == Some(r) { if resp.hovered() { SEL_HOVER() } else { SEL() } } else if resp.hovered() { HOVER() } else if r % 2 == 1 { stripe } else { BG() };
+        let hovered = resp.hovered() && !st.busy;
+        let fill = if sel == Some(r) { if hovered { SEL_HOVER() } else { SEL() } } else if hovered { HOVER() } else if st.lifted { RAISED() } else if r % 2 == 1 { stripe } else { BG() };
         ui.painter().rect_filled(row, 0.0, fill);
         put(ui, Rect::from_min_size(row.min, vec2(NUM, ROW_H)), &(r + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT(), false);
         for (i, (a, b)) in xs.iter().enumerate() {
             cell(ui, Rect::from_min_max(pos2(*a, row.top()), pos2(*b, row.bottom())), r, i);
+        }
+        if st.lifted {
+            return resp;
         }
         if resp.clicked() || resp.secondary_clicked() {
             hit.click = Some(r);
@@ -849,6 +866,27 @@ fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Optio
                 menu_look(ui);
                 m(ui, r);
             });
+        }
+        resp
+    };
+    let body = Rect::from_min_size(pos2(rect.left(), rect.top() + TABLE_HEAD_H), vec2(w, rows as f32 * ROW_H));
+    match drag {
+        Some(keys) => {
+            let sizes = vec![ROW_H; rows];
+            let moved = put_at(ui, body, |ui| {
+                dnd::reorder(ui, egui::Id::unique(("sql-grid-reorder", salt)), dnd::Items::vertical(&sizes).keys(keys), |ui, r, st| {
+                    // The x of every cell is the grid's, so a row sliding to open the gap moves only along y.
+                    let row = Rect::from_min_size(pos2(rect.left(), ui.max_rect().top()), vec2(w, ROW_H));
+                    draw_row(ui, row, r, st, &mut hit)
+                })
+            });
+            hit.moved = moved;
+        }
+        None => {
+            for r in 0..rows {
+                let row = Rect::from_min_size(pos2(rect.left(), body.top() + r as f32 * ROW_H), vec2(w, ROW_H));
+                draw_row(ui, row, r, dnd::ItemState::default(), &mut hit);
+            }
         }
     }
     ui.painter().hline(rect.x_range(), rect.top() + TABLE_HEAD_H, Stroke::new(1.0, LINE()));
