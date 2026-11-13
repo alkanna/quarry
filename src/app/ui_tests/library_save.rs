@@ -249,6 +249,31 @@ fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_pick
 }
 
 #[test]
+fn the_picker_fades_in_once_and_stays_inside_the_window() {
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    // When each foreground area started to show: a popover whose fade-in restarts would show see-through for good.
+    let starts = |ctx: &egui::Context| {
+        let ids = ctx.memory(|m| m.areas().visible_layer_ids());
+        ids.into_iter().filter(|l| l.order == egui::Order::Foreground).filter_map(|l| egui::AreaState::load(ctx, l.id).and_then(|s| s.last_became_visible_at)).map(f64::to_bits).collect::<std::collections::BTreeSet<u64>>()
+    };
+    ui.h.get_by_label("Library 5").click();
+    let mut first = None;
+    for _ in 0..8 {
+        ui.h.step();
+        // The frame the lists arrive in must not place the popover from the empty sizing pass, past the window's edge.
+        if let Some(n) = ui.h.query_all_by_label("Search library").next() {
+            assert!(n.rect().right() <= 1400.0, "the popover runs off the window at {}", n.rect().right());
+        }
+        let now = starts(&ui.h.ctx);
+        if !now.is_empty() {
+            assert_eq!(*first.get_or_insert_with(|| now.clone()), now, "the popover's fade-in started again");
+        }
+    }
+    assert!(first.is_some(), "the popover never showed");
+    ui.show("Script Late shipments");
+}
+
+#[test]
 fn the_picker_lists_are_built_only_while_it_is_open() {
     use crate::app::library::picker::PickKind;
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };

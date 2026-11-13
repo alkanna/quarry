@@ -481,3 +481,23 @@ fn the_save_dialog_looks_for_the_file_once_per_path() {
     assert_eq!(cached(&ui), Some((dir.join("b.sql"), false)));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_second_cmd_s_before_the_first_is_back_raises_no_conflict() {
+    let dir = temp_dir("twice");
+    let mut h = bound_app(&dir, "select 1", false);
+    h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 5".into();
+    assert!(h.state_mut().save_linked());
+    assert!(h.state_mut().save_linked());
+    io(&mut h);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 5");
+    let b = h.state().tabs[0].script.as_ref().unwrap();
+    assert!(b.conflict.is_none() && b.base == "select 5", "{:?}", b.conflict);
+    // A save after it is back goes through as well, from the time and text it left.
+    h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 6".into();
+    assert!(h.state_mut().save_linked());
+    io(&mut h);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 6");
+    assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

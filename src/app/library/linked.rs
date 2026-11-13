@@ -163,6 +163,10 @@ impl App {
             },
             (Job::Reload { uid, link, rel }, FileOut::Read(res)) => match res {
                 Ok(now) => {
+                    // Only a tab still bound to that file takes its text.
+                    if self.bound_to(uid, link, &rel).is_none() {
+                        return;
+                    }
                     let Some(t) = self.tab_by_uid(uid).map(|i| &mut self.tabs[i]) else { return };
                     set_bound_text(t, &now.text, now.parsed.as_ref());
                     if let Some(b) = t.script.as_mut() {
@@ -335,6 +339,11 @@ impl App {
         }
         if self.link_missing(link) {
             self.warn(super::panel::MISSING);
+            return true;
+        }
+        // One save of a file at a time: a second one sent before the first is back would carry the same old time and text,
+        // and both would write through the same temp file.
+        if self.lib_ui.jobs.values().any(|j| matches!(j, Job::Save { link: l, rel: r, .. } if *l == link && *r == rel)) {
             return true;
         }
         let (base, was, uid) = (b.base.clone(), b.disk, t.uid);

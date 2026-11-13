@@ -123,9 +123,11 @@ pub fn save_file(root: &Path, path: &Path, was: Meta, base: &str, text: &str, js
     if !root.is_dir() {
         return SaveOut::Failed(format!("{} is not there", root.display()));
     }
+    // Text equal to what is being written is no conflict: it is this same save landing twice.
     if was.is_some() && meta_of(path) != was
         && let Ok(now) = read_script(path)
         && now.text != base
+        && now.text != text
     {
         return SaveOut::Changed(now);
     }
@@ -370,7 +372,20 @@ pub fn create_file(root: &Path, dir: &Path, name: &str, ext: &str, bytes: &[u8])
 /// Windows). There a case-only rename finds its own file at the target and must still go ahead.
 pub fn same_file_other_case(from: &Path, to: &Path) -> bool {
     let (Some(a), Some(b)) = (from.file_name().and_then(|f| f.to_str()), to.file_name().and_then(|f| f.to_str())) else { return false };
-    from.parent() == to.parent() && a != b && a.to_lowercase() == b.to_lowercase() && matches!((std::fs::canonicalize(from), std::fs::canonicalize(to)), (Ok(x), Ok(y)) if x == y)
+    from.parent() == to.parent() && a != b && a.to_lowercase() == b.to_lowercase() && same_file(from, to)
+}
+
+/// Whether two paths reach one file: the same device and inode on unix, where a canonical path may keep the case as asked.
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!((std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino())
+}
+
+/// Whether two paths reach one file. Windows gives the final path of the file itself, in the case it is stored in.
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Renames the file at `path` to `name` in the same folder, and returns the new path. Refuses a name that is taken by
