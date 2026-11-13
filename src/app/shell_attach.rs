@@ -517,12 +517,10 @@ async function run() {
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                attach = ui.add_enabled(can, primary_button(ui, "Attach", PRIMARY())).clicked();
-                if ui.button("Cancel").on_hover_text("Esc").clicked() {
-                    *keep = false;
-                }
-            });
+            attach = ui.add_enabled(can, primary_button(ui, "Attach", PRIMARY())).clicked();
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
         });
         if attach {
             if let (Some(conn), Some(t)) = (f.conn, self.tm()) {

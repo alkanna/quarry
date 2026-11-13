@@ -203,4 +203,10 @@ fn a_short_dialog_after_a_tall_one_shrinks_to_its_content() {
     ui.h.state_mut().demo_dialog("unlock");
     ui.settle();
     assert!((height(&ui) - short).abs() < 2.0, "the unlock dialog kept the save dialog's height: {} against {short}", height(&ui));
+    // The footer row must sit inside the band's padding, not overhang the dialog.
+    let area = ui.h.ctx.memory(|m| m.area_rect(id)).expect("no modal area");
+    let button = ui.h.get_by_label("Allow writes").rect();
+    // 460 px plus the frame's 1 px border on each side.
+    assert!(area.width() <= 463.0, "the unlock dialog grew past its 460 px: {}", area.width());
+    assert!(button.right() <= area.right() - crate::ui::theme::DIALOG_PAD + 1.0, "the primary button overhangs the footer padding: {} against {}", button.right(), area.right());
 }
