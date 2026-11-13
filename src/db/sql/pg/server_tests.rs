@@ -213,10 +213,17 @@ fn live_quarrys_own_sessions_are_refused() {
         // A pooled connection of Quarry's: the one that read the list.
         let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         let me = a.rows.iter().find(|r| r.ours && r.state == "active" && r.query.contains("pg_blocking_pids")).expect("the reader");
-        for terminate in [false, true] {
-            let err = l.w.rt.block_on(signal(&l.db, &tgt(&l, me), terminate, false)).unwrap_err();
-            assert!(err.contains("Quarry's own"), "{err}");
+        // The list also holds the sessions of parallel tests in this process, which may close before the signal is checked, so a
+        // session that is already gone proves nothing and the next one is tried. A reader that is still there is always refused.
+        let mut refused = 0;
+        for r in a.rows.iter().filter(|r| r.ours && r.state == "active" && r.query.contains("pg_blocking_pids")) {
+            for terminate in [false, true] {
+                let err = l.w.rt.block_on(signal(&l.db, &tgt(&l, r), terminate, false)).unwrap_err();
+                assert!(err.contains("Quarry's own") || err.contains("already gone"), "{err}");
+                refused += err.contains("Quarry's own") as u32;
+            }
         }
+        assert!(refused > 0, "no live reader was refused");
         // A connection of Quarry's own outside the pools (Stop and the script runs open these) is marked too.
         let c = l.w.rt.block_on(l.db.detached()).unwrap();
         let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
