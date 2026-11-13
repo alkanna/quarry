@@ -16,7 +16,8 @@ impl App {
     /// CREATE USER whose password the log keeps out.
     pub(super) fn sql_log_demo(&mut self) {
         let user = db::redact_sql("CREATE USER 'report'@'10.0.%' IDENTIFIED BY 'correct horse battery'").0;
-        if let Ok(mut log) = db::LOG.lock() {
+        {
+            let mut log = db::log();
             log.clear();
             log.extend([
                 db::LogEntry::finished(3, 300, "shop", "SELECT", "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, TABLE_ROWS AS row_estimate FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME LIMIT 18446744073709551615", 6, None),
@@ -64,13 +65,13 @@ impl App {
                     log.detached = !log.detached;
                 }
                 if ui.button("Clear").clicked() {
-                    db::LOG.lock().map(|mut l| l.clear()).ok();
+                    db::log().clear();
                 }
             });
         });
         ui.separator();
         // The driver threads write to the log too, so it stays locked only while visible rows are drawn.
-        let Ok(entries) = db::LOG.lock() else { return };
+        let entries = db::log();
         let rows: Vec<&db::LogEntry> = entries
             .iter()
             .filter(|l| (!log.errors || l.err.is_some()) && (log.filter.is_empty() || [&l.name, &l.db, &l.cmd].iter().any(|s| s.contains(log.filter.as_str()))))

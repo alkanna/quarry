@@ -23,10 +23,18 @@ impl LogEntry {
     }
 }
 
-pub const LOG_MAX: usize = 2000;
+/// Entries kept. Tests run in parallel in one process and all write here, so a cap this low would drop a test's own
+/// entries before it reads them back.
+pub const LOG_MAX: usize = if cfg!(test) { 1 << 20 } else { 2000 };
 
 // ponytail: one process-wide log, clients of every connection write here; keyed by conn id.
 pub static LOG: std::sync::Mutex<std::collections::VecDeque<LogEntry>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// The log, even after a thread panicked while holding it: the entries are plain data, and refusing the lock stopped
+/// every later write for the rest of the session.
+pub fn log() -> std::sync::MutexGuard<'static, std::collections::VecDeque<LogEntry>> {
+    LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Feeds the driver's command events into `LOG`. The driver already blanks the bodies of
 /// authentication and user password commands, so secrets never reach the log.
@@ -56,7 +64,7 @@ pub(crate) fn log_event(conn: u64, ev: mongodb::event::command::CommandEvent) {
                 text.push_str(" …");
             }
             let entry = LogEntry { conn, at: std::time::SystemTime::now(), db: s.db, name: s.command_name, cmd: text, ms: None, err: None, req: s.request_id };
-            let Ok(mut log) = LOG.lock() else { return };
+            let mut log = log();
             if log.len() >= LOG_MAX {
                 log.pop_front();
             }
@@ -68,7 +76,7 @@ pub(crate) fn log_event(conn: u64, ev: mongodb::event::command::CommandEvent) {
                 E::Failed(f) => (f.request_id, f.duration.as_millis(), Some(e(f.failure))),
                 _ => return,
             };
-            let Ok(mut log) = LOG.lock() else { return };
+            let mut log = log();
             if let Some(l) = log.iter_mut().rev().find(|l| l.conn == conn && l.req == req) {
                 (l.ms, l.err) = (Some(ms), err);
             }
@@ -245,7 +253,7 @@ pub fn log_sql(conn: u64, db: &str, sql: &str, ms: u128, err: Option<&str>) {
     // The verb fills the name column like a Mongo command name, so the filter and the columns work the same.
     let name = super::sql::lex::tokens(&text, super::sql::Dialect::MySql).into_iter().find(|(t, _)| *t == super::sql::lex::Tok::Word).map_or(String::new(), |(_, r)| text[r].to_ascii_uppercase());
     let entry = LogEntry { conn, at: std::time::SystemTime::now(), db: db.into(), name, cmd: text, ms: Some(ms), err, req: 0 };
-    let Ok(mut log) = LOG.lock() else { return };
+    let mut log = log();
     if log.len() >= LOG_MAX {
         log.pop_front();
     }
@@ -339,7 +347,7 @@ mod tests {
             assert!(!r(src).contains("pw"), "{src}: {}", r(src));
         }
         super::log_sql(990_002, "d", "ALTER USER a IDENTIFIED BY /*!80000 'hunter2' */ bogus", 1, Some("syntax error near ''hunter2' */ bogus' at line 1"));
-        let log = super::LOG.lock().unwrap();
+        let log = super::log();
         let l = log.iter().rev().find(|l| l.conn == 990_002).unwrap();
         assert!(!l.cmd.contains("hunter2") && !l.err.as_deref().unwrap().contains("hunter2"), "{} {:?}", l.cmd, l.err);
     }
@@ -369,7 +377,7 @@ mod tests {
         let sql = format!("CREATE USER a IDENTIFIED BY '{}tailsecret'", "p".repeat(3970));
         assert!(sql.chars().count() > 4000);
         super::log_sql(990_003, "d", &sql, 1, None);
-        let log = super::LOG.lock().unwrap();
+        let log = super::log();
         let l = log.iter().rev().find(|l| l.conn == 990_003).unwrap();
         assert!(l.cmd.starts_with("CREATE USER a IDENTIFIED BY '***'") && !l.cmd.contains("ppp") && l.cmd.ends_with(" …"), "{}", &l.cmd[..l.cmd.len().min(80)]);
         assert!(l.cmd.chars().count() < 100);
@@ -378,7 +386,7 @@ mod tests {
     #[test]
     fn errors_lose_the_quoted_secret() {
         super::log_sql(990_001, "d", "CREATE USER a IDENTIFIED BY 'hunter2' bogus", 1, Some("You have an error in your SQL syntax; check the manual for the right syntax to use near ''hunter2' bogus' at line 1"));
-        let log = super::LOG.lock().unwrap();
+        let log = super::log();
         let l = log.iter().rev().find(|l| l.conn == 990_001).unwrap();
         assert!(!l.cmd.contains("hunter2") && !l.err.as_deref().unwrap().contains("hunter2"), "{} {:?}", l.cmd, l.err);
         assert_eq!(l.name, "CREATE");

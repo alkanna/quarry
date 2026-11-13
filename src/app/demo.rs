@@ -79,7 +79,8 @@ impl App {
             self.load_sql_demo();
             return;
         }
-        if let Ok(mut log) = db::LOG.lock() {
+        {
+            let mut log = db::log();
             let q = r#"{ "status": { "$in": ["paid", "shipped", "pending"] } }"#;
             log.extend([
                 db::LogEntry::finished(1, 340, "admin", "listDatabases", r#"{ "listDatabases": 1, "nameOnly": true }"#, 4, None),

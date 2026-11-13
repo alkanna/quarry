@@ -187,7 +187,7 @@ fn live_sql_statements_reach_the_query_log_without_passwords() {
         run(&format!("ALTER USER {user} IDENTIFIED BY /*!80000 '{pw}' */ bogus"));
         l.sql(&format!("DROP USER IF EXISTS {user}"));
         l.sql(&format!("DROP DATABASE {schema}; DROP DATABASE {other}"));
-        let log = crate::db::LOG.lock().unwrap();
+        let log = crate::db::log();
         let mine: Vec<&crate::db::LogEntry> = log.iter().filter(|e| e.conn == conn).collect();
         let has = |what: &str| mine.iter().any(|e| e.cmd.contains(what));
         assert!(has("SELECT * FROM t"), "{var}: Query");

@@ -507,7 +507,7 @@ fn live_passwords_sign_in_and_never_reach_the_log_or_an_error() {
         l.w.pg_role_password(1, l.db.clone(), "qr_no_such_role".into(), oid, second.into(), false);
         let err = done(l).1.unwrap_err();
         assert!(!err.contains("Marker") && !err.contains("Märker"), "{var}: {err}");
-        let log = crate::db::LOG.lock().unwrap();
+        let log = crate::db::log();
         let mine: Vec<String> = log.iter().filter(|e| e.conn == l.db.conn && e.cmd.contains(n)).map(|e| format!("{} {}", e.cmd, e.err.clone().unwrap_or_default())).collect();
         assert!(mine.iter().any(|c| c.starts_with("CREATE ROLE") && c.contains("PASSWORD '***'")), "{var}: {mine:?}");
         assert!(mine.iter().any(|c| c.starts_with("ALTER ROLE") && c.contains("PASSWORD '***'")), "{var}: {mine:?}");
