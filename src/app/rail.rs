@@ -1,6 +1,7 @@
 //! The activity rail: a thin column of icons left of the sidebar for the app's panels.
 
 use super::*;
+use crate::ui::dnd;
 
 #[derive(Clone, Copy)]
 pub(super) enum RailIcon {
@@ -68,9 +69,16 @@ impl App {
     }
 
     /// One square per open connection under the panel buttons, with a folded group as one tile, scrolling when they outgrow the rail.
+    /// The tiles and folders drag to reorder with the shared engine, and an open folder's members are a list of their own.
+    /// A lifted tile also carries a `DragItem` payload, so a tile can leave its folder or land among another folder's
+    /// members, and a connection dragged in from the sidebar lands here, through the same `tile_drop` targets. Such a
+    /// drop wins over the move the list would make, since it is the more precise of the two.
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
         let open: Vec<u64> = self.conns.iter().filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).map(|c| c.meta.id).collect();
         sync_order(&mut self.rail_order, &open);
+        // A deleted group's id is given to the next new one, which must not show open for it.
+        let groups = &self.groups;
+        self.rail_open.retain(|g| groups.group(*g).is_some());
         if self.rail_order.is_empty() {
             return;
         }
@@ -79,48 +87,91 @@ impl App {
         // Leaves room for the Settings button, which sits at the bottom of the rail.
         let room = (ui.available_height() - 36.0).max(28.0);
         let items = rail_items(&self.rail_order, &self.groups);
+        let sizes: Vec<f32> = items
+            .iter()
+            .map(|it| match it {
+                RailItem::Folder { gid, members } if self.rail_open.contains(gid) => capsule_h(members.len()),
+                _ => SLOT,
+            })
+            .collect();
+        let keys: Vec<egui::Id> = items
+            .iter()
+            .map(|it| match it {
+                RailItem::Conn(id) => egui::Id::unique(("rail-conn", *id)),
+                RailItem::Folder { gid, .. } => egui::Id::unique(("rail-folder", *gid)),
+            })
+            .collect();
+        let into = vec![true; items.len()];
         let mut pick = None;
         let mut act = None;
         let mut toggle = None;
         let mut drops: Vec<RailDrop> = Vec::new();
+        let mut inner: Option<(u64, Vec<u64>, dnd::Move)> = None;
+        let mut outer = None;
         egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
             ui.spacing_mut().scroll.bar_width = 3.0;
             // A capsule is wider than the 28 px column, so the scroll area's clip must not cut its sides.
             ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(6.0, 0.0)));
-            for item in &items {
-                match item {
-                    RailItem::Conn(id) => self.conn_tile(ui, *id, DropOn::Loose(*id), &mut pick, &mut act, &mut drops),
+            dnd::auto_scroll_while_dragging(ui);
+            outer = dnd::reorder(ui, egui::Id::unique("rail-tiles"), dnd::Items::vertical(&sizes).keys(&keys).into(&into), |ui, k, st| {
+                let slot = ui.max_rect();
+                let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(28.0, 28.0));
+                match &items[k] {
+                    RailItem::Conn(id) => {
+                        dnd::carry(ui.ctx(), st, || DragItem::Conn(*id));
+                        let target = (!st.busy).then_some(DropOn::Loose(*id));
+                        self.conn_tile(ui, tile, *id, st.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
+                    }
                     RailItem::Folder { gid, members } => {
-                        let Some(g) = self.groups.group(*gid) else { continue };
+                        let Some(g) = self.groups.group(*gid) else { return ui.response() };
                         let color = group_color(&g.color);
                         let open_now = self.rail_open.contains(gid);
                         // The tile sits at the first open member in rail order, which is not always the group's first.
                         let anchor = folder_anchor(&self.rail_order, members);
                         let marks: Vec<&str> = members.iter().filter_map(|m| self.conn(*m)).map(|c| engine_mark(c.meta.engine, &c.server.product).0).collect();
                         let tip = format!("{} \u{b7} {} connection{}, {} open", g.name, g.members.len(), if g.members.len() == 1 { "" } else { "s" }, members.len());
-                        // Reserved before the tile so the capsule tint lies under it and under its drop mark.
-                        let bg = open_now.then(|| ui.painter().add(egui::Shape::Noop));
-                        let (r, rect) = folder_tile(ui, &g.name, color, open_now, &marks, &tip);
+                        if open_now {
+                            let span = egui::Rect::from_min_max(tile.min, egui::pos2(tile.right(), tile.bottom() + members.len() as f32 * MEMBER_SLOT));
+                            ui.painter().rect_filled(span.expand2(egui::vec2(3.0, 3.0)), R_LG, tint(color, 36));
+                        }
+                        let (r, rect) = folder_tile(ui, tile, &g.name, color, open_now, &marks, &tip);
+                        if st.lifted {
+                            if open_now {
+                                for (i, m) in members.iter().enumerate() {
+                                    let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 4.0 + i as f32 * MEMBER_SLOT), egui::vec2(28.0, 28.0));
+                                    self.conn_tile(ui, at, *m, true, None, &mut pick, &mut act, &mut drops);
+                                }
+                            }
+                            return r;
+                        }
                         if r.clicked() {
                             toggle = Some(*gid);
                         }
-                        let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
-                        tile_drop(ui, &r, rect, top, &self.groups, &mut drops);
-                        if let Some(bg) = bg {
-                            let mut span = rect;
-                            ui.scope(|ui| {
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                for m in members {
-                                    self.conn_tile(ui, *m, DropOn::Member { id: *m, gid: *gid }, &mut pick, &mut act, &mut drops);
-                                    span = span.union(ui.min_rect());
-                                }
-                            });
-                            ui.painter().set(bg, egui::Shape::rect_filled(span.expand2(egui::vec2(3.0, 3.0)), R_LG, tint(color, 36)));
+                        if !st.busy {
+                            let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
+                            tile_drop(ui, &r, rect, top, &self.groups, &mut drops);
                         }
+                        if open_now {
+                            let list = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom()), egui::vec2(28.0, members.len() as f32 * MEMBER_SLOT));
+                            let msizes = vec![MEMBER_SLOT; members.len()];
+                            let mkeys: Vec<egui::Id> = members.iter().map(|m| egui::Id::unique(("rail-member", *m))).collect();
+                            let mv = put_at(ui, list, |ui| {
+                                dnd::reorder(ui, egui::Id::unique(("rail-capsule", *gid)), dnd::Items::vertical(&msizes).keys(&mkeys), |ui, i, mst| {
+                                    let m = members[i];
+                                    dnd::carry(ui.ctx(), mst, || DragItem::Conn(m));
+                                    let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 4.0), egui::vec2(28.0, 28.0));
+                                    let target = (!mst.busy).then_some(DropOn::Member { id: m, gid: *gid });
+                                    self.conn_tile(ui, at, m, mst.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
+                                })
+                            });
+                            if let Some(mv) = mv {
+                                inner = Some((*gid, members.clone(), mv));
+                            }
+                        }
+                        r
                     }
                 }
-            }
+            });
         });
         if let Some(id) = pick {
             self.active = Some(id);
@@ -130,12 +181,23 @@ impl App {
         {
             self.rail_open.insert(gid);
         }
-        // Both change state after the frame was drawn.
-        if toggle.is_some() || !drops.is_empty() {
+        // All of them change state after the frame was drawn.
+        if toggle.is_some() || !drops.is_empty() || outer.is_some() || inner.is_some() {
             ui.ctx().request_repaint();
         }
-        for d in drops {
-            self.apply_rail_drop(d);
+        if !drops.is_empty() {
+            for d in drops {
+                self.apply_rail_drop(d);
+            }
+        } else if let Some(m) = outer {
+            self.apply_rail_move(&items, m);
+        } else if let Some((gid, members, m)) = inner {
+            let full = self.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
+            if let Some(at) = member_slot(&full, &members, m) {
+                let all = self.conn_ids();
+                self.groups.place(members[m.from], Place::Into(gid, Some(at)), &all);
+                self.save_groups();
+            }
         }
         match act {
             Some((id, 0)) => {
@@ -148,15 +210,21 @@ impl App {
         }
     }
 
-    /// One connection's tile with its context menu, drag source and drop target.
-    fn conn_tile(&self, ui: &mut egui::Ui, id: u64, target: DropOn, pick: &mut Option<u64>, act: &mut Option<(u64, u8)>, drops: &mut Vec<RailDrop>) {
-        let Some(c) = self.conns.iter().find(|c| c.meta.id == id) else { return };
-        let r = conn_shortcut(ui, c, self.active == Some(id));
+    /// One connection's tile in `rect` with its context menu and, given a `target`, the drop target it is. None when the
+    /// connection is gone. A lifted tile floats with the pointer, so it gets no menu.
+    #[allow(clippy::too_many_arguments)]
+    fn conn_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, id: u64, lifted: bool, target: Option<DropOn>, pick: &mut Option<u64>, act: &mut Option<(u64, u8)>, drops: &mut Vec<RailDrop>) -> Option<egui::Response> {
+        let c = self.conns.iter().find(|c| c.meta.id == id)?;
+        let r = conn_shortcut(ui, rect, c, self.active == Some(id));
+        if lifted {
+            return Some(r);
+        }
         if r.clicked() {
             *pick = Some(id);
         }
-        crate::ui::dnd::drag_source(ui, &r, DragItem::Conn(id), &c.meta.name);
-        tile_drop(ui, &r, r.rect, target, &self.groups, drops);
+        if let Some(t) = target {
+            tile_drop(ui, &r, r.rect, t, &self.groups, drops);
+        }
         r.context_menu(|ui| {
             menu_look(ui);
             if ui.button("Reconnect").clicked() {
@@ -169,11 +237,29 @@ impl App {
                 *act = Some((id, 2));
             }
         });
+        Some(r)
+    }
+
+    /// Applies a move of the rail's tile list: a reorder of tiles and folders, or a tile let go on the middle of another
+    /// tile (a new group) or of a folder (into it). A folder let go on a tile does nothing, since groups do not nest.
+    fn apply_rail_move(&mut self, items: &[RailItem], m: dnd::Move) {
+        if !m.into {
+            self.rail_order = order_after_move(&self.rail_order, items, m);
+            return;
+        }
+        let Some(RailItem::Conn(conn)) = items.get(m.from) else { return };
+        match items.get(m.to) {
+            Some(RailItem::Conn(target)) => self.apply_rail_drop(RailDrop::Pair { conn: *conn, target: *target }),
+            Some(RailItem::Folder { gid, .. }) => self.apply_rail_drop(RailDrop::Into { conn: *conn, gid: *gid, at: None }),
+            None => {}
+        }
     }
 
     /// Applies one drop on the rail: the groups are saved, and the toast offers Undo.
     fn apply_rail_drop(&mut self, d: RailDrop) {
         let before = self.groups.clone();
+        // Undo puts the tile back where it stood in the rail too, not only in its old group.
+        let rail = self.rail_order.clone();
         let all = self.conn_ids();
         let name = |a: &App, id: u64| a.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
         match d {
@@ -185,7 +271,7 @@ impl App {
                 let left = self.groups.group_of(conn).filter(|g| g.fold_rail).map(|g| g.name.clone());
                 if let Some(g) = left {
                     self.groups.place(conn, Place::Loose(None), &all);
-                    self.toast_restore(format!("{} left {g}.", name(self, conn)), Restore::Groups(Box::new(before)));
+                    self.toast_restore(format!("{} left {g}.", name(self, conn)), Restore::Groups { groups: Box::new(before), rail });
                 }
                 move_next_to(&mut self.rail_order, conn, anchor, after);
             }
@@ -198,7 +284,7 @@ impl App {
                     if let Some(last) = self.rail_order.iter().copied().filter(|c| *c != conn && members.contains(c)).last() {
                         move_next_to(&mut self.rail_order, conn, last, true);
                     }
-                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), Restore::Groups(Box::new(before)));
+                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), Restore::Groups { groups: Box::new(before), rail });
                 }
             }
             RailDrop::Pair { conn, target } => {
@@ -207,7 +293,7 @@ impl App {
                 self.groups.place(conn, Place::Into(gid, None), &all);
                 self.rail_open.insert(gid);
                 move_next_to(&mut self.rail_order, conn, target, true);
-                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), Restore::Groups(Box::new(before)), Some(gid));
+                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), Restore::Groups { groups: Box::new(before), rail }, Some(gid));
             }
         }
         self.save_groups();
@@ -370,8 +456,8 @@ fn tile_drop(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: DropOn, gr
 
 /// A 28 px tile for a folded group: tinted in the group color with a bar on its left edge, holding a 2x2 grid of its
 /// members' engine logos while closed and an open folder while open. Returns the click response and the tile's rect.
-fn folder_tile(ui: &mut egui::Ui, name: &str, color: Color32, open: bool, marks: &[&str], tip: &str) -> (egui::Response, egui::Rect) {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, open: bool, marks: &[&str], tip: &str) -> (egui::Response, egui::Rect) {
+    let r = ui.interact(rect, ui.id().with("folder-tile"), Sense::click());
     let state = state_of(&r);
     let alpha = [if open { 72 } else { 56 }, 84, 104][state];
     let p = ui.painter();
@@ -414,6 +500,47 @@ fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
     order.retain(|c| *c != conn);
     let at = order.iter().position(|c| *c == anchor).map_or(order.len(), |i| i + after as usize);
     order.insert(at, conn);
+}
+
+/// A tile's slot in the rail list: the 28 px tile and the 8 px gap, half above and half below it.
+const SLOT: f32 = 36.0;
+/// A member's slot inside an open folder: a 4 px gap above its tile.
+const MEMBER_SLOT: f32 = 32.0;
+
+/// The slot of an open folder: its tile, its members and the capsule's margin.
+fn capsule_h(members: usize) -> f32 {
+    SLOT + members as f32 * MEMBER_SLOT + 3.0
+}
+
+/// The rail order once item `m.from` of `items` moves to `m.to`: each folder brings its open members in the order they
+/// had, so the folder keeps its anchor.
+fn order_after_move(order: &[u64], items: &[RailItem], m: dnd::Move) -> Vec<u64> {
+    let mut ids: Vec<Vec<u64>> = items
+        .iter()
+        .map(|it| match it {
+            RailItem::Conn(id) => vec![*id],
+            RailItem::Folder { members, .. } => order.iter().copied().filter(|c| members.contains(c)).collect(),
+        })
+        .collect();
+    m.apply(&mut ids);
+    ids.concat()
+}
+
+/// Where `Groups::place` puts the member moved by `m` inside an open folder that shows `open` of the group's `full`
+/// members: next to its new neighbour among the open ones, counted in the full list without it. None for no change.
+fn member_slot(full: &[u64], open: &[u64], m: dnd::Move) -> Option<usize> {
+    if m.into || m.from == m.to || m.to >= open.len() {
+        return None;
+    }
+    let mut now = open.to_vec();
+    m.apply(&mut now);
+    let dragged = now[m.to];
+    let rest: Vec<u64> = full.iter().copied().filter(|c| *c != dragged).collect();
+    match (now.get(m.to + 1), m.to.checked_sub(1).and_then(|i| now.get(i))) {
+        (Some(next), _) => rest.iter().position(|c| c == next),
+        (None, Some(prev)) => rest.iter().position(|c| c == prev).map(|i| i + 1),
+        _ => None,
+    }
 }
 
 /// Two-letter mark and product name. MariaDB shares the MySQL engine, so only the server
@@ -489,8 +616,9 @@ fn pg_monogram() -> egui::ColorImage {
 
 /// A 28 px square with the engine logo, a status dot at the bottom right and, for a tagged
 /// connection, a bar in the tag color on the left edge.
-fn conn_shortcut(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click_and_drag());
+fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool) -> egui::Response {
+    // Click only: the reorder engine senses the drag under it.
+    let r = ui.interact(rect, ui.id().with(("tile", c.meta.id)), Sense::click());
     let state = state_of(&r);
     let (mark, product) = engine_mark(c.meta.engine, &c.server.product);
     let color = mark_color(mark);
@@ -699,6 +827,30 @@ mod tests {
         assert_eq!(r(DropOn::Member { id: 3, gid: 1 }, Zone::After, 1), Some(RailDrop::Into { conn: 1, gid: 1, at: Some(2) }));
         assert_eq!(r(DropOn::Member { id: 2, gid: 1 }, Zone::Before, 9), Some(RailDrop::Into { conn: 9, gid: 1, at: Some(1) }));
         assert_eq!(r(DropOn::FolderTop { gid: 1, anchor: 1 }, Zone::After, 9), Some(RailDrop::Into { conn: 9, gid: 1, at: Some(0) }));
+    }
+
+    #[test]
+    fn a_moved_folder_brings_its_open_members_along() {
+        let g = groups_of(&[("Prod", true, &[2, 4])]);
+        let order = [1, 4, 3, 2];
+        let items = rail_items(&order, &g);
+        // Items: 1, the folder (4 then 2 in rail order), 3. The folder goes last and 4 stays its anchor.
+        let m = dnd::Move { from: 1, to: 2, into: false };
+        assert_eq!(order_after_move(&order, &items, m), [1, 3, 4, 2]);
+        assert_eq!(order_after_move(&order, &items, dnd::Move { from: 2, to: 0, into: false }), [3, 1, 4, 2]);
+    }
+
+    #[test]
+    fn a_member_moved_in_its_folder_keeps_the_closed_members_in_place() {
+        // 9 is closed, so the folder shows 1, 2 and 3.
+        let full = [1, 9, 2, 3];
+        let open = [1, 2, 3];
+        let mv = |from, to| member_slot(&full, &open, dnd::Move { from, to, into: false });
+        // 3 to the top goes before 1; 1 to the end goes after 3; 1 below 2 goes before 3, after 9 and 2.
+        assert_eq!(mv(2, 0), Some(0));
+        assert_eq!(mv(0, 2), Some(3));
+        assert_eq!(mv(0, 1), Some(2));
+        assert_eq!(mv(1, 1), None);
     }
 
     #[test]

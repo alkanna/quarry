@@ -217,3 +217,31 @@ fn the_picker_groups_its_list_folds_it_and_opens_the_panel() {
     ui.click("Manage groups…");
     assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
 }
+
+#[test]
+fn esc_cancels_a_connection_drag_and_a_click_still_activates() {
+    let Some(mut ui) = panel() else { return };
+    ui.drag_esc("sandbox", "Group Staging", 0.5);
+    assert_eq!(members(&ui, STAGE), [2, 14], "Esc did not cancel the drop");
+    assert!(ui.app().groups.group_of(17).is_none());
+    ui.click("sandbox");
+    assert_eq!(ui.app().active, Some(17));
+}
+
+#[test]
+fn the_edit_dialog_reorders_members_by_dragging_and_esc_cancels_without_closing_it() {
+    let Some(mut ui) = panel() else { return };
+    right_click(&mut ui, "Group Production");
+    ui.click("Edit group…");
+    ui.show("Member billing");
+    let form = |a: &App| match &a.modal {
+        Some(Modal::GroupEdit(f)) => Some(f.members.clone()),
+        _ => None,
+    };
+    ui.drag_esc("Member billing", "Member prod-eu", 0.1);
+    assert_eq!(form(ui.app()), Some(vec![11, 12, 13]), "Esc moved a member or closed the dialog");
+    ui.drag("Member prod-eu", "Member billing", 0.9, 1);
+    assert_eq!(form(ui.app()), Some(vec![12, 13, 11]));
+    ui.click("Save");
+    assert_eq!(members(&ui, PROD), [12, 13, 11]);
+}

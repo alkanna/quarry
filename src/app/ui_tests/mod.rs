@@ -281,6 +281,38 @@ impl UiApp {
         self.h.run_steps(4);
     }
 
+    /// Presses at `from` and moves to `to` in steps, past the drag threshold, leaving the button down.
+    pub fn press_and_move(&mut self, from: egui::Pos2, to: egui::Pos2) {
+        self.h.hover_at(from);
+        self.h.step();
+        self.h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        self.h.step();
+        for i in 1..=6 {
+            self.h.hover_at(from.lerp(to, i as f32 / 6.0));
+            self.h.step();
+        }
+    }
+
+    /// Lets go of the primary button at `at`, then the frames a drop and its landing need.
+    pub fn release(&mut self, at: egui::Pos2) {
+        self.h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        self.h.run_steps(4);
+    }
+
+    /// `drag` that presses Esc before letting go, which must cancel it.
+    #[allow(dead_code)]
+    pub fn drag_esc(&mut self, from: &str, to: &str, at_frac: f32) {
+        self.show(from);
+        self.show(to);
+        let start = self.node(from, Pick::Only).rect().center();
+        let r = self.node(to, Pick::Only).rect();
+        let end = egui::pos2(r.center().x, r.top() + r.height() * at_frac);
+        self.press_and_move(start, end);
+        self.h.key_press(egui::Key::Escape);
+        self.h.step();
+        self.release(end);
+    }
+
     /// Presses a key with modifiers and gives the frames its effects need.
     #[allow(dead_code)]
     pub fn key(&mut self, mods: egui::Modifiers, key: egui::Key) {

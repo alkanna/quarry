@@ -391,7 +391,9 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
             if !held {
                 m.lift = None;
             }
-        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) || drag_cancelled(&ctx) {
+            // A list whose lifted item also carries a DragAndDrop payload (the rail) never sees the Esc key: egui's
+            // plugin eats it to drop the payload, which drag_cancelled notices instead.
             m.lift = Some(Lift { cancelled: true, ..l });
             m.settle = Some(Settle { index: l.from, at: pos, t0: now });
         } else {
@@ -496,9 +498,16 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
         let p = ctx.layer_painter(layer).with_clip_rect(room);
         p.add(ui.visuals().popup_shadow.as_shape(rect, R_SM));
         p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, if target.is_some() { PRIMARY() } else { BORDER() }), egui::StrokeKind::Inside);
-        let mut child = ui.new_child(egui::UiBuilder::new().scope_id(id.with(("item", key(k)))).layer_id(layer).max_rect(rect));
-        child.set_clip_rect(room);
-        draw(&mut child, k, ItemState { lifted: true, busy: true, offset: 0.0 });
+        // In an area that takes no pointer: widgets the item draws there would otherwise cover the targets under the
+        // pointer, and a lifted item that also carries a DragAndDrop payload (`carry`) needs those targets to see it.
+        let layout = *ui.layout();
+        let style = ui.style().clone();
+        egui::Area::new(layer.id).order(egui::Order::Tooltip).interactable(false).constrain(false).fixed_pos(rect.min).show(&ctx, |area| {
+            let mut child = area.new_child(egui::UiBuilder::new().scope_id(id.with(("item", key(k)))).layout(layout).max_rect(rect));
+            child.set_style(style);
+            child.set_clip_rect(room);
+            draw(&mut child, k, ItemState { lifted: true, busy: true, offset: 0.0 });
+        });
     }
     ctx.data_mut(|d| d.insert_temp(id, m));
     out
@@ -520,6 +529,15 @@ pub(crate) fn drag_source_with<T: std::any::Any + Send + Sync>(ui: &egui::Ui, r:
     p.add(ui.visuals().popup_shadow.as_shape(rect, R_SM));
     p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
     paint(&p.with_clip_rect(rect), rect);
+}
+
+/// Lets an item lifted by `reorder` also travel as an `egui::DragAndDrop` payload, so targets outside its list (another
+/// list, a tree) can take it. Call it from `draw` with the item's state: the payload is set while it is lifted. The
+/// list itself cancels a release outside it, so the target that took the payload is the one that acts.
+pub(crate) fn carry<T: std::any::Any + Send + Sync>(ctx: &egui::Context, st: ItemState, payload: impl FnOnce() -> T) {
+    if st.lifted && !drag_cancelled(ctx) && ctx.input(|i| i.pointer.any_down()) {
+        egui::DragAndDrop::set_payload(ctx, payload());
+    }
 }
 
 /// Scrolls the scroll area `ui` is inside while an `egui::DragAndDrop` payload is held near its edges, on both axes,

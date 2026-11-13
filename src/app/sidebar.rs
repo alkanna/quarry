@@ -184,14 +184,17 @@ pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Respo
 /// `conn_row` indented by `indent`, with the matched byte ranges of the name highlighted, and optionally draggable.
 pub(super) fn conn_row_in(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool) -> egui::Response {
     let sense = if drag { Sense::click_and_drag() } else { Sense::click() };
-    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| {
-        let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
-        p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
-        paint_name_tag_hl(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag, hl);
-        let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
-        let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
-        p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
-    })
+    side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| paint_conn_row(p, r, c, active, hl))
+}
+
+/// The inside of a connection row: status dot, name and tag, address. Also the ghost of a dragged row.
+pub(super) fn paint_conn_row(p: &egui::Painter, r: egui::Rect, c: &Conn, active: bool, hl: &[(usize, usize)]) {
+    let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
+    p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
+    paint_name_tag_hl(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag, hl);
+    let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
+    let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
+    p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
 }
 
 impl App {

@@ -4,7 +4,7 @@
 
 use super::conns_panel::{color_swatches, folder_glyph};
 use super::*;
-use crate::ui::dnd::{drag_source, drop_line};
+use crate::ui::dnd;
 
 /// The working copy of a group while the dialog is open.
 #[derive(Default)]
@@ -104,84 +104,68 @@ impl App {
     }
 }
 
-/// The CONNECTIONS card: one row per member, then the button that adds more.
+/// The CONNECTIONS card: one row per member, then the button that adds more. The whole row drags to reorder, and
+/// Alt+Up or Alt+Down moves the focused one.
 fn members_card(ui: &mut egui::Ui, f: &mut GroupForm, conns: &[Conn]) {
     card_caption(ui, "CONNECTIONS", "drag to reorder");
     let mut remove = None;
-    let mut reorder: Option<(u64, usize)> = None;
+    let mut mv = None;
     card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
-        let members = f.members.clone();
-        for (i, id) in members.iter().enumerate() {
-            let Some(c) = conns.iter().find(|c| c.meta.id == *id) else { continue };
-            let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), MEMBER_H), Sense::click_and_drag());
-            let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), egui::vec2(24.0, 24.0));
-            // Over the row, so a press on the cross is a click on it and never the start of a drag.
-            let x = ui.interact(x_rect, egui::Id::unique(("member-remove", *id)), Sense::click());
-            let p = ui.painter();
-            if i > 0 {
+        let members: Vec<&Conn> = f.members.iter().filter_map(|id| conns.iter().find(|c| c.meta.id == *id)).collect();
+        // Members whose connection is gone are kept out of the rows and the move indexes alike.
+        f.members.retain(|id| conns.iter().any(|c| c.meta.id == *id));
+        let sizes = vec![MEMBER_H; members.len()];
+        let keys: Vec<egui::Id> = members.iter().map(|c| egui::Id::unique(("member", c.meta.id))).collect();
+        let id = ui.make_persistent_id("group-members");
+        mv = dnd::reorder(ui, id, dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+            let c = members[i];
+            let rect = ui.max_rect();
+            let r = ui.interact(rect, ui.id().with("row"), Sense::click());
+            let p = ui.painter().clone();
+            if i > 0 && !st.lifted && st.offset == 0.0 {
                 p.hline(rect.x_range(), rect.top(), Stroke::new(0.5, LINE()));
             }
-            p.rect_filled(rect, 0, hover_fill(state_of(&r)));
-            for (dx, dy) in [(0.0, -4.0), (0.0, 0.0), (0.0, 4.0), (4.0, -4.0), (4.0, 0.0), (4.0, 4.0)] {
-                p.circle_filled(egui::pos2(rect.left() + 14.0 + dx, rect.center().y + dy), 1.0, FAINT());
-            }
+            p.rect_filled(rect, 0, hover_fill(if st.busy { 0 } else { state_of(&r) }));
+            dnd::grip_dots(&p, egui::pos2(rect.left() + 16.0, rect.center().y), if st.lifted || r.hovered() { MUTED() } else { FAINT() });
             let cy = rect.center().y;
             p.circle_filled(egui::pos2(rect.left() + 34.0, cy), 3.5, status_color(&c.status));
+            let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), egui::vec2(24.0, 24.0));
             let right = x_rect.left() - 6.0;
-            let left = if c.meta.tag.is_empty() { right } else { paint_tag(p, right, cy, &c.meta.tag, 140.0) - 8.0 };
-            let name = truncated(p, &c.meta.name, FontId::proportional(TXT_BODY), BRIGHT(), left - (rect.left() + 46.0));
+            let left = if c.meta.tag.is_empty() { right } else { paint_tag(&p, right, cy, &c.meta.tag, 140.0) - 8.0 };
+            let name = truncated(&p, &c.meta.name, FontId::proportional(TXT_BODY), BRIGHT(), left - (rect.left() + 46.0));
             p.galley(egui::pos2(rect.left() + 46.0, cy - 8.0 - name.size().y / 2.0 + 2.0), name, BRIGHT());
             let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
-            let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), left - (rect.left() + 46.0));
+            let addr = truncated(&p, uri, FontId::monospace(TXT_CAPTION), FAINT(), left - (rect.left() + 46.0));
             p.galley(egui::pos2(rect.left() + 46.0, cy + 8.0 - addr.size().y / 2.0), addr, FAINT());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Member {}", c.meta.name)));
+            if st.lifted {
+                return r;
+            }
+            // Drawn after the row, so a press on the cross is a click on it and never the start of a drag.
+            let x = ui.interact(x_rect, egui::Id::unique(("member-remove", c.meta.id)), Sense::click());
             let xc = if x.hovered() { ALERT() } else { MUTED() };
             let (xc_pos, s) = (x_rect.center(), Stroke::new(1.4, xc));
             p.line_segment([xc_pos + egui::vec2(-3.5, -3.5), xc_pos + egui::vec2(3.5, 3.5)], s);
             p.line_segment([xc_pos + egui::vec2(-3.5, 3.5), xc_pos + egui::vec2(3.5, -3.5)], s);
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Member {}", c.meta.name)));
             x.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Remove {} from the group", c.meta.name)));
-            let x = x.on_hover_text("Remove from the group");
-            if x.clicked() {
-                remove = Some(*id);
+            if x.on_hover_text("Remove from the group").clicked() {
+                remove = Some(c.meta.id);
             }
-            drag_source(ui, &r, DragItem::Conn(*id), &c.meta.name);
-            if let Some(m) = held_member(ui.ctx(), &members).filter(|_| r.contains_pointer()) {
-                let frac = ui.ctx().pointer_interact_pos().map_or(0.5, |p| ((p.y - r.rect.top()) / r.rect.height().max(1.0)).clamp(0.0, 1.0));
-                let at = if frac < 0.5 { i } else { i + 1 };
-                drop_line(ui.painter(), r.rect.x_range(), if frac < 0.5 { r.rect.top() } else { r.rect.bottom() });
-                if r.dnd_release_payload::<DragItem>().is_some() {
-                    reorder = Some((m, at));
-                }
-            }
-        }
+            r
+        });
         if !members.is_empty() {
             rule_line(ui);
         }
         add_row(ui, f, conns);
     });
     ui.add_space(16.0);
+    if let Some(m) = mv {
+        m.apply(&mut f.members);
+    }
     if let Some(id) = remove {
         f.members.retain(|c| *c != id);
-    }
-    if let Some((m, mut at)) = reorder
-        && let Some(s) = f.members.iter().position(|c| *c == m)
-    {
-        // The index counts the list with the member still in it, so a move down is one less once it leaves.
-        if s < at {
-            at -= 1;
-        }
-        let c = f.members.remove(s);
-        f.members.insert(at.min(f.members.len()), c);
-    }
-}
-
-/// The member being dragged, when it is one of this group's.
-fn held_member(ctx: &egui::Context, members: &[u64]) -> Option<u64> {
-    match egui::DragAndDrop::payload::<DragItem>(ctx).as_deref() {
-        Some(DragItem::Conn(id)) if members.contains(id) => Some(*id),
-        _ => None,
     }
 }
 

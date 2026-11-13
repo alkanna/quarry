@@ -10,7 +10,8 @@ pub(super) enum Restore {
     /// A deleted group, with where it stood in the list. Its members left the group when it went.
     Group { g: Group, at: usize },
     /// The groups as they were before a change that created or moved into one, such as a drop on the rail.
-    Groups(Box<Groups>),
+    /// `rail` is the rail order then, so the tile goes back to its place as well.
+    Groups { groups: Box<Groups>, rail: Vec<u64> },
     /// Deleted library scripts and the folders that held them.
     Saved { scripts: Vec<Script>, folders: Vec<Folder> },
     /// A file moved to the trash, with the bytes it held.
@@ -27,11 +28,15 @@ impl App {
                 self.save_groups();
                 self.ok(format!("Group {name} is back."));
             }
-            Restore::Groups(before) => {
+            Restore::Groups { groups: before, rail } => {
                 // Connections removed since are pruned so the snapshot never brings a dead id back.
                 self.groups = *before;
                 let alive = self.conn_ids();
                 self.groups.prune(&alive);
+                // The rail drops what has closed since and appends what opened since on its next frame.
+                self.rail_order = rail;
+                let groups = &self.groups;
+                self.rail_open.retain(|g| groups.group(*g).is_some());
                 self.save_groups();
                 self.ok("Grouping undone.");
             }

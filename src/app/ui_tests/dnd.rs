@@ -9,27 +9,6 @@ fn shown(ui: &UiApp) -> Vec<String> {
     crate::app::table::visible_cols(a.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())
 }
 
-fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
-    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
-}
-
-/// Presses at `from` and moves to `to` in steps, past the drag threshold, leaving the button down.
-fn press_and_move(ui: &mut UiApp, from: egui::Pos2, to: egui::Pos2) {
-    ui.h.hover_at(from);
-    ui.h.step();
-    ui.h.input_mut().events.push(button(from, true));
-    ui.h.step();
-    for i in 1..=6 {
-        ui.h.hover_at(from.lerp(to, i as f32 / 6.0));
-        ui.h.step();
-    }
-}
-
-fn release(ui: &mut UiApp, at: egui::Pos2) {
-    ui.h.input_mut().events.push(button(at, false));
-    ui.h.run_steps(4);
-}
-
 /// The rect of the header of `col`. Other widgets in the Mongo demo carry field names too, so it is the one right above
 /// the column's first cell.
 fn header(ui: &UiApp, col: &str) -> egui::Rect {
@@ -72,10 +51,10 @@ fn esc_cancels_a_drag_and_keeps_the_popover_open() {
     let from = ui.h.get_by_label(&format!("{} column", before[0])).rect().center();
     let r = ui.h.get_by_label(&format!("{} column", before[2])).rect();
     let to = egui::pos2(r.center().x, r.top() + r.height() * 0.8);
-    press_and_move(&mut ui, from, to);
+    ui.press_and_move(from, to);
     ui.h.key_press(egui::Key::Escape);
     ui.h.step();
-    release(&mut ui, to);
+    ui.release(to);
     assert_eq!(shown(&ui), before, "Esc did not cancel the drag");
     assert!(ui.h.query_all_by_label(&format!("{} column", before[1])).next().is_some(), "Esc closed the popover instead of only cancelling the drag");
 }
@@ -93,9 +72,9 @@ fn header_drag_reorders(load: fn(&mut App)) {
     // The first unpinned header, past the middle of the one two further, so it lands after that one.
     let k = pins(&ui);
     let (from, to) = (across(&ui, &before[k], 0.5), across(&ui, &before[k + 2], 0.8));
-    press_and_move(&mut ui, from, to);
+    ui.press_and_move(from, to);
     ui.h.step();
-    release(&mut ui, to);
+    ui.release(to);
     let mut want = before.clone();
     let c = want.remove(k);
     want.insert(k + 2, c);
@@ -110,8 +89,8 @@ fn a_pinned_header_stays_in_the_pinned_block() {
     let before = shown(&ui);
     assert_eq!(pins(&ui), 1, "the demo no longer pins one column");
     let (from, to) = (across(&ui, &before[0], 0.5), across(&ui, &before[2], 0.8));
-    press_and_move(&mut ui, from, to);
-    release(&mut ui, to);
+    ui.press_and_move(from, to);
+    ui.release(to);
     assert_eq!(shown(&ui), before, "a pinned column left the pinned block");
     assert_eq!(pins(&ui), 1, "a drag changed which columns are pinned");
 }
@@ -143,10 +122,10 @@ fn esc_cancels_a_header_drag() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let before = shown(&ui);
     let (from, to) = (across(&ui, &before[0], 0.5), across(&ui, &before[2], 0.8));
-    press_and_move(&mut ui, from, to);
+    ui.press_and_move(from, to);
     ui.h.key_press(egui::Key::Escape);
     ui.h.step();
-    release(&mut ui, to);
+    ui.release(to);
     assert_eq!(shown(&ui), before, "Esc did not cancel the header drag");
 }
 
@@ -158,8 +137,8 @@ fn the_resize_edge_still_resizes_instead_of_dragging_the_header() {
     // The header's widget is inset 4 pt from its cell, and the resize edge covers 3 pt either side of the cell's border.
     let from = across(&ui, &c, 1.0) + egui::vec2(3.0, 0.0);
     let to = from + egui::vec2(60.0, 0.0);
-    press_and_move(&mut ui, from, to);
-    release(&mut ui, to);
+    ui.press_and_move(from, to);
+    ui.release(to);
     assert_eq!(shown(&ui), before, "dragging the resize edge moved the column");
     let a = ui.app();
     assert!(a.prefs.cols.get(&a.col_key(false)).is_some_and(|p| p.widths.contains_key(&c)), "dragging the resize edge did not resize {c}");

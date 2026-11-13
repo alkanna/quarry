@@ -4,7 +4,7 @@
 //! without a window. Changes are collected while the rows are drawn and applied after, since the rows borrow the lists.
 
 use super::*;
-use crate::ui::dnd::{drag_source, drop_fill, drop_line, hover_open};
+use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot};
 
 /// Whether the rail shows the Connections button.
 pub(super) const READY: bool = true;
@@ -241,6 +241,7 @@ impl App {
         let room = (ui.available_height() - foot_h).max(80.0);
         egui::ScrollArea::vertical().id_salt("conns-panel").auto_shrink(false).max_height(room).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
+            auto_scroll_while_dragging(ui);
             let cx = Cx { conns: &self.conns, groups: &self.groups, all: &all, active: self.active, toks: &toks };
             draw_rows(ui, &rows, &cx, &mut self.conns_ui, &mut acts);
         });
@@ -484,7 +485,8 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
                 if r.clicked() {
                     acts.push(PanelAct::Activate(c.meta.id));
                 }
-                drag_source(ui, &r, DragItem::Conn(c.meta.id), &c.meta.name);
+                // The ghost is the row itself, without its indent, so it reads the same wherever it is carried.
+                drag_source_with(ui, &r, DragItem::Conn(c.meta.id), |p, rect| paint_conn_row(p, egui::Rect::from_min_max(rect.min + egui::vec2(12.0, 0.0), rect.max - egui::vec2(8.0, 0.0)), c, false, &[]));
                 drop_target(ui, &r, rows, i, cx, acts);
                 conn_menu(&r, c, group.is_some(), acts);
             }
@@ -493,15 +495,18 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
     // The room under the last row takes a connection out to the end of the loose ones.
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), Sense::hover());
     if !filtering && let Some(m) = held(&ctx) && r.contains_pointer() {
-        drop_line(ui.painter(), rect.x_range(), rect.top() + 1.0);
+        paint_spot(ui.painter(), rect.with_max_y(rect.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, rect.left() + 8.0, MEMBER_INDENT);
         if r.dnd_release_payload::<DragItem>().is_some() {
             acts.push(PanelAct::Move(m, Place::Loose(None)));
         }
     }
 }
 
-/// The connection being dragged, if a drag of one is on.
+/// The connection being dragged, if a drag of one is on and Esc has not cancelled it.
 fn held(ctx: &egui::Context) -> Option<u64> {
+    if drag_cancelled(ctx) {
+        return None;
+    }
     match egui::DragAndDrop::payload::<DragItem>(ctx).as_deref() {
         Some(DragItem::Conn(id)) => Some(*id),
         _ => None,
@@ -517,13 +522,18 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
     let Some(m) = held(ui.ctx()).filter(|_| r.contains_pointer()) else { return };
     let frac = ui.ctx().pointer_interact_pos().map_or(0.5, |p| ((p.y - r.rect.top()) / r.rect.height().max(1.0)).clamp(0.0, 1.0));
     let Some(place) = drop_place(cx.groups, cx.all, m, rows, i, frac) else { return };
-    let p = ui.painter();
-    match (&rows[i], drop_slot(&rows[i], frac)) {
-        (CRow::Conn { .. }, Slot::Before) => drop_line(p, r.rect.x_range(), r.rect.top() - 1.0),
-        (CRow::Conn { .. }, _) | (CRow::Caption { .. }, _) => drop_line(p, r.rect.x_range(), r.rect.bottom() + 1.0),
-        (CRow::Group { open: true, .. }, Slot::After) => drop_line(p, r.rect.x_range(), r.rect.bottom() + 1.0),
-        _ => drop_fill(p, r.rect),
-    }
+    // The mark follows what the drop does, so the edges of a group row, which put the connection into it, show the fill.
+    // A line's depth is the list it lands in: a group's members are one step in.
+    let zone = match (&rows[i], drop_slot(&rows[i], frac)) {
+        (CRow::Conn { .. }, Slot::Before) => Zone::Before,
+        (CRow::Conn { .. }, _) | (CRow::Caption { .. }, _) | (CRow::Group { open: true, .. }, Slot::After) => Zone::After,
+        _ => Zone::Into,
+    };
+    let depth = match &rows[i] {
+        CRow::Conn { group: Some(_), .. } | CRow::Group { .. } => 1,
+        _ => 0,
+    };
+    paint_spot(ui.painter(), r.rect, Spot { zone, depth }, r.rect.left() + 8.0, MEMBER_INDENT);
     if r.dnd_release_payload::<DragItem>().is_some() {
         acts.push(PanelAct::Move(m, place));
     }
