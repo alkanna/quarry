@@ -59,6 +59,16 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        // QUARRY_TEST_CROWD=1 adds long collection names and thirty connections, for the one-line rows and the scrolling connections menu.
+        if std::env::var("QUARRY_TEST_CROWD").is_ok() {
+            if let Some((_, Some(c))) = self.conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
+                c.extend(["hydra_oauth2_obfuscated_authentication_session", "hydra_oauth2_trusted_jwt_bearer_issuer"].map(String::from));
+                c.sort();
+            }
+            for i in 0..30u64 {
+                self.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
+            }
+        }
         // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
         if std::env::var("QUARRY_TEST_RAIL").is_ok() && std::env::var("QUARRY_TEST_SQL").is_err() {
             // The SQL demo replaces the tabs, which the Mongo demo keeps.
