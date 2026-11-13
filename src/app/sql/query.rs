@@ -1,6 +1,7 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
 use crate::app::*;
+use crate::ui::dnd;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
@@ -155,6 +156,14 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
     let widths: Vec<f32> = set.cols.iter().zip(wide).map(|(c, &longest)| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0)).collect();
     let lead = CHECK_W + NUM_W;
     let total = lead + widths.iter().sum::<f32>();
+    // The order the columns show in, as indexes into `set.cols`. Headers drag to reorder; the order is kept in memory for
+    // results with the same columns, so the next page or a run again keeps it.
+    let names: Vec<&str> = set.cols.iter().map(|c| c.name.as_str()).collect();
+    let oid = egui::Id::unique(("sql-query-order", &names));
+    let kept: Vec<String> = ui.ctx().data(|d| d.get_temp(oid)).unwrap_or_default();
+    let mut order: Vec<usize> = kept.iter().filter_map(|n| names.iter().position(|c| c == n)).collect();
+    let rest: Vec<usize> = (0..names.len()).filter(|i| !order.contains(i)).collect();
+    order.extend(rest);
     let mut out = GridOut::default();
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
@@ -180,7 +189,8 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                             out.check = Some((i, shift));
                         }
                         let mut x = rr.left() + lead;
-                        for (ci, (c, w)) in set.cols.iter().zip(&widths).enumerate() {
+                        for &ci in &order {
+                            let (c, w) = (&set.cols[ci], &widths[ci]);
                             let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
                             x += w;
                             if !ui.is_rect_visible(cell) {
@@ -234,13 +244,35 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
             out.all = Some(!all);
         }
         p.text(egui::pos2(head.left() + CHECK_W + 18.0 - off, head.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
-        let mut x = head.left() + lead - off;
-        for (c, w) in set.cols.iter().zip(&widths) {
-            let g = p.layout_no_wrap(c.name.clone(), FontId::proportional(TXT_SMALL), MUTED());
-            p.galley(egui::pos2(x + 8.0, head.center().y - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
-            x += w;
-        }
         p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, LINE()));
+        // Headers drag sideways to reorder the columns, or Alt+Left and Alt+Right on the focused one.
+        let ow: Vec<f32> = order.iter().map(|&ci| widths[ci]).collect();
+        let keys: Vec<egui::Id> = order.iter().map(|&ci| egui::Id::unique(("sql-query-col", names[ci]))).collect();
+        let strip = egui::Rect::from_min_size(egui::pos2(head.left() + lead - off, head.top()), egui::vec2(ow.iter().sum(), TABLE_HEAD_H));
+        let room = egui::Rect::from_min_max(egui::pos2(head.left() + lead, head.top()), head.max);
+        let mv = put_at(ui, strip, |ui| {
+            ui.set_clip_rect(room.intersect(ui.clip_rect()));
+            dnd::reorder(ui, egui::Id::unique(("sql-query-head", &names)), dnd::Items::horizontal(&ow, TABLE_HEAD_H).keys(&keys), |ui, k, st| {
+                let c = &set.cols[order[k]];
+                let cell = ui.max_rect();
+                let r = ui.interact(cell, ui.scope_id().with("head"), Sense::click());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ColumnHeader, true, format!("Result column {}", c.name)));
+                let state = if st.busy { 0 } else { state_of(&r) };
+                if state > 0 {
+                    ui.painter().rect_filled(cell, 0, hover_fill(state));
+                }
+                let color = if st.lifted || state > 0 { BRIGHT() } else { MUTED() };
+                let g = ui.painter().layout_no_wrap(c.name.clone(), FontId::proportional(TXT_SMALL), color);
+                ui.painter().with_clip_rect(cell.shrink2(egui::vec2(4.0, 0.0)).intersect(ui.clip_rect())).galley(egui::pos2(cell.left() + 8.0, cell.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
+                r
+            })
+        });
+        if let Some(m) = mv {
+            let mut now: Vec<String> = order.iter().map(|&ci| names[ci].to_string()).collect();
+            m.apply(&mut now);
+            ui.ctx().data_mut(|d| d.insert_temp(oid, now));
+            ui.ctx().request_repaint();
+        }
     });
     out
 }

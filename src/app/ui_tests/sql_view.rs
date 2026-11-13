@@ -106,3 +106,34 @@ fn a_query_result_value_opens_from_its_eye_and_a_double_click() {
     ui.settle();
     assert_eq!(shown_text(&ui).as_deref(), Some("Ada Byron"), "a double click did not open the value");
 }
+
+/// The Query result's column headers, left to right.
+fn result_cols(ui: &UiApp) -> Vec<(String, egui::Rect)> {
+    let mut v: Vec<(String, egui::Rect)> = ui.h.query_all_by_label_contains("Result column ").map(|n| (n.accesskit_node().label().unwrap_or_default().trim_start_matches("Result column ").to_string(), n.rect())).collect();
+    v.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+    v
+}
+
+#[test]
+fn query_result_headers_drag_to_reorder_and_esc_cancels() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_query_demo();
+    }) else { return };
+    ui.show("Result row 1");
+    let before = result_cols(&ui);
+    assert!(before.len() >= 3, "the demo result has fewer than three columns");
+    let names = |v: &[(String, egui::Rect)]| v.iter().map(|c| c.0.clone()).collect::<Vec<_>>();
+    let (from, to) = (before[0].1.center(), egui::pos2(before[2].1.left() + before[2].1.width() * 0.8, before[2].1.center().y));
+    ui.press_and_move(from, to);
+    ui.h.key_press(egui::Key::Escape);
+    ui.h.step();
+    ui.release(to);
+    assert_eq!(names(&result_cols(&ui)), names(&before), "Esc did not cancel the header drag");
+    ui.press_and_move(from, to);
+    ui.release(to);
+    let mut want = names(&before);
+    let c = want.remove(0);
+    want.insert(2, c);
+    assert_eq!(names(&result_cols(&ui)), want, "the header did not land after the one it was dropped on");
+}
