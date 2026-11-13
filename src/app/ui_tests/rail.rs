@@ -93,6 +93,21 @@ fn undoing_a_new_group_puts_the_tiles_back_and_a_later_group_is_not_open() {
 }
 
 #[test]
+fn undoing_a_drop_keeps_a_group_edit_made_since() {
+    let Some(mut ui) = demo_ui(with_group) else { return };
+    ui.drag("Switch to alpha", "Switch to Local sample", 0.5, 1);
+    ui.wait("the new group", |a| a.groups.groups.len() == 2);
+    // While the toast is up, the other group is renamed.
+    ui.h.state_mut().groups.group_mut(1).unwrap().name = "Renamed".into();
+    ui.click_pick("Undo", Pick::Last);
+    ui.wait("the grouping to be undone", |a| a.groups.groups.len() == 1);
+    let a = ui.app();
+    assert_eq!((a.groups.groups[0].name.as_str(), a.groups.groups[0].members.clone()), ("Renamed", vec![6, 7]), "Undo threw away the rename");
+    assert!(a.groups.group_of(1).is_none() && a.groups.group_of(5).is_none());
+    assert_eq!(a.rail_order, [1, 5, 6, 7]);
+}
+
+#[test]
 fn esc_cancels_a_tile_drag() {
     let Some(mut ui) = demo_ui(without_group) else { return };
     ui.drag_esc("Switch to alpha", "Switch to beta", 0.5);

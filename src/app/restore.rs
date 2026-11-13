@@ -9,9 +9,10 @@ use crate::library::{Folder, Script};
 pub(super) enum Restore {
     /// A deleted group, with where it stood in the list. Its members left the group when it went.
     Group { g: Group, at: usize },
-    /// The groups as they were before a change that created or moved into one, such as a drop on the rail.
-    /// `rail` is the rail order then, so the tile goes back to its place as well.
-    Groups { groups: Box<Groups>, rail: Vec<u64> },
+    /// A drop on the rail: the connections it moved with the spot each had (`Groups::spot`), the group it made, and the
+    /// rail tile it moved with the tile before it and its index then. Undo puts back only these, so a change made to the
+    /// groups while the toast is up stays.
+    Placed { moved: Vec<(u64, Option<u64>, usize)>, created: Option<u64>, tile: u64, prev: Option<u64>, at: usize },
     /// Deleted library scripts and the folders that held them.
     /// `written` is the file a script moved into a linked folder left there: its link, its path in the link and what it held.
     Saved { scripts: Vec<Script>, folders: Vec<Folder>, written: Option<(u64, PathBuf, Vec<u8>)> },
@@ -29,13 +30,18 @@ impl App {
                 self.save_groups();
                 self.ok(format!("Group {name} is back."));
             }
-            Restore::Groups { groups: before, rail } => {
-                // Connections removed since are pruned so the snapshot never brings a dead id back.
-                self.groups = *before;
+            Restore::Placed { moved, created, tile, prev, at } => {
                 let alive = self.conn_ids();
-                self.groups.prune(&alive);
-                // The rail drops what has closed since and appends what opened since on its next frame.
-                self.rail_order = rail;
+                self.groups.undo_drop(&moved, created, &alive);
+                // The tile goes back after the tile it followed, or to its old index when that one has closed since.
+                if self.rail_order.contains(&tile) {
+                    self.rail_order.retain(|c| *c != tile);
+                    let i = match prev {
+                        None => 0,
+                        Some(p) => self.rail_order.iter().position(|c| *c == p).map_or(at.min(self.rail_order.len()), |i| i + 1),
+                    };
+                    self.rail_order.insert(i, tile);
+                }
                 let groups = &self.groups;
                 self.rail_open.retain(|g| groups.group(*g).is_some());
                 self.save_groups();

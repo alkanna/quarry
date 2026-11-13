@@ -112,6 +112,40 @@ impl Groups {
         id
     }
 
+    /// Where `conn` stands: its group and its index among the members, or no group and its index in `loose_order`. Put
+    /// back with `place`, the index reads the same once the connection has left wherever it went since.
+    pub(super) fn spot(&self, conn: u64, all: &[u64]) -> (Option<u64>, usize) {
+        match self.group_of(conn) {
+            Some(g) => (Some(g.id), g.members.iter().position(|c| *c == conn).unwrap_or(0)),
+            None => (None, self.loose_order(all).iter().position(|c| *c == conn).unwrap_or(usize::MAX)),
+        }
+    }
+
+    /// Undoes one drop: the connections it moved go back to the spots `spot` gave before it, and the group it made goes
+    /// when nothing else has joined it since. Every other change made since (a rename, a color, another move) stays.
+    pub(super) fn undo_drop(&mut self, moved: &[(u64, Option<u64>, usize)], created: Option<u64>, all: &[u64]) {
+        if let Some(i) = created.and_then(|g| self.groups.iter().position(|x| x.id == g))
+            && self.groups[i].members.iter().all(|c| moved.iter().any(|m| m.0 == *c))
+        {
+            self.groups.remove(i);
+        }
+        // Lowest index first, so two tiles from one list each land at their old index.
+        let mut moved = moved.to_vec();
+        moved.sort_by_key(|m| m.2);
+        for (conn, group, at) in moved {
+            if !all.contains(&conn) {
+                continue;
+            }
+            let to = match group {
+                Some(g) if self.group(g).is_some() => Place::Into(g, Some(at)),
+                // Its old group was deleted since: it goes back among the loose ones.
+                Some(_) => Place::Loose(None),
+                None => Place::Loose(Some(at)),
+            };
+            self.place(conn, to, all);
+        }
+    }
+
     /// Drops connections that are gone from every list. Returns whether anything changed, so the caller saves.
     pub(super) fn prune(&mut self, alive: &[u64]) -> bool {
         let before = (self.groups.iter().map(|g| g.members.len()).sum::<usize>(), self.loose.len());
@@ -169,6 +203,34 @@ mod tests {
         g.place(2, Place::Into(a, None), &all);
         g.place(3, Place::Into(b, None), &all);
         g
+    }
+
+    #[test]
+    fn undoing_a_drop_moves_back_only_what_it_moved() {
+        let mut g = two();
+        let all = [1, 2, 3, 4, 5];
+        // 4 and 5 were loose; a drop of 5 on 4 made a group of them.
+        let moved = [(4, None, g.spot(4, &all).1), (5, None, g.spot(5, &all).1)];
+        let new = g.new_group("New group");
+        g.place(4, Place::Into(new, None), &all);
+        g.place(5, Place::Into(new, None), &all);
+        // Later edits while the toast is up: a rename, and a move of 3 into the new group.
+        g.group_mut(1).unwrap().name = "Production".into();
+        g.place(3, Place::Into(new, None), &all);
+        g.undo_drop(&moved, Some(new), &all);
+        assert_eq!(g.group(1).map(|x| x.name.as_str()), Some("Production"));
+        // The new group keeps 3, which joined it since, and 4 and 5 are loose again in their old order.
+        assert_eq!(g.group(new).map(|x| x.members.clone()), Some(vec![3]));
+        assert_eq!(g.loose_order(&all), [4, 5]);
+        // Without later members the group made by the drop goes.
+        let mut g = two();
+        let moved = [(1, Some(1), 0), (4, None, g.spot(4, &all).1)];
+        let new = g.new_group("New group");
+        g.place(4, Place::Into(new, None), &all);
+        g.place(1, Place::Into(new, None), &all);
+        g.undo_drop(&moved, Some(new), &all);
+        assert!(g.group(new).is_none());
+        assert_eq!((g.groups[0].members.clone(), g.loose_order(&all)), (vec![1, 2], vec![4, 5]));
     }
 
     #[test]

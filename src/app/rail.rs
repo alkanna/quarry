@@ -266,10 +266,19 @@ impl App {
 
     /// Applies one drop on the rail: the groups are saved, and the toast offers Undo.
     fn apply_rail_drop(&mut self, d: RailDrop) {
-        let before = self.groups.clone();
-        // Undo puts the tile back where it stood in the rail too, not only in its old group.
-        let rail = self.rail_order.clone();
         let all = self.conn_ids();
+        // Undo puts back only what this drop moves: each connection's spot in the groups, the tile's place in the rail and
+        // the group it makes. A whole snapshot would also throw away group edits made while the toast is up.
+        let tile = match d {
+            RailDrop::Reorder { conn, .. } | RailDrop::Into { conn, .. } | RailDrop::Pair { conn, .. } => conn,
+        };
+        let at = self.rail_order.iter().position(|c| *c == tile).unwrap_or(0);
+        let prev = at.checked_sub(1).and_then(|i| self.rail_order.get(i).copied());
+        let spot = |a: &App, c: u64| {
+            let (g, i) = a.groups.spot(c, &all);
+            (c, g, i)
+        };
+        let undo = |moved: Vec<(u64, Option<u64>, usize)>, created: Option<u64>| Restore::Placed { moved, created, tile, prev, at };
         let name = |a: &App, id: u64| a.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
         match d {
             RailDrop::Reorder { conn, anchor, after } => {
@@ -279,13 +288,15 @@ impl App {
                 // A member of a folded group dropped between tiles leaves its group. An unfolded one is loose in the rail already.
                 let left = self.groups.group_of(conn).filter(|g| g.fold_rail).map(|g| g.name.clone());
                 if let Some(g) = left {
+                    let was = vec![spot(self, conn)];
                     self.groups.place(conn, Place::Loose(None), &all);
-                    self.toast_restore(format!("{} left {g}.", name(self, conn)), Restore::Groups { groups: Box::new(before), rail });
+                    self.toast_restore(format!("{} left {g}.", name(self, conn)), undo(was, None));
                 }
                 move_next_to(&mut self.rail_order, conn, anchor, after);
             }
             RailDrop::Into { conn, gid, at } => {
                 let joined = self.groups.group_of(conn).map(|g| g.id) != Some(gid);
+                let was = vec![spot(self, conn)];
                 if self.groups.place(conn, Place::Into(gid, at), &all) && joined {
                     let g = self.groups.group(gid).map(|g| g.name.clone()).unwrap_or_default();
                     // The folder sits at its first open member, so a tile from above it must follow the group or the folder jumps.
@@ -293,16 +304,17 @@ impl App {
                     if let Some(last) = self.rail_order.iter().copied().filter(|c| *c != conn && members.contains(c)).last() {
                         move_next_to(&mut self.rail_order, conn, last, true);
                     }
-                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), Restore::Groups { groups: Box::new(before), rail });
+                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), undo(was, None));
                 }
             }
             RailDrop::Pair { conn, target } => {
+                let was = vec![spot(self, conn), spot(self, target)];
                 let gid = self.groups.new_group("New group");
                 self.groups.place(target, Place::Into(gid, None), &all);
                 self.groups.place(conn, Place::Into(gid, None), &all);
                 self.rail_open.insert(gid);
                 move_next_to(&mut self.rail_order, conn, target, true);
-                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), Restore::Groups { groups: Box::new(before), rail }, Some(gid));
+                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), undo(was, Some(gid)), Some(gid));
             }
         }
         self.save_groups();
