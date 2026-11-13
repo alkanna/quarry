@@ -11,6 +11,7 @@ mod agents_windows;
 mod calendar;
 mod demo_states;
 mod dialogs;
+mod journeys;
 mod dnd;
 mod conn_advanced;
 mod conn_cert;
