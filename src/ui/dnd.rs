@@ -303,13 +303,30 @@ pub(crate) enum Zone {
 /// The zone of an item `len` long that a point `at` from its start falls in: the middle half is `Into` when the item
 /// takes drops into it, and either side of the middle are `Before` and `After`.
 pub(crate) fn zone_at(len: f32, at: f32, into: bool) -> Zone {
-    if into && at >= len * 0.25 && at <= len * 0.75 {
-        Zone::Into
+    if into {
+        zone_edges(len, at, 0.25)
     } else if at < len / 2.0 {
         Zone::Before
     } else {
         Zone::After
     }
+}
+
+/// The zone with bands of `edge` of the length at each end for `Before` and `After` and the rest `Into`: 0.25 is the
+/// middle half of `zone_at`, 1/3 the thirds of a rail tile.
+pub(crate) fn zone_edges(len: f32, at: f32, edge: f32) -> Zone {
+    if at < len * edge {
+        Zone::Before
+    } else if at > len * (1.0 - edge) {
+        Zone::After
+    } else {
+        Zone::Into
+    }
+}
+
+/// How far down `rect` the pointer at `pos` is, from 0.0 at its top edge to 1.0 at its bottom edge; the middle without one.
+pub(crate) fn y_frac(rect: egui::Rect, pos: Option<egui::Pos2>) -> f32 {
+    pos.map_or(0.5, |p| ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0))
 }
 
 /// Where a drop on a tree row lands: before, into or after it, and the depth an insertion line sits at.
@@ -796,6 +813,7 @@ mod tests {
         assert_eq!(zone_at(28.0, 25.0, true), Zone::After);
         assert_eq!(zone_at(28.0, 13.0, false), Zone::Before);
         assert_eq!(zone_at(28.0, 15.0, false), Zone::After);
+        assert_eq!([5.0, 15.0, 25.0].map(|at| zone_edges(30.0, at, 1.0 / 3.0)), [Zone::Before, Zone::Into, Zone::After]);
         assert_eq!(drop_depth(100.0, 10.0, 16.0, 0, 3), 3);
         assert_eq!(drop_depth(30.0, 10.0, 16.0, 0, 3), 1);
         assert_eq!(drop_depth(0.0, 10.0, 16.0, 1, 3), 1);

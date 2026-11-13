@@ -4,7 +4,7 @@
 //! without a window. Changes are collected while the rows are drawn and applied after, since the rows borrow the lists.
 
 use super::*;
-use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot};
+use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, y_frac, zone_at};
 use crate::ui::fold;
 
 /// Whether the rail shows the Connections button.
@@ -65,21 +65,12 @@ pub(super) enum CRow {
     GroupsEnd,
 }
 
-/// What a drop on a row means, by how far down the row the pointer is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Slot {
-    Into,
-    Before,
-    After,
-}
-
-/// The middle half of a group row is "into" the group. Elsewhere the top or bottom half of the row means before or after it.
-pub(super) fn drop_slot(row: &CRow, y_frac: f32) -> Slot {
+/// What a drop on a row means, by how far down the row the pointer is. The middle half of a group row is "into" the
+/// group. Elsewhere the top or bottom half of the row means before or after it.
+pub(super) fn drop_slot(row: &CRow, y_frac: f32) -> Zone {
     match row {
-        CRow::Group { .. } if (0.25..=0.75).contains(&y_frac) => Slot::Into,
-        CRow::Hint(_) => Slot::Into,
-        _ if y_frac < 0.5 => Slot::Before,
-        _ => Slot::After,
+        CRow::Hint(_) => Zone::Into,
+        _ => zone_at(1.0, y_frac, matches!(row, CRow::Group { .. })),
     }
 }
 
@@ -90,7 +81,7 @@ pub(super) fn drop_place(groups: &Groups, all: &[u64], moved: u64, rows: &[CRow]
     let row = rows.get(i)?;
     let slot = drop_slot(row, y_frac);
     match row {
-        CRow::Group { id, open, .. } => Some(Place::Into(*id, if slot == Slot::After && *open { Some(0) } else { None })),
+        CRow::Group { id, open, .. } => Some(Place::Into(*id, if slot == Zone::After && *open { Some(0) } else { None })),
         CRow::Hint(g) => Some(Place::Into(*g, None)),
         CRow::Caption { .. } => Some(Place::Loose(Some(0))),
         CRow::GroupsEnd => None,
@@ -98,7 +89,7 @@ pub(super) fn drop_place(groups: &Groups, all: &[u64], moved: u64, rows: &[CRow]
             if *id == moved {
                 return None;
             }
-            let mut at = if slot == Slot::Before { *pos } else { *pos + 1 };
+            let mut at = if slot == Zone::Before { *pos } else { *pos + 1 };
             // The index counts the list after the connection leaves it, so a move down inside one list is one less.
             let from = match group {
                 Some(g) => groups.group(*g).and_then(|g| g.members.iter().position(|c| *c == moved)),
@@ -648,13 +639,13 @@ fn drop_target(ui: &egui::Ui, r: &egui::Response, rows: &[CRow], i: usize, cx: &
         return;
     }
     let Some(m) = held(ui.ctx()).filter(|_| r.contains_pointer()) else { return };
-    let frac = ui.ctx().pointer_interact_pos().map_or(0.5, |p| ((p.y - r.rect.top()) / r.rect.height().max(1.0)).clamp(0.0, 1.0));
+    let frac = y_frac(r.rect, ui.ctx().pointer_interact_pos());
     let Some(place) = drop_place(cx.groups, cx.all, m, rows, i, frac) else { return };
     // The mark follows what the drop does, so the edges of a group row, which put the connection into it, show the fill.
     // A line's depth is the list it lands in: a group's members are one step in.
     let zone = match (&rows[i], drop_slot(&rows[i], frac)) {
-        (CRow::Conn { .. }, Slot::Before) => Zone::Before,
-        (CRow::Conn { .. }, _) | (CRow::Caption { .. }, _) | (CRow::Group { open: true, .. }, Slot::After) => Zone::After,
+        (CRow::Conn { .. }, Zone::Before) => Zone::Before,
+        (CRow::Conn { .. }, _) | (CRow::Caption { .. }, _) | (CRow::Group { open: true, .. }, Zone::After) => Zone::After,
         _ => Zone::Into,
     };
     let depth = match &rows[i] {
@@ -1147,9 +1138,9 @@ mod tests {
     fn the_middle_of_a_group_row_is_into_and_elsewhere_before_or_after() {
         let g = CRow::Group { id: 1, open: true, shown: 2, total: 2 };
         let c = CRow::Conn { id: 1, group: Some(1), pos: 0 };
-        assert_eq!([0.0, 0.2, 0.25, 0.5, 0.75, 0.8, 1.0].map(|f| drop_slot(&g, f)), [Slot::Before, Slot::Before, Slot::Into, Slot::Into, Slot::Into, Slot::After, Slot::After]);
-        assert_eq!([0.0, 0.49, 0.5, 1.0].map(|f| drop_slot(&c, f)), [Slot::Before, Slot::Before, Slot::After, Slot::After]);
-        assert_eq!(drop_slot(&CRow::Hint(1), 0.0), Slot::Into);
+        assert_eq!([0.0, 0.2, 0.25, 0.5, 0.75, 0.8, 1.0].map(|f| drop_slot(&g, f)), [Zone::Before, Zone::Before, Zone::Into, Zone::Into, Zone::Into, Zone::After, Zone::After]);
+        assert_eq!([0.0, 0.49, 0.5, 1.0].map(|f| drop_slot(&c, f)), [Zone::Before, Zone::Before, Zone::After, Zone::After]);
+        assert_eq!(drop_slot(&CRow::Hint(1), 0.0), Zone::Into);
     }
 
     #[test]

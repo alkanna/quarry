@@ -54,33 +54,6 @@ pub struct Row {
     pub count: usize,
 }
 
-/// Where over a row a drop lands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pos {
-    Into,
-    Before,
-    After,
-}
-
-/// The drop position for a pointer `y_frac` down a row (0 at its top edge, 1 at its bottom edge). A folder takes the
-/// middle as "into" and the edges as before and after; an open folder has its first child right below, so its lower edge
-/// also means "into". A script has no inside, so it splits at the middle.
-pub fn drop_at(folder: bool, open: bool, y_frac: f32) -> Pos {
-    if folder {
-        if y_frac < 0.25 {
-            Pos::Before
-        } else if y_frac > 0.75 && !open {
-            Pos::After
-        } else {
-            Pos::Into
-        }
-    } else if y_frac < 0.5 {
-        Pos::Before
-    } else {
-        Pos::After
-    }
-}
-
 fn matches(s: &Script, q: &str) -> bool {
     q.is_empty() || s.name.to_lowercase().contains(q) || s.body.chars().take(200).collect::<String>().to_lowercase().contains(q)
 }
@@ -488,13 +461,4 @@ mod tests {
         assert!(shows(Some(7)) && shows(None));
     }
 
-    #[test]
-    fn drop_positions_split_rows_by_height() {
-        assert_eq!(drop_at(true, false, 0.1), Pos::Before);
-        assert_eq!(drop_at(true, false, 0.5), Pos::Into);
-        assert_eq!(drop_at(true, false, 0.9), Pos::After);
-        // The first child of an open folder is right below it, so its lower edge is "into".
-        assert_eq!(drop_at(true, true, 0.9), Pos::Into);
-        assert_eq!((drop_at(false, false, 0.2), drop_at(false, false, 0.8)), (Pos::Before, Pos::After));
-    }
 }

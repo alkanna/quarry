@@ -1,7 +1,8 @@
 //! The activity rail: a thin column of icons left of the sidebar for the app's panels.
 
 use super::*;
-use crate::ui::{dnd, fold};
+use crate::ui::dnd::{self, Zone};
+use crate::ui::fold;
 
 /// The id a rail folder's open and close animation goes by.
 fn fold_id(gid: u64) -> egui::Id {
@@ -485,22 +486,8 @@ enum Mark {
 }
 
 /// Top third, middle and bottom third of a tile, by the pointer's height.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Zone {
-    Before,
-    Onto,
-    After,
-}
-
 fn zone_of(rect: egui::Rect, y: f32) -> Zone {
-    let f = (y - rect.top()) / rect.height().max(1.0);
-    if f < 1.0 / 3.0 {
-        Zone::Before
-    } else if f > 2.0 / 3.0 {
-        Zone::After
-    } else {
-        Zone::Onto
-    }
+    dnd::zone_edges(rect.height().max(1.0), y - rect.top(), 1.0 / 3.0)
 }
 
 /// The index `Groups::place` wants to put `dragged` next to `target` in group `gid`: it counts the members after the dragged one leaves.
@@ -509,7 +496,7 @@ fn slot_in_group(groups: &Groups, gid: u64, target: u64, after: bool, dragged: u
     rest.iter().position(|m| *m == target).map(|i| i + after as usize)
 }
 
-/// What dropping `dragged` at `zone` of `on` does, or None when nothing sensible. A member tile has no middle: Onto counts as After there.
+/// What dropping `dragged` at `zone` of `on` does, or None when nothing sensible. A member tile has no middle: Into counts as After there.
 fn resolve_drop(on: DropOn, zone: Zone, dragged: u64, groups: &Groups) -> Option<(RailDrop, Mark)> {
     let reorder = |anchor: u64, after: bool| (anchor != dragged).then_some((RailDrop::Reorder { conn: dragged, anchor, after }, Mark::Line { top: !after }));
     let in_group = |gid: u64| groups.group(gid).is_some_and(|g| g.members.contains(&dragged));
@@ -518,7 +505,7 @@ fn resolve_drop(on: DropOn, zone: Zone, dragged: u64, groups: &Groups) -> Option
         DropOn::Loose(id) => match zone {
             Zone::Before => reorder(id, false),
             Zone::After => reorder(id, true),
-            Zone::Onto => Some((RailDrop::Pair { conn: dragged, target: id }, Mark::Fill)),
+            Zone::Into => Some((RailDrop::Pair { conn: dragged, target: id }, Mark::Fill)),
         },
         DropOn::Member { id, .. } if id == dragged => None,
         DropOn::Member { id, gid } => {
@@ -530,12 +517,12 @@ fn resolve_drop(on: DropOn, zone: Zone, dragged: u64, groups: &Groups) -> Option
         DropOn::Folder { gid, anchor } => match zone {
             Zone::Before => reorder(anchor, false),
             Zone::After => reorder(anchor, true),
-            Zone::Onto => Some((RailDrop::Into { conn: dragged, gid, at: None }, Mark::Fill)),
+            Zone::Into => Some((RailDrop::Into { conn: dragged, gid, at: None }, Mark::Fill)),
         },
         DropOn::FolderTop { gid, anchor } => match zone {
             Zone::Before => reorder(anchor, false),
-            Zone::Onto if in_group(gid) => None,
-            Zone::Onto => Some((RailDrop::Into { conn: dragged, gid, at: None }, Mark::Fill)),
+            Zone::Into if in_group(gid) => None,
+            Zone::Into => Some((RailDrop::Into { conn: dragged, gid, at: None }, Mark::Fill)),
             Zone::After => Some((RailDrop::Into { conn: dragged, gid, at: Some(0) }, Mark::Line { top: false })),
         },
     }
@@ -931,19 +918,19 @@ mod tests {
     #[test]
     fn zones_are_thirds_of_the_tile() {
         let r = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(28.0, 30.0));
-        assert_eq!((zone_of(r, 105.0), zone_of(r, 115.0), zone_of(r, 125.0)), (Zone::Before, Zone::Onto, Zone::After));
+        assert_eq!((zone_of(r, 105.0), zone_of(r, 115.0), zone_of(r, 125.0)), (Zone::Before, Zone::Into, Zone::After));
     }
 
     #[test]
     fn drops_resolve_by_tile_and_zone() {
         let g = groups_of(&[("Prod", true, &[1, 2, 3])]);
         let r = |on, z, d| resolve_drop(on, z, d, &g).map(|x| x.0);
-        assert_eq!(r(DropOn::Loose(8), Zone::Onto, 9), Some(RailDrop::Pair { conn: 9, target: 8 }));
+        assert_eq!(r(DropOn::Loose(8), Zone::Into, 9), Some(RailDrop::Pair { conn: 9, target: 8 }));
         assert_eq!(r(DropOn::Loose(8), Zone::After, 9), Some(RailDrop::Reorder { conn: 9, anchor: 8, after: true }));
-        assert_eq!(r(DropOn::Loose(8), Zone::Onto, 8), None);
+        assert_eq!(r(DropOn::Loose(8), Zone::Into, 8), None);
         // Closed folder: the middle adds, a member of it does nothing, the edges reorder.
-        assert_eq!(r(DropOn::Folder { gid: 1, anchor: 1 }, Zone::Onto, 9), Some(RailDrop::Into { conn: 9, gid: 1, at: None }));
-        assert_eq!(r(DropOn::Folder { gid: 1, anchor: 1 }, Zone::Onto, 2), None);
+        assert_eq!(r(DropOn::Folder { gid: 1, anchor: 1 }, Zone::Into, 9), Some(RailDrop::Into { conn: 9, gid: 1, at: None }));
+        assert_eq!(r(DropOn::Folder { gid: 1, anchor: 1 }, Zone::Into, 2), None);
         assert_eq!(r(DropOn::Folder { gid: 1, anchor: 1 }, Zone::Before, 9), Some(RailDrop::Reorder { conn: 9, anchor: 1, after: false }));
         // Inside the capsule the index counts the members after the dragged one leaves: 1 below 3 lands at 2.
         assert_eq!(r(DropOn::Member { id: 3, gid: 1 }, Zone::After, 1), Some(RailDrop::Into { conn: 1, gid: 1, at: Some(2) }));

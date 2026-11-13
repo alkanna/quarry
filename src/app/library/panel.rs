@@ -9,10 +9,10 @@
 use super::*;
 use crate::app::restore::Restore;
 use crate::library::ops::{self, DropAt};
-use crate::library::tree::{self, Node, Pos, Row, Scans};
+use crate::library::tree::{self, Node, Row, Scans};
 use crate::library::{Library, ScriptRef};
 use std::path::{Path, PathBuf};
-use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, side_row_drag};
+use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, side_row_drag, y_frac, zone_at};
 use crate::ui::fold;
 use super::open::How;
 
@@ -117,16 +117,16 @@ pub(in crate::app) const MISSING: &str = "That folder is not there. Reload it on
 
 /// What dropping `item` on `target` at `pos` would do, or why it cannot be done. Each link keeps its files to itself: a file
 /// moves between the folders of its own link, and leaves it only as a copy in the library.
-fn plan_drop(lib: &Library, scans: &Scans, item: &Node, target: &Node, pos: Pos) -> Result<Plan, &'static str> {
+fn plan_drop(lib: &Library, scans: &Scans, item: &Node, target: &Node, pos: Zone) -> Result<Plan, &'static str> {
     if let Some((l, _)) = dir_of(target)
         && scans.get(&l).is_some_and(|s| s.missing)
     {
         return Err(MISSING);
     }
     let at = match (target, pos) {
-        (Node::Folder(id), Pos::Into) => Some(DropAt::Into(*id)),
-        (n, Pos::Before) if n.is_saved() => Some(DropAt::Before(n.clone())),
-        (n, Pos::After) if n.is_saved() => Some(DropAt::After(n.clone())),
+        (Node::Folder(id), Zone::Into) => Some(DropAt::Into(*id)),
+        (n, Zone::Before) if n.is_saved() => Some(DropAt::Before(n.clone())),
+        (n, Zone::After) if n.is_saved() => Some(DropAt::After(n.clone())),
         _ => None,
     };
     let dir = dir_of(target);
@@ -195,6 +195,16 @@ fn item_node(d: &DragItem) -> Option<Node> {
         DragItem::Script(ScriptRef::File { link, rel }) => Some(Node::File { link: *link, rel: rel.clone() }),
         DragItem::Folder(id) => Some(Node::Folder(*id)),
         _ => None,
+    }
+}
+
+/// Where over a row a drop lands, for a pointer `y_frac` down it. A folder takes the middle as "into" and the edges as
+/// before and after; an open folder has its first child right below, so its lower edge also means "into". A script has
+/// no inside, so it splits at the middle.
+fn drop_zone(folder: bool, open: bool, y_frac: f32) -> Zone {
+    match zone_at(1.0, y_frac, folder) {
+        Zone::After if folder && open => Zone::Into,
+        z => z,
     }
 }
 
@@ -1459,9 +1469,9 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     }
     let target_is_folder = matches!(row.node, Node::Folder(_)) || dir_like;
     let over = r.dnd_hover_payload::<DragItem>().filter(|_| !drag_cancelled(&ctx)).and_then(|p| item_node(&p));
-    let frac = ctx.pointer_hover_pos().map_or(0.5, |p| ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0));
+    let frac = y_frac(rect, ctx.pointer_hover_pos());
     // A linked folder has nothing to order, so any part of its row means "into".
-    let pos = if dir_like { Pos::Into } else { tree::drop_at(target_is_folder, row.open, frac) };
+    let pos = if dir_like { Zone::Into } else { drop_zone(target_is_folder, row.open, frac) };
     let into_closed = target_is_folder && !row.open;
     if let Some(item) = over.as_ref().filter(|i| **i != row.node) {
         let plan = plan_drop(cx.lib, cx.scans, item, &row.node, pos);
@@ -1469,9 +1479,9 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         if plan.is_ok() {
             // The mark follows the plan: a fill for into a folder, else a line at the depth of the row it lands beside.
             let zone = match (pos, &plan) {
-                (Pos::Into, Ok(Plan::Saved(DropAt::Into(_)))) if target_is_folder => Zone::Into,
+                (Zone::Into, Ok(Plan::Saved(DropAt::Into(_)))) if target_is_folder => Zone::Into,
                 (_, Ok(Plan::Into { .. })) if dir_like => Zone::Into,
-                (Pos::Before, _) => Zone::Before,
+                (Zone::Before, _) => Zone::Before,
                 _ => Zone::After,
             };
             let depth = row.depth;
@@ -1488,7 +1498,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         }
     }
     // A closed folder under a drag opens after a short rest, so the item can go inside it.
-    let resting = over.as_ref().is_some_and(|i| *i != row.node) && into_closed && pos == Pos::Into;
+    let resting = over.as_ref().is_some_and(|i| *i != row.node) && into_closed && pos == Zone::Into;
     if hover_open(&ctx, r.id.with("dnd-open"), resting) {
         st.open.insert(row.node.clone());
         fold::start(&ctx, fold_id(&row.node), true);
@@ -1523,19 +1533,29 @@ mod linked_tests {
         let dir = |rel: &str| Node::Dir { link: 1, rel: rel.into() };
         let mut scans = Scans::default();
         // A file goes to another folder of its own link, not the one it is in, and never to another link.
-        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Pos::Into), Ok(Plan::Into { link: 1, dir: "sub".into() }));
-        assert!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &dir("sub"), Pos::Into).is_err());
-        assert_eq!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &Node::Link(1), Pos::Into), Ok(Plan::Into { link: 1, dir: PathBuf::new() }));
-        assert!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Link(2), Pos::Into).is_err());
-        assert!(plan_drop(&lib, &scans, &Node::File { link: 2, rel: "x.sql".into() }, &Node::Link(1), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Zone::Into), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &dir("sub"), Zone::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &Node::Link(1), Zone::Into), Ok(Plan::Into { link: 1, dir: PathBuf::new() }));
+        assert!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Link(2), Zone::Into).is_err());
+        assert!(plan_drop(&lib, &scans, &Node::File { link: 2, rel: "x.sql".into() }, &Node::Link(1), Zone::Into).is_err());
         // Onto a library folder it is copied there; a library script goes into the linked folder; a library folder does not.
-        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Folder(5), Pos::Into), Ok(Plan::Out(DropAt::Into(5))));
-        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &dir("sub"), Pos::Before), Ok(Plan::Into { link: 1, dir: "sub".into() }));
-        assert!(plan_drop(&lib, &scans, &Node::Folder(5), &Node::Link(1), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Folder(5), Zone::Into), Ok(Plan::Out(DropAt::Into(5))));
+        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &dir("sub"), Zone::Before), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &scans, &Node::Folder(5), &Node::Link(1), Zone::Into).is_err());
         // A linked folder that is gone takes nothing, neither at its top nor in one of its folders.
         scans.insert(1, crate::library::disk::Scan { missing: true, ..Default::default() });
-        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &Node::Link(1), Pos::Into), Err(MISSING));
-        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Pos::Into), Err(MISSING));
+        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &Node::Link(1), Zone::Into), Err(MISSING));
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Zone::Into), Err(MISSING));
+    }
+
+    #[test]
+    fn drop_positions_split_rows_by_height() {
+        assert_eq!(drop_zone(true, false, 0.1), Zone::Before);
+        assert_eq!(drop_zone(true, false, 0.5), Zone::Into);
+        assert_eq!(drop_zone(true, false, 0.9), Zone::After);
+        // The first child of an open folder is right below it, so its lower edge is "into".
+        assert_eq!(drop_zone(true, true, 0.9), Zone::Into);
+        assert_eq!((drop_zone(false, false, 0.2), drop_zone(false, false, 0.8)), (Zone::Before, Zone::After));
     }
 
     #[test]
