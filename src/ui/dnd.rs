@@ -212,7 +212,7 @@ pub(crate) fn move_items(ui: &mut egui::Ui, n: usize, k: usize, blocks: &[usize]
 
 /// One id per item from its name, telling apart items that share a name (two columns of one name in a result or an
 /// index) by how many came before, so `reorder` never gives two items one id.
-pub(crate) fn unique_keys<T: std::hash::Hash + Eq>(salt: &str, items: &[T]) -> Vec<egui::Id> {
+pub(crate) fn unique_keys<T: std::hash::Hash + Eq + std::fmt::Debug>(salt: &str, items: &[T]) -> Vec<egui::Id> {
     let mut seen: std::collections::HashMap<&T, usize> = std::collections::HashMap::new();
     items
         .iter()
