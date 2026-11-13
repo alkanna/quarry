@@ -227,7 +227,7 @@ impl App {
         dialog_title(ui, format!("New index on {coll}"));
         caption(ui, "KEYS");
         let id = egui::Id::unique("index-keys");
-        ac_field(ui, id, &mut f.keys, &mut ac, &|b| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
+        ac_field(ui, id, &mut f.keys, &mut ac, &|b, _| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
             egui::TextEdit::singleline(text).id(id).font(egui::TextStyle::Monospace).hint_text("{ email: 1, createdAt: -1 }").desired_width(440.0).show(ui)
         });
         self.ac = ac;

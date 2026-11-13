@@ -630,11 +630,11 @@ impl App {
         // Inside sql`...` the suggestions are SQL ones; elsewhere the built-in and server ones stay.
         let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &t.shell.code) } else { String::new() };
         let (meta, need): (RefCell<Option<(String, String)>>, RefCell<Option<crate::ui::sql_complete::Need>>) = Default::default();
-        let compute = |b: &str| -> Option<(usize, Vec<Sug>)> {
+        let compute = |b: &str, force: bool| -> Option<(usize, Vec<Sug>)> {
             let tpl = scope.as_ref().and_then(|_| sql_at(b, b.len()));
             let (Some(tpl), Some(scope)) = (tpl, &scope) else { return suggest_js(b, &known, &colls, &pkg_names) };
             let (sb, full) = split_statement(&sql_text(b, &tpl, b.len()).0, &tail, scope.dialect);
-            let o = analyze(&sb, &full, scope, values)?;
+            let o = analyze(&sb, &full, scope, values, force)?;
             *need.borrow_mut() = o.need.clone();
             *meta.borrow_mut() = Some((o.title.clone(), o.foot.clone()));
             (!o.sugs.is_empty()).then(|| (sb[o.from..].chars().count(), o.sugs))

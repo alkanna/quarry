@@ -225,7 +225,7 @@ pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac
     let Some(tpl) = sql_at(code, at) else { return };
     let (before, full) = sql_text(code, &tpl, at);
     let (b, f) = crate::ui::sql_complete::split_statement(&before, &full[before.len()..], scope.dialect);
-    if let Some(o) = crate::ui::sql_complete::analyze(&b, &f, scope, values).filter(|o| !o.sugs.is_empty()) {
+    if let Some(o) = crate::ui::sql_complete::analyze(&b, &f, scope, values, false).filter(|o| !o.sugs.is_empty()) {
         let n = code[..at].chars().count();
         *ac = Ac { id: Some(id), token: b[o.from..].chars().count(), items: o.sugs, cursor: n, title: o.title, foot: o.foot, ..Default::default() };
         ui.memory_mut(|m| m.request_focus(id));

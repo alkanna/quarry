@@ -275,7 +275,7 @@ impl App {
         }
         // Suggestions are recomputed on every edit, even with no list open, so this sees every edit.
         let edited = std::cell::Cell::new(None);
-        let compute = |b: &str| {
+        let compute = |b: &str, _: bool| {
             if kind == FieldKind::Query {
                 edited.set(Some(value_at(b).and_then(|(_, p)| p).map(str::to_string)));
             }

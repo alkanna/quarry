@@ -203,7 +203,7 @@ impl App {
                 // One field filters the lists and adds a path the lists do not offer. Its suggestions are
                 // nested paths seen in the loaded documents.
                 let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
-                let suggest = |b: &str| {
+                let suggest = |b: &str, _: bool| {
                     let typed = b.trim().to_lowercase();
                     let items: Vec<Sug> = paths
                         .iter()

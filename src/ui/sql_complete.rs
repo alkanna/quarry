@@ -334,8 +334,9 @@ pub(crate) fn split_statement(before: &str, tail: &str, dl: Dialect) -> (String,
 }
 
 /// Suggestions for the text before the caret, with the heading, footer and lookups. None where nothing should pop up: in a comment, in a string
-/// that is not a value, in a closed identifier, or in an empty word where a list would only be noise.
-pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fields) -> Option<Out> {
+/// that is not a value, in a closed identifier, or in an empty word where a list would only be noise. `force` is Ctrl+Space, which lists
+/// what fits even in an empty word.
+pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fields, force: bool) -> Option<Out> {
     // A space after the text shows whether it ends inside a string, comment or backtick name: such a
     // token swallows the space, while a finished one leaves it as a token of its own.
     let probe = format!("{before} ");
@@ -389,14 +390,16 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     let last = prev.last();
     let table_kw = last.is_some_and(|t| ["FROM", "JOIN", "UPDATE", "INTO", "TABLE"].iter().any(|k| t.is(k))) || last.is_some_and(|t| t.punct(",")) && clause(prev).as_deref() == Some("FROM");
     // An empty word lists only where the choice is narrow: tables after FROM and the like, values after a comparison.
-    // Anywhere else every column, function and keyword would pop up after each space.
+    // Anywhere else every column, function and keyword would pop up after each space, so that waits for Ctrl+Space.
     if !in_tick && word.is_empty() && !last.is_some_and(|t| t.punct(".")) && !table_kw {
         // Only values already known: asking the server here would run a lookup for every `a = b` typed, where a column
         // or a function often follows. A typed quote or digit still asks.
         if let Some(out) = value_list(prev, "", from, "", &rts, values).filter(|o| !o.sugs.is_empty()) {
             return Some(out);
         }
-        return None;
+        if !force {
+            return None;
+        }
     }
     // After `x.`: the columns of table or alias x, or the tables of database x.
     if last.is_some_and(|t| t.punct(".")) {
@@ -454,7 +457,7 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         }
     }
     // The word already typed in full, and nothing else to pick, needs no list.
-    if sugs.len() == 1 && sugs[0].text.trim_end_matches("()").eq_ignore_ascii_case(word) {
+    if !force && sugs.len() == 1 && sugs[0].text.trim_end_matches("()").eq_ignore_ascii_case(word) {
         return None;
     }
     // Columns come first, so their loose matches would push a keyword or function the word spells out of view.
@@ -686,9 +689,9 @@ pub(crate) fn sql_ac_field(
     let tail: String = if focused { prev_caret.map(|c| text.chars().skip(c).collect()).unwrap_or_default() } else { String::new() };
     let meta: RefCell<Option<(String, String)>> = RefCell::new(None);
     let need: RefCell<Option<Need>> = RefCell::new(None);
-    let compute = |before: &str| -> Option<(usize, Vec<Sug>)> {
+    let compute = |before: &str, force: bool| -> Option<(usize, Vec<Sug>)> {
         let (b, full) = split_statement(before, &tail, scope.dialect);
-        let out = analyze(&b, &full, scope, values)?;
+        let out = analyze(&b, &full, scope, values, force)?;
         // `from` is relative to the statement; the popup wants the typed length.
         *need.borrow_mut() = out.need.clone();
         *meta.borrow_mut() = Some((out.title.clone(), out.foot.clone()));
@@ -710,7 +713,7 @@ pub(crate) fn sql_ac_field(
     if ac.id == Some(id) && ac.loading && values.contains_key(&ac.want) {
         let before: String = text.chars().take(ac.cursor).collect();
         let cursor = ac.cursor;
-        match compute(&before) {
+        match compute(&before, false) {
             Some((token, items)) => {
                 *ac = Ac { id: Some(id), token, items, cursor, ..Default::default() };
                 if let Some((t, f)) = meta.borrow_mut().take() {
@@ -751,7 +754,7 @@ pub(crate) fn open_list(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, sc
         return;
     }
     let (b, full) = split_statement(text, "", scope.dialect);
-    if let Some(out) = analyze(&b, &full, scope, values).filter(|o| !o.sugs.is_empty()) {
+    if let Some(out) = analyze(&b, &full, scope, values, false).filter(|o| !o.sugs.is_empty()) {
         let n = text.chars().count();
         *ac = Ac { id: Some(id), token: b[out.from..].chars().count(), items: out.sugs, cursor: n, title: out.title, foot: out.foot, ..Default::default() };
         ui.memory_mut(|m| m.request_focus(id));
@@ -766,7 +769,7 @@ mod tests {
     use super::*;
 
     fn suggest(before: &str, full_stmt: &str, scope: &Scope, values: &Fields) -> Option<(usize, Vec<Sug>)> {
-        let out = analyze(before, full_stmt, scope, values)?;
+        let out = analyze(before, full_stmt, scope, values, false)?;
         (!out.sugs.is_empty()).then_some((out.from, out.sugs))
     }
     use mongodb::bson::Bson;
@@ -877,9 +880,9 @@ mod tests {
     #[test]
     fn column_list_is_titled_with_the_alias() {
         let sc = scope();
-        let o = analyze("SELECT * FROM customers c WHERE c.", "SELECT * FROM customers c WHERE c.", &sc, &Fields::new()).unwrap();
+        let o = analyze("SELECT * FROM customers c WHERE c.", "SELECT * FROM customers c WHERE c.", &sc, &Fields::new(), false).unwrap();
         assert_eq!(o.title, "C = CUSTOMERS");
-        let o = analyze("SELECT customers.", "SELECT customers. FROM customers", &sc, &Fields::new()).unwrap();
+        let o = analyze("SELECT customers.", "SELECT customers. FROM customers", &sc, &Fields::new(), false).unwrap();
         assert_eq!(o.title, "CUSTOMERS");
     }
 
@@ -921,7 +924,7 @@ mod tests {
         assert_eq!(s[0].insert, "paid'");
         // A quote inside a value is doubled.
         assert_eq!(s[2].insert, "it''s'");
-        let o = analyze("SELECT * FROM orders o WHERE o.status = 'sh", "SELECT * FROM orders o WHERE o.status = 'sh", &scope(), &Fields::new()).unwrap();
+        let o = analyze("SELECT * FROM orders o WHERE o.status = 'sh", "SELECT * FROM orders o WHERE o.status = 'sh", &scope(), &Fields::new(), false).unwrap();
         assert_eq!(text_of(&o.sugs), ["'shipped'"]);
         assert_eq!(o.title, "ORDERS.STATUS · ENUM, ALL 3 VALUES");
         assert!(o.need.is_none());
@@ -969,13 +972,13 @@ mod tests {
 
     #[test]
     fn values_that_are_not_known_yet_are_asked_for() {
-        let o = analyze("SELECT * FROM orders WHERE currency = '", "SELECT * FROM orders WHERE currency = '", &scope(), &Fields::new()).unwrap();
+        let o = analyze("SELECT * FROM orders WHERE currency = '", "SELECT * FROM orders WHERE currency = '", &scope(), &Fields::new(), false).unwrap();
         assert!(o.sugs.is_empty());
         assert_eq!(o.need, Some(Need { table: "orders".into(), column: "currency".into(), prefix: None }));
         // With 200 values known, typed text may be missing from them and is asked for.
         let mut f = Fields::new();
         f.insert(value_key("orders", "currency"), super::super::complete::FieldInfo { kind: "string", values: (0..200).map(|i| Bson::from(format!("v{i}"))).collect(), freq: Vec::new() });
-        let o = analyze("SELECT * FROM orders WHERE currency = 'zz", "SELECT * FROM orders WHERE currency = 'zz", &scope(), &f).unwrap();
+        let o = analyze("SELECT * FROM orders WHERE currency = 'zz", "SELECT * FROM orders WHERE currency = 'zz", &scope(), &f, false).unwrap();
         assert_eq!(o.need.unwrap().prefix.as_deref(), Some("zz"));
     }
 
@@ -1042,7 +1045,7 @@ mod tests {
         assert_eq!(text_of(&suggest(&b, &full, &sc, &Fields::new()).unwrap().1)[0], "currency");
         // Values work from the fallback too.
         let (b, full) = split_statement("currency = '", "", Dialect::MySql);
-        assert!(analyze(&b, &full, &sc, &Fields::new()).unwrap().need.is_some());
+        assert!(analyze(&b, &full, &sc, &Fields::new(), false).unwrap().need.is_some());
     }
 
     #[test]
@@ -1080,13 +1083,19 @@ mod tests {
     }
 
     #[test]
-    fn tables_and_values_list_before_a_letter() {
+    fn tables_and_values_list_before_a_letter_and_ctrl_space_lists_anywhere() {
         let t = run("SELECT * FROM |").unwrap();
         assert!(t.1.iter().any(|s| s.text == "orders"));
         assert!(run("SELECT * FROM orders o JOIN |").is_some());
         // Values of an enum need no lookup and go in with their quotes.
         let v = run("SELECT * FROM orders WHERE status = |").unwrap();
         assert!(v.1.iter().any(|s| s.insert.starts_with('\'') && s.insert.ends_with('\'')), "{:?}", text_of(&v.1));
+        let forced = |sql: &str| {
+            let b = sql.replace('|', "");
+            analyze(&b, &b, &scope(), &Fields::new(), true).map(|o| o.sugs.len()).unwrap_or(0)
+        };
+        assert!(forced("SELECT |") > 0);
+        assert!(forced("SELECT * FROM orders WHERE |") > 0);
     }
 
     #[test]
