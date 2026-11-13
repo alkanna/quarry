@@ -9,6 +9,7 @@ mod agents;
 mod aggregate;
 mod agents_windows;
 mod calendar;
+mod demo_states;
 mod dialogs;
 mod dnd;
 mod conn_advanced;
@@ -191,6 +192,16 @@ impl UiApp {
         }
         self.h.get_by_label_contains(part).click();
         self.settle();
+    }
+
+    /// Waits until a widget whose accessible name contains `part` is on screen, such as a menu item read with its shortcut.
+    pub fn show_contains(&mut self, part: &str) {
+        let t = std::time::Instant::now();
+        while self.h.query_all_by_label_contains(part).next().is_none() {
+            assert!(t.elapsed() < LIMIT, "timed out waiting for a widget with \"{part}\" on screen; last error: {}", self.app().last_problem());
+            self.h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Waits until a widget with this accessible name is on screen.

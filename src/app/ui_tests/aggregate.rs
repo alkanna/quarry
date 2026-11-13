@@ -58,6 +58,6 @@ fn a_stage_header_takes_the_focus_and_moves_by_keyboard_or_its_menu() {
     let at = head_of(&ui, 3);
     ui.press_at(at, egui::PointerButton::Secondary, 1);
     ui.settle();
-    ui.click("Move up");
+    ui.click_contains("Move up");
     assert_eq!(ops(&ui), ["$group", "$sort", "$match"]);
 }

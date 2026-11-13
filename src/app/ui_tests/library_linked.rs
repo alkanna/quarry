@@ -665,7 +665,7 @@ fn the_link_dialog_warns_when_a_chosen_connection_shows_none_of_the_files_and_ad
     // The folder holds .sql files, so "Every ... connection" means a SQL engine, not the Mongo tab it was opened from.
     ui.show("Every MySQL or MariaDB connection");
     ui.click("+ Add");
-    ui.click("All of Shops");
+    ui.click_contains("All of Shops");
     ui.h.run_steps(3);
     assert!(matches!(&ui.app().modal, Some(Modal::LinkFolder(_))));
     ui.click("Remove Local sample");

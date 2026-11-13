@@ -3,6 +3,29 @@
 use super::*;
 
 impl App {
+    /// QUARRY_TEST_RAIL=<state>: the MySQL demo connection and a connecting one beside the Mongo demo. groups folds the two
+    /// SQL connections into a Production folder, open shows it open, and tip is the closed folder, which a
+    /// QUARRY_TEST_POINTER over it shows the tooltip of. Apart from `load_demo` so a test can load each state.
+    pub(super) fn demo_rail(&mut self, state: &str) {
+        // The SQL demo replaces the tabs, which the Mongo demo keeps.
+        let tabs = std::mem::take(&mut self.tabs);
+        self.load_sql_demo();
+        self.tabs = tabs;
+        self.cur = 1;
+        self.active = Some(1);
+        self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+        if matches!(state, "groups" | "open" | "tip") {
+            let gid = self.groups.new_group("Production");
+            let all = self.conn_ids();
+            for id in [3, 4] {
+                self.groups.place(id, Place::Into(gid, None), &all);
+            }
+            if state == "open" {
+                self.rail_open.insert(gid);
+            }
+        }
+    }
+
     pub(super) fn load_demo(&mut self) {
         let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
         let status = ["paid", "shipped", "pending", "refunded"];
@@ -70,26 +93,10 @@ impl App {
             }
         }
         // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
-        if std::env::var("QUARRY_TEST_RAIL").is_ok() && std::env::var("QUARRY_TEST_SQL").is_err() {
-            // The SQL demo replaces the tabs, which the Mongo demo keeps.
-            let tabs = std::mem::take(&mut self.tabs);
-            self.load_sql_demo();
-            self.tabs = tabs;
-            self.cur = 1;
-            self.active = Some(1);
-            self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
-            // QUARRY_TEST_RAIL=groups folds the two SQL connections into a Production folder, open shows it open, and tip
-            // is the closed folder, which a QUARRY_TEST_POINTER over it shows the tooltip of.
-            if matches!(std::env::var("QUARRY_TEST_RAIL").as_deref(), Ok("groups" | "open" | "tip")) {
-                let gid = self.groups.new_group("Production");
-                let all = self.conn_ids();
-                for id in [3, 4] {
-                    self.groups.place(id, Place::Into(gid, None), &all);
-                }
-                if std::env::var("QUARRY_TEST_RAIL").as_deref() == Ok("open") {
-                    self.rail_open.insert(gid);
-                }
-            }
+        if let Ok(state) = std::env::var("QUARRY_TEST_RAIL")
+            && std::env::var("QUARRY_TEST_SQL").is_err()
+        {
+            self.demo_rail(&state);
         }
         // QUARRY_TEST_PG=<view> does the same with an offline PostgreSQL connection, see demo_pg.rs.
         if std::env::var("QUARRY_TEST_PG").is_ok() {

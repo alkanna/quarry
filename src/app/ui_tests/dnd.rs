@@ -177,12 +177,13 @@ fn a_tab_moves_from_its_menu() {
     let colls = |a: &App| a.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
     assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
     menu_of(&mut ui, "Tab customers");
-    ui.click("Move right");
+    ui.click_contains("Move right");
     assert_eq!(colls(ui.app()), ["orders", "customers", "events"]);
     menu_of(&mut ui, "Tab customers");
-    let w = ui.h.get_by_label("Move left").rect().width();
+    ui.show_contains("Move left");
+    let w = ui.h.get_by_label_contains("Move left").rect().width();
     assert!(w < 320.0, "the tab menu is {w} px wide");
-    ui.click("Move left");
+    ui.click_contains("Move left");
     assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
 }
 
@@ -200,6 +201,6 @@ fn a_group_member_moves_from_its_menu() {
     };
     assert_eq!(form(ui.app()), Some(vec![11, 12, 13]));
     menu_of(&mut ui, "Member billing");
-    ui.click("Move up");
+    ui.click_contains("Move up");
     assert_eq!(form(ui.app()), Some(vec![11, 13, 12]));
 }
