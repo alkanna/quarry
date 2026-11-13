@@ -336,12 +336,6 @@ pub(crate) struct Spot {
     pub depth: usize,
 }
 
-/// The depth an insertion line takes at pointer x, held between `lo` and `hi`.
-pub(crate) fn drop_depth(x: f32, x0: f32, indent: f32, lo: usize, hi: usize) -> usize {
-    let d = if indent > 0.0 { ((x - x0) / indent).round().max(0.0) as usize } else { 0 };
-    d.clamp(lo, hi.max(lo))
-}
-
 /// Paints the mark of a tree drop on the row at `rect`: the drop fill for `Into`, else an insertion line on the row's
 /// top or bottom edge that starts at the depth's indent with a small ring.
 pub(crate) fn paint_spot(p: &egui::Painter, rect: egui::Rect, spot: Spot, x0: f32, indent: f32) {
@@ -807,15 +801,12 @@ mod tests {
     }
 
     #[test]
-    fn zones_and_depths() {
+    fn zones_split_an_item_by_length() {
         assert_eq!(zone_at(28.0, 3.0, true), Zone::Before);
         assert_eq!(zone_at(28.0, 14.0, true), Zone::Into);
         assert_eq!(zone_at(28.0, 25.0, true), Zone::After);
         assert_eq!(zone_at(28.0, 13.0, false), Zone::Before);
         assert_eq!(zone_at(28.0, 15.0, false), Zone::After);
         assert_eq!([5.0, 15.0, 25.0].map(|at| zone_edges(30.0, at, 1.0 / 3.0)), [Zone::Before, Zone::Into, Zone::After]);
-        assert_eq!(drop_depth(100.0, 10.0, 16.0, 0, 3), 3);
-        assert_eq!(drop_depth(30.0, 10.0, 16.0, 0, 3), 1);
-        assert_eq!(drop_depth(0.0, 10.0, 16.0, 1, 3), 1);
     }
 }

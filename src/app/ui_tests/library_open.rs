@@ -565,7 +565,8 @@ fn panel(a: &mut App) {
 #[test]
 fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
     let Some(mut ui) = demo_ui(panel) else { return };
-    let max = crate::app::library::panel::MENU_MAX_W + 2.0;
+    // The widest a Library menu grows: a long folder or connection name is cut rather than stretching the menu.
+    let max = 262.0;
     ui.click("Library menu");
     // The menu takes the width of its longest item, not the cap: three short items stay well under it.
     for item in ["Link a folder\u{2026}", "Fold all", "Show all connections"] {

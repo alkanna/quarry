@@ -41,8 +41,6 @@ pub(in crate::app) struct PanelUi {
     pub rename: Option<(Node, String, bool)>,
     /// Keys act on the tree only after a row was clicked and until something else takes the pointer or the keyboard.
     pub focus: bool,
-    /// The row whose dots menu is open.
-    pub menu: Option<Node>,
     pub scroll_y: f32,
     pub view_h: f32,
     pub scroll_set: Option<f32>,
@@ -364,8 +362,6 @@ fn run_chip(ui: &mut egui::Ui) -> egui::Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The widest a Library menu grows: a long folder or connection name is cut rather than stretching the menu.
-pub(in crate::app) const MENU_MAX_W: f32 = 260.0;
 /// The longest item label a Library menu shows in full, in characters.
 const MENU_LABEL_MAX: usize = 36;
 
