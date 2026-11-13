@@ -1,7 +1,6 @@
 //! Connection groups: named, colored folders of saved connections, kept in groups.json. The file is apart from
 //! connections.json because an older Quarry rewrites that file and drops the fields it does not know. The functions are
 //! pure, so the rules (one group per connection, what a drop does to the order) are tested without a window.
-#![allow(dead_code)]
 
 use super::*;
 

@@ -2,11 +2,10 @@
 //! Rows keep their own click, right-click and focus, so a press that moves less than egui's drag threshold is still a click.
 //! The payload travels through `egui::DragAndDrop`; targets read it with `Response::dnd_hover_payload` and
 //! `dnd_release_payload`. The `table.rs` grip pattern does not fit rows that are also clickable.
-#![allow(dead_code)]
 
 use super::theme::*;
 use super::widgets::{focus_ring, menu_look, side_row_sense};
-use eframe::egui::{self, FontId, Sense, Stroke};
+use eframe::egui::{self, Sense, Stroke};
 use std::time::Duration;
 
 /// How long a drag must rest on a closed folder before it opens.
@@ -15,25 +14,6 @@ const HOVER_OPEN_S: f64 = 0.6;
 /// `side_row` that can also be dragged.
 pub(crate) fn side_row_drag(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
     side_row_sense(ui, Sense::click_and_drag(), height, indent, active, label, paint)
-}
-
-/// Makes `r` the source of a drag: sets `payload` when the drag starts and, while it goes on, draws a ghost row with `label`
-/// beside the pointer. The ghost is painted on the tooltip layer without a widget, so it never catches the pointer that
-/// the targets below it need.
-pub(crate) fn drag_source<T: std::any::Any + Send + Sync>(ui: &egui::Ui, r: &egui::Response, payload: T, label: &str) {
-    if r.drag_started() {
-        egui::DragAndDrop::set_payload(ui.ctx(), payload);
-    }
-    if !r.dragged() {
-        return;
-    }
-    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
-    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("quarry-drag-ghost")));
-    let galley = p.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), TEXT());
-    let rect = egui::Rect::from_min_size(pos + egui::vec2(12.0, 8.0), galley.size() + egui::vec2(24.0, 10.0));
-    p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
-    p.galley(rect.min + egui::vec2(12.0, 5.0), galley, TEXT());
 }
 
 /// The insertion line between two rows: 2 px in the accent, across `x`.
@@ -339,16 +319,6 @@ pub(crate) struct Spot {
     pub depth: usize,
 }
 
-/// The drop spot on a tree row at `rect` for the pointer at `pos`. `into` says the row takes drops (a folder or group).
-/// For a line, the depth follows the pointer's x from `x0` in steps of `indent`, held to `depths`: the caller passes the
-/// depths a line there may take, such as from the depth of the row below up to one deeper than this row when it is an
-/// open folder, like Finder's list view.
-pub(crate) fn tree_spot(rect: egui::Rect, pos: egui::Pos2, into: bool, x0: f32, indent: f32, depths: std::ops::RangeInclusive<usize>) -> Spot {
-    let zone = zone_at(rect.height(), pos.y - rect.top(), into);
-    let depth = drop_depth(pos.x, x0, indent, *depths.start(), *depths.end());
-    Spot { zone, depth }
-}
-
 /// The depth an insertion line takes at pointer x, held between `lo` and `hi`.
 pub(crate) fn drop_depth(x: f32, x0: f32, indent: f32, lo: usize, hi: usize) -> usize {
     let d = if indent > 0.0 { ((x - x0) / indent).round().max(0.0) as usize } else { 0 };
@@ -567,8 +537,10 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
     out
 }
 
-/// `drag_source` with a ghost that `paint` draws: the source's own look (a tile, a connection row, a script row) at
-/// its size, floating beside the pointer with a shadow. Esc drops the payload (see `drag_cancelled`) and the ghost goes.
+/// Makes `r` the source of a drag: sets `payload` when the drag starts and, while it goes on, draws a ghost that `paint`
+/// draws: the source's own look (a tile, a connection row, a script row) at its size, floating beside the pointer with a
+/// shadow. The ghost is painted on the tooltip layer without a widget, so it never catches the pointer that the targets
+/// below it need. Esc drops the payload (see `drag_cancelled`) and the ghost goes.
 pub(crate) fn drag_source_with<T: std::any::Any + Send + Sync>(ui: &egui::Ui, r: &egui::Response, payload: T, paint: impl FnOnce(&egui::Painter, egui::Rect)) {
     if r.drag_started() {
         egui::DragAndDrop::set_payload(ui.ctx(), payload);
@@ -827,7 +799,5 @@ mod tests {
         assert_eq!(drop_depth(100.0, 10.0, 16.0, 0, 3), 3);
         assert_eq!(drop_depth(30.0, 10.0, 16.0, 0, 3), 1);
         assert_eq!(drop_depth(0.0, 10.0, 16.0, 1, 3), 1);
-        let r = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(200.0, 28.0));
-        assert_eq!(tree_spot(r, egui::pos2(40.0, 126.0), true, 10.0, 16.0, 0..=1), Spot { zone: Zone::After, depth: 1 });
     }
 }

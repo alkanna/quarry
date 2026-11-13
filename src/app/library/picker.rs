@@ -2,7 +2,6 @@
 //! recent scripts that fit the view, and the folders. It only picks: saving is the Save dialog, and deleting is the
 //! sidebar's. The popover draws from a snapshot (`PickData`) and returns what was asked (`PickAct`), so the views that
 //! hold borrows of the tab can still show it.
-#![allow(dead_code)]
 
 use super::open::How;
 use super::save_dialog::folder_rows;

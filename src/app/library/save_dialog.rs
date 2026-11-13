@@ -1,6 +1,5 @@
 //! The Save to library dialog: a name, a folder and a preview of what is saved. Opened by Cmd+S on a script that is not
 //! bound to the library yet (see `save_script` in open.rs).
-#![allow(dead_code)]
 
 use super::linked::{FileOut, Job, SaveOut, file_bytes, kind_ext};
 use super::open::{TabText, now_secs};

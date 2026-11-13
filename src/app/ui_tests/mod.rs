@@ -278,7 +278,6 @@ impl UiApp {
     /// way, hold there for `hold_frames` frames (a hover timer such as a folder opening needs time to run), then release.
     /// `at_frac` is where over the target the pointer rests, from 0.0 at its top edge to 1.0 at its bottom edge. Start and
     /// target must be more than 6 px apart, or the press stays a click.
-    #[allow(dead_code)]
     pub fn drag(&mut self, from: &str, to: &str, at_frac: f32, hold_frames: usize) {
         self.show(from);
         self.show(to);
@@ -318,7 +317,6 @@ impl UiApp {
     }
 
     /// `drag` that presses Esc before letting go, which must cancel it.
-    #[allow(dead_code)]
     pub fn drag_esc(&mut self, from: &str, to: &str, at_frac: f32) {
         self.show(from);
         self.show(to);
@@ -332,7 +330,6 @@ impl UiApp {
     }
 
     /// Presses a key with modifiers and gives the frames its effects need.
-    #[allow(dead_code)]
     pub fn key(&mut self, mods: egui::Modifiers, key: egui::Key) {
         self.h.key_press_modifiers(mods, key);
         self.settle();

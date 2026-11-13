@@ -1,6 +1,5 @@
 //! Opening a library script into a tab, and writing a tab's text back to the script it came from. The signatures of
 //! `open_script` and `save_script` are fixed so the panel (B3) and the linked folders (B2) can call them.
-#![allow(dead_code)]
 
 use super::*;
 use crate::library::ScriptRef;

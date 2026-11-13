@@ -1,6 +1,5 @@
 //! Undo for changes that are not database edits: a deleted group, deleted library scripts and folders, a deleted file.
 //! `apply_undo` cannot serve them, since it needs a writable connection and these never touch one.
-#![allow(dead_code)]
 
 use super::*;
 use crate::library::{Folder, Script};

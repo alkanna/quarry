@@ -66,7 +66,6 @@ mod watch;
 use column_menu::*;
 use errors::*;
 use config::*;
-#[allow(unused_imports)]
 use groups::{Group, Groups, Place};
 use restore::Restore;
 use library::picker::{PickKind, picker_button};
@@ -264,18 +263,13 @@ pub struct App {
     /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
     rail_order: Vec<u64>,
     /// Connection groups, from groups.json. Never part of ConnMeta, which an older Quarry rewrites without them.
-    #[allow(dead_code)]
     groups: Groups,
     /// The script library, from library.json.
-    #[allow(dead_code)]
     library: crate::library::Library,
     /// What the Connections panel and the Library panel remember while the app runs.
-    #[allow(dead_code)]
     conns_ui: conns_panel::ConnsUi,
-    #[allow(dead_code)]
     lib_ui: library::LibUi,
     /// Group folders opened into a capsule in the rail.
-    #[allow(dead_code)]
     rail_open: HashSet<u64>,
     /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
     restores: Vec<(u64, Restore)>,

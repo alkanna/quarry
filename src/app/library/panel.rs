@@ -5,7 +5,6 @@
 //! Only the rows in view are drawn, so nothing here holds a reference into `self` across a frame: the drawing collects
 //! `Act`s and `apply` runs them once the panel is done. Rows are one height, and their places follow from their index
 //! except while a folder opens or closes, when `tree::lay_out` places them.
-#![allow(dead_code)]
 
 use super::*;
 use crate::app::restore::Restore;

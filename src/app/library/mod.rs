@@ -1,7 +1,6 @@
 //! The script library in the app: loading and saving library.json, opening scripts into tabs, the Save dialog, the quick
 //! pickers and the sidebar panel. The data types and the rules on them are in `crate::library`, free of egui.
 //! F0 holds the frozen state types and the stubs; the streams fill the submodules.
-#![allow(dead_code)]
 
 use super::*;
 use crate::library::Library;

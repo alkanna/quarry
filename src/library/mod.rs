@@ -4,7 +4,6 @@
 //!
 //! Values that name a choice (`Script::kind`, `Link::on`) are strings read leniently, so a build that knows more of them
 //! does not make an older one skip the entry.
-#![allow(dead_code)]
 
 pub mod disk;
 pub mod format;

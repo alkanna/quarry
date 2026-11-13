@@ -419,7 +419,6 @@ pub(super) struct Tab {
 }
 
 /// The tie between a tab and the library script or linked file it was opened from.
-#[allow(dead_code)]
 pub(super) struct Bound {
     pub(super) r: crate::library::ScriptRef,
     /// The view whose text is the script. Cmd+S in another view of the tab does not write it.
@@ -434,7 +433,6 @@ pub(super) struct Bound {
 }
 
 /// What a row of the sidebar carries while it is dragged. Dropped on another row, or on a rail tile.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DragItem {
     Conn(u64),
@@ -885,7 +883,6 @@ pub(super) enum Danger {
 /// What to run once writes are allowed.
 pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
-#[allow(dead_code)]
 pub(super) enum Modal {
     Conn(Box<ConnForm>),
     Settings,
