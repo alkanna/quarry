@@ -146,6 +146,24 @@ impl Groups {
         }
     }
 
+    /// Mends a hand-edited file: a repeated group id gets a new one, a connection listed twice keeps its first place (in
+    /// the first group that names it), and a grouped connection leaves `loose`. Everything else relies on one group per
+    /// connection, so the panel and the rail would otherwise show it twice.
+    pub(super) fn normalize(&mut self) {
+        let mut ids = HashSet::new();
+        let mut next = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+        let mut seen = HashSet::new();
+        for g in &mut self.groups {
+            if !ids.insert(g.id) {
+                g.id = next;
+                ids.insert(next);
+                next += 1;
+            }
+            g.members.retain(|c| seen.insert(*c));
+        }
+        self.loose.retain(|c| seen.insert(*c));
+    }
+
     /// Drops connections that are gone from every list. Returns whether anything changed, so the caller saves.
     pub(super) fn prune(&mut self, alive: &[u64]) -> bool {
         let before = (self.groups.iter().map(|g| g.members.len()).sum::<usize>(), self.loose.len());
@@ -162,17 +180,26 @@ impl Groups {
 pub(super) fn load_groups_from(path: &std::path::Path) -> (Groups, Option<String>) {
     let Ok(b) = std::fs::read(path) else { return (Groups::default(), None) };
     let Ok(serde_json::Value::Object(mut o)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
+    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
+    let mut bad = Vec::new();
     let mut list = |k: &str| match o.remove(k) {
         Some(serde_json::Value::Array(a)) => a,
-        _ => Vec::new(),
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(_) => {
+            bad.push(format!("{k} is not a list"));
+            Vec::new()
+        }
     };
     let (groups, loose) = (list("groups"), list("loose"));
-    let total = groups.len() + loose.len();
+    let total = groups.len() + loose.len() + bad.len();
     let (groups, mut errs) = parse_entries::<Group>(groups);
     let (loose, e) = parse_entries::<u64>(loose);
     errs.extend(e);
+    errs.extend(bad);
     let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    (Groups { v, groups, loose }, skipped_note(path, total, &errs))
+    let mut g = Groups { v, groups, loose };
+    g.normalize();
+    (g, skipped_note(path, total, &errs))
 }
 
 pub(super) fn load_groups() -> (Groups, Option<String>) {
@@ -323,6 +350,32 @@ mod tests {
         assert_eq!(g.loose, [5, 7]);
         assert!(note.is_some_and(|n| n.contains("Skipped 2 of 6")));
         assert!(p.exists() && dir.join("groups.json.bak").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_file_keeps_one_group_per_connection() {
+        let dir = std::env::temp_dir().join(format!("quarry-groups-norm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("groups.json");
+        // 2 is in two groups and loose, 1 is listed twice in its group, and two groups share id 1.
+        std::fs::write(&p, r#"{"v":1,"groups":[{"id":1,"name":"Prod","members":[1,2,1]},{"id":1,"name":"Dev","members":[2,3]}],"loose":[2,4,4,3]}"#).unwrap();
+        let (g, note) = load_groups_from(&p);
+        assert!(note.is_none());
+        assert_eq!(g.groups.iter().map(|x| (x.id, x.members.clone())).collect::<Vec<_>>(), [(1, vec![1, 2]), (2, vec![3])]);
+        assert_eq!(g.loose, [4]);
+        let all = [1, 2, 3, 4];
+        assert_eq!(g.group_of(2).map(|x| x.name.as_str()), Some("Prod"));
+        assert_eq!(g.loose_order(&all), [4]);
+        let rows = crate::app::conns_panel::panel_rows(&all.map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)), &g, "", |_| true);
+        let shown = rows.iter().filter(|r| matches!(r, crate::app::conns_panel::CRow::Conn { .. })).count();
+        assert_eq!(shown, 4);
+        // A list key of another type is kept aside like a bad entry.
+        std::fs::write(&p, r#"{"v":1,"groups":{"id":1},"loose":[1]}"#).unwrap();
+        let (g, note) = load_groups_from(&p);
+        assert_eq!(g.loose, [1]);
+        assert!(note.is_some_and(|n| n.contains("groups is not a list")));
+        assert!(dir.join("groups.json.bak").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

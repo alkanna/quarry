@@ -93,11 +93,8 @@ pub fn live_parent(lib: &Library, p: Option<u64>) -> Option<u64> {
 /// A link shows on a connection when its `on` names it: a chosen connection, the engine of the connection, or every one.
 /// Without a connection (the All scope) every link shows. `engine` is that of `conn`, when it is known.
 fn link_visible(l: &Link, conn: Option<u64>, engine: Option<Engine>) -> bool {
-    match conn {
-        Some(c) if l.on == "conns" => l.conns.contains(&c),
-        Some(_) if l.on == "engine" => engine.is_none_or(|e| l.engine == format::engine_key(e)),
-        _ => true,
-    }
+    // The same rule as the one that decides where a file runs, so a link never shows where its files cannot open.
+    conn.is_none_or(|c| format::used_on(l, c, engine))
 }
 
 struct Ctx<'a> {
@@ -386,6 +383,16 @@ mod tests {
         l.links.push(Link { id: 50, on: "conns".into(), conns: vec![7], ..Default::default() });
         assert!(flatten(&l, &Scans::new(), Some(1), None, "", &HashSet::new()).iter().all(|r| r.node != Node::Link(50)));
         assert!(flatten(&l, &Scans::new(), Some(7), None, "", &HashSet::new()).iter().any(|r| r.node == Node::Link(50)));
+    }
+
+    #[test]
+    fn a_link_with_an_unknown_scope_shows_only_where_its_files_could_run() {
+        let mut l = lib();
+        l.links.push(Link { id: 50, on: "team".into(), conns: vec![7], ..Default::default() });
+        let shows = |conn| flatten(&l, &Scans::new(), conn, None, "", &HashSet::new()).iter().any(|r| r.node == Node::Link(50));
+        // Before, any scope it did not know showed it on every connection, though its files would not open there.
+        assert!(!shows(Some(1)));
+        assert!(shows(Some(7)) && shows(None));
     }
 
     #[test]

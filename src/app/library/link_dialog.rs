@@ -128,6 +128,19 @@ fn conn_chip(ui: &mut egui::Ui, id: egui::Id, name: &str, dot: Color32) -> bool 
     x.on_hover_text("Remove").on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+/// The link already made for the folder `dir`, whose resolved path the preview scan found to be `canon`. Paths are compared
+/// as written once trailing slashes and `.` are gone, and as resolved through the scans, so a symlink or another spelling
+/// of the same folder is caught too.
+fn clash<'a>(links: &'a [Link], scans: &crate::library::tree::Scans, dir: &std::path::Path, canon: Option<&std::path::Path>) -> Option<&'a Link> {
+    let plain = |p: &std::path::Path| p.components().collect::<PathBuf>();
+    let d = plain(dir);
+    links.iter().find(|l| {
+        let lp = plain(&l.path);
+        let lc = scans.get(&l.id).and_then(|s| s.canon.as_deref());
+        lp == d || canon.is_some_and(|c| Some(c) == lc || c == lp) || lc.is_some_and(|lc| lc == d)
+    })
+}
+
 impl App {
     /// The engine a new link is for: that of the current tab's connection, else of the active one.
     fn link_engine(&self) -> Engine {
@@ -301,7 +314,8 @@ impl App {
 
         let dir = expand(&f.path);
         let found = f.preview.as_ref().is_some_and(|(p, s)| *p == f.path.trim() && !s.missing);
-        let clash = (!edit).then(|| self.library.links.iter().find(|l| l.path == dir).map(|l| l.name.clone())).flatten();
+        let canon = f.preview.as_ref().filter(|(p, _)| *p == f.path.trim()).and_then(|(_, s)| s.canon.clone());
+        let clash = (!edit).then(|| clash(&self.library.links, &self.lib_ui.scans, &dir, canon.as_deref()).map(|l| l.name.clone())).flatten();
         let problem = if f.path.trim().is_empty() {
             Some("Choose a folder".to_string())
         } else if let Some(n) = clash {
@@ -338,5 +352,38 @@ impl App {
             self.ok(if edit { format!("{name} updated.") } else { format!("Linked {name}.") });
             *keep = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_linked_under_another_spelling_is_a_clash() {
+        let links = vec![Link { id: 1, path: "/work/q".into(), name: "q".into(), ..Default::default() }];
+        let mut scans = crate::library::tree::Scans::default();
+        let at = |scans: &crate::library::tree::Scans, p: &str, c: Option<&str>| clash(&links, scans, std::path::Path::new(p), c.map(std::path::Path::new)).map(|l| l.id);
+        assert_eq!(at(&scans, "/work/q/", None), Some(1));
+        assert_eq!(at(&scans, "/work/./q", None), Some(1));
+        assert_eq!(at(&scans, "/work/qq", None), None);
+        // The preview resolved a symlink to the linked folder.
+        assert_eq!(at(&scans, "/tmp/alias", Some("/work/q")), Some(1));
+        // The link itself was made through a symlink: its scan knows where it leads.
+        scans.insert(1, crate::library::disk::Scan { canon: Some("/real/work/q".into()), ..Default::default() });
+        assert_eq!(at(&scans, "/real/work/q", None), Some(1));
+        assert_eq!(at(&scans, "/elsewhere", Some("/real/work/q")), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_preview_scan_resolves_a_symlinked_folder() {
+        let d = std::env::temp_dir().join(format!("quarry-link-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("alias")).unwrap();
+        let (a, b) = (disk::scan(&d.join("real"), &[], None), disk::scan(&d.join("alias"), &[], None));
+        assert!(a.canon.is_some() && a.canon == b.canon);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

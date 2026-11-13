@@ -75,21 +75,38 @@ pub(in crate::app) fn keys_text(cmd: bool, shift: bool, alt: bool, key: &str) ->
 pub(super) fn load_library_from(path: &std::path::Path) -> (Library, Option<String>) {
     let Ok(b) = std::fs::read(path) else { return (Library::default(), None) };
     let Ok(serde_json::Value::Object(mut o)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
+    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
+    let mut bad = Vec::new();
     let mut list = |k: &str| match o.remove(k) {
         Some(serde_json::Value::Array(a)) => a,
-        _ => Vec::new(),
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(_) => {
+            bad.push(format!("{k} is not a list"));
+            Vec::new()
+        }
     };
     let (folders, scripts, links, recent) = (list("folders"), list("scripts"), list("links"), list("recent"));
-    let total = folders.len() + scripts.len() + links.len() + recent.len();
+    let total = folders.len() + scripts.len() + links.len() + recent.len() + bad.len();
     let (folders, mut errs) = parse_entries(folders);
+    errs.extend(bad);
     let (scripts, e) = parse_entries(scripts);
     errs.extend(e);
     let (links, e) = parse_entries(links);
     errs.extend(e);
-    let (recent, e) = parse_entries(recent);
+    let (recent, e) = parse_entries::<ScriptRef>(recent);
     errs.extend(e);
+    // A recent file whose path leaves its folder is skipped like an entry that does not parse.
+    let (recent, bad): (Vec<ScriptRef>, Vec<ScriptRef>) = recent.into_iter().partition(|r| r.is_safe());
+    errs.extend(bad.iter().map(|r| format!("{r:?} leaves its linked folder")));
     let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let next = o.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut links: Vec<crate::library::Link> = links;
+    // A link with no file types, which no dialog makes, would show nothing at all: it shows every type instead.
+    for l in &mut links {
+        if l.exts.is_empty() {
+            l.exts = ["sql", "js", "json"].map(String::from).to_vec();
+        }
+    }
     let mut lib = Library { v, folders, scripts, links, recent, next };
     lib.reserve_ids();
     (lib, skipped_note(path, total, &errs))
@@ -204,6 +221,50 @@ mod tests {
         assert!(should_migrate(true, true, &empty));
         let kept = Library { scripts: vec![crate::library::Script { id: 1, ..Default::default() }], ..Default::default() };
         assert!(!should_migrate(true, true, &kept), "what was read of a damaged file is not doubled");
+    }
+
+    #[test]
+    fn a_recent_file_that_leaves_its_folder_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("quarry-library-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("library.json");
+        std::fs::write(&p, r#"{"v":1,"links":[{"id":3,"path":"/tmp/q"}],"recent":[{"File":{"link":3,"rel":"a.sql"}},{"File":{"link":3,"rel":"../../etc/x.sql"}},{"File":{"link":3,"rel":"/etc/x.sql"}}]}"#).unwrap();
+        let (l, note) = load_library_from(&p);
+        assert_eq!(l.recent, [ScriptRef::File { link: 3, rel: "a.sql".into() }]);
+        assert!(note.is_some_and(|n| n.contains("Skipped 2 of 4")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_list_key_of_another_type_is_kept_aside_and_a_newer_file_loads() {
+        let dir = std::env::temp_dir().join(format!("quarry-library-shape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("library.json");
+        std::fs::write(&p, r#"{"v":7,"scripts":{"id":1},"folders":[{"id":2,"name":"F"}],"later":true}"#).unwrap();
+        let (l, note) = load_library_from(&p);
+        assert_eq!((l.v, l.folders.len(), l.scripts.len()), (7, 1, 0));
+        assert!(note.is_some_and(|n| n.contains("scripts is not a list")));
+        assert!(dir.join("library.json.bak").exists());
+        // A script whose folder entry did not parse stays, at the top level.
+        std::fs::write(&p, r#"{"v":1,"folders":[{"id":"bad"}],"scripts":[{"id":5,"name":"s","kind":"sql","folder":9}]}"#).unwrap();
+        let (l, _) = load_library_from(&p);
+        assert_eq!((l.scripts.len(), l.scripts[0].folder), (1, Some(9)));
+        assert_eq!(crate::library::tree::live_parent(&l, l.scripts[0].folder), None);
+        let rows = crate::library::tree::flatten(&l, &Default::default(), None, None, "", &Default::default());
+        assert!(rows.iter().any(|r| r.node == crate::library::tree::Node::Script(5) && r.depth == 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_link_without_file_types_shows_every_type() {
+        let dir = std::env::temp_dir().join(format!("quarry-library-exts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("library.json");
+        std::fs::write(&p, r#"{"v":1,"links":[{"id":3,"path":"/tmp/q","on":"all"},{"id":4,"path":"/tmp/r","exts":["sql"]}]}"#).unwrap();
+        let (l, _) = load_library_from(&p);
+        assert_eq!(l.links[0].exts, ["sql", "js", "json"]);
+        assert_eq!(l.links[1].exts, ["sql"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub struct Scan {
     pub empty_dirs: Vec<PathBuf>,
     /// Files open in a tab whose time or length changed, read in full by the scan so the UI thread never reads them.
     pub texts: Vec<(PathBuf, Loaded)>,
+    /// The folder with its links resolved, so two spellings of one folder (a trailing slash, /tmp and /private/tmp) are
+    /// told to be the same without a look at the disk on the UI thread.
+    pub canon: Option<PathBuf>,
 }
 
 /// Modified time and length of a file, which tell a change on disk.
@@ -87,7 +90,7 @@ pub fn scan_reading(root: &Path, exts: &[String], prev: Option<&Scan>, open: &[(
     for (rel, seen) in open {
         let changed = s.entries.iter().any(|e| e.rel == *rel && Some((e.mtime, e.len)) != *seen);
         // A file caught half written, or one that stopped being a script, waits for the next scan.
-        if changed && let Ok(l) = read_script(&root.join(rel)) {
+        if changed && super::safe_rel(rel) && let Ok(l) = read_script(&root.join(rel)) {
             s.texts.push((rel.clone(), l));
         }
     }
@@ -103,6 +106,9 @@ pub enum SaveOut {
     Changed(Loaded),
     /// The text could not be turned into the file (a filter that does not parse): a warning.
     Refused(String),
+    /// The file was deleted on disk since the tab read it: nothing was written, so a save never brings back a file someone
+    /// removed without saying so.
+    Gone,
     /// The disk refused: an error.
     Failed(String),
 }
@@ -122,6 +128,9 @@ pub struct JsonParts {
 pub fn save_file(root: &Path, path: &Path, was: Meta, base: &str, text: &str, json: Option<JsonParts>) -> SaveOut {
     if !root.is_dir() {
         return SaveOut::Failed(format!("{} is not there", root.display()));
+    }
+    if was.is_some() && std::fs::symlink_metadata(path).is_err() {
+        return SaveOut::Gone;
     }
     // Text equal to what is being written is no conflict: it is this same save landing twice.
     if was.is_some() && meta_of(path) != was
@@ -154,8 +163,9 @@ pub fn save_file(root: &Path, path: &Path, was: Meta, base: &str, text: &str, js
 pub enum FileOut {
     Read(Result<Loaded, String>),
     Saved(SaveOut),
-    /// A new file written, as a scan would list it.
-    Made(Entry),
+    /// A new file written, as a scan would list it. When it replaced a file, the bytes that file held and the bytes written,
+    /// for the Undo.
+    Made(Entry, Option<(Vec<u8>, Vec<u8>)>),
     Trashed(Result<Vec<u8>, String>),
 }
 
@@ -182,6 +192,7 @@ pub fn scan(root: &Path, exts: &[String], prev: Option<&Scan>) -> Scan {
         return out;
     }
     out.branch = git_branch(root);
+    out.canon = std::fs::canonicalize(root).ok();
     let old: HashMap<&Path, &Entry> = prev.map(|p| p.entries.iter().map(|e| (e.rel.as_path(), e)).collect()).unwrap_or_default();
     let mut stack = vec![(PathBuf::new(), 0usize)];
     let mut opened = 0;
@@ -242,6 +253,9 @@ pub fn scan(root: &Path, exts: &[String], prev: Option<&Scan>) -> Scan {
 
 /// The entry for the file `rel` below `root` as it is now, for a file the app just wrote.
 pub fn entry_of(root: &Path, rel: &Path) -> Option<Entry> {
+    if !super::safe_rel(rel) {
+        return None;
+    }
     let path = root.join(rel);
     let meta = std::fs::metadata(&path).ok()?;
     read_entry(&path, rel.to_path_buf(), &format::ext_of(&path), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len())
@@ -343,6 +357,9 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn dir_below(root: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     if !root.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} is not there", root.display())));
+    }
+    if !super::safe_rel(dir) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} leaves the linked folder", dir.display())));
     }
     let at = root.join(dir);
     std::fs::create_dir_all(&at)?;
@@ -536,6 +553,23 @@ mod tests {
         assert_eq!((s.entries[0].kind.as_str(), s.entries[0].target.clone()), ("sql", Target { db: "shop".into(), schema: "x".into(), coll: String::new() }));
         assert_eq!((s.entries[1].kind.as_str(), s.entries[1].head.as_str(), s.entries[1].target.coll.as_str()), ("filter", "{ a: 1 }", "orders"));
         assert_eq!(rels(&scan(&d, &exts(&["js"]), None)), ["sub/c.js"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn nothing_outside_the_linked_folder_is_read_or_made() {
+        let d = temp_dir("escape");
+        let root = d.join("link");
+        put(&d, "secret.sql", "select 'outside'");
+        put(&root, "in.sql", "select 1");
+        assert!(entry_of(&root, Path::new("in.sql")).is_some());
+        assert!(entry_of(&root, Path::new("../secret.sql")).is_none());
+        assert!(entry_of(&root, &d.join("secret.sql")).is_none());
+        assert!(dir_below(&root, Path::new("../made")).is_err());
+        assert!(!d.join("made").exists());
+        assert!(create_file(&root, Path::new("../"), "x", "sql", b"").is_err());
+        let s = scan_reading(&root, &exts(&["sql"]), None, &[(PathBuf::from("../secret.sql"), None)]);
+        assert!(s.texts.is_empty());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

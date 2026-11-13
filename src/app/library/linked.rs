@@ -69,9 +69,9 @@ fn file_label(rel: &std::path::Path) -> String {
 }
 
 impl Library {
-    /// The folder of a link and the file `rel` below it.
+    /// The folder of a link and the file `rel` below it. None when the link is gone or `rel` would leave its folder.
     pub(in crate::app) fn file_path(&self, link: u64, rel: &std::path::Path) -> Option<PathBuf> {
-        self.links.iter().find(|l| l.id == link).map(|l| l.path.join(rel))
+        self.link_join(link, rel)
     }
 }
 
@@ -119,7 +119,7 @@ impl App {
             .tabs
             .iter()
             .filter_map(|t| match t.script.as_ref()? {
-                Bound { r: ScriptRef::File { link, rel }, disk, .. } if *link == id => Some((rel.clone(), *disk)),
+                Bound { r: ScriptRef::File { link, rel }, disk, .. } if *link == id && crate::library::safe_rel(rel) => Some((rel.clone(), *disk)),
                 _ => None,
             })
             .collect();
@@ -198,14 +198,28 @@ impl App {
                         }
                         self.warn(format!("{} changed on disk. Nothing was saved.", file_label(&rel)));
                     }
+                    SaveOut::Gone => {
+                        // The next Cmd+S writes it back, now that the person has been told.
+                        if let Some(b) = self.bound_to(uid, link, &rel) {
+                            b.disk = None;
+                        }
+                        self.drop_entry(link, &rel);
+                        self.warn(format!("{} was deleted on disk. Nothing was saved; press Cmd+S again to write it back.", file_label(&rel)));
+                    }
                     SaveOut::Refused(e) => self.warn(e),
                     SaveOut::Failed(e) => self.err(e),
                 }
             }
-            (Job::SaveNew { uid, link, rel, view, body, place, password }, FileOut::Made(e)) => {
+            (Job::SaveNew { uid, link, rel, view, body, place, password }, FileOut::Made(e, replaced)) => {
                 let meta = Some((e.mtime, e.len));
                 self.insert_entry(link, e);
                 let r = ScriptRef::File { link, rel: rel.clone() };
+                // Other tabs open on the file it replaced see the change now, as a scan would show it: a clean one that
+                // follows takes the new text, an edited one gets the conflict banner.
+                let others: Vec<usize> = (0..self.tabs.len()).filter(|i| self.tabs[*i].uid != uid && self.tabs[*i].script.as_ref().is_some_and(|b| b.r == r)).collect();
+                for i in others {
+                    self.file_changed(i, link, &rel, Loaded { text: body.clone(), parsed: None, meta });
+                }
                 match (view, self.tab_by_uid(uid)) {
                     (Some(v), Some(i)) if self.tabs[i].view == v => self.tabs[i].script = Some(Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None }),
                     _ => {}
@@ -213,7 +227,10 @@ impl App {
                 self.library.push_recent(r);
                 self.save_library();
                 self.mark_seen(link, &rel, meta);
-                self.ok(format!("Saved {} to {place}", file_label(&rel)));
+                match (replaced, self.library.file_path(link, &rel)) {
+                    (Some((old, new)), Some(path)) => self.toast_restore(format!("Replaced {} in {place}.", file_label(&rel)), Restore::Replaced { link, path, old, new }),
+                    _ => self.ok(format!("Saved {} to {place}", file_label(&rel))),
+                }
                 if password {
                     self.warn("Saved, but the script holds a password in plain text in the file.");
                 }
@@ -310,6 +327,11 @@ impl App {
         let seen = if now.text == b.base {
             let b = t.script.as_mut().unwrap();
             (b.disk, b.conflict) = (now.meta, None);
+            true
+        } else if now.text == mine {
+            // The file now holds what the tab holds, as when the same edit was made elsewhere: nothing to choose between.
+            let b = t.script.as_mut().unwrap();
+            (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
             true
         } else if mine == b.base && follow && b.disk.is_some() {
             set_bound_text(t, &now.text, now.parsed.as_ref());
@@ -614,8 +636,7 @@ impl App {
 
     /// New folder in a linked folder. It is empty, so the scan lists it among its empty folders.
     pub(in crate::app) fn new_linked_dir(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
-        let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
-        let at = root.join(dir);
+        let at = self.library.link_join(link, dir)?;
         let name = disk::unique_name(&at, "New folder");
         match std::fs::create_dir(at.join(&name)) {
             Ok(()) => {
@@ -701,8 +722,8 @@ impl App {
     /// Moves a file into another folder of the same link, never over a file that is there.
     pub(in crate::app) fn move_linked_file(&mut self, link: u64, rel: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
         let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
-        let (from, name) = (root.join(rel), rel.file_name()?.to_string_lossy().into_owned());
-        let at = root.join(dir);
+        let (from, at) = (self.library.link_join(link, rel)?, self.library.link_join(link, dir)?);
+        let name = rel.file_name()?.to_string_lossy().into_owned();
         let to = at.join(disk::unique_name(&at, &name));
         if let Err(e) = std::fs::rename(&from, &to) {
             self.warn(format!("Could not move {name}: {e}"));

@@ -85,7 +85,32 @@ pub enum ScriptRef {
     File { link: u64, rel: PathBuf },
 }
 
+/// Whether `rel` stays inside the folder it is joined to. It comes from ui.json and library.json, which a person or another
+/// build may have edited, so a `..`, a root or a drive in it would read and write outside the linked folder. Empty is the
+/// folder itself.
+pub fn safe_rel(rel: &std::path::Path) -> bool {
+    rel.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+}
+
+impl ScriptRef {
+    /// False for a linked file whose path would leave its folder.
+    pub fn is_safe(&self) -> bool {
+        match self {
+            ScriptRef::Saved(_) => true,
+            ScriptRef::File { rel, .. } => safe_rel(rel) && !rel.as_os_str().is_empty(),
+        }
+    }
+}
+
 impl Library {
+    /// The folder of a link and `rel` below it. None when the link is gone or `rel` would leave the folder.
+    pub fn link_join(&self, link: u64, rel: &std::path::Path) -> Option<PathBuf> {
+        if !safe_rel(rel) {
+            return None;
+        }
+        self.links.iter().find(|l| l.id == link).map(|l| l.path.join(rel))
+    }
+
     /// An id no folder, script or link uses or ever used, so the three share one id space and a deleted item's id is not
     /// handed out again.
     pub fn next_id(&mut self) -> u64 {
@@ -183,6 +208,23 @@ mod tests {
         assert_eq!((l.scripts[1].id, l.scripts[2].folder), (20, None));
         let ids: std::collections::HashSet<u64> = l.folders.iter().map(|f| f.id).chain(l.scripts.iter().map(|s| s.id)).collect();
         assert_eq!(ids.len(), 6);
+    }
+
+    #[test]
+    fn a_path_below_a_link_never_leaves_it() {
+        use std::path::Path;
+        let l = Library { links: vec![Link { id: 1, path: "/work/q".into(), ..Default::default() }], ..Default::default() };
+        assert_eq!(l.link_join(1, Path::new("reports/a.sql")), Some(PathBuf::from("/work/q/reports/a.sql")));
+        assert_eq!(l.link_join(1, Path::new("")), Some(PathBuf::from("/work/q")));
+        for bad in ["../x.sql", "reports/../../x.sql", "/etc/passwd"] {
+            assert_eq!(l.link_join(1, Path::new(bad)), None, "{bad}");
+            assert!(!ScriptRef::File { link: 1, rel: bad.into() }.is_safe());
+        }
+        #[cfg(windows)]
+        assert_eq!(l.link_join(1, Path::new("C:\\x.sql")), None);
+        assert!(ScriptRef::File { link: 1, rel: "a.sql".into() }.is_safe());
+        assert!(!ScriptRef::File { link: 1, rel: "".into() }.is_safe());
+        assert_eq!(l.link_join(2, Path::new("a.sql")), None);
     }
 
     #[test]

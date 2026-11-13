@@ -501,3 +501,76 @@ fn a_second_cmd_s_before_the_first_is_back_raises_no_conflict() {
     assert!(h.state().tabs[0].script.as_ref().unwrap().conflict.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn cmd_s_on_a_file_deleted_on_disk_writes_nothing_until_asked_again() {
+    let dir = temp_dir("deleted");
+    let mut h = bound_app(&dir, "select 1", false);
+    h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    std::fs::remove_file(dir.join("a.sql")).unwrap();
+    rescan(h.state_mut(), &dir);
+    assert!(h.state_mut().save_linked());
+    io(&mut h);
+    // Before, the save recreated the file without a word.
+    assert!(!dir.join("a.sql").exists(), "a file deleted on disk came back on Cmd+S");
+    assert!(h.state().last_problem().contains("deleted on disk"), "{}", h.state().last_problem());
+    assert!(h.state().tabs[0].script.as_ref().is_some_and(|b| b.disk.is_none()));
+    // Told once, the second Cmd+S writes it back.
+    assert!(h.state_mut().save_linked());
+    io(&mut h);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 3");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_file_changed_to_what_the_tab_holds_raises_no_conflict() {
+    let dir = temp_dir("sametext");
+    let mut h = bound_app(&dir, "select 1", false);
+    h.state_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    put(&dir, "a.sql", "select 3");
+    rescan(h.state_mut(), &dir);
+    let b = h.state().tabs[0].script.as_ref().unwrap();
+    assert!(b.conflict.is_none(), "a conflict between two equal texts: {:?}", b.conflict);
+    assert_eq!(b.base, "select 3");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn saving_over_a_linked_file_flags_the_tabs_on_it_and_undo_brings_the_old_bytes_back() {
+    let dir = temp_dir("replace");
+    let h = panel_app(&dir, &[("a.sql", "select 1")]);
+    let mut ui = UiApp { h };
+    // One tab holds edits to a.sql; another, unbound, is saved over it.
+    ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
+    io(&mut ui.h);
+    let edited = ui.app().cur;
+    ui.h.state_mut().tabs[edited].sql.as_mut().unwrap().query = "select 7".into();
+    ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
+    io(&mut ui.h);
+    let a = ui.h.state_mut();
+    let cur = a.cur;
+    assert_ne!(cur, edited);
+    a.tabs[cur].script = None;
+    a.tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
+    a.save_script();
+    if let Some(Modal::SaveScript(f)) = &mut a.modal {
+        (f.link, f.name) = (Some(1), "a".into());
+    }
+    ui.h.run_steps(3);
+    ui.show("Replaces a.sql in this folder.");
+    ui.click_last("Save");
+    io(&mut ui.h);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 42");
+    let other = ui.app().tabs[edited].script.as_ref().unwrap();
+    assert_eq!(other.conflict.as_deref(), Some("select 42"), "the tab with edits to the replaced file was not told");
+    let id = ui.app().restores.last().map(|r| r.0).expect("an Undo for the replaced file");
+    ui.h.state_mut().apply_restore(id);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 1");
+    // An Undo after the file was edited again keeps the edit.
+    std::fs::write(dir.join("a.sql"), "select 9").unwrap();
+    ui.h.state_mut().toast_restore("Replaced.".into(), crate::app::restore::Restore::Replaced { link: 1, path: dir.join("a.sql"), old: b"select 1".to_vec(), new: b"select 42".to_vec() });
+    let id = ui.app().restores.last().map(|r| r.0).unwrap();
+    ui.h.state_mut().apply_restore(id);
+    assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 9");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -131,6 +131,9 @@ impl App {
     /// Its base is the saved text, so edits made before the restart still show as edits. A linked file is bound with the
     /// text the tab holds; the linked folders' code adjusts its disk state when it rescans.
     pub(in crate::app) fn rebind(&self, t: &Tab, r: ScriptRef) -> Option<Bound> {
+        if !r.is_safe() {
+            return None;
+        }
         let (view, base) = match &r {
             ScriptRef::Saved(id) => {
                 let s = self.library.scripts.iter().find(|s| s.id == *id)?;

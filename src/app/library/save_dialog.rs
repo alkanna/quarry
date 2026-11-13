@@ -207,7 +207,8 @@ impl App {
         }
         let file = self.file_for(f, f.name.trim());
         let rel = f.dir.join(&file);
-        let (root, sub, path) = (l.path.clone(), f.dir.clone(), l.path.join(&rel));
+        let Some(path) = self.library.link_join(link, &rel) else { return self.warn("That folder is outside the linked folder.") };
+        let (root, sub) = (l.path.clone(), f.dir.clone());
         let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
         let (kind, body, sort, project) = (f.kind.clone(), f.body.clone(), f.sort.clone(), f.project.clone());
         let place = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
@@ -216,7 +217,8 @@ impl App {
         let job = Job::SaveNew { uid, link, rel: rel.clone(), view: f.view, body: f.body.clone(), place, password };
         // The old file is read, the new one written and listed on the worker; the tab is bound when it is back.
         self.run_job(job, move || {
-            let old = std::fs::read_to_string(&path).ok();
+            let was = std::fs::read(&path).ok();
+            let old = was.as_deref().map(|b| String::from_utf8_lossy(b).into_owned());
             let bytes = match file_bytes(&kind, &body, &sort, &project, target, old.as_deref()) {
                 Ok(b) => b,
                 Err(e) => return FileOut::Saved(SaveOut::Refused(format!("Not saved: {e}"))),
@@ -225,7 +227,7 @@ impl App {
                 return FileOut::Saved(SaveOut::Failed(format!("Could not save {}: {e}", path.display())));
             }
             match disk::entry_of(&root, &rel) {
-                Some(e) => FileOut::Made(e),
+                Some(e) => FileOut::Made(e, was.map(|w| (w, bytes))),
                 None => FileOut::Saved(SaveOut::Failed(format!("{} was written but cannot be read back", path.display()))),
             }
         });

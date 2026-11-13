@@ -201,12 +201,19 @@ pub fn fits(link: &Link, kind: &str, conn: u64, engine: Engine) -> bool {
         "filter" | "pipeline" => engine == Engine::Mongo,
         _ => true,
     };
-    kind_ok
-        && match link.on.as_str() {
-            "engine" => link.engine == engine_key(engine),
-            "all" => true,
-            _ => link.conns.contains(&conn),
-        }
+    kind_ok && used_on(link, conn, Some(engine))
+}
+
+/// Whether a link is used on connection `conn` of `engine` (None when not known yet). An `on` this build does not know is
+/// read as chosen connections, so a scope from a newer build never widens to every connection here. "engine" with no
+/// engine named, which no dialog writes, is every connection rather than none.
+pub fn used_on(link: &Link, conn: u64, engine: Option<Engine>) -> bool {
+    match link.on.as_str() {
+        "engine" if link.engine.is_empty() => true,
+        "engine" => engine.is_none_or(|e| link.engine == engine_key(e)),
+        "all" => true,
+        _ => link.conns.contains(&conn),
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +314,18 @@ mod tests {
         let my = link("engine", "mysql", &[]);
         assert!(fits(&my, "sql", 1, Engine::MySql) && !fits(&my, "sql", 1, Engine::Postgres) && fits(&my, "shell", 1, Engine::MySql));
         assert!(fits(&link("all", "", &[]), "sql", 1, Engine::Postgres) && !fits(&link("all", "", &[]), "sql", 1, Engine::Mongo));
+    }
+
+    #[test]
+    fn odd_scopes_read_from_disk_stay_narrow() {
+        let link = |on: &str, engine: &str, conns: &[u64]| Link { on: on.into(), engine: engine.into(), conns: conns.to_vec(), ..Default::default() };
+        // A scope from a newer build is read as chosen connections, never as every connection.
+        let future = link("team", "", &[7]);
+        assert!(fits(&future, "sql", 7, Engine::MySql) && !fits(&future, "sql", 8, Engine::MySql));
+        // "engine" with no engine named is every connection; a removed connection's id matches nobody else.
+        assert!(fits(&link("engine", "", &[]), "sql", 3, Engine::Postgres));
+        let gone = link("conns", "", &[99]);
+        assert!(!fits(&gone, "sql", 1, Engine::MySql) && !fits(&gone, "shell", 2, Engine::Mongo));
+        assert!(used_on(&link("engine", "mysql", &[]), 1, None));
     }
 }
