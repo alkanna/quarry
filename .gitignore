@@ -48,3 +48,6 @@ local.mk
 
 # Plans and progress notes for the SQL work, kept local
 /docs/sql/*.md
+
+# Trail learnings stay local
+.trail/
