@@ -562,8 +562,35 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
         let Some(c) = st.columns.iter_mut().find(|c| c.name == name) else { continue };
         c.srid = num(&r, "srid").and_then(|n| u32::try_from(n).ok());
         c.check = text(&r, "clause");
+        if d == Dialect::MariaDb && is_json_alias(&c.full_type, &name, c.check.as_deref().unwrap_or_default()) {
+            c.kind = Some(Kind::Json);
+        }
     }
     Ok(())
+}
+
+/// The column a `json_valid(col)` CHECK clause guards, or None for any other clause. Only the bare call counts: a clause
+/// that combines it with more tests says nothing about the column being JSON alone.
+pub(super) fn json_check_col(clause: &str) -> Option<String> {
+    let c = clause.trim();
+    let head = c.get(..11).filter(|h| h.eq_ignore_ascii_case("json_valid("))?;
+    let inner = c[head.len()..].strip_suffix(')')?.trim();
+    match inner.strip_prefix('`') {
+        Some(q) => q.strip_suffix('`').filter(|n| !n.replace("``", "").contains('`')).map(|n| n.replace("``", "`")),
+        None => (!inner.is_empty() && inner.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')).then(|| inner.to_string()),
+    }
+}
+
+/// MariaDB's JSON is an alias for LONGTEXT with a `json_valid` CHECK on the column, so that pair is what tells a JSON column
+/// from plain text.
+pub(super) fn is_json_alias(full_type: &str, name: &str, clause: &str) -> bool {
+    full_type.eq_ignore_ascii_case("longtext") && json_check_col(clause).is_some_and(|c| c == name)
+}
+
+/// The `(table, column)` pairs that the CHECK rows of a MariaDB schema declare JSON, given rows of `Dialect::json_checks`.
+/// The caller still has to confirm the column is LONGTEXT.
+pub(super) fn json_check_pairs(rows: &[SqlRow]) -> Vec<(String, String)> {
+    rows.iter().filter_map(|r| Some((text(r, "tbl")?, json_check_col(&text(r, "clause")?)?))).collect()
 }
 
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
@@ -722,6 +749,21 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mariadb_json_alias_is_a_longtext_with_its_own_json_valid_check() {
+        assert_eq!(json_check_col("json_valid(`doc`)").as_deref(), Some("doc"));
+        assert_eq!(json_check_col("JSON_VALID(`we``ird`)").as_deref(), Some("we`ird"));
+        assert_eq!(json_check_col("json_valid(doc)").as_deref(), Some("doc"));
+        // Other checks, and a combined one, say nothing about the column being JSON.
+        assert_eq!(json_check_col("`age` > 0"), None);
+        assert_eq!(json_check_col("json_valid(`a`) and json_valid(`b`)"), None);
+        assert_eq!(json_check_col("json_valid(concat(`a`,`b`))"), None);
+        assert!(is_json_alias("longtext", "doc", "json_valid(`doc`)"));
+        assert!(is_json_alias("LONGTEXT", "doc", "json_valid(`doc`)"));
+        assert!(!is_json_alias("text", "doc", "json_valid(`doc`)"));
+        assert!(!is_json_alias("longtext", "other", "json_valid(`doc`)"));
+    }
+
     use super::*;
 
     #[test]

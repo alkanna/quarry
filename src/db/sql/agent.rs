@@ -146,12 +146,13 @@ pub(in crate::db) fn where_sql(db: &Db, wher: &[Cond]) -> String {
 async fn table_cols(db: &Db, schema: &str, table: &str) -> Res<Vec<Col>> {
     let d = db.dialect;
     let rows = if d == Dialect::Postgres { pg_columns(db, schema, table).await? } else { db.meta(schema, d.columns(), [schema, table]).await? };
+    let json = super::worker::json_alias_cols(db, schema, Some(table)).await;
     Ok(rows
         .iter()
         .filter_map(|r| {
             let name = text(r, "name")?;
             let full = text(r, "full_type")?;
-            let kind = if d == Dialect::Postgres { pg_kind(r) } else { Kind::from_column_type(&full) };
+            let kind = if d == Dialect::Postgres { pg_kind(r) } else if full.eq_ignore_ascii_case("longtext") && json.contains(&(table.to_string(), name.clone())) { Kind::Json } else { Kind::from_column_type(&full) };
             Some(Col::plain(&name, &full, kind, r.int("nullable").map(|n| n != 0).unwrap_or(true)))
         })
         .collect())

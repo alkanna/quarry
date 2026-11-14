@@ -9,6 +9,8 @@ use crate::db::{e, Msg, Res, Worker};
 use sqlx::{Connection, Executor};
 use std::collections::HashMap;
 
+pub mod locks;
+
 /// One row of SHOW FULL PROCESSLIST.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Proc {
@@ -379,6 +381,7 @@ pub enum Answer {
     Vars(Res<Variables>),
     Status(Res<Snap>),
     Overview(Res<Overview>),
+    Locks(Res<locks::Locks>),
     /// A KILL: whether it was of the whole connection, and the server's answer.
     Kill { whole: bool, res: Res<String> },
 }
@@ -394,15 +397,19 @@ async fn uptime(c: &mut sqlx::MySqlConnection) -> Option<u64> {
     text(rows.first()?, "Value")?.trim().parse().ok()
 }
 
+async fn proc_list(c: &mut sqlx::MySqlConnection) -> Res<Vec<Proc>> {
+    let list = rows(c, "SHOW FULL PROCESSLIST").await.map_err(|x| {
+        let denied = matches!(&x, sqlx::Error::Database(d) if d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().is_some_and(|m| m.number() == 1227));
+        if denied { "Your account cannot list the processes: it needs the PROCESS privilege.".to_string() } else { e(x) }
+    })?;
+    Ok(list.iter().filter_map(|r| proc_from(&|n| text(r, n))).collect())
+}
+
 async fn processes(db: &Db) -> Res<Processes> {
     db.mysql_only()?;
     let mut c = db.acquire().await?;
     let (me, identity) = me_and_identity(&mut c, db.dialect).await?;
-    let list = rows(&mut c, "SHOW FULL PROCESSLIST").await.map_err(|x| {
-        let denied = matches!(&x, sqlx::Error::Database(d) if d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().is_some_and(|m| m.number() == 1227));
-        if denied { "Your account cannot list the processes: it needs the PROCESS privilege.".to_string() } else { e(x) }
-    })?;
-    let rows = list.iter().filter_map(|r| proc_from(&|n| text(r, n))).collect();
+    let rows = proc_list(&mut c).await?;
     Ok(Processes { rows, me, uptime: uptime(&mut c).await, identity })
 }
 
@@ -583,6 +590,10 @@ async fn kill_on(c: &mut sqlx::MySqlConnection, d: Dialect, t: &KillTarget, whol
 impl Worker {
     pub fn sql_server_processes(&self, db: Db, req: u64) {
         self.spawn(async move { Msg::SqlServer { req, ans: Answer::Procs(processes(&db).await) } });
+    }
+
+    pub fn sql_server_locks(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::SqlServer { req, ans: Answer::Locks(locks::read(&db).await) } });
     }
 
     pub fn sql_server_variables(&self, db: Db, req: u64, global: bool) {

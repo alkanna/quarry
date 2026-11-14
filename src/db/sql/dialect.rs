@@ -55,6 +55,16 @@ impl Dialect {
         "SELECT COLUMN_NAME AS name, COLUMN_TYPE AS full_type, IS_NULLABLE = 'YES' AS nullable, COLUMN_KEY AS col_key, COLUMN_DEFAULT AS col_default, EXTRA AS extra, COLLATION_NAME AS collation, COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
     }
 
+    /// The CHECK constraints of MariaDB 10.2 and later, for finding the columns declared JSON. Params: [schema] or, with
+    /// `by_table`, [schema, table]. Columns: tbl, clause.
+    pub fn json_checks(self, by_table: bool) -> &'static str {
+        if by_table {
+            "SELECT TABLE_NAME AS tbl, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?"
+        } else {
+            "SELECT TABLE_NAME AS tbl, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ?"
+        }
+    }
+
     /// One row per indexed column, the primary key first. Params: [schema, table]. Columns: name,
     /// non_unique (1 or 0), seq, col, direction ("A", "D" or NULL), cardinality, sub_part,
     /// index_type, nullable ("YES" or empty), comment.

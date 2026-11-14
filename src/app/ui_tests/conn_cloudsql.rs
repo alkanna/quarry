@@ -73,7 +73,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.click("Use acme-prod:europe-west1:orders-db");
     ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
-    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public }));
+    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert_eq!((f.name.as_str(), f.addr.user.as_str(), f.engine), ("orders-db", "jane@example.com", db::sql::Engine::Postgres));
     ui.show("From gcloud, editable");
     ui.show("No password. The proxy signs in with Application Default Credentials, which must be this user's account");
@@ -87,7 +87,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.click("Save and connect");
     ui.wait("the form to close", |a| a.modal.is_none());
     let c = ui.app().conns.last().expect("the saved connection");
-    assert_eq!(c.meta.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public }));
+    assert_eq!(c.meta.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert!(c.meta.ssh.is_none());
     assert!(!c.masked_uri.contains("****") && c.masked_uri.contains("jane%40example.com@"), "the stored address has no password: {}", c.masked_uri);
 

@@ -1,4 +1,4 @@
-//! Cloud SQL: the "Add from Cloud SQL" browser of the projects and PostgreSQL instances gcloud reaches, the cards for a
+//! Cloud SQL: the "Add from Cloud SQL" browser of the projects and PostgreSQL and MySQL instances gcloud reaches, the cards for a
 //! missing gcloud or proxy and a signed-out account, and the card of a connection whose proxy failed.
 
 use super::*;
@@ -95,7 +95,7 @@ pub(super) struct CloudBrowser {
     pub(super) change: bool,
     /// An IAM instance whose Use found no Application Default Credentials, which the browser then asks for.
     pub(super) adc_for: Option<String>,
-    /// Shows the projects with no PostgreSQL instance or no access, folded by default since an account often reaches
+    /// Shows the projects with no PostgreSQL or MySQL instance or no access, folded by default since an account often reaches
     /// dozens of them (Apps Script's sys- projects among them).
     pub(super) others: bool,
 }
@@ -144,16 +144,22 @@ fn running(i: &Instance) -> bool {
 pub(super) fn use_instance(f: &mut ConnForm, inst: &Instance, account: Option<&str>) {
     let keep = f.cloud_sql.as_ref().map(|c| c.ip).filter(|k| ip_on(inst, *k));
     let ip = keep.or_else(|| KINDS.iter().map(|k| k.0).find(|k| ip_on(inst, *k))).unwrap_or_default();
-    f.cloud_sql = Some(CloudSql { instance: inst.connection_name.clone(), iam: inst.iam, ip });
+    let iam = inst.iam_usable();
+    f.cloud_sql = Some(CloudSql { instance: inst.connection_name.clone(), iam, ip, mysql: inst.mysql() });
     f.cloud_inst = Some(inst.clone());
-    f.engine = db::sql::Engine::Postgres;
-    f.addr.scheme = "postgres".into();
-    f.addr.port = db::sql::Addr::default_port("postgres");
+    let scheme = if inst.mysql() { "mysql" } else { "postgres" };
+    f.engine = if inst.mysql() { db::sql::Engine::MySql } else { db::sql::Engine::Postgres };
+    // The libpq and mysql spellings of a TLS mode differ, so a mode of the other engine does not carry over.
+    if f.addr.scheme != scheme {
+        f.addr.ssl_mode = Default::default();
+    }
+    f.addr.scheme = scheme.into();
+    f.addr.port = db::sql::Addr::default_port(scheme);
     f.ssh_on = false;
     if f.name.trim().is_empty() {
         f.name = inst.name.clone();
     }
-    if inst.iam {
+    if iam {
         if let Some(a) = account {
             f.addr.user = crate::cloudsql::iam_user(a);
         }
@@ -649,7 +655,7 @@ impl App {
         let mut act = None;
         let r = banded(egui::Id::unique(("quarry-layer", "cloud-sql"))).show(ctx, |ui| {
             ui.set_width(BROWSER_W + 40.0);
-            let sub = if b.change { "PostgreSQL instances your gcloud account can reach. Use puts one in the open form." } else { "PostgreSQL instances your gcloud account can reach. Use fills a new connection." };
+            let sub = if b.change { "PostgreSQL and MySQL instances your gcloud account can reach. Use puts one in the open form." } else { "PostgreSQL and MySQL instances your gcloud account can reach. Use fills a new connection." };
             let account = self.cloud.account();
             dialog_head_with(ui, &Head::new("Add from Cloud SQL").sub(sub).glyph(glyphs::server), |ui| {
                 if let Some(a) = account {
@@ -707,8 +713,9 @@ impl App {
             let ui = outer;
             let shown = b.sel.as_ref().and_then(|n| self.cloud.instance(n));
             let foot = match shown {
-                Some(i) => format!("Only PostgreSQL instances are listed. Use saves {} {}.", i.connection_name, if i.iam { "with IAM sign-in on" } else { "with a database password" }),
-                None => "Only PostgreSQL instances are listed.".to_string(),
+                Some(i) if i.mysql() && i.iam => format!("Only PostgreSQL and MySQL instances are listed. Use saves {} with a database password: IAM sign-in is not offered for MySQL instances.", i.connection_name),
+                Some(i) => format!("Only PostgreSQL and MySQL instances are listed. Use saves {} {}.", i.connection_name, if i.iam { "with IAM sign-in on" } else { "with a database password" }),
+                None => "Only PostgreSQL and MySQL instances are listed. IAM sign-in is offered for PostgreSQL only.".to_string(),
             };
             dialog_foot(ui, |ui| {
                 close = ui.button("Cancel").on_hover_text("Esc").clicked();
@@ -718,7 +725,7 @@ impl App {
         self.cloud_card_act(act, |a| a.cloud_load(true));
         if let Some(i) = pick {
             // Without Application Default Credentials the proxy cannot sign in to IAM, so the browser asks for them first.
-            if !(i.iam && !self.cloud.adc()) {
+            if !(i.iam_usable() && !self.cloud.adc()) {
                 return self.cloud_use(&i, b.change);
             }
             (b.adc_for, b.sel) = (Some(i.connection_name.clone()), Some(i.connection_name));
@@ -797,11 +804,11 @@ impl App {
                         });
                     }
                     if !others.is_empty() {
-                        let label = if b.others { "Hide projects without PostgreSQL".to_string() } else { format!("{} more without PostgreSQL", others.len()) };
+                        let label = if b.others { "Hide projects without instances".to_string() } else { format!("{} more without instances", others.len()) };
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.add_space(4.0);
-                            if quiet(ui, &label).on_hover_text("Projects with no PostgreSQL instance, or that this account may not list. Hover one for the reason.").clicked() {
+                            if quiet(ui, &label).on_hover_text("Projects with no PostgreSQL or MySQL instance, or that this account may not list. Hover one for the reason.").clicked() {
                                 b.others = !b.others;
                             }
                         });
@@ -867,7 +874,7 @@ impl App {
                             } else if !q.is_empty() {
                                 ui.label(RichText::new(format!("No instance matches \u{201c}{}\u{201d}.", b.search.trim())).color(MUTED()));
                             } else {
-                                ui.label(RichText::new("No PostgreSQL instances here.").color(MUTED()));
+                                ui.label(RichText::new("No PostgreSQL or MySQL instances here.").color(MUTED()));
                             }
                         });
                     } else if loading {
@@ -920,12 +927,12 @@ fn instance_row(ui: &mut egui::Ui, i: &Instance, b: &mut CloudBrowser) -> bool {
         p.layout_job(job)
     };
     let mut x = left + COL_NAME + 15.0;
-    let badge_room = if i.iam { iam_galley(p).size().x + 14.0 + 8.0 } else { 0.0 };
+    let badge_room = if i.iam_usable() { iam_galley(p).size().x + 14.0 + 8.0 } else { 0.0 };
     let name = fit(&i.name, mono_fmt(TXT_BODY, name_c, 400.0), end - x - badge_room);
     let name_w = name.size().x;
     galley_at(p, x, cy, name, name_c);
     x += name_w + 8.0;
-    if i.iam {
+    if i.iam_usable() {
         x = iam_badge(p, x, cy) + 6.0;
     }
     if !up && x < end {
@@ -1015,6 +1022,22 @@ mod tests {
         assert_eq!((f.name.as_str(), f.cloud_sql.as_ref().unwrap().ip, f.cloud_sql.as_ref().unwrap().iam), ("mine", IpKind::Psc, false));
         use_host(&mut f);
         assert!(f.cloud_sql.is_none() && f.addr.host.is_empty());
+    }
+
+    #[test]
+    fn use_fills_a_mysql_instance_with_the_mysql_engine_and_a_password_sign_in() {
+        let mut f = ConnForm { addr: db::sql::Addr { scheme: "postgres".into(), ssl_mode: db::sql::SslMode::Required, ..Default::default() }, ..Default::default() };
+        let shop = Instance { version: "MYSQL_8_0".into(), name: "shop".into(), ..inst(true, false, false, true) };
+        use_instance(&mut f, &shop, Some("me@example.com"));
+        let c = f.cloud_sql.clone().unwrap();
+        assert_eq!((c.mysql, c.iam, f.engine), (true, false, db::sql::Engine::MySql));
+        assert_eq!((f.addr.scheme.as_str(), f.addr.port), ("mysql", 3306));
+        assert_eq!(f.addr.ssl_mode, db::sql::SslMode::default());
+        assert!(f.addr.user.is_empty(), "no IAM user is filled in");
+        // The form goes through the proxy for MySQL and not for the PostgreSQL card it was switched to.
+        assert!(f.cloud_on().is_some() && f.net().cloud_sql.is_some());
+        f.engine = db::sql::Engine::Postgres;
+        assert!(f.cloud_on().is_none() && f.net().cloud_sql.is_none());
     }
 
     #[test]
