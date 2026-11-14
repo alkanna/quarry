@@ -218,7 +218,9 @@ impl Sim {
             }
             Change::DropIndex(name) => {
                 let i = self.idx.iter().position(|x| same_name(&x.name, name) || (name == "PRIMARY" && x.kind == IndexKind::Primary)).ok_or_else(|| format!("Index {name} is not on the table."))?;
-                if self.idx[i].functional {
+                // PostgreSQL's own text of the index puts it back exactly, unless a constraint owns it.
+                let x = &self.idx[i];
+                if x.functional && !(self.pg && x.raw.starts_with("CREATE ") && !x.constraint && x.kind != IndexKind::Primary) {
                     return Err(format!("Index {name} has an expression part, which cannot be read back to add it again."));
                 }
                 Ok(vec![Change::AddIndex(self.idx.remove(i))])
@@ -408,7 +410,16 @@ pub struct Plan {
 impl Plan {
     /// The statements as the preview shows them. MySQL has the one ALTER as it is; PostgreSQL has a script of its steps.
     pub fn sql(&self) -> String {
-        if self.expect.is_some() { script(&self.steps) } else { self.steps.join("\n\n") }
+        if self.expect.is_none() {
+            return self.steps.join("\n\n");
+        }
+        let (now, later) = crate::db::sql::pg::ddl::split_steps(&self.steps);
+        if later.is_empty() {
+            return script(&self.steps);
+        }
+        let (now, later): (Vec<String>, Vec<String>) = (now.into_iter().cloned().collect(), later.into_iter().cloned().collect());
+        let note = "-- CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so the statements below run on their own after the ones above. If one fails, the ones above stay applied.";
+        if now.is_empty() { format!("{note}\n\n{}", script(&later)) } else { format!("{}\n\n{note}\n\n{}", script(&now), script(&later)) }
     }
 }
 

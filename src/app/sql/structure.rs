@@ -345,6 +345,14 @@ impl App {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 caption(ui, "INDEXES");
                 stat_chip(ui, &d.indexes.len().to_string());
+                if !d.indexes.is_empty() {
+                    if !d.usage.unavailable.is_empty() {
+                        ui.label(RichText::new("use not counted").size(TXT_SMALL).color(FAINT())).on_hover_text(&d.usage.unavailable);
+                    } else if d.indexes.iter().any(|i| i.scans.is_some()) {
+                        let (since, tip) = usage_note(&d.usage);
+                        ui.label(RichText::new(since).size(TXT_SMALL).color(FAINT())).on_hover_text(tip);
+                    }
+                }
                 right_group(ui, |ui| {
                     if quiet_enabled(ui, editable, "+ Index").on_disabled_hover_text(why).clicked() {
                         acts.push(Act::NewIndex);
@@ -360,9 +368,9 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-            let ishown: Vec<usize> = (0..6).filter(|i| cardinality || *i != 4).collect();
-            let iall = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
-            let heads: Vec<GCol> = iall.into_iter().enumerate().filter(|(i, _)| ishown.contains(i)).map(|(_, g)| g).collect();
+            let (used, last, partial) = (d.indexes.iter().any(|i| i.scans.is_some()), d.indexes.iter().any(|i| i.last_scan.is_some()), d.indexes.iter().any(|i| !i.predicate.is_empty()));
+            let iall = [(0, gc("Key name", 2.0)), (1, gc("Columns", 2.4)), (8, gc("Where", 1.8)), (2, gc("Unique", 0.8)), (3, gc("Type", 0.8)), (4, gc_r("Cardinality", 1.2)), (6, gc_r("Used", 0.9)), (7, gc_r("Last used", 1.4)), (5, gc("Comment", 2.4))];
+            let (ishown, heads): (Vec<usize>, Vec<GCol>) = iall.into_iter().filter(|(i, _)| match *i { 4 => cardinality, 6 => used, 7 => last, 8 => partial, _ => true }).unzip();
             let mut imenu = |ui: &mut egui::Ui, r: usize| {
                 if ui.add_enabled(editable, egui::Button::new("Edit index")).on_disabled_hover_text(why).clicked() {
                     acts.push(Act::EditIndex(r));
@@ -896,8 +904,10 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
     match col {
         0 => named(ui, rect, &ix.name, ix.name == "PRIMARY", mono()),
         1 => {
-            let cols: Vec<String> = ix.cols.iter().map(|c| format!("{}{}{}", c.name, c.prefix.map_or(String::new(), |n| format!("({n})")), if c.desc { " DESC" } else { "" })).collect();
-            put(ui, rect, &cols.join(", "), mono(), TEXT(), false);
+            // A key part that is an expression has no column name, so the expression stands in for it.
+            let cols: Vec<String> = ix.cols.iter().map(|c| format!("{}{}{}", if c.name.is_empty() { c.expr.as_deref().unwrap_or_default() } else { c.name.as_str() }, c.prefix.map_or(String::new(), |n| format!("({n})")), if c.desc { " DESC" } else { "" })).collect();
+            let inc = if ix.include.is_empty() { String::new() } else { format!("  INCLUDE {}", ix.include.join(", ")) };
+            put(ui, rect, &format!("{}{inc}", cols.join(", ")), mono(), TEXT(), false);
         }
         2 => tick(ui, rect, ix.unique),
         3 => {
@@ -906,6 +916,14 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
         4 => {
             put(ui, rect, &ix.cardinality.map_or(String::new(), |n| group(&n.to_string())), mono(), C_NUMBER(), true);
         }
+        6 => match ix.scans {
+            // A key that enforces uniqueness is needed even when no query reads it, so it is never called unused.
+            Some(0) if !(ix.unique || ix.primary || ix.constraint || ix.name == "PRIMARY") => put(ui, rect, "unused", mono(), FAINT(), true),
+            Some(n) => put(ui, rect, &group(&n.to_string()), mono(), C_NUMBER(), true),
+            None => {}
+        },
+        7 => put(ui, rect, ix.last_scan.as_deref().map(stamp).as_deref().unwrap_or_default(), mono(), MUTED(), true),
+        8 => put(ui, rect, &ix.predicate, mono(), MUTED(), false),
         _ => {
             put(ui, rect, &ix.comment, FontId::proportional(TXT_BODY), TEXT(), false);
         }
@@ -934,6 +952,28 @@ fn check_cell(ui: &egui::Ui, rect: Rect, k: &CheckConstraint, col: usize, dialec
             put(ui, rect, &v.join(", "), mono(), MUTED(), false);
         }
     }
+}
+
+/// A server timestamp to the minute, without the fraction and zone: "2026-11-14 10:03".
+fn stamp(t: &str) -> String {
+    t.replace('T', " ").chars().take(16).collect()
+}
+
+/// The short note beside the index list and the tooltip that says what the counts mean and when they restart.
+fn usage_note(u: &db::sql::structure::IndexUsage) -> (String, String) {
+    let tip = "How often a query used each index. A count of zero on an index that is not a key of the table may mean it can be dropped, but check that nothing reads it only now and then, such as a monthly report.";
+    if !u.reset.is_empty() {
+        return (format!("use counted since {}", stamp(&u.reset)), format!("{tip} The server counts from the last reset of this database's statistics. A restore or crash recovery also clears them."));
+    }
+    if let Some(secs) = u.uptime {
+        let ago = match secs {
+            0..3600 => format!("{} min", secs / 60),
+            3600..86400 => format!("{} h", secs / 3600),
+            _ => format!("{} days", secs / 86400),
+        };
+        return (format!("use counted for {ago}"), format!("{tip} The server counts from its start, and a table that falls out of its table cache starts again."));
+    }
+    ("use counted".into(), format!("{tip} No reset time is recorded, so the count may go back a long way."))
 }
 
 /// A bordered table with a header row, striped rows and a row number. `cell` paints one cell and

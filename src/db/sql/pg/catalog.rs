@@ -78,8 +78,9 @@ pub const COLUMNS: &str = concat!(
 /// `col` is empty), def (`pg_get_indexdef`), is_primary and backs_constraint (a primary key, unique or exclusion
 /// constraint owns the index, so a CREATE TABLE writes it as a constraint and not as CREATE INDEX), defer_ok and
 /// defer_init (the constraint is DEFERRABLE, INITIALLY DEFERRED), con_comment (the constraint's own comment) and complex
-/// (the index has a part its key columns do not say: a condition, expressions, included columns, a non-default operator
-/// class, collation or NULLS order, storage options, a tablespace or NULLS NOT DISTINCT). `complex` is read from the
+/// (the index has a part the editor cannot write: expressions, a non-default operator class, collation or NULLS order,
+/// storage options, a tablespace or NULLS NOT DISTINCT), pred (the WHERE condition of a partial index) and incl (the
+/// INCLUDE columns as a JSON array, in order). `complex` is read from the
 /// catalog fields and not from the text of `def`, which a quoted name could confuse; PostgreSQL 13 has no
 /// `indnullsnotdistinct`, so it is read through the row's JSON, which leaves it out there.
 pub const INDEXES: &str = "SELECT ic.relname::text AS name, (NOT i.indisunique)::int AS non_unique, k.n::bigint AS seq, \
@@ -90,7 +91,9 @@ pub const INDEXES: &str = "SELECT ic.relname::text AS name, (NOT i.indisunique):
      pg_get_indexdef(i.indexrelid) AS def, i.indisprimary::int AS is_primary, \
      (cc.oid IS NOT NULL)::int AS backs_constraint, COALESCE(cc.condeferrable, false)::int AS defer_ok, COALESCE(cc.condeferred, false)::int AS defer_init, \
      COALESCE(obj_description(cc.oid, 'pg_constraint'), '') AS con_comment, \
-     (i.indpred IS NOT NULL OR i.indexprs IS NOT NULL OR i.indnatts <> i.indnkeyatts OR ic.reloptions IS NOT NULL OR ic.reltablespace <> 0 \
+     pg_get_expr(i.indpred, i.indrelid) AS pred, \
+     (SELECT json_agg(ia.attname::text ORDER BY ik.n)::text FROM generate_series(i.indnkeyatts::int + 1, i.indnatts::int) AS ik(n) JOIN pg_attribute ia ON ia.attrelid = tc.oid AND ia.attnum = i.indkey[ik.n - 1]) AS incl, \
+     (i.indexprs IS NOT NULL OR ic.reloptions IS NOT NULL OR ic.reltablespace <> 0 \
       OR COALESCE(to_jsonb(i) ->> 'indnullsnotdistinct', 'false') <> 'false' \
       OR NOT COALESCE((SELECT oc.opcdefault FROM pg_opclass oc WHERE oc.oid = i.indclass[k.n - 1]), false) \
       OR i.indcollation[k.n - 1] <> COALESCE(a.attcollation, 0) \
