@@ -8,6 +8,7 @@ pub(super) mod create;
 pub(super) mod create_pg;
 pub(super) mod dump;
 pub(super) mod edit;
+pub(super) mod explain;
 pub(super) mod import;
 pub(super) mod ns;
 pub(super) mod pg_roles;

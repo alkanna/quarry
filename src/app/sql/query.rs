@@ -463,6 +463,10 @@ impl App {
         if text.trim().is_empty() {
             return self.warn("Nothing to run.");
         }
+        // The plan has a dialog of its own; the classic rows are one click away there.
+        if explain {
+            return self.sql_explain(text);
+        }
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
         let (db, ns) = run_target(&self.tabs[self.cur], db);
         let read_only = !self.conn_writable(conn);
@@ -470,7 +474,6 @@ impl App {
         // History is written to ui.json and listed in the menu, so a password never goes in.
         push_history(&mut self.prefs.history.entry(key).or_default().selector, &db::redact_sql(&text).0);
         self.save_prefs();
-        let text = if explain { format!("EXPLAIN {text}") } else { text };
         self.req += 1;
         let req = self.req;
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };

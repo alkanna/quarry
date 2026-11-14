@@ -320,6 +320,7 @@ impl App {
                 Modal::Rename { doc: d, path, name } => self.rename_field_dialog(ui, d, path, name, &mut keep),
                 Modal::UpdateMany { set_txt, unset_txt, preview } => self.update_many_dialog(ui, set_txt, unset_txt, preview, &mut keep),
                 Modal::Undo => self.undo_dialog(ui, &mut keep),
+                Modal::SqlExplain(x) => self.sql_explain_dialog(ui, x, &mut keep),
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
                 // Drawn by their own functions before this dialog.
                 Modal::Palette { .. } | Modal::Settings => {}
