@@ -156,7 +156,15 @@ impl Drop for FileState {
 
 /// The text on the clipboard as an import source, or why there is none.
 fn clipboard_source() -> Result<Source, String> {
+    // arboard is a dependency on macOS only, where the menu bar reads the clipboard the same way.
+    #[cfg(target_os = "macos")]
     let text = arboard::Clipboard::new().and_then(|mut c| c.get_text()).map_err(|e| format!("Could not read the clipboard: {e}"))?;
+    #[cfg(not(target_os = "macos"))]
+    let text = String::new();
+    #[cfg(not(target_os = "macos"))]
+    if text.is_empty() {
+        return Err("Reading the clipboard is not available here. Save the text to a file and import that.".into());
+    }
     if text.trim().is_empty() {
         return Err("The clipboard holds no text.".into());
     }
