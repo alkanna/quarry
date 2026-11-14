@@ -3,11 +3,6 @@
 
 use super::*;
 
-fn disabled(ui: &UiApp, label: &str) -> bool {
-    // The last match is the topmost one: the page behind a dialog can carry a button of the same name, such as the document view's Duplicate.
-    ui.h.query_all_by_label(label).last().expect("no widget with this name").accesskit_node().is_disabled()
-}
-
 #[test]
 fn the_close_button_closes_a_dialog() {
     let Some(mut ui) = demo_ui(|a| {
@@ -30,13 +25,13 @@ fn a_typed_confirmation_arms_only_on_the_exact_name() {
         return;
     };
     ui.show("Confirm");
-    assert!(disabled(&ui, "Confirm"), "Confirm is armed before the name is typed");
+    assert!(ui.disabled("Confirm"), "Confirm is armed before the name is typed");
     ui.fill("Confirmation", "ERS");
-    assert!(disabled(&ui, "Confirm"), "the check is case sensitive");
+    assert!(ui.disabled("Confirm"), "the check is case sensitive");
     let Some(Modal::Typed { typed, .. }) = &mut ui.h.state_mut().modal else { panic!("the dialog closed") };
     *typed = "orders".into();
     ui.settle();
-    assert!(!disabled(&ui, "Confirm"), "Confirm stays off with the exact name typed");
+    assert!(!ui.disabled("Confirm"), "Confirm stays off with the exact name typed");
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
     assert!(ui.app().modal.is_none(), "Esc left the confirmation open");
@@ -65,12 +60,12 @@ fn a_taken_name_blocks_duplicate_and_says_why() {
         return;
     };
     ui.show("Duplicate");
-    assert!(disabled(&ui, "Duplicate"), "Duplicate onto an existing collection is offered");
+    assert!(ui.disabled("Duplicate"), "Duplicate onto an existing collection is offered");
     assert!(ui.h.query_by_label_contains("already exists").is_some(), "no note says the name is taken");
     let Some(Modal::DuplicateColl { name, .. }) = &mut ui.h.state_mut().modal else { panic!("the dialog closed") };
     *name = "customers_copy".into();
     ui.settle();
-    assert!(!disabled(&ui, "Duplicate"));
+    assert!(!ui.disabled("Duplicate"));
     assert!(ui.h.query_by_label_contains("already exists").is_none());
 }
 
@@ -83,13 +78,13 @@ fn a_new_view_needs_a_source_and_a_pipeline_that_parses() {
         return;
     };
     ui.show("Create view");
-    assert!(!disabled(&ui, "Create view"));
+    assert!(!ui.disabled("Create view"));
     assert!(ui.h.query_by_label("Pipeline parses").is_some());
     let Some(Modal::NewCollection { source, pipeline, .. }) = &mut ui.h.state_mut().modal else { panic!("the dialog closed") };
     source.clear();
     *pipeline = "[ { $match: ".into();
     ui.settle();
-    assert!(disabled(&ui, "Create view"), "a view with no source can be created");
+    assert!(ui.disabled("Create view"), "a view with no source can be created");
     assert!(ui.h.query_by_label("Pipeline parses").is_none(), "a broken pipeline is said to parse");
 }
 

@@ -4,14 +4,6 @@
 use super::*;
 use crate::app::palette::keys;
 
-fn off(ui: &UiApp, label: &str) -> bool {
-    ui.h.query_all_by_label(label).last().unwrap_or_else(|| panic!("no widget named {label}")).accesskit_node().is_disabled()
-}
-
-fn query(a: &App) -> String {
-    a.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
-}
-
 fn hint(a: &App, name: &str) -> Option<String> {
     a.command_hints().into_iter().find(|(n, _)| n == name).map(|(_, k)| k)
 }
@@ -108,25 +100,25 @@ fn mysql_info_buttons_run_light_statements_in_the_query_view() {
     }
     ui.click("Check");
     assert!(ui.app().t().map(|t| t.view) == Some(View::Sql), "Check did not go to the Query view");
-    let q = query(ui.app());
+    let q = ui.query_text();
     assert!(q.starts_with("CHECK TABLE") && q.contains("`orders`"), "{q}");
 }
 
 #[test]
 fn a_heavy_maintenance_statement_asks_first_and_cancel_runs_nothing() {
     let Some(mut ui) = demo_ui(mysql_info) else { return };
-    let before = query(ui.app());
+    let before = ui.query_text();
     ui.click("Optimize");
     assert!(matches!(&ui.app().modal, Some(Modal::SqlMaintain { stmt, .. }) if stmt.starts_with("OPTIMIZE TABLE")), "Optimize did not ask first");
     ui.click_last("Cancel");
     assert!(ui.app().modal.is_none());
     assert!(ui.app().t().map(|t| t.view) == Some(View::Info), "a cancelled Optimize left the Info page");
-    assert_eq!(query(ui.app()), before, "a cancelled Optimize filled the Query view");
+    assert_eq!(ui.query_text(), before, "a cancelled Optimize filled the Query view");
 
     ui.click("Optimize");
     ui.click_last("Run");
     assert!(ui.app().t().map(|t| t.view) == Some(View::Sql));
-    assert!(query(ui.app()).starts_with("OPTIMIZE TABLE"), "{}", query(ui.app()));
+    assert!(ui.query_text().starts_with("OPTIMIZE TABLE"), "{}", ui.query_text());
 }
 
 #[test]
@@ -137,12 +129,10 @@ fn truncate_asks_for_the_table_name_and_a_locked_connection_turns_every_button_o
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
 
-    for c in &mut ui.h.state_mut().conns {
-        c.writable = false;
-    }
+    ui.lock();
     ui.settle();
     for b in ["Analyze", "Optimize", "Check", "Truncate..."] {
-        assert!(off(&ui, b), "{b} is on for a read-only connection");
+        assert!(ui.disabled(b), "{b} is on for a read-only connection");
     }
 }
 
@@ -154,7 +144,7 @@ fn postgresql_info_offers_vacuum_analyze_and_reindex_with_a_confirm_for_the_slow
     }
     assert!(ui.h.query_all_by_label("Optimize").next().is_none() && ui.h.query_all_by_label("Truncate...").next().is_none(), "MySQL's buttons show on PostgreSQL");
     ui.click("Analyze");
-    let q = query(ui.app());
+    let q = ui.query_text();
     assert!(q.starts_with("ANALYZE ") && q.contains("\"orders\""), "{q}");
 
     let Some(mut ui) = demo_ui(pg_info) else { return };

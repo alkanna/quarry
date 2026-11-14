@@ -23,10 +23,6 @@ fn set_query(ui: &mut UiApp, text: &str) {
     a.tabs[c].sql.as_mut().unwrap().query = text.into();
 }
 
-fn query(ui: &UiApp) -> String {
-    ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
-}
-
 fn dialog_name(ui: &UiApp) -> Option<String> {
     match &ui.app().modal {
         Some(Modal::SaveScript(f)) => Some(f.name.clone()),
@@ -164,7 +160,7 @@ fn a_recent_script_loads_its_text_into_the_empty_tab() {
     let tabs = ui.app().tabs.len();
     ui.click("Library 5");
     ui.click("Script Late shipments");
-    assert!(query(&ui).starts_with("-- Paid orders that never shipped"));
+    assert!(ui.query_text().starts_with("-- Paid orders that never shipped"));
     assert_eq!(ui.app().tabs.len(), tabs, "an empty tab is reused, as a click on a table does");
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some());
 }
@@ -178,7 +174,7 @@ fn a_script_opens_beside_a_tab_that_holds_text() {
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.settle();
     assert_eq!(ui.app().tabs.len(), tabs + 1);
-    assert!(query(&ui).starts_with("SELECT tier"));
+    assert!(ui.query_text().starts_with("SELECT tier"));
     // The first tab kept what was typed there.
     let first = ui.app().tabs.iter().filter_map(|t| t.sql.as_ref()).any(|s| s.query == "SELECT 7");
     assert!(first);
@@ -278,7 +274,7 @@ fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_pick
     assert!(rows.contains(&(lost, 0)), "{rows:?}");
     ui.click("Library 6");
     ui.click("Script Lost script");
-    assert_eq!(query(&ui), "SELECT 2;");
+    assert_eq!(ui.query_text(), "SELECT 2;");
 }
 
 #[test]

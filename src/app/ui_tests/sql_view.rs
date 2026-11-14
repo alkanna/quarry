@@ -39,16 +39,10 @@ pub(super) fn shown_text(ui: &UiApp) -> Option<String> {
     }
 }
 
-fn read_only(ui: &mut UiApp) {
-    for c in &mut ui.h.state_mut().conns {
-        c.writable = false;
-    }
-}
-
 #[test]
 fn the_eye_on_a_hovered_cell_opens_the_value_on_a_read_only_connection() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    read_only(&mut ui);
+    ui.lock();
     // Hidden until the pointer is on the cell.
     assert!(ui.h.query_all_by_label("View note row 2").next().is_none(), "the eye shows on a cell nobody hovers");
     ui.show("note row 2");
@@ -63,7 +57,7 @@ fn the_eye_on_a_hovered_cell_opens_the_value_on_a_read_only_connection() {
 #[test]
 fn view_value_in_the_cell_menu_opens_the_value() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    read_only(&mut ui);
+    ui.lock();
     right_click(&mut ui, "note row 2");
     ui.click("View value…");
     assert_eq!(shown_text(&ui).as_deref(), Some("Leave at the door"));
@@ -91,7 +85,7 @@ fn a_query_result_value_opens_from_its_eye_and_a_double_click() {
         a.load_sql_demo();
         a.sql_query_demo();
     }) else { return };
-    read_only(&mut ui);
+    ui.lock();
     ui.show("Result row 1");
     // The first column starts after the check box and the row number.
     let row = ui.h.get_by_label("Result row 1").rect();

@@ -3,7 +3,6 @@
 //! worker would send back is handed to the dialog the way its answer is.
 
 use super::sql_structure::replace;
-use super::sql_tableops::{disabled, shows};
 use super::*;
 use crate::app::sql::bulk::BulkForm;
 use db::sql::bulk::BulkPrep;
@@ -28,17 +27,17 @@ fn delete_matching_waits_for_the_count_and_the_typed_table_name() {
     let Some(mut ui) = demo() else { return };
     open(&mut ui, false, "status = 'paid'", 2, "InnoDB");
     ui.show("2 rows match");
-    assert!(shows(&ui, "DELETE FROM `shop`.`orders`"), "the preview is not the DELETE");
-    assert!(shows(&ui, "status = 'paid'"), "the preview does not hold the WHERE");
-    assert!(shows(&ui, "Undo is available"), "no note says the rows can be taken back");
-    assert!(!shows(&ui, "No WHERE."), "a filtered delete warns that it has no WHERE");
-    assert!(disabled(&ui, "Delete 2 rows"), "the button armed before the name was typed");
+    assert!(ui.shows("DELETE FROM `shop`.`orders`"), "the preview is not the DELETE");
+    assert!(ui.shows("status = 'paid'"), "the preview does not hold the WHERE");
+    assert!(ui.shows("Undo is available"), "no note says the rows can be taken back");
+    assert!(!ui.shows("No WHERE."), "a filtered delete warns that it has no WHERE");
+    assert!(ui.disabled("Delete 2 rows"), "the button armed before the name was typed");
     ui.fill("Confirmation", "orde");
-    assert!(disabled(&ui, "Delete 2 rows"), "a name that is letters short armed the button");
+    assert!(ui.disabled("Delete 2 rows"), "a name that is letters short armed the button");
     replace(&mut ui, "Confirmation", "ORDERS");
-    assert!(disabled(&ui, "Delete 2 rows"), "the check ignores case");
+    assert!(ui.disabled("Delete 2 rows"), "the check ignores case");
     replace(&mut ui, "Confirmation", "orders");
-    assert!(!disabled(&ui, "Delete 2 rows"), "the exact name did not arm the button");
+    assert!(!ui.disabled("Delete 2 rows"), "the exact name did not arm the button");
     ui.click("Delete 2 rows");
     assert!(ui.app().modal.is_none(), "the confirmed dialog stayed open");
 }
@@ -48,12 +47,12 @@ fn an_empty_filter_warns_that_every_row_is_reached() {
     let Some(mut ui) = demo() else { return };
     open(&mut ui, false, "", 4410, "InnoDB");
     ui.show("No WHERE.");
-    assert!(shows(&ui, "This deletes every row of orders."), "the banner does not say what a delete reaches");
-    assert!(shows(&ui, "4,410 rows match"), "the count is not grouped");
+    assert!(ui.shows("This deletes every row of orders."), "the banner does not say what a delete reaches");
+    assert!(ui.shows("4,410 rows match"), "the count is not grouped");
     let Some(mut ui) = demo() else { return };
     open(&mut ui, true, "  ", 4410, "InnoDB");
     ui.show("No WHERE.");
-    assert!(shows(&ui, "This changes every row of orders."), "the banner does not say what an update reaches");
+    assert!(ui.shows("This changes every row of orders."), "the banner does not say what an update reaches");
 }
 
 #[test]
@@ -64,15 +63,15 @@ fn update_matching_takes_a_value_before_it_arms() {
     ui.show("Value of customer_id");
     assert!(ui.h.query_by_label("Value of id").is_none(), "the primary key is offered for an update");
     ui.fill("Confirmation", "orders");
-    assert!(disabled(&ui, "Update 2 rows"), "an update with no value armed the button");
+    assert!(ui.disabled("Update 2 rows"), "an update with no value armed the button");
     ui.fill("Value of customer_id", "7");
-    assert!(shows(&ui, "UPDATE `shop`.`orders`"), "the preview is not the UPDATE");
-    assert!(shows(&ui, "`customer_id` = 7"), "the preview does not set the column");
-    assert!(shows(&ui, "status = 'paid'"), "the preview does not hold the WHERE");
-    assert!(!disabled(&ui, "Update 2 rows"), "a value and the name did not arm the button");
+    assert!(ui.shows("UPDATE `shop`.`orders`"), "the preview is not the UPDATE");
+    assert!(ui.shows("`customer_id` = 7"), "the preview does not set the column");
+    assert!(ui.shows("status = 'paid'"), "the preview does not hold the WHERE");
+    assert!(!ui.disabled("Update 2 rows"), "a value and the name did not arm the button");
     // A value the column cannot hold is refused where it is typed.
     replace(&mut ui, "Value of customer_id", "seven");
-    assert!(disabled(&ui, "Update 2 rows"), "a value that does not parse armed the button");
+    assert!(ui.disabled("Update 2 rows"), "a value that does not parse armed the button");
 }
 
 #[test]
@@ -81,8 +80,8 @@ fn nothing_matching_leaves_nothing_to_confirm() {
     open(&mut ui, false, "status = 'gone'", 0, "InnoDB");
     ui.show("0 rows match");
     ui.fill("Confirmation", "orders");
-    assert!(disabled(&ui, "Delete 0 rows"), "a delete of nothing armed the button");
-    assert!(!shows(&ui, "Undo is available"), "an undo is promised for no rows");
+    assert!(ui.disabled("Delete 0 rows"), "a delete of nothing armed the button");
+    assert!(!ui.shows("Undo is available"), "an undo is promised for no rows");
 }
 
 #[test]
@@ -93,11 +92,11 @@ fn the_banners_say_when_a_write_cannot_roll_back_or_be_undone() {
     let Some(mut ui) = demo() else { return };
     open(&mut ui, false, "status = 'paid'", 2, "InnoDB");
     ui.show("2 rows match");
-    assert!(!shows(&ui, "No rollback."), "a transactional engine is said to have no rollback");
+    assert!(!ui.shows("No rollback."), "a transactional engine is said to have no rollback");
     let Some(mut ui) = demo() else { return };
     open(&mut ui, false, "status = 'paid'", db::sql::import::UNDO_MAX_ROWS + 1, "InnoDB");
     ui.show("No undo.");
-    assert!(!shows(&ui, "Undo is available"), "a delete too big to keep is said to be undoable");
+    assert!(!ui.shows("Undo is available"), "a delete too big to keep is said to be undoable");
     let Some(mut ui) = demo() else { return };
     open(&mut ui, false, "status = 'paid'", 2, "InnoDB");
     if let Some(Modal::SqlBulk(f)) = &mut ui.h.state_mut().modal {
@@ -122,9 +121,7 @@ fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     ui.h.state_mut().open_bulk(false);
     assert!(!matches!(ui.app().modal, Some(Modal::SqlBulk(_))), "the offline demo has no server to count on");
     assert!(ui.app().status.contains("Offline demo"), "nothing says why nothing opened: {}", ui.app().status);
-    for c in &mut ui.h.state_mut().conns {
-        c.writable = false;
-    }
+    ui.lock();
     ui.h.state_mut().open_bulk(true);
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(..))), "a locked connection did not ask to unlock");
     let Some(mut ui) = demo() else { return };
