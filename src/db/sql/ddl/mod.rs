@@ -116,8 +116,9 @@ impl ColDef {
     /// What the structure read holds about a column. Generated, invisible and compressed columns
     /// carry attributes this definition does not write, so redefining them would lose them: those are refused.
     pub fn from_column(c: &Column) -> Result<ColDef, String> {
-        // Only a PostgreSQL column has a catalog kind.
-        if c.kind.is_some() {
+        // Only a PostgreSQL column has a catalog kind, apart from MariaDB's JSON, which the structure read marks so the grid shows
+        // it as JSON: that one is still a LONGTEXT with its CHECK and is written the MariaDB way below.
+        if c.kind.is_some() && !super::structure::is_json_alias(&c.full_type, &c.name, c.check.as_deref().unwrap_or_default()) {
             return super::pg::ddl::col_def(c);
         }
         let extra = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
@@ -132,7 +133,7 @@ impl ColDef {
         let mut check = None;
         if let Some(chk) = &c.check {
             // MariaDB's JSON is a LONGTEXT with this CHECK, and declaring JSON again brings both back.
-            if ty == "LONGTEXT" && *chk == format!("json_valid({})", Dialect::MariaDb.quote_ident(&c.name)) {
+            if super::structure::is_json_alias(&c.full_type, &c.name, chk) {
                 (ty, args, collation) = ("JSON".into(), String::new(), None);
             } else {
                 // MODIFY drops a column CHECK it does not repeat, so it is carried and written again.
