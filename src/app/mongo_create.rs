@@ -57,11 +57,11 @@ impl App {
             if f.new_db {
                 form_card(ui, "", "", |rows| {
                     rows.label_width(120.0);
-                    rows.row("Database", "", |ui| ui.add(egui::TextEdit::singleline(&mut f.db).desired_width(ui.available_width())));
-                    rows.row("First collection", "", |ui| ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(ui.available_width())));
+                    rows.row("Database", "", |ui| field_named(ui, &mut f.db, "Database name", ui.available_width()));
+                    rows.row("First collection", "", |ui| field_named(ui, &mut f.name, "Collection name", ui.available_width()));
                 });
             } else {
-                stacked_field(ui, "Name", "", |ui| ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(f32::INFINITY)));
+                stacked_field(ui, "Name", "", |ui| field_named(ui, &mut f.name, "Collection name", f32::INFINITY));
             }
             let summary = if f.form.is_plain() { "Default settings".to_string() } else { options_summary(&f.form) };
             egui::CollapsingHeader::new(medium(RichText::new("Options").size(TXT_SMALL).color(TEXT()))).id_salt("mongo-coll-options").default_open(false).show(ui, |ui| {
@@ -103,6 +103,13 @@ impl App {
         self.worker.db_change(f.conn, client, db.clone(), cmd, format!("Created {db}.{name}"));
         *keep = false;
     }
+}
+
+/// A single-line field with the accessible name the UI tests find it by.
+fn field_named(ui: &mut egui::Ui, text: &mut String, name: &str, width: f32) -> egui::Response {
+    let r = ui.add(egui::TextEdit::singleline(text).desired_width(width));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, name));
+    r
 }
 
 fn options_summary(f: &CollForm) -> String {

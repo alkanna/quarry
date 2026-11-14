@@ -345,6 +345,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
         });
     });
     let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text(if f.engine == db::sql::Engine::Postgres { "postgresql://user@host:5432/database?sslmode=verify-full" } else { "mysql://user@host:3306/database?ssl-mode=VERIFY_CA" }).desired_width(field_w + FORM_LABEL_W + FORM_GAP).margin(FIELD_MARGIN_TALL));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Paste connection string"));
     if r.changed() && !st.text.trim().is_empty() {
         paste_apply(&mut st, f);
     } else if r.changed() {
