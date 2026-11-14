@@ -3,7 +3,7 @@
 
 use super::config::{Access, ConnPolicy, Mode, OpClass, Scope, ScopeMode};
 use super::scrub::{Rules, wild};
-use super::tools::{Call, Target, changes_structure, each_stage, locks_rows, touches_users};
+use super::tools::{Call, Target, calls_procedure, changes_structure, each_stage, locks_rows, never_for_agents, touches_users};
 use crate::db::sql::Dialect;
 use crate::db::sql::lex::{Tok, read_only_check, split_statements, tokens, use_target};
 use std::collections::HashSet;
@@ -144,27 +144,38 @@ impl ShellSql {
         ShellSql { change: p.change, structure: p.structure }
     }
 
-    pub fn check(&self, stmt: &str, d: Dialect, read_only: bool) -> Result<(), String> {
-        if let Some(s) = system_in_sql(stmt, d) {
+    /// `sql` may hold several statements (run_sql); each is classed on its own.
+    pub fn check(&self, sql: &str, d: Dialect, read_only: bool) -> Result<(), String> {
+        if let Some(s) = system_in_sql(sql, d) {
             return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
         }
-        if touches_users(stmt, d) {
+        if touches_users(sql, d) {
             return Err("Agents can't manage users, roles or the server.".into());
+        }
+        // Classed by its first words, a DO block or a prepared statement would pass a DROP or a CREATE ROLE as a data
+        // change, so what cannot be classed from its text is refused instead.
+        if let Some(why) = never_for_agents(sql, d) {
+            return Err(why);
         }
         if read_only {
             // MySQL's read-only check passes a SELECT whole, and a READ ONLY session still takes the locks it asks for.
-            if locks_rows(stmt, d) {
+            if locks_rows(sql, d) {
                 return Err("A locking read (FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE) is not allowed while the connection is locked for writes.".into());
             }
             return Ok(());
         }
-        if read_only_check(stmt, d).is_ok() {
-            return Ok(());
-        }
-        let class = if changes_structure(stmt, d) { OpClass::ChangeStructure } else { OpClass::ChangeData };
-        let mode = if class == OpClass::ChangeStructure { self.structure } else { self.change };
-        if mode == Mode::Never {
-            return Err(format!("{} is set to Never for agents on this connection, so this statement was not run.", class_name(class)));
+        for (_, stmt) in split_statements(sql, d) {
+            if read_only_check(stmt, d).is_ok() {
+                continue;
+            }
+            if calls_procedure(stmt, d) && (self.change == Mode::Never || self.structure == Mode::Never) {
+                return Err("CALL runs a procedure Quarry cannot read, which may change data or structure, so it needs neither Change data nor Change structure set to Never on this connection.".into());
+            }
+            let class = if changes_structure(stmt, d) { OpClass::ChangeStructure } else { OpClass::ChangeData };
+            let mode = if class == OpClass::ChangeStructure { self.structure } else { self.change };
+            if mode == Mode::Never {
+                return Err(format!("{} is set to Never for agents on this connection, so this statement was not run.", class_name(class)));
+            }
         }
         Ok(())
     }
@@ -209,10 +220,18 @@ fn reach(p: &ConnPolicy, live: LiveState, call: &Call) -> Result<(), String> {
             }
         }
         Call::QuerySql { sql, .. } | Call::RunSql { sql, .. } => {
-            if let Some(d) = live.sql
-                && let Some(s) = system_in_sql(sql, d)
-            {
-                return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
+            if let Some(d) = live.sql {
+                if let Some(s) = system_in_sql(sql, d) {
+                    return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
+                }
+                if let Some(why) = never_for_agents(sql, d) {
+                    return Err(why);
+                }
+                // Free SQL is classed statement by statement like a script's, so Never on Change data or Change
+                // structure holds for it too.
+                if matches!(call, Call::RunSql { .. }) {
+                    ShellSql::new(p).check(sql, d, false)?;
+                }
             }
         }
         _ => {}
@@ -555,13 +574,52 @@ mod tests {
         }
         assert!(no_structure.check("DELETE FROM orders", Dialect::MySql, false).is_ok());
         let no_change = ShellSql { change: Mode::Never, ..open };
-        for s in ["DELETE FROM orders", "INSERT INTO orders VALUES (1)", "CALL refresh()"] {
+        for s in ["DELETE FROM orders", "INSERT INTO orders VALUES (1)"] {
             let e = no_change.check(s, Dialect::Postgres, false).unwrap_err();
             assert!(e.contains("Change data is set to Never"), "{s}: {e}");
         }
+        // A procedure's body is not read, so CALL needs both classes.
+        for p in [no_change, no_structure] {
+            let e = p.check("CALL refresh()", Dialect::Postgres, false).unwrap_err();
+            assert!(e.contains("CALL runs a procedure"), "{e}");
+        }
+        assert!(open.check("CALL refresh()", Dialect::MySql, false).is_ok());
         assert!(no_change.check("SELECT 1", Dialect::Postgres, false).is_ok() && no_change.check("DROP TABLE orders", Dialect::Postgres, false).is_ok());
         let p = ConnPolicy { change: Mode::Never, structure: Mode::Allow, ..ConnPolicy::default() };
         assert_eq!(ShellSql::new(&p), ShellSql { change: Mode::Never, structure: Mode::Allow });
+    }
+
+    /// With Change structure set to Never and Change data allowed, nothing that wraps a DROP or a role change gets through
+    /// as a data change, in a script or in run_sql, locked or not.
+    #[test]
+    fn wrapped_structure_and_role_changes_are_refused() {
+        let s = ShellSql { change: Mode::Allow, structure: Mode::Never };
+        let my = ["PREPARE s FROM 'DROP TABLE orders'", "EXECUTE s", "SET ROLE admin", "SET DEFAULT ROLE ALL TO app", "SET GLOBAL read_only = 0", "SET PERSIST max_connections = 1", "KILL 1", "SHUTDOWN", "LOAD DATA INFILE '/tmp/x' INTO TABLE orders", "SELECT LOAD_FILE('/etc/passwd')"];
+        let pg = ["DO $$ BEGIN EXECUTE 'DROP TABLE orders'; EXECUTE 'CREATE ROLE x SUPERUSER'; END $$", "SET SESSION ROLE x", "SET LOCAL ROLE x", "SET SESSION AUTHORIZATION x", "RESET ROLE", "ALTER SYSTEM SET fsync = off", "SELECT set_config('role', 'x', false)", "COPY orders TO PROGRAM 'id'", "SELECT pg_terminate_backend(1)"];
+        let live = |d| LiveState { sql: Some(d), ..OPEN };
+        let p = ConnPolicy { change: Mode::Allow, structure: Mode::Never, scripts: Mode::Allow, ..pol(Access::ReadWrite, Mode::Allow) };
+        for (d, list) in [(Dialect::MySql, &my[..]), (Dialect::Postgres, &pg[..])] {
+            for q in list {
+                for ro in [false, true] {
+                    assert!(s.check(q, d, ro).is_err(), "{d:?} script ro={ro}: {q}");
+                }
+                let run = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: q.to_string() };
+                let class = crate::agents::tools::classify(&run, Some(d));
+                for writable in [false, true] {
+                    let d2 = decide(Some(&p), LiveState { writable, ..live(d) }, &run, class, &Grants::default(), None, false);
+                    assert!(is_refused(&d2), "{d:?} run_sql writable={writable}: {q} => {d2:?}");
+                }
+            }
+        }
+        // run_sql now keeps Change structure = Never too, and still runs data changes.
+        let drop = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE orders SET a = 1; DROP TABLE orders".into() };
+        let Decision::Refuse(why) = decide(Some(&p), live(Dialect::MySql), &drop, OpClass::RunScripts, &Grants::default(), None, false) else { panic!("DROP under Never") };
+        assert!(why.contains("Change structure is set to Never"), "{why}");
+        let update = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE orders SET a = 1".into() };
+        assert_eq!(decide(Some(&p), live(Dialect::MySql), &update, OpClass::RunScripts, &Grants::default(), None, false), Decision::Allow);
+        // A read through query_sql may not read server files either.
+        let file = Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: "SELECT LOAD_FILE('/etc/passwd')".into(), limit: None };
+        assert!(is_refused(&decide(Some(&p), live(Dialect::MySql), &file, OpClass::ReadData, &Grants::default(), None, false)));
     }
 
     #[test]

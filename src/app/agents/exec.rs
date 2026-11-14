@@ -832,7 +832,7 @@ impl App {
 /// What Quarry checks on each statement of a SQL script, for its approval: the settings it was allowed under.
 fn sql_script_fact(p: &crate::agents::config::ConnPolicy) -> String {
     use crate::agents::config::Mode;
-    let mut refused = vec!["user and role statements", "server credentials and activity"];
+    let mut refused = vec!["user and role statements", "server credentials and activity", "server commands", "SQL it cannot read (DO blocks, prepared statements)"];
     if p.change == Mode::Never {
         refused.push("data changes");
     }

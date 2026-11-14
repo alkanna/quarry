@@ -838,7 +838,7 @@ mod tests {
     /// Every path asked to be refused was, by Quarry or by the server's read-only guard. A refusal must say why, so a typo
     /// or a missing helper in the script, which also throws, never passes for one.
     fn all_refused(out: &Value, paths: &[(&str, &str)], var: &str) {
-        const WHY: [&str; 6] = ["read-only", "read only", "not allowed", "one statement", "locking read", "users, roles"];
+        const WHY: [&str; 9] = ["read-only", "read only", "not allowed", "not available", "one statement", "locking read", "users, roles", "set to never", "call runs a procedure"];
         for (k, _) in paths {
             let got = out[*k].as_str().unwrap_or("missing");
             let low = got.to_lowercase();
@@ -928,22 +928,40 @@ mod tests {
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users WHERE age = 0 OR email LIKE 'r@%'")), "0", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "0", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{db}' AND table_name IN ('made', 'gone')")), "0", "{var}");
-            // Unlocked: every path reaches the server and data changes run, structure is set to Never, users are never the
-            // agent's, and a duplicate key's value is gone from the error the script gets.
-            let refused = [("drop", "sql`DROP TABLE users`"), ("grant", "sql`GRANT SELECT ON users TO CURRENT_USER`"), ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`")];
-            let paths: Vec<(&str, &str)> = UNLOCKED_RUNS.iter().chain(&refused).copied().collect();
-            let Some(j) = shell_job(&l.db, &db, &tries(&paths), true, NO_STRUCTURE) else { return };
+            // Unlocked with both classes allowed: every path reaches the server and runs.
+            let Some(j) = shell_job(&l.db, &db, &tries(&UNLOCKED_RUNS), true, ALLOW_ALL) else { return };
             let out = run_script(&l.w, j).unwrap();
             all_ran(&out, &UNLOCKED_RUNS, var);
-            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
-            assert!(out["grant"].as_str().unwrap().contains("users, roles"), "{var}: {out}");
-            let dup = out["dup"].as_str().unwrap();
-            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
             assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 60")), "2", "{var}");
             assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 5")), "61", "{var}");
             assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 4")), "56", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "6", "{var}: one inserted, one inserted and deleted");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "2", "{var}: the procedure and the function both wrote");
+            // Unlocked with Change structure set to Never: nothing that wraps a DROP, switches the role or acts on the server
+            // passes as a data change, and a duplicate key's value is gone from the error the script gets.
+            let wrapped = [
+                ("drop", "sql`DROP TABLE users`"),
+                ("call", "sql`CALL agent_p()`"),
+                ("prepare", "sql.unsafe(\"PREPARE s FROM 'DROP TABLE users'\")"),
+                ("execute", "sql.unsafe('EXECUTE s')"),
+                ("grant", "sql`GRANT SELECT ON users TO CURRENT_USER`"),
+                ("set_role", "sql.unsafe('SET ROLE NONE')"),
+                ("set_global", "sql.unsafe('SET GLOBAL max_connections = 500')"),
+                ("set_global_var", "sql.unsafe('SET @@global.max_connections = 500')"),
+                ("kill", "sql.unsafe('KILL 999999')"),
+                ("load_file", "sql`SELECT LOAD_FILE('/etc/passwd') AS f`"),
+            ];
+            let dup = ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`");
+            let paths: Vec<(&str, &str)> = wrapped.iter().copied().chain([dup]).collect();
+            let Some(j) = shell_job(&l.db, &db, &tries(&paths), true, NO_STRUCTURE) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_refused(&out, &wrapped, var);
+            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
+            let dup = out["dup"].as_str().unwrap();
+            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "6", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "2", "{var}: the refused CALL wrote nothing");
+            assert_ne!(l.one("SELECT @@global.max_connections"), "500", "{var}");
             l.sql(&format!("DROP DATABASE {db}"));
         });
     }
@@ -979,20 +997,38 @@ mod tests {
             assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "0", "{var}");
             assert_eq!(f.one("SELECT is_called::text FROM agent_seq"), "false", "{var}: the sequence never moved");
             assert_eq!(f.one("SELECT count(*)::text FROM pg_tables WHERE schemaname = 'agent_pgsh' AND tablename IN ('made', 'gone')"), "0", "{var}");
-            let refused = [("drop", "sql`DROP TABLE users`"), ("grant", "sql`GRANT SELECT ON users TO PUBLIC`"), ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`")];
-            let paths: Vec<(&str, &str)> = UNLOCKED_RUNS.iter().chain(&refused).copied().collect();
-            let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&paths), true, NO_STRUCTURE) else { return };
+            let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&UNLOCKED_RUNS), true, ALLOW_ALL) else { return };
             let out = run_script(&l.w, j).unwrap();
             all_ran(&out, &UNLOCKED_RUNS, var);
-            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
-            assert!(out["grant"].as_str().unwrap().contains("users, roles"), "{var}: {out}");
-            let dup = out["dup"].as_str().unwrap();
-            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
             assert_eq!(f.one("SELECT age::text FROM users WHERE id = 60"), "2", "{var}");
             assert_eq!(f.one("SELECT age::text FROM users WHERE id = 5"), "61", "{var}");
             assert_eq!(f.one("SELECT age::text FROM users WHERE id = 4"), "56", "{var}");
             assert_eq!(f.one("SELECT count(*)::text FROM users"), "6", "{var}: one inserted, one inserted and deleted");
             assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "2", "{var}: the procedure and the function both wrote");
+            let wrapped = [
+                ("drop", "sql`DROP TABLE users`"),
+                ("call", "sql`CALL agent_p()`"),
+                ("do", "sql.unsafe(\"DO $$ BEGIN EXECUTE 'DROP TABLE agent_pgsh.users'; EXECUTE 'CREATE ROLE agent_shell_x SUPERUSER'; END $$\")"),
+                ("prepare", "sql.unsafe('PREPARE p AS DELETE FROM users')"),
+                ("grant", "sql`GRANT SELECT ON users TO PUBLIC`"),
+                ("set_role", "sql.unsafe('SET SESSION ROLE postgres')"),
+                ("set_local_role", "sql.unsafe('SET LOCAL ROLE postgres')"),
+                ("set_authorization", "sql.unsafe('SET SESSION AUTHORIZATION postgres')"),
+                ("set_config", "sql.unsafe(\"SELECT set_config('role', 'postgres', false)\")"),
+                ("alter_system", "sql.unsafe(\"ALTER SYSTEM SET work_mem = '64MB'\")"),
+                ("terminate", "sql`SELECT pg_terminate_backend(0)`"),
+            ];
+            let dup = ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`");
+            let paths: Vec<(&str, &str)> = wrapped.iter().copied().chain([dup]).collect();
+            let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&paths), true, NO_STRUCTURE) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_refused(&out, &wrapped, var);
+            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
+            let dup = out["dup"].as_str().unwrap();
+            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
+            assert_eq!(f.one("SELECT count(*)::text FROM users"), "6", "{var}");
+            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "2", "{var}: the refused CALL wrote nothing");
+            assert_eq!(f.one("SELECT count(*)::text FROM pg_roles WHERE rolname = 'agent_shell_x'"), "0", "{var}");
         });
     }
 
