@@ -283,6 +283,11 @@ mod tests {
         move |n| m.get(n).cloned()
     }
 
+    /// A plain function, because inside a spawned block the executor lifetimes of a borrowed connection do not infer.
+    async fn run(c: &mut sqlx::MySqlConnection, q: &str) {
+        let _ = sqlx::Executor::execute(c, q).await;
+    }
+
     fn wait(waiter: u64, blocker: u64) -> LockWait {
         LockWait { waiter, blocker, kind: "Row".into(), on: "shop.orders".into(), mode: "X".into() }
     }
@@ -382,7 +387,7 @@ mod tests {
                 let wid: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut *waiter).await.unwrap();
                 let q = format!("UPDATE quarry_test.{t} SET v = 2 WHERE id = 1");
                 let blocked = tokio::spawn(async move {
-                    let _ = sqlx::raw_sql(&q).execute(&mut *waiter).await;
+                    run(&mut waiter, &q).await;
                     waiter
                 });
                 let mut found = None;
