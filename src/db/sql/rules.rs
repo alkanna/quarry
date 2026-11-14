@@ -333,7 +333,9 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
         Some(x) if r.kind == Kind::Binary && is_hex(x) => super::value::pg_lit(&format!("\\x{}", x.trim_start_matches("0x").trim_start_matches("0X"))),
         _ => v(0),
     };
-    let side = || if r.kind == Kind::Binary { c.to_string() } else { format!("{c}::text") };
+    // `c` already ends in ::text for uuid, inet and the other text-like kinds (see `rule_sql`).
+    let txt = if c.ends_with("::text") { c.to_string() } else { format!("{c}::text") };
+    let side = || if r.kind == Kind::Binary { c.to_string() } else { txt.clone() };
     let other = group_of(r.kind) == Group::Other;
     Some(match r.op {
         Eq if r.kind == Kind::Json => format!("{c} = {}::jsonb", v(0)),
@@ -343,13 +345,13 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
         LenEq if other => format!("octet_length({}) = {}", side(), n()),
         LenGt if other => format!("octet_length({}) > {}", side(), n()),
         LenLt if other => format!("octet_length({}) < {}", side(), n()),
-        Regexp => format!("{c}::text ~ {}", v(0)),
-        NotRegexp => format!("{c}::text !~ {}", v(0)),
+        Regexp => format!("{txt} ~ {}", v(0)),
+        NotRegexp => format!("{txt} !~ {}", v(0)),
         Today => format!("{c}::date = CURRENT_DATE"),
         Last => format!("{c} >= NOW() - INTERVAL '{} {}'", n(), unit_sql(r.values.get(1).map_or("", |s| s.as_str()))),
         ThisWeek => format!("date_trunc('week', {c}) = date_trunc('week', CURRENT_DATE)"),
         ThisMonth => format!("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)"),
-        SetContains => format!("{} = ANY(string_to_array({c}::text, ','))", v(0)),
+        SetContains => format!("{} = ANY(string_to_array({txt}, ','))", v(0)),
         JsonPathEq => format!("jsonb_path_query_first({c}::jsonb, {}) #>> '{{}}' = {}", v(0), v(1)),
         JsonContains => format!("{c}::jsonb @> {}::jsonb", v(0)),
         JsonHasPath => format!("jsonb_path_exists({c}::jsonb, {})", v(0)),
@@ -370,6 +372,8 @@ enum T {
     Num(String),
     P(char),
     Cmp(&'static str),
+    /// PostgreSQL's `::` cast.
+    Cast,
 }
 
 /// Splits text into the few token kinds the rule SQL uses. Bare words that name a column become
@@ -449,6 +453,10 @@ fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec<T>> {
         } else if "(),-".contains(c) {
             out.push(T::P(c));
             i += 1;
+        } else if let Some((t, n)) = [("::", T::Cast), ("~", T::Cmp("~")), ("!~", T::Cmp("!~")), ("@>", T::Cmp("@>")), ("#>>", T::Cmp("#>>"))].into_iter().find(|(p, _)| ch[i..].starts_with(&p.chars().collect::<Vec<_>>())).map(|(p, t)| (t, p.len())) {
+            // The PostgreSQL spellings: casts, regex match, JSON containment and path text.
+            out.push(t);
+            i += n;
         } else if "=<>".contains(c) {
             let two: String = ch[i..(i + 2).min(ch.len())].iter().collect();
             let (cmp, n) = match two.as_str() {
@@ -560,6 +568,18 @@ fn kind_of(cols: &[(String, Kind)], name: &str) -> Option<Kind> {
 
 fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
     let mk = |col: &str, op: Op, values: Vec<String>| Some(Rule { col: col.into(), kind: kind_of(cols, col)?, op, values });
+    // PostgreSQL reads uuid, inet and other text-like columns as `col::text`; the column is the same rule. Writing the rule
+    // out again (in `parse`) tells whether the cast belonged there.
+    let mut cut = Vec::with_capacity(t.len());
+    let mut k = 0;
+    while k < t.len() {
+        cut.push(t[k].clone());
+        k += if matches!(t[k], T::Id(_)) && t.get(k + 1) == Some(&T::Cast) && t.get(k + 2).is_some_and(|w| word(w, "TEXT")) { 3 } else { 1 };
+    }
+    let t = cut.as_slice();
+    if d == Dialect::Postgres && let Some(r) = pg_rule_of(t, &mk) {
+        return Some(r);
+    }
     // Wrapped forms: NOT IN ... OR NULL and this month.
     if t.first() == Some(&T::P('(')) && close_of(t, 0) == Some(t.len() - 1) {
         let inner = &t[1..t.len() - 1];
@@ -631,6 +651,36 @@ fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
         [T::Cmp(o), v] => {
             let op = match *o { "=" => Op::Eq, "<>" => Op::Ne, ">" => Op::Gt, "<" => Op::Lt, ">=" => Op::Ge, _ => Op::Le };
             mk(c, op, vec![value_of(v)?])
+        }
+        _ => None,
+    }
+}
+
+/// The forms `pg_rule_sql` writes, read back. `t` has its `::text` casts after a column already cut.
+fn pg_rule_of(t: &[T], mk: &impl Fn(&str, Op, Vec<String>) -> Option<Rule>) -> Option<Rule> {
+    let jsonb = |a: &T, b: &T| *a == T::Cast && word(b, "JSONB");
+    match t {
+        [T::Id(c), T::Cast, dt, T::Cmp("="), cd] if word(dt, "DATE") && word(cd, "CURRENT_DATE") => mk(c, Op::Today, vec![]),
+        [T::Id(c), T::Cmp("~"), T::Str(v)] => mk(c, Op::Regexp, vec![v.clone()]),
+        [T::Id(c), T::Cmp("!~"), T::Str(v)] => mk(c, Op::NotRegexp, vec![v.clone()]),
+        [T::Id(c), T::Cmp(">="), n, T::P('('), T::P(')'), T::P('-'), iv, T::Str(s)] if word(n, "NOW") && word(iv, "INTERVAL") => {
+            let (k, u) = s.split_once(' ')?;
+            let unit = match u { "HOUR" => "hours", "DAY" => "days", "WEEK" => "weeks", "MONTH" => "months", _ => return None };
+            mk(c, Op::Last, vec![k.into(), unit.into()])
+        }
+        [f, T::P('('), T::Str(g), T::P(','), T::Id(c), T::P(')'), T::Cmp("="), f2, T::P('('), T::Str(g2), T::P(','), cd, T::P(')')] if word(f, "DATE_TRUNC") && word(f2, "DATE_TRUNC") && g == g2 && word(cd, "CURRENT_DATE") => match g.as_str() {
+            "week" => mk(c, Op::ThisWeek, vec![]),
+            "month" => mk(c, Op::ThisMonth, vec![]),
+            _ => None,
+        },
+        [T::Str(v), T::Cmp("="), a, T::P('('), f, T::P('('), T::Id(c), T::P(','), T::Str(sep), T::P(')'), T::P(')')] if word(a, "ANY") && word(f, "STRING_TO_ARRAY") && sep == "," => mk(c, Op::SetContains, vec![v.clone()]),
+        [f, T::P('('), T::Id(c), x, y, T::P(','), T::Str(p), T::P(')'), T::Cmp("#>>"), T::Str(all), T::Cmp("="), T::Str(v)] if word(f, "JSONB_PATH_QUERY_FIRST") && jsonb(x, y) && all == "{}" => mk(c, Op::JsonPathEq, vec![p.clone(), v.clone()]),
+        [T::Id(c), x, y, T::Cmp("@>"), T::Str(v), x2, y2] if jsonb(x, y) && jsonb(x2, y2) => mk(c, Op::JsonContains, vec![v.clone()]),
+        [f, T::P('('), T::Id(c), x, y, T::P(','), T::Str(p), T::P(')')] if word(f, "JSONB_PATH_EXISTS") && jsonb(x, y) => mk(c, Op::JsonHasPath, vec![p.clone()]),
+        [T::Id(c), T::Cmp(o @ ("=" | "<>")), T::Str(v), x, y] if jsonb(x, y) => mk(c, if *o == "=" { Op::Eq } else { Op::Ne }, vec![v.clone()]),
+        [f, T::P('('), T::Id(c), T::P(')'), T::Cmp(o), T::Num(n)] if word(f, "OCTET_LENGTH") => {
+            let op = match *o { "=" => Op::LenEq, ">" => Op::LenGt, "<" => Op::LenLt, _ => return None };
+            mk(c, op, vec![n.clone()])
         }
         _ => None,
     }
@@ -738,6 +788,48 @@ mod tests {
                 let sql = to_sql(std::slice::from_ref(&r), false, Dialect::MySql, true);
                 let (back, any) = parse(&sql, &cols(), Dialect::MySql, true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
                 assert!(!any);
+                assert_eq!(back, vec![r], "{sql}");
+            }
+        }
+    }
+
+    /// Every rule the bar writes on PostgreSQL reads back into the same rule, so the bar stays in rules mode.
+    #[test]
+    fn every_op_round_trips_on_postgres() {
+        let d = Dialect::Postgres;
+        let mut cols = cols();
+        cols.push(("u".into(), Kind::Uuid));
+        for (col, kind) in cols.clone() {
+            for &op in ops_for(kind) {
+                // A bytea value is written as E'\\x..', and text with a backslash stays SQL on a server without backslash escapes.
+                if kind == Kind::Binary && matches!(op, Op::Eq | Op::Ne) {
+                    continue;
+                }
+                if matches!(op, Op::AfterCol) && col != "created_at" {
+                    continue;
+                }
+                let mut v: Vec<String> = vals(op).into_iter().map(|x| x.replace('\\', "")).collect();
+                // LIKE escapes % and _ with a backslash, which keeps such text in SQL mode on PostgreSQL (see `parse`).
+                if matches!(op, Op::Contains | Op::NotContains | Op::StartsWith | Op::NotStartsWith | Op::EndsWith | Op::NotEndsWith) {
+                    v = vec!["ab'c".into()];
+                }
+                let g = group_of(kind);
+                if g == Group::Number && matches!(op, Op::Eq | Op::Ne | Op::Gt | Op::Lt | Op::Ge | Op::Le) {
+                    v = vec!["50.5".into()];
+                }
+                if g == Group::Number && op == Op::Between {
+                    v = vec!["50".into(), "200".into()];
+                }
+                if g == Group::Number && matches!(op, Op::In | Op::NotInOrNull) {
+                    v = vec!["1".into(), "2".into()];
+                }
+                if kind == Kind::Json && matches!(op, Op::Eq | Op::Ne) {
+                    v = vec!["{\"a\": 1}".into()];
+                }
+                let r = Rule { col: col.clone(), kind, op, values: v };
+                assert!(r.complete(), "{op:?}");
+                let sql = to_sql(std::slice::from_ref(&r), false, d, false);
+                let (back, _) = parse(&sql, &cols, d, false).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
                 assert_eq!(back, vec![r], "{sql}");
             }
         }
