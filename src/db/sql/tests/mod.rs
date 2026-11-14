@@ -99,10 +99,64 @@ fn client_certificate_paths_come_from_the_string_and_go_back_into_it() {
     assert_eq!(Addr::parse(&a.to_uri()), Some(a));
     let a = Addr::from_paste(r"host=h sslmode=require sslcert='/c/my cert.crt' sslkey=/c/k.key").unwrap();
     assert_eq!((a.ssl_mode, a.ssl_cert.as_str(), a.ssl_key.as_str()), (SslMode::Required, "/c/my cert.crt", "/c/k.key"));
-    // MySQL has no such fields in Quarry, so they are neither read nor written there.
-    let m = Addr::parse("mysql://u@h/?sslcert=%2Fc.crt").unwrap();
-    assert_eq!(m.ssl_cert, "");
-    assert!(!Addr { ssl_cert: "/c.crt".into(), ..m }.to_uri().contains("sslcert"));
+    // MySQL names them ssl-cert and ssl-key, and reads libpq's spellings too.
+    let m = Addr::parse("mysql://u@h/?sslcert=%2Fc.crt&ssl_key=%2Fc.key").unwrap();
+    assert_eq!((m.ssl_cert.as_str(), m.ssl_key.as_str()), ("/c.crt", "/c.key"));
+    assert_eq!(m.to_uri(), "mysql://u@h:3306/?ssl-cert=%2Fc.crt&ssl-key=%2Fc.key");
+    assert_eq!(Addr::parse(&m.to_uri()), Some(m));
+}
+
+#[test]
+fn mysql_paste_fills_the_fields() {
+    let a = Addr::from_paste_for("  mariadb://app:p%40ss%3Aw%2Frd@db.internal:3307/my%20db?ssl-mode=VERIFY_CA&ssl-ca=%2Fc%2Fca.pem&ssl-cert=%2Fc%2Fc.crt&ssl-key=%2Fc%2Fc.key&charset=utf8mb4 ", Engine::MySql).unwrap();
+    assert_eq!((a.scheme.as_str(), a.host.as_str(), a.port, a.user.as_str(), a.password.as_str(), a.database.as_str()), ("mariadb", "db.internal", 3307, "app", "p@ss:w/rd", "my db"));
+    assert_eq!((a.ssl_mode, a.ssl_ca.as_str(), a.ssl_cert.as_str(), a.ssl_key.as_str()), (SslMode::VerifyCa, "/c/ca.pem", "/c/c.crt", "/c/c.key"));
+    // Charset has no form field, so it is read past and never stored.
+    assert!(!a.to_uri().contains("charset"));
+    let b = Addr::from_paste_for("mysql://u@h/d?sslmode=verify-identity&sslcert=/c.crt&sslkey=/c.key", Engine::MySql).unwrap();
+    assert_eq!((b.scheme.as_str(), b.port, b.ssl_mode, b.ssl_cert.as_str()), ("mysql", 3306, SslMode::VerifyIdentity, "/c.crt"));
+    assert_eq!(Addr::from_paste_for("mysql://h?ssl-mode=required", Engine::MySql).unwrap().ssl_mode, SslMode::Required);
+}
+
+#[test]
+fn mysql_paste_names_the_right_card_without_echoing_input() {
+    let pg = Addr::from_paste_for("postgres://u:secret@h/d", Engine::MySql).unwrap_err();
+    assert!(pg.contains("PostgreSQL card"), "{pg}");
+    let mongo = Addr::from_paste_for("mongodb+srv://u:secret@h", Engine::MySql).unwrap_err();
+    assert!(mongo.contains("MongoDB card"), "{mongo}");
+    for bad in ["host=h password=secret", "secret", "", "mysql://u:secret@h:notaport/d", "mysql:///d", "sqlite://secret"] {
+        let e = Addr::from_paste_for(bad, Engine::MySql).unwrap_err();
+        assert!(!e.contains("secret"), "{e}");
+    }
+    assert!(Addr::from_paste_for("mariadb://h", Engine::Postgres).unwrap_err().contains("MariaDB card"));
+    assert!(Addr::from_paste("mysql://h").unwrap_err().contains("MySQL card"));
+}
+
+#[test]
+fn mysql_options_carry_the_client_certificate_files() {
+    use crate::db::sql::pg::cert::tests::{make_certs, temp_dir};
+    use sqlx::ConnectOptions;
+    let d = temp_dir("my-opts");
+    if make_certs(&d, "db.test", "app").is_none() {
+        eprintln!("openssl not found, skipped");
+        return;
+    }
+    let p = |f: &str| d.join(f).display().to_string();
+    let base = Addr { scheme: "mysql".into(), host: "h".into(), port: 3306, user: "u".into(), ssl_mode: SslMode::VerifyCa, ..Default::default() };
+    let url = |a: &Addr| super::worker::with_client_cert(sqlx::mysql::MySqlConnectOptions::new(), a).map(|o| o.to_url_lossy().to_string());
+    assert!(!url(&base).unwrap().contains("ssl-cert"));
+    let with = Addr { ssl_cert: p("client.crt"), ssl_key: p("client.key"), ..base.clone() };
+    let u = url(&with).unwrap();
+    assert!(u.contains("ssl-cert=") && u.contains("client.crt") && u.contains("ssl-key=") && u.contains("client.key"), "{u}");
+    // TLS off sends nothing, so the files are not even read.
+    assert!(!url(&Addr { ssl_mode: SslMode::Disabled, ssl_cert: "/missing".into(), ..with.clone() }).unwrap().contains("ssl-cert"));
+    let err = |a: Addr| url(&a).unwrap_err();
+    assert!(err(Addr { ssl_key: String::new(), ..with.clone() }).contains("Only one of"));
+    assert!(err(Addr { ssl_cert: p("missing.crt"), ..with.clone() }).contains("Could not read the client certificate file"));
+    assert!(err(Addr { ssl_key: p("client-enc.key"), ..with.clone() }).contains("cannot use a passphrase"));
+    assert!(err(Addr { ssl_key: p("client-old.key"), ..with.clone() }).contains("cannot use a passphrase"));
+    assert!(err(Addr { ssl_key: p("client.crt"), ..with }).contains("No PEM private key"));
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -111,7 +165,6 @@ fn paste_refuses_other_input_without_echoing_it() {
         let e = Addr::from_paste(bad).unwrap_err();
         assert!(!e.contains("secret"), "{e}");
     }
-    assert!(Addr::from_paste("mysql://h").unwrap_err().contains("postgresql://"));
 }
 
 #[test]

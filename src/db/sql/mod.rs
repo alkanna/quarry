@@ -408,7 +408,7 @@ pub struct Addr {
     pub database: String,
     pub ssl_mode: SslMode,
     pub ssl_ca: String,
-    /// PostgreSQL only: the client certificate and key files, as libpq's `sslcert` and `sslkey` name them.
+    /// The client certificate and key files: libpq's `sslcert` and `sslkey`, MySQL's `ssl-cert` and `ssl-key`.
     pub ssl_cert: String,
     pub ssl_key: String,
 }
@@ -454,35 +454,55 @@ impl Addr {
                 continue;
             }
             match k.replace('_', "-").as_str() {
-                "ssl-mode" | "sslmode" => a.ssl_mode = SslMode::from_param(v).unwrap_or_default(),
+                // Connector URLs spell the modes both VERIFY_CA and verify-ca.
+                "ssl-mode" | "sslmode" => a.ssl_mode = SslMode::from_param(&decode(v).replace('-', "_")).unwrap_or_default(),
                 "ssl-ca" | "sslca" => a.ssl_ca = decode(v),
+                "ssl-cert" | "sslcert" => a.ssl_cert = decode(v),
+                "ssl-key" | "sslkey" => a.ssl_key = decode(v),
                 _ => {}
             }
         }
         Some(a)
     }
 
-    /// Reads what a user pastes into the form: a `postgresql://` or `postgres://` URI, or a libpq
-    /// `key=value` string. The error text never repeats the input, which may hold a password.
+    /// Reads what a user pastes into the PostgreSQL card. The form calls `from_paste_for`.
+    #[cfg(test)]
     pub fn from_paste(text: &str) -> Result<Addr, String> {
+        Addr::from_paste_for(text, Engine::Postgres)
+    }
+
+    /// Reads what a user pastes into the form of this engine: a `postgresql://` or `postgres://` URI or a libpq
+    /// `key=value` string on the PostgreSQL card, a `mysql://` or `mariadb://` URI on the MySQL and MariaDB cards.
+    /// The error text never repeats the input, which may hold a password.
+    pub fn from_paste_for(text: &str, engine: Engine) -> Result<Addr, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("Nothing to read".into());
         }
+        let pg = engine == Engine::Postgres;
         let a = if let Some((scheme, _)) = text.split_once("://") {
-            if !matches!(scheme.to_ascii_lowercase().as_str(), "postgres" | "postgresql") {
-                return Err("Only postgresql:// and postgres:// strings can be pasted here".into());
+            let scheme = scheme.to_ascii_lowercase();
+            match (Engine::from_uri(text).filter(|e| e.is_sql()), pg) {
+                (Some(Engine::Postgres), true) | (Some(Engine::MySql), false) => {}
+                (Some(Engine::Postgres), false) => return Err("This is a postgresql:// string. Pick the PostgreSQL card to paste it".into()),
+                (Some(_), true) if scheme == "mariadb" => return Err("Only postgresql:// and postgres:// strings can be pasted on this card. Pick the MariaDB card for mariadb:// strings".into()),
+                (Some(_), true) => return Err("Only postgresql:// and postgres:// strings can be pasted on this card. Pick the MySQL card for mysql:// strings".into()),
+                _ if scheme.starts_with("mongodb") => return Err("This is a MongoDB address. Pick the MongoDB card to paste it".into()),
+                _ if pg => return Err("Only postgresql:// and postgres:// strings can be pasted here".into()),
+                _ => return Err("Only mysql:// and mariadb:// strings can be pasted here".into()),
             }
             Addr::parse(text).ok_or("Could not read this connection string, check the port")?
-        } else if text.contains('=') {
+        } else if pg && text.contains('=') {
             Addr::from_keywords(text)?
-        } else {
+        } else if pg {
             return Err("Paste a postgresql:// address or a host=... connection string".into());
+        } else {
+            return Err("Paste a mysql:// or mariadb:// address".into());
         };
         if a.host.trim().is_empty() {
             return Err("The connection string has no host".into());
         }
-        Ok(Addr { scheme: "postgres".into(), ..a })
+        Ok(if pg { Addr { scheme: "postgres".into(), ..a } } else { a })
     }
 
     /// The libpq `key=value` form. Values may be single quoted with backslash escapes. An error names the position of the
@@ -576,9 +596,9 @@ impl Addr {
         if !self.ssl_ca.is_empty() {
             q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca)));
         }
-        for (k, v) in [("sslcert", &self.ssl_cert), ("sslkey", &self.ssl_key)] {
-            if pg && !v.is_empty() {
-                q.push(format!("{k}={}", encode(v)));
+        for (k, mk, v) in [("sslcert", "ssl-cert", &self.ssl_cert), ("sslkey", "ssl-key", &self.ssl_key)] {
+            if !v.is_empty() {
+                q.push(format!("{}={}", if pg { k } else { mk }, encode(v)));
             }
         }
         let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
