@@ -12,6 +12,7 @@ pub mod structure;
 pub mod write;
 pub mod ddl;
 pub mod create;
+pub mod tableops;
 pub mod export;
 pub mod lex;
 pub mod format;

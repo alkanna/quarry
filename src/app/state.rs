@@ -917,6 +917,9 @@ pub(super) enum Modal {
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
+    SqlRename(Box<super::sql::tableops::RenameForm>),
+    SqlDuplicate(Box<super::sql::tableops::DupForm>),
+    PgTruncate(Box<super::sql::tableops::TruncForm>),
     PgNewDb(Box<super::sql::create_pg::PgNewDb>),
     PgNewSchema(Box<super::sql::create_pg::PgNewSchema>),
     PgNewTable(Box<super::sql::create_pg::PgNewTable>),
@@ -1412,6 +1415,10 @@ pub(super) enum SideAct {
     NewDb,
     NewTable(String),
     SqlDrop(String, String, DropKind),
+    /// Rename a SQL table, view or PostgreSQL schema (database, name, kind), duplicate a table, and empty a PostgreSQL table.
+    SqlRename(String, String, DropKind),
+    SqlDuplicate(String, String),
+    PgTruncate(String, String),
     /// PostgreSQL: a schema of a database, and dropping one (database, schema).
     NewSchema(String),
     DropSchema(String, String),

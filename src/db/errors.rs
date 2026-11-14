@@ -521,6 +521,12 @@ pub(crate) fn lock_held(name: &str, secs: u32) -> String {
     format!("The table {name} is locked by another session that did not let go within {secs} seconds. Nothing was changed.")
 }
 
+/// PostgreSQL 0A000 from a TRUNCATE of a table that other tables have a foreign key to: the server's sentence follows its lc_messages, so
+/// the cause and the way out are said here and its own sentence stays below.
+pub(crate) fn truncate_refused(server: &str) -> String {
+    format!("{server}\nA table that other tables point at with a foreign key cannot be emptied alone. Tick CASCADE to empty those tables too, or empty them first. Nothing was emptied.")
+}
+
 /// 55P03 for the drop that reads what a CASCADE takes.
 pub(crate) fn lock_held_cascade(secs: u32) -> String {
     format!("Another session holds a lock on it or on something that depends on it, and did not let go within {secs} seconds, so what the drop takes cannot be read right now. Try again in a moment.")

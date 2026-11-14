@@ -500,7 +500,7 @@ const EXTRAS: &str = "SELECT what FROM (
 ) x ORDER BY 1";
 
 /// The whole fingerprint of a table, read inside the transaction that makes or drops it.
-async fn state_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Vec<String>> {
+pub(super) async fn state_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Vec<String>> {
     let st = read_in(tx, schema, table).await?;
     let mut v = fingerprint(&st);
     let extras = tx.fetch_bound(EXTRAS, &[Param::Text(D.qualified(schema, table))]).await.map_err(se)?;
@@ -950,14 +950,14 @@ async fn begin<'c>(c: &'c mut Conn, db: &Db, scope: &str) -> Res<Tx<'c>> {
 
 /// One write transaction of a create or a drop, ended by COMMIT, or by ROLLBACK when `body` failed (`run_locked`). A failed COMMIT
 /// does not say that nothing changed, so it says so.
-async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
+pub(super) async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
     let run = run_locked(db, scope, read_only, &[], "Refresh the lists and check before running it again.", async |tx| body(tx).await.map_err(Fail::Run)).await;
     run.map_err(|f| match f {
         Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
     })
 }
 
-async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
+pub(super) async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT oid::text AS n FROM pg_namespace WHERE nspname = $1", &[Param::Text(schema.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
 }
@@ -985,7 +985,7 @@ pub(in crate::db::sql) async fn check_ids(db: &Db, schema: &str, table: &str, id
     }
 }
 
-async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
+pub(super) async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT to_regclass($1)::oid::text AS n", &[Param::Text(name.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
 }
@@ -1013,9 +1013,9 @@ async fn drop_schema(db: &Db, name: &str, cascade: bool, read_only: bool) -> Res
 }
 
 /// What a create made, for the undo: the table's oid and how it reads right after.
-struct Made {
-    oid: String,
-    state: Vec<String>,
+pub(super) struct Made {
+    pub(super) oid: String,
+    pub(super) state: Vec<String>,
 }
 
 /// The first function a CHECK of the table `$1` (an oid) reaches that is not IMMUTABLE, with its constraint: called by name, behind an
@@ -1084,7 +1084,7 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
 }
 
 /// The DROP keyword for a relation of pg_class kind `relkind`.
-fn drop_word(relkind: &str) -> &'static str {
+pub(super) fn drop_word(relkind: &str) -> &'static str {
     match relkind {
         "v" => "VIEW",
         "m" => "MATERIALIZED VIEW",
@@ -1268,11 +1268,11 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
     out
 }
 
-fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
+pub(super) fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
     UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
 }
 
-fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
+pub(super) fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
     match res {
         Ok(dbs) => (Ok(said), dbs),
         Err(err) => (Err(err), None),
