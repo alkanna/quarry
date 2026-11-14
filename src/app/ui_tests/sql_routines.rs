@@ -28,6 +28,23 @@ fn present(ui: &UiApp, part: &str) -> bool {
     ui.h.query_all_by_label_contains(part).next().is_some()
 }
 
+/// Every accessible name on screen, for a failure message that says what was there instead.
+fn names(ui: &UiApp) -> String {
+    use egui_kittest::kittest::NodeT;
+    ui.h.root().children_recursive().filter_map(|n| n.accesskit_node().label()).collect::<Vec<_>>().join(" | ")
+}
+
+/// Steps frames until no widget has this name, or fails with what is on screen.
+fn gone(ui: &mut UiApp, label: &str) {
+    for _ in 0..20 {
+        if ui.h.query_all_by_label(label).next().is_none() {
+            return;
+        }
+        ui.h.step();
+    }
+    panic!("\"{label}\" is still on screen: {}", names(ui));
+}
+
 fn query(a: &App) -> String {
     a.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
 }
@@ -38,7 +55,7 @@ fn the_sidebar_lists_routines_and_the_caption_folds_them() {
     ui.show("order_total");
     ui.show("archive_orders");
     ui.click("Routines");
-    assert!(ui.h.query_all_by_label("order_total").next().is_none(), "folding the group left its rows");
+    gone(&mut ui, "order_total");
     ui.click("Routines");
     ui.show("order_total");
 }
@@ -123,7 +140,10 @@ fn the_row_menu_opens_the_drop_pane_of_that_routine() {
     let at = ui.h.get_by_label("order_total").rect().center();
     ui.press_at(at, egui::PointerButton::Secondary, 1);
     ui.settle();
-    ui.click("Drop function\u{2026}");
+    if ui.h.query_all_by_label_contains("Drop function").next().is_none() {
+        panic!("the row menu did not open: {}", names(&ui));
+    }
+    ui.click_contains("Drop function");
     ui.show("Confirmation");
     assert!(off(&ui, "Drop"));
     replace(&mut ui, "Confirmation", "add_tax");
@@ -136,7 +156,7 @@ fn run_fills_a_call_into_a_new_query_tab() {
     let before = ui.app().tabs.len();
     ui.show("Argument before_day");
     replace(&mut ui, "Argument before_day", "2024-01-01");
-    ui.click("Run");
+    ui.click_last("Run");
     assert!(!ui.app().routines.window_open(), "the window stayed open after Run");
     assert_eq!(ui.app().tabs.len(), before + 1, "Run did not open a Query tab");
     let q = query(ui.app());
@@ -160,7 +180,7 @@ fn a_locked_postgresql_connection_runs_a_read_only_function_and_asks_for_a_proce
     }
     let before = ui.app().tabs.len();
     ui.click("Run\u{2026}");
-    ui.click("Run");
+    ui.click_last("Run");
     assert!(!matches!(ui.app().modal, Some(Modal::Unlock(..))), "an IMMUTABLE function asked to unlock");
     assert_eq!(ui.app().tabs.len(), before + 1, "the function did not run in a new Query tab");
     assert!(query(ui.app()).starts_with("SELECT * FROM"), "{}", query(ui.app()));
@@ -170,6 +190,6 @@ fn a_locked_postgresql_connection_runs_a_read_only_function_and_asks_for_a_proce
         c.writable = false;
     }
     ui.show_contains("Writes are locked.");
-    ui.click("Run");
+    ui.click_last("Run");
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(..))), "a procedure ran on a locked connection");
 }

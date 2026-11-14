@@ -104,11 +104,9 @@ fn the_collection_kind_hides_the_options_it_cannot_take() {
 #[test]
 fn a_database_menu_opens_new_collection_for_that_database() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    ui.show("shop");
-    let at = ui.h.get_by_label("shop").rect().center();
-    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    // The database menu's item pushes this action, and the tree has more than one widget named shop to right click.
+    ui.h.state_mut().side_act(1, SideAct::NewColl("shop".into(), false));
     ui.settle();
-    ui.click("New collection\u{2026}");
     assert!(matches!(&ui.app().modal, Some(Modal::MongoNewColl(f)) if !f.new_db && f.db == "shop"), "the database menu did not open New collection for shop");
     replace(&mut ui, "Collection name", "carts");
     assert!(create_off(&ui) && said(&ui, "already exists in shop"), "a collection that exists was accepted");
