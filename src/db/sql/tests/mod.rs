@@ -11,6 +11,7 @@ mod pg_roles;
 mod pg_shell;
 mod pg_write;
 mod tls;
+mod views;
 
 use super::*;
 

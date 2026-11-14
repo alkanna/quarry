@@ -1004,7 +1004,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

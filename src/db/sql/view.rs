@@ -311,8 +311,8 @@ async fn read_def(db: &Db, schema: &str, name: &str) -> Res<ViewDef> {
 }
 
 async fn my_def(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, name: &str) -> Res<ViewDef> {
-    let row = sqlx::raw_sql(&d.create_stmt(true, schema, name)).fetch_optional(&mut *c).await.map_err(se)?;
-    let create = row.and_then(|r| text_at(&r, 1)).ok_or_else(|| format!("{name} is not a view in {schema}."))?;
+    let rows = sqlx::raw_sql(&d.create_stmt(true, schema, name)).fetch_all(&mut *c).await.map_err(se)?;
+    let create = rows.first().and_then(|r| text_at(r, 1)).ok_or_else(|| format!("{name} is not a view in {schema}."))?;
     parse_create_view(&create).map(|v| ViewDef { schema: schema.into(), name: name.into(), ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
 }
 
@@ -428,20 +428,33 @@ async fn undo_my(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: boo
     out
 }
 
+/// The old definition goes back with CREATE OR REPLACE where the columns allow it. An edit that added or removed columns cannot be
+/// undone that way, so then the view is dropped and made again, which the person asked for by undoing and which the server refuses
+/// while another object depends on the view.
 async fn undo_pg(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool) -> Res<()> {
+    match undo_pg_with(db, schema, name, u, read_only, false).await {
+        Err(e) if e == NEEDS_DROP => undo_pg_with(db, schema, name, u, read_only, true).await,
+        r => r,
+    }
+}
+
+async fn undo_pg_with(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool, force_drop: bool) -> Res<()> {
     let run = run_locked(db, schema, read_only, &[], "Refresh the lists and check before running it again.", async |tx| {
         set_path(tx, db, schema).await.map_err(|x| Fail::Run(se(x)))?;
         let now = pg_def_in(tx, schema, name).await.map_err(Fail::Run)?.filter(|n| !n.materialized).ok_or_else(|| Fail::Run(format!("Not undone: the view {name} is gone.")))?;
         if now.body != u.left {
             return Err(Fail::Run(format!("Not undone: {name} was changed after this, so undoing now would overwrite that.")));
         }
-        let drop = u.created || u.dropped;
+        let drop = u.created || u.dropped || force_drop;
         if drop {
             pg_exec(tx, db, schema, &drop_view_sql(D, schema, name)).await.map_err(|x| Fail::Run(lock_error(&x, name).unwrap_or_else(|| format!("Not undone: {}", se(x)))))?;
         }
         if !u.created {
             let sql = u.restore.as_deref().ok_or_else(|| Fail::Run("Not undone: the old definition was not kept.".into()))?;
-            pg_exec(tx, db, schema, sql).await.map_err(|x| Fail::Run(lock_error(&x, name).unwrap_or_else(|| se(x))))?;
+            if let Err(x) = pg_exec(tx, db, schema, sql).await {
+                let columns = !drop && sql_state(&x).as_deref() == Some("42P16");
+                return Err(Fail::Run(if columns { NEEDS_DROP.into() } else { lock_error(&x, name).unwrap_or_else(|| se(x)) }));
+            }
         }
         Ok(())
     })
