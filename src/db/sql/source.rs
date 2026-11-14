@@ -51,13 +51,13 @@ pub fn single_table(stmt: &str, d: Dialect) -> Option<(Option<String>, String)> 
     if !ident(i) {
         return None;
     }
-    let mut parts = vec![unquote(toks[i].1)];
+    let mut parts = vec![lex::unquote_ident(toks[i].1)];
     i += 1;
     while punct(i, ".") {
         if !ident(i + 1) {
             return None;
         }
-        parts.push(unquote(toks[i + 1].1));
+        parts.push(lex::unquote_ident(toks[i + 1].1));
         i += 2;
     }
     // An alias, with or without AS, may follow the table.
@@ -95,13 +95,6 @@ const BRING_IN: [&str; 13] = ["join", "inner", "left", "right", "full", "cross",
 
 fn is_clause(w: &str) -> bool {
     CLAUSES.iter().chain(&BRING_IN).any(|k| w.eq_ignore_ascii_case(k))
-}
-
-fn unquote(t: &str) -> String {
-    match t.chars().next() {
-        Some(q @ ('`' | '"')) if t.len() >= 2 => t[1..t.len() - 1].replace(&format!("{q}{q}"), &q.to_string()),
-        _ => t.to_string(),
-    }
 }
 
 #[cfg(test)]

@@ -533,9 +533,10 @@ fn fact(ui: &mut egui::Ui, name: &str, value: &str) {
 fn facts(ui: &mut egui::Ui, d: &Detail, dialect: db::sql::Dialect) {
     plain_card(ui, |ui| {
         egui::Grid::new("routine-facts").num_columns(2).spacing([18.0, 6.0]).show(ui, |ui| {
-            fact(ui, "Language", &d.lang);
+            let (lang, returns) = d.routine.as_ref().map_or(("", ""), |r| (r.lang.as_str(), r.returns.as_str()));
+            fact(ui, "Language", lang);
             fact(ui, "Arguments", &d.signature);
-            fact(ui, "Returns", &d.returns);
+            fact(ui, "Returns", returns);
             let pg = dialect == db::sql::Dialect::Postgres;
             fact(ui, "Security", &if d.owner.is_empty() { d.security.clone() } else if pg { format!("{} (owner {})", d.security, d.owner) } else { format!("{} ({})", d.security, d.owner) });
             fact(ui, if pg { "Volatility" } else { "Determinism" }, &d.behavior);
@@ -805,8 +806,6 @@ fn demo_detail(d: db::sql::Dialect, r: &Routine) -> Detail {
         routine: Some(r.clone()),
         source: source.into(),
         signature,
-        returns: r.returns.clone(),
-        lang: r.lang.clone(),
         security: if pg { "INVOKER".into() } else { "DEFINER".into() },
         owner: if pg { "analyst".into() } else { "shop@%".into() },
         behavior: if pg { "IMMUTABLE".into() } else { "DETERMINISTIC".into() },

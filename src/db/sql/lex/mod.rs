@@ -249,6 +249,15 @@ pub fn nth_reading(text: &str, d: Dialect, n: usize) -> Vec<(Tok, Range<usize>)>
     lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0, dialect: Dialect::MySql })
 }
 
+/// An identifier token without its quotes: a backtick or double quoted name loses them and un-doubles the quote inside. A bare word,
+/// and a lone quote that closes nothing, come back as they are.
+pub fn unquote_ident(t: &str) -> String {
+    match t.chars().next() {
+        Some(q @ ('`' | '"')) if t.len() >= 2 && t.ends_with(q) => t[1..t.len() - 1].replace(&format!("{q}{q}"), &q.to_string()),
+        _ => t.to_string(),
+    }
+}
+
 /// The database a `USE name` switches to, with the name unquoted.
 pub fn use_target(stmt: &str, d: Dialect) -> Option<String> {
     // PostgreSQL has no USE: a connection is bound to one database.
@@ -269,7 +278,7 @@ pub fn use_target(stmt: &str, d: Dialect) -> Option<String> {
     let name = &stmt[r];
     match t {
         Tok::Word => Some(name.to_string()),
-        Tok::Quoted => Some(name.trim_matches('`').replace("``", "`")),
+        Tok::Quoted => Some(unquote_ident(name)),
         _ => None,
     }
 }
@@ -931,6 +940,15 @@ mod tests {
     }
     fn use_target(t: &str) -> Option<String> {
         super::use_target(t, D)
+    }
+
+    #[test]
+    fn identifiers_lose_their_quotes_and_doubled_quotes() {
+        assert_eq!(super::unquote_ident("`a``b`"), "a`b");
+        assert_eq!(super::unquote_ident("\"a\"\"b\""), "a\"b");
+        assert_eq!(super::unquote_ident("plain"), "plain");
+        assert_eq!(super::unquote_ident("`"), "`");
+        assert_eq!(super::unquote_ident("`é"), "`é");
     }
 
     #[test]
