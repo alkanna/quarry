@@ -1325,6 +1325,12 @@ impl Worker {
                     match st {
                         Ok(st) => {
                             u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
+                            // A concurrent index that failed to build is not there to drop, and its drop would fail the whole undo.
+                            if late.is_some() {
+                                let built: Vec<String> = st.indexes.iter().map(|i| format!("DROP INDEX {}.{}", q(&schema), q(&i.name))).collect();
+                                let unbuilt: Vec<String> = steps.iter().filter_map(|s| concurrent_name(s)).map(|n| format!("DROP INDEX {}.{n}", q(&schema))).filter(|d| !built.contains(d)).collect();
+                                u.steps.retain(|s| !unbuilt.contains(s));
+                            }
                             // The undo of a dropped key puts it back and leans on the parent as it is now.
                             let mut unread = None;
                             for (&i, loaded) in want.iter().zip(loads) {
