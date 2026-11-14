@@ -20,6 +20,7 @@ mod js_ls;
 mod log;
 mod shell;
 pub mod sql;
+pub mod collopts;
 pub mod copy;
 mod tools;
 mod worker;

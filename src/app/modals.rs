@@ -146,6 +146,7 @@ impl App {
                         }
                     });
                 }
+                Modal::MongoNewColl(f) => self.mongo_new_coll_dialog(ui, f, &mut keep),
                 Modal::NewCollection { conn, db, name, view, source, pipeline } => self.new_collection_dialog(ui, conn, db, name, view, source, pipeline, &mut keep),
                 Modal::Tool(f) => self.tool_dialog(ui, f, &mut keep),
                 Modal::Relations { conn, db } => self.relations_dialog(ui, conn, db, &mut keep),

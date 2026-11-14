@@ -932,6 +932,7 @@ pub(super) enum Modal {
     AggWrite(Vec<Document>),
     ShellWrite(Vec<String>),
     ImportInsert(usize),
+    MongoNewColl(Box<super::mongo_create::MongoNewColl>),
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
     DuplicateColl { conn: u64, db: String, coll: String, name: String },

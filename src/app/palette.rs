@@ -36,6 +36,7 @@ pub(super) enum Cmd {
     ShowLibrary,
     NewGroup,
     EditGroup(u64),
+    NewDb,
 }
 
 #[derive(Clone)]
@@ -189,6 +190,9 @@ impl App {
                 add(&g, Row::cmd("Refresh connection", Glyph::Reload, keys(true, false, "R"), Cmd::Connect));
                 if lockable && c.writable {
                     add(&g, Row::cmd("Lock writes", Glyph::Lock, "", Cmd::LockWrites));
+                }
+                if !c.meta.engine.is_sql() {
+                    add(&g, Row::cmd("New database\u{2026}", Glyph::Prompt, "", Cmd::NewDb));
                 }
                 add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
                 add(&g, Row::cmd(if c.meta.engine == db::sql::Engine::Postgres { "Roles" } else { "Users" }, Glyph::Prompt, "", Cmd::Users));
@@ -377,6 +381,11 @@ impl App {
                 self.edit_group(id);
             }
             Cmd::EditGroup(id) => self.edit_group(id),
+            Cmd::NewDb => {
+                if let Some(id) = active {
+                    self.side_act(id, SideAct::NewDb);
+                }
+            }
             _ => {}
         }
     }

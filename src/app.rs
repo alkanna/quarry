@@ -38,6 +38,7 @@ mod library;
 mod log;
 mod mem;
 mod modals;
+mod mongo_create;
 mod palette;
 mod poll;
 mod query;
@@ -179,6 +180,8 @@ pub struct App {
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
+    /// A collection to open once the create that makes it is answered.
+    open_after: Option<(u64, String, String)>,
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
     export_job: Option<export::ExportJob>,
     /// A CSV import or a script file running, shown in the status bar with a Cancel.
@@ -367,6 +370,7 @@ impl App {
             tree_x: egui::Rangef::NOTHING,
             insert: None,
             copying: Default::default(),
+            open_after: None,
             export_job: None,
             sql_job: None,
             prefs: UiPrefs::default(),

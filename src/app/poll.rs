@@ -526,6 +526,15 @@ impl App {
             }
             self.copying.remove(&(conn, db.clone(), to));
         }
+        let open = self.open_after.take_if(|o| o.0 == conn && o.1 == db);
+        if res.is_ok() && open.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) && !c.dbs.iter().any(|d| d.0 == db) {
+            // A new database is listed now so its collection has a row to open under.
+            c.dbs.push((db.clone(), None));
+            c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        if res.is_ok() && let Some((_, _, coll)) = open {
+            self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, Open::Here);
+        }
         match res {
             Ok(m) => {
                 // Only a drop the server confirmed forgets its undo entries; a refused one keeps them.

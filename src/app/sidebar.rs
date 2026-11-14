@@ -255,8 +255,18 @@ impl App {
         r.on_hover_text("Press / or Cmd+Shift+F");
         ui.add_space(14.0);
         let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+        let mongo_conn = self.active.and_then(|id| self.conn(id)).filter(|c| !c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| c.meta.id);
         let mut new_db = None;
         ui.horizontal(|ui| {
+            if let Some(id) = mongo_conn {
+                ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if plus_button(ui, true).on_hover_text("New database… (asks to unlock writes first)").clicked() {
+                        new_db = Some(id);
+                    }
+                });
+                return;
+            }
             ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
             if let Some((id, writable, pg)) = sql_conn {
                 // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
@@ -919,6 +929,7 @@ impl App {
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
+            SideAct::NewDb if self.conn(conn).is_some_and(|c| !c.meta.engine.is_sql()) => return self.mongo_new_db(conn),
             SideAct::NewDb => return self.sql_new_db(conn),
             SideAct::SqlUsers => return self.open_sql_users(conn),
             SideAct::NewTable(db) if self.is_pg(conn) => return self.pg_new_table(conn, db),
@@ -954,6 +965,7 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         match a {
+            SideAct::NewColl(db, false) => self.mongo_new_coll(conn, db),
             SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
             SideAct::Refresh(db) => {
                 self.refresh_db(conn, &db);
