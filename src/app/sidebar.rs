@@ -628,6 +628,9 @@ impl App {
                             if ui.add_enabled(!sys_schema, egui::Button::new("New table…")).on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::NewTable(db_name.clone()));
                             }
+                            if ui.add_enabled(!sys_schema, egui::Button::new("New view…")).on_disabled_hover_text("Belongs to the server").clicked() {
+                                side.push(SideAct::NewView(db_name.clone()));
+                            }
                             if ui.add_enabled_ui(!sys_schema && !picked.is_empty(), |ui| danger_item(ui, format!("Drop schema {picked}…"))).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::DropSchema(db_name.clone(), picked.to_string()));
                             }
@@ -640,6 +643,9 @@ impl App {
                             ui.separator();
                             if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
                                 side.push(SideAct::NewTable(db_name.clone()));
+                            }
+                            if ui.add_enabled(writable && !system, egui::Button::new("New view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a view" }).clicked() {
+                                side.push(SideAct::NewView(db_name.clone()));
                             }
                             if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
                                 side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
@@ -800,6 +806,13 @@ impl App {
                                 if ui.button("Export as SQL dump…").clicked() {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
+                                if is_view {
+                                    // PostgreSQL's items stay enabled on a locked connection and ask to unlock; MySQL's wait for the unlock like its other writes.
+                                    let system = if pg { db::sql::pg::create::system_schema(picked) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str()) };
+                                    if ui.add_enabled(!system && (pg || writable), egui::Button::new("Edit view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to edit a view" }).clicked() {
+                                        side.push(SideAct::EditView(db_name.clone(), coll.clone()));
+                                    }
+                                }
                                 if pg {
                                     let system = db::sql::pg::create::system_schema(picked);
                                     ui.separator();
@@ -925,6 +938,8 @@ impl App {
             SideAct::NewTable(db) => return self.sql_new_table(conn, db),
             SideAct::SqlDrop(db, table, kind) if self.is_pg(conn) => return self.pg_drop_ask(conn, db, table, kind),
             SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
+            SideAct::NewView(db) => return self.sql_new_view(conn, db, String::new()),
+            SideAct::EditView(db, name) => return self.sql_edit_view(conn, db, name),
             SideAct::NewSchema(db) => return self.pg_new_schema(conn, db),
             SideAct::DropSchema(db, schema) => return self.pg_drop_ask(conn, db, schema, DropKind::Schema),
             SideAct::SqlImport(db, table) => {

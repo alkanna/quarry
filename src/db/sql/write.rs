@@ -39,6 +39,8 @@ pub enum SqlUndo {
     Alter(Box<super::ddl::AlterUndo>),
     /// A trigger change: what puts the trigger back and how the change left it.
     Trigger(Box<super::ddl::TrigUndo>),
+    /// A view created or edited here: dropped, or put back as it was, while it still reads as the change left it.
+    View(Box<super::view::ViewUndo>),
     /// A database or table this app created: undone by dropping it while it is still empty.
     /// `oid` is the database's pg_database oid and `baseline` how many objects of a user it held right after the create (what its template gave it), PostgreSQL only; MySQL leaves both empty.
     CreatedDb { oid: String, baseline: i64 },
@@ -73,7 +75,7 @@ impl SqlUndo {
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Inserted(r) => r.first().map(pk_of),
-            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) | SqlUndo::Import(_) => None,
+            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::View(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) | SqlUndo::Import(_) => None,
             SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
@@ -88,6 +90,7 @@ impl SqlUndo {
             SqlUndo::Import(u) => u.describe(),
             SqlUndo::Alter(u) => u.label.clone(),
             SqlUndo::Trigger(u) => u.label.clone(),
+            SqlUndo::View(u) => u.label.clone(),
             SqlUndo::CreatedDb { .. } => "created database".into(),
             SqlUndo::CreatedTable { .. } | SqlUndo::PgCreatedTable { .. } => "created table".into(),
             SqlUndo::CreatedSchema { .. } => "created schema".into(),
@@ -688,6 +691,9 @@ impl Worker {
         if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. }, .. }) {
             return self.sql_undo_create(db, a, read_only);
         }
+        if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::View(_), .. }) {
+            return self.sql_undo_view(db, a, read_only);
+        }
         self.spawn(undo_rows(db, a, pk, read_only));
     }
 }
@@ -740,7 +746,7 @@ pub(in crate::db) async fn undo_rows(db: Db, a: UndoAction, pk: Vec<String>, rea
         SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
         SqlUndo::Import(u) => super::pg::import::undo(&db, &schema, &table, &u, read_only).await,
         // Taken before this match, where the structure statements run.
-        SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) => Err("Not a row change".into()),
+        SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::View(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) => Err("Not a row change".into()),
         SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
     };
     let undo = res.is_err().then(|| UndoAction { agent, at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo, ids } });

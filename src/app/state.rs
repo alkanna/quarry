@@ -465,6 +465,8 @@ pub(super) struct SqlTab {
     pub(super) query: String,
     /// The query of the last page asked for, which whole-query column actions repeat.
     pub(super) ran: db::sql::PageQuery,
+    /// The Content bar's Save as view button was pressed; `view_requests` opens the dialog on the next frame.
+    pub(super) save_view: bool,
     /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
     pub(super) matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.
@@ -920,6 +922,7 @@ pub(super) enum Modal {
     PgNewDb(Box<super::sql::create_pg::PgNewDb>),
     PgNewSchema(Box<super::sql::create_pg::PgNewSchema>),
     PgNewTable(Box<super::sql::create_pg::PgNewTable>),
+    SqlView(Box<super::sql::viewdef::ViewForm>),
     SqlNewUser(Box<super::sql::users::NewUser>),
     SqlPassword(Box<super::sql::users::PwForm>),
     PgNewRole(Box<super::sql::pg_roles::NewRoleForm>),
@@ -1414,6 +1417,9 @@ pub(super) enum SideAct {
     DropSchema(String, String),
     /// The Users and privileges window of a SQL connection.
     SqlUsers,
+    /// A new view in a SQL database (the database on MySQL, the PostgreSQL database's picked schema), and the edit of one (database, view).
+    NewView(String),
+    EditView(String, String),
 }
 
 pub(super) enum QAct {

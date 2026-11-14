@@ -18,6 +18,7 @@ pub(super) mod server;
 pub(super) mod structure;
 pub(super) mod trig;
 pub(super) mod trig_pg;
+pub(super) mod viewdef;
 pub(super) mod users;
 pub(super) mod view;
 pub(super) mod views;

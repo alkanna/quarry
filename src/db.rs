@@ -246,6 +246,10 @@ pub enum Msg {
     SqlAltered { conn: u64, database: String, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool },
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
+    /// A view's definition for the edit dialog.
+    SqlViewDef { conn: u64, database: String, schema: String, name: String, res: Res<sql::view::ViewDef> },
+    /// A view created or replaced, or an undo of either. `need_drop` is a PostgreSQL edit that CREATE OR REPLACE refused because the columns changed.
+    SqlViewSaved { conn: u64, database: String, schema: String, name: String, kind: sql::view::ViewDone, res: Res<String>, undo: Option<UndoAction>, need_drop: bool, sql_mode: Option<String> },
     /// What a drop confirmation says will be lost; `table` is empty for a database.
     /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
     SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },

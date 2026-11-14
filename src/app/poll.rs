@@ -4,6 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
+        self.view_requests();
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
@@ -59,6 +60,8 @@ impl App {
                     }
                 }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
+                Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
+                Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
                 Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
