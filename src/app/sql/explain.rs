@@ -23,7 +23,6 @@ pub(in crate::app) struct SqlExplain {
     unread: Option<String>,
     raw: String,
     show_raw: bool,
-    find: Find,
     analyzed: bool,
     /// The statement ran inside a transaction that was rolled back.
     rolled_back: bool,
@@ -57,7 +56,7 @@ impl App {
             (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
             _ => Ok(a),
         });
-        let mut x = SqlExplain { req: 0, busy: false, stmt: text, conn, tab_db, dialect: d, db, schema, plan: None, unread: None, raw: String::new(), show_raw: false, find: Find::default(), analyzed: false, rolled_back: false, analyze, asked: None };
+        let mut x = SqlExplain { req: 0, busy: false, stmt: text, conn, tab_db, dialect: d, db, schema, plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None };
         self.sql_explain_send(&mut x, None);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
@@ -137,7 +136,7 @@ impl App {
                 segmented(ui, &mut x.show_raw, &[(false, "Plan"), (true, "Raw")]);
             });
         }
-        let find = if x.show_raw { Find::bar(ui, egui::Id::new("sql-explain-raw"), &x.raw) } else { Find::default() };
+        let find = if x.show_raw { Find::bar(ui, egui::Id::unique("sql-explain-raw"), &x.raw) } else { Find::default() };
         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             if x.show_raw {
                 let mut text = x.raw.as_str();
