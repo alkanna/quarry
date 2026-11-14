@@ -7,6 +7,8 @@ use crate::app::*;
 use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Plan, Routine};
 use std::collections::{HashMap, HashSet};
 
+const LINE_H: f32 = 20.0;
+
 /// What the sidebar knows of one schema's routines.
 pub(in crate::app) enum Loaded {
     Wait,
