@@ -14,10 +14,12 @@ pub fn sort_rows(set: &mut ResultSet, keys: &[(String, bool)]) -> Vec<usize> {
         set.seq = (0..n).collect();
     }
     let by: Vec<(&str, bool, Kind)> = keys.iter().filter_map(|(c, desc)| set.cols.iter().find(|x| x.name == *c).map(|x| (x.name.as_str(), *desc, x.kind))).collect();
+    // Looked up once per row: a cell lookup scans the raw document, which a comparison would repeat n log n times.
+    let cells: Vec<Vec<Option<RawBsonRef>>> = set.rows.iter().map(|r| by.iter().map(|&(name, ..)| cell(r, name)).collect()).collect();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&x, &y| {
-        for &(name, desc, kind) in &by {
-            let (a, b) = (cell(&set.rows[x], name), cell(&set.rows[y], name));
+        for (k, &(_, desc, kind)) in by.iter().enumerate() {
+            let (a, b) = (cells[x][k], cells[y][k]);
             // A missing value goes last in both directions, so the values a person looks for stay on top.
             let o = match (a, b) {
                 (None, None) => Ordering::Equal,
@@ -34,6 +36,7 @@ pub fn sort_rows(set: &mut ResultSet, keys: &[(String, bool)]) -> Vec<usize> {
         }
         set.seq[x].cmp(&set.seq[y])
     });
+    drop(cells);
     let mut old: Vec<Option<crate::db::Row>> = std::mem::take(&mut set.rows).into_iter().map(Some).collect();
     let seq = std::mem::take(&mut set.seq);
     let mut moved = vec![0; n];
