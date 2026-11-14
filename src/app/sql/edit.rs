@@ -770,6 +770,7 @@ impl App {
     }
 
     /// File > Insert Document on a SQL tab: the row form lives on the Content grid, so the tab goes there first.
+    #[cfg(target_os = "macos")]
     pub(in crate::app) fn sql_insert_row_menu(&mut self) {
         if self.t().is_none_or(|t| t.sel.coll.is_empty()) {
             return self.warn("Open a table first to insert a row.");
