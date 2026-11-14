@@ -581,6 +581,35 @@ fn an_index_with_a_condition_included_columns_a_method_and_concurrently_is_built
 }
 
 #[test]
+fn a_concurrent_index_never_touches_an_index_of_another_table_and_a_late_failure_keeps_the_undo() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "ixlate", TABLE_DDL);
+        // the name belongs to the schema: another table's index of that name stops the plan before anything runs
+        t.sql("CREATE TABLE other (x integer); CREATE INDEX t_taken ON other (x)");
+        let mut clash = index("t_taken", IndexKind::Index, &["note"]);
+        clash.concurrently = true;
+        let before = t.shape();
+        let p = t.plan(&[add(ColDef::new("extra", "text")), Change::AddIndex(clash)]).unwrap();
+        let (res, undo) = t.run(p);
+        assert!(res.unwrap_err().contains("already has something called"), "{var}");
+        assert!(undo.is_none() && t.col("extra").is_none() && t.shape() == before, "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM pg_indexes WHERE indexname = 't_taken' AND tablename = 'other'"), "1", "{var}");
+        // a build that fails after the commit (duplicate values) is an error, the committed column stays and can be undone,
+        // and the INVALID index it left is gone
+        t.sql("UPDATE t SET note = 'same'");
+        let mut dup = index("t_note_dup", IndexKind::Unique, &["note"]);
+        dup.concurrently = true;
+        let p = t.plan(&[add(ColDef::new("extra", "text")), Change::AddIndex(dup)]).unwrap();
+        let (res, undo) = t.run(p);
+        assert!(res.unwrap_err().contains("were already applied"), "{var}");
+        assert!(t.col("extra").is_some(), "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM pg_class WHERE relname = 't_note_dup'"), "0", "{var}");
+        t.undo(undo.expect("the committed part keeps its undo")).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(t.col("extra").is_none(), "{var}");
+    });
+}
+
+#[test]
 fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
     every_pg(|l, var| {
         let t = fixture(l, var, "plain", TABLE_DDL);

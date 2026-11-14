@@ -14,7 +14,7 @@
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
 use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
-use crate::db::sql::exec::{sql_state, Tx};
+use crate::db::sql::exec::{bound_pg, sql_state, Conn, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
 use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
 use crate::db::sql::value::{lit, pg_lit, Param};
@@ -85,6 +85,8 @@ enum Text {
     Cond,
     /// A CHECK constraint's expression.
     Check,
+    /// The WHERE condition of a partial index.
+    Pred,
     Type,
 }
 
@@ -96,6 +98,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
         Text::Expr => "default expression",
         Text::Cond => "WHEN condition",
         Text::Check => "CHECK expression",
+        Text::Pred => "index condition",
         Text::Type => "type",
     };
     let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Type { "a type name like numeric(10,2)" } else { "one expression" });
@@ -157,6 +160,16 @@ pub fn check_constraint_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Check)?;
     match crate::db::sql::lex::refused_call(s) {
         Some(f) => Err(format!("The CHECK expression calls {f}, which acts outside the row and is refused.")),
+        None => Ok(()),
+    }
+}
+
+/// The WHERE condition of a partial index typed by the person: one expression, and no call the read-only check refuses, because
+/// the server runs it for every row written later. See `scan`.
+pub(in crate::db::sql) fn check_predicate_pg(s: &str) -> Result<(), String> {
+    scan(s, Text::Pred)?;
+    match crate::db::sql::lex::refused_call(s) {
+        Some(f) => Err(format!("The index condition calls {f}, which acts outside the row and is refused.")),
         None => Ok(()),
     }
 }
@@ -455,6 +468,9 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
             return Err("Only a btree index has a sort order.".into());
         }
         let using = if method.is_empty() { String::new() } else { format!(" USING {method}") };
+        if !predicate.is_empty() {
+            check_predicate_pg(predicate)?;
+        }
         let wher = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
         out.push(format!("CREATE {}INDEX {}{} ON {t}{using} ({cols}){include}{wher}", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, if ix.concurrently { "CONCURRENTLY " } else { "" }, q(&ix.name)));
     }
@@ -503,32 +519,50 @@ pub(in crate::db::sql) fn split_steps(steps: &[String]) -> (Vec<&String>, Vec<&S
     (now, later)
 }
 
+/// One statement through the extended protocol, so the server takes exactly one statement from the text.
+async fn exec_one(conn: &mut Conn, sql: &str) -> Result<(), sqlx::Error> {
+    match conn {
+        Conn::Pg(c) => bound_pg(sql, &[]).execute(&mut **c).await.map(|_| ()),
+        Conn::My(_) => Err(sqlx::Error::Protocol("not a PostgreSQL connection".into())),
+    }
+}
+
 /// Runs the steps that cannot share the plan's transaction, one at a time on a connection of their own, after it committed.
-/// A build that fails leaves an INVALID index behind, which is dropped again so a retry does not meet its name.
-async fn run_concurrent(db: &Db, schema: &str, steps: &[String]) -> Result<(), Fail> {
+/// A build that fails leaves an INVALID index behind, and only such an index of this table is dropped again, so a retry does
+/// not meet its name and an index of another table with the same name is never touched. The error says the rest was applied.
+async fn run_concurrent(db: &Db, schema: &str, table: &str, steps: &[String]) -> Result<(), String> {
     let n = steps.len();
-    let unsure = |what: String| Fail::Unknown(format!("{what}. The other changes were already applied, and the index was not built. Reload the structure and stage it again."));
-    let mut conn = write::writer_conn(db, schema, false).await.map_err(&unsure)?;
+    let late = |what: String| format!("{what}. The other changes were already applied, and the index was not built. Reload the structure and stage it again.");
+    let mut conn = write::writer_conn(db, schema, false).await.map_err(&late)?;
     // The session is read-only and has a statement timeout, and this statement runs outside the transaction that lifts both.
     // The connection is closed after, so none of it reaches the next user of a connection.
     let prep = [db.pg_set_path(schema), "SET default_transaction_read_only = off".to_string(), "SET statement_timeout = 0".to_string()];
     let mut res = Ok(());
     for p in &prep {
-        if let Err(e) = conn.execute(p).await {
-            res = Err(unsure(se(e)));
+        if let Err(e) = exec_one(&mut conn, p).await {
+            res = Err(late(se(e)));
             break;
         }
     }
     if res.is_ok() {
         for (i, s) in steps.iter().enumerate() {
             let t = Instant::now();
-            let out = conn.execute(s).await;
+            let out = exec_one(&mut conn, s).await;
             db.note(schema, s, t, &out);
             if let Err(e) = out {
                 if let Some(name) = concurrent_name(s) {
-                    let _ = conn.execute(&format!("DROP INDEX IF EXISTS {}.{name}", q(schema))).await;
+                    let full = format!("{}.{name}", q(schema));
+                    let find = "SELECT 1 AS x FROM pg_index WHERE indexrelid = to_regclass($1) AND indrelid = to_regclass($2) AND NOT indisvalid";
+                    let params = [Param::Text(full.clone()), Param::Text(D.qualified(schema, table))];
+                    let invalid = match &mut conn {
+                        Conn::Pg(c) => bound_pg(find, &params).fetch_all(&mut **c).await.is_ok_and(|r| !r.is_empty()),
+                        Conn::My(_) => false,
+                    };
+                    if invalid {
+                        let _ = exec_one(&mut conn, &format!("DROP INDEX {full}")).await;
+                    }
                 }
-                res = Err(unsure(format!("{} (concurrent statement {} of {})", se(e), i + 1, n)));
+                res = Err(late(format!("{} (concurrent statement {} of {})", se(e), i + 1, n)));
                 break;
             }
         }
@@ -1126,7 +1160,7 @@ async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &Foreign
 /// Runs `steps` as one transaction: the lock first, with a timeout so a busy table fails the plan instead of queueing
 /// behind it, then the check that the touched columns and indexes are as `expect` says, then the statements, then COMMIT.
 /// Any failure leaves the transaction to roll back. Returns the ids the undo will check, read before the COMMIT.
-pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<PgIds, Fail> {
+pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<(PgIds, Option<String>), Fail> {
     // The changed table and the other tables of its keys, in one fixed order. A key takes a lock on both of its tables, and
     // the parent can be changed by another session between the plan and here, so it is locked before it is read.
     let locks: Vec<Lock> = lock_order(schema, table, expect.own_share, &expect.refs)
@@ -1139,16 +1173,26 @@ pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &
         .collect();
     let (now, later) = split_steps(steps);
     let now: Vec<String> = now.into_iter().cloned().collect();
+    let later: Vec<String> = later.into_iter().cloned().collect();
+    let names: Vec<String> = later.iter().filter_map(|s| concurrent_name(s)).map(String::from).collect();
     let ids = run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
         checked_run(tx, db, schema, table, &now, expect, undo).await?;
+        // An index name belongs to the schema and not to the table, so a table, index or sequence of another table may hold it.
+        // Seen here, after the transaction's own drops, it still rolls everything back instead of failing after the commit.
+        for name in &names {
+            let full = format!("{}.{name}", q(schema));
+            let rows = tx.fetch_bound("SELECT to_regclass($1)::text AS r", &[Param::Text(full)]).await.map_err(|e| Fail::Run(se(e)))?;
+            if rows.first().and_then(|r| crate::db::sql::worker::text(r, "r")).is_some() {
+                return Err(Fail::Run(format!("The schema {schema} already has something called {name}: an index name belongs to the schema, not to the table. Pick another name. Nothing was changed.")));
+            }
+        }
         Ok(ids_in(tx, schema, table).await)
     })
     .await?;
-    if !later.is_empty() {
-        let later: Vec<String> = later.into_iter().cloned().collect();
-        run_concurrent(db, schema, &later).await?;
-    }
-    Ok(ids)
+    // The committed part stays committed when a concurrent build fails, so the failure comes back beside the ids and the
+    // caller still records the undo of what ran.
+    let late = if later.is_empty() { None } else { run_concurrent(db, schema, table, &later).await.err() };
+    Ok((ids, late))
 }
 
 async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
@@ -1265,10 +1309,13 @@ impl Worker {
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let out = run(&db, &schema, &table, &steps, &expect, read_only, false).await;
             let unsure = matches!(out, Err(Fail::Unknown(_)));
-            let (res, ids) = match out {
-                Ok(ids) => (Ok(()), ids),
-                Err(f) => (Err(plan_failed(f, false)), PgIds::default()),
+            let (res, ids, late) = match out {
+                Ok((ids, late)) => (Ok(()), ids, late),
+                Err(f) => (Err(plan_failed(f, false)), PgIds::default(), None),
             };
+            // A concurrent build that failed after the commit is an error that still carries the undo of what did run, and the
+            // structure is reloaded.
+            let unsure = unsure || late.is_some();
             let mut done = done;
             let undo = match (res.is_ok(), undo) {
                 (true, Some(mut u)) => {
@@ -1278,6 +1325,12 @@ impl Worker {
                     match st {
                         Ok(st) => {
                             u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
+                            // A concurrent index that failed to build is not there to drop, and its drop would fail the whole undo.
+                            if late.is_some() {
+                                let built: Vec<String> = st.indexes.iter().map(|i| format!("DROP INDEX {}.{}", q(&schema), q(&i.name))).collect();
+                                let unbuilt: Vec<String> = steps.iter().filter_map(|s| concurrent_name(s)).map(|n| format!("DROP INDEX {}.{n}", q(&schema))).filter(|d| !built.contains(d)).collect();
+                                u.steps.retain(|s| !unbuilt.contains(s));
+                            }
                             // The undo of a dropped key puts it back and leans on the parent as it is now.
                             let mut unread = None;
                             for (&i, loaded) in want.iter().zip(loads) {
@@ -1302,7 +1355,7 @@ impl Worker {
                 }
                 _ => None,
             };
-            Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: res.map(|_| done), undo, sql_mode: None, alter: true, unsure }
+            Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: match late { Some(e) => Err(e), None => res.map(|_| done) }, undo, sql_mode: None, alter: true, unsure }
         });
     }
 }
@@ -1482,6 +1535,19 @@ mod tests {
         let mut desc = ix_on("t_d", &["name"]);
         desc.cols[0].desc = true;
         assert!(refused(IndexDef { method: "gist".into(), ..desc }).contains("sort order"));
+    }
+
+    #[test]
+    fn an_index_condition_stays_one_expression() {
+        for ok in ["qty > 1", "(note IS NOT NULL)", "status = 'open;closed'", "lower(name) <> 'x'"] {
+            assert!(check_predicate_pg(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "qty > 1; DROP TABLE t", "qty > 1 -- c", "qty > 1 /* c */", "(qty > 1", "qty > 1)", "name = 'open", "qty > 1) WITH (fillfactor = 10"] {
+            assert!(check_predicate_pg(bad).is_err(), "{bad}");
+        }
+        // the plan refuses the same text before any statement exists
+        let ix = IndexDef { predicate: "qty > 1; DROP TABLE t".into(), ..ix_on("t_n", &["name"]) };
+        assert!(plan("t", &table(), &[Change::AddIndex(ix)]).err().unwrap_or_default().contains("index condition"));
     }
 
     #[test]
