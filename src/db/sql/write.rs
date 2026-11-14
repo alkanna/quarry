@@ -48,6 +48,10 @@ pub enum SqlUndo {
     CreatedSchema { oid: String },
     /// A PostgreSQL table this app created: its oid and how its structure read right after, so the undo drops it only while it is that table, unchanged and empty.
     PgCreatedTable { oid: String, state: Vec<String> },
+    /// A table, view or PostgreSQL schema this app renamed: `from` is the name to rename it back to, and `token` is what shows it is
+    /// still the same object (the oid on PostgreSQL, CREATE_TIME on MySQL), empty when there is none. The action's `coll` is the
+    /// current name, empty for a schema.
+    Renamed { from: String, token: String },
     /// A change to an account's privileges, or a user this app created; see `users`.
     Account(Box<super::users::AccountUndo>),
     /// PostgreSQL role and privilege changes, or a role this app created; see `pg::roles`.
@@ -74,7 +78,7 @@ impl SqlUndo {
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Inserted(r) => r.first().map(pk_of),
             SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) | SqlUndo::Import(_) => None,
-            SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => None,
+            SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } | SqlUndo::Renamed { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
     }
@@ -91,6 +95,7 @@ impl SqlUndo {
             SqlUndo::CreatedDb { .. } => "created database".into(),
             SqlUndo::CreatedTable { .. } | SqlUndo::PgCreatedTable { .. } => "created table".into(),
             SqlUndo::CreatedSchema { .. } => "created schema".into(),
+            SqlUndo::Renamed { from, .. } => format!("renamed from {from}"),
             SqlUndo::Account(u) => u.label.clone(),
             SqlUndo::PgRoles(u) => u.label(),
         }
@@ -688,6 +693,9 @@ impl Worker {
         if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. }, .. }) {
             return self.sql_undo_create(db, a, read_only);
         }
+        if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::Renamed { .. }, .. }) {
+            return self.sql_undo_rename(db, a, read_only);
+        }
         self.spawn(undo_rows(db, a, pk, read_only));
     }
 }
@@ -742,6 +750,7 @@ pub(in crate::db) async fn undo_rows(db: Db, a: UndoAction, pk: Vec<String>, rea
         // Taken before this match, where the structure statements run.
         SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) => Err("Not a row change".into()),
         SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
+        SqlUndo::Renamed { .. } => Err("Handled by sql_undo_rename".to_string()),
     };
     let undo = res.is_err().then(|| UndoAction { agent, at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo, ids } });
     Msg::Written { at, res, undo, reload: true, retry: None }

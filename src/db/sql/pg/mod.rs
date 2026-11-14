@@ -11,6 +11,7 @@ pub(super) mod script;
 pub(super) mod dump;
 pub mod server;
 pub mod create;
+pub mod tableops;
 pub mod ddl;
 pub mod ddl_trig;
 pub mod import;

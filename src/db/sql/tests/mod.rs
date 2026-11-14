@@ -10,6 +10,7 @@ mod pg_read;
 mod pg_roles;
 mod pg_shell;
 mod pg_write;
+mod table_ops;
 mod tls;
 
 use super::*;

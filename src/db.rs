@@ -254,6 +254,8 @@ pub enum Msg {
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
+    /// A table, view or PostgreSQL schema was renamed, or a rename was undone. `schema` is the schema holding it (the old name for a schema rename), `whole` is set for a schema rename. A refused undo hands its entry back.
+    SqlRenamed { conn: u64, database: String, schema: String, from: String, to: String, whole: bool, res: Res<String>, undo: Option<UndoAction> },
     SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },

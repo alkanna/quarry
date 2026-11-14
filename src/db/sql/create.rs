@@ -132,7 +132,7 @@ pub fn check_name(what: &str, name: &str, path_chars: bool) -> Res<()> {
 
 /// A database or table already on the server can be dropped whatever it is called (`a.b` or ` lead` exist
 /// when another client made them), as long as the quoted name reads back as the one name.
-fn check_existing(what: &str, name: &str) -> Res<()> {
+pub(super) fn check_existing(what: &str, name: &str) -> Res<()> {
     if name.is_empty() {
         return Err(format!("Give the {what} a name."));
     }
@@ -148,7 +148,7 @@ fn check_schema(name: &str) -> Res<()> {
 
 /// `fold` is whether the server compares names without case (lower_case_table_names is not 0). Where it
 /// does not, `MySQL` is a database of its own and not the server's `mysql`.
-fn not_system(name: &str, fold: bool) -> Res<()> {
+pub(super) fn not_system(name: &str, fold: bool) -> Res<()> {
     if SYSTEM_SCHEMAS.iter().any(|s| if fold { s.eq_ignore_ascii_case(name) } else { *s == name }) {
         return Err(format!("{name} belongs to the server and is left alone."));
     }
@@ -548,7 +548,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
 /// MySQL 8 caches TABLE_ROWS and the other statistics of information_schema.TABLES for a day, so a table
 /// that filled since reads as 0. Only for this connection, which is never handed back to the pool; MariaDB
 /// has no such cache and no variable.
-async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
+pub(super) async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
     match d {
         Dialect::MySql => {
             let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
@@ -621,7 +621,7 @@ async fn stop_count(pool: &sqlx::MySqlPool, d: Dialect, me: &(u64, String), sql:
     }
 }
 
-async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
+pub(super) async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
     let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     Ok(rows.iter().filter_map(|r| text_at(r, 0)).collect())
 }
@@ -643,7 +643,7 @@ pub(super) async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
 }
 
 /// When the table was made, as the server writes it, so an undo drops it only while it is still that table.
-async fn create_time(c: &mut sqlx::MySqlConnection, schema: &str, table: &str) -> Option<String> {
+pub(super) async fn create_time(c: &mut sqlx::MySqlConnection, schema: &str, table: &str) -> Option<String> {
     let r = sqlx::query("SELECT CAST(CREATE_TIME AS CHAR) AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut *c).await.ok()??;
     text(&r, "t")
 }
@@ -679,7 +679,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
     out
 }
 
-fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
+pub(super) fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
     UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo, ids: Default::default() } }
 }
 
@@ -861,7 +861,7 @@ impl Worker {
     }
 }
 
-fn split(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
+pub(super) fn split(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
     match res {
         Ok(dbs) => (Ok(said), dbs),
         Err(err) => (Err(err), None),

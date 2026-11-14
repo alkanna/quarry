@@ -353,7 +353,7 @@ impl App {
             DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, ro),
             DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, ro),
             DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, ro),
-            DropKind::Truncate => unreachable!("the PostgreSQL menus never offer Empty table"),
+            DropKind::Truncate => unreachable!("PostgreSQL empties a table through pg_truncate_ask, not the drop dialog"),
         }
     }
 
@@ -435,7 +435,7 @@ impl App {
                 self.remove_tabs(|t| in_schema(t, &schema) && t.sel.coll == table);
                 self.pg_refresh(conn, &database);
             }
-            Ddl::Emptied => unreachable!("PostgreSQL never empties a table through the drop path"),
+            Ddl::Emptied => self.pg_emptied(conn, &database),
         }
     }
 
@@ -996,7 +996,7 @@ impl App {
                     }
                 }
             }
-            DropKind::Truncate => unreachable!("the PostgreSQL menus never offer Empty table"),
+            DropKind::Truncate => unreachable!("PostgreSQL empties a table through pg_truncate_ask, not the drop dialog"),
         }
         blocked
     }

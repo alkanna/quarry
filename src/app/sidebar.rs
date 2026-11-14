@@ -628,6 +628,9 @@ impl App {
                             if ui.add_enabled(!sys_schema, egui::Button::new("New table…")).on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::NewTable(db_name.clone()));
                             }
+                            if ui.add_enabled(!sys_schema && !picked.is_empty(), egui::Button::new(format!("Rename schema {picked}…"))).on_disabled_hover_text("Belongs to the server").clicked() {
+                                side.push(SideAct::SqlRename(db_name.clone(), picked.to_string(), DropKind::Schema));
+                            }
                             if ui.add_enabled_ui(!sys_schema && !picked.is_empty(), |ui| danger_item(ui, format!("Drop schema {picked}…"))).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::DropSchema(db_name.clone(), picked.to_string()));
                             }
@@ -803,6 +806,15 @@ impl App {
                                 if pg {
                                     let system = db::sql::pg::create::system_schema(picked);
                                     ui.separator();
+                                    if ui.add_enabled(!system, egui::Button::new("Rename…")).on_disabled_hover_text("Belongs to the server").clicked() {
+                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                    }
+                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Duplicate…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                    }
+                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Empty table…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Deletes every row and keeps the table").clicked() {
+                                        side.push(SideAct::PgTruncate(db_name.clone(), coll.clone()));
+                                    }
                                     if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
                                     }
@@ -811,6 +823,12 @@ impl App {
                                     let on = writable && !system;
                                     let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
                                     ui.separator();
+                                    if ui.add_enabled(on, egui::Button::new("Rename…")).on_disabled_hover_text(note).clicked() {
+                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                    }
+                                    if !is_view && ui.add_enabled(on, egui::Button::new("Duplicate…")).on_disabled_hover_text(note).on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                    }
                                     if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
                                     }
@@ -923,6 +941,9 @@ impl App {
             SideAct::SqlUsers => return self.open_sql_users(conn),
             SideAct::NewTable(db) if self.is_pg(conn) => return self.pg_new_table(conn, db),
             SideAct::NewTable(db) => return self.sql_new_table(conn, db),
+            SideAct::SqlRename(db, name, kind) => return self.sql_rename_ask(conn, db, name, kind),
+            SideAct::SqlDuplicate(db, name) => return self.sql_duplicate_ask(conn, db, name),
+            SideAct::PgTruncate(db, table) => return self.pg_truncate_ask(conn, db, table),
             SideAct::SqlDrop(db, table, kind) if self.is_pg(conn) => return self.pg_drop_ask(conn, db, table, kind),
             SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
             SideAct::NewSchema(db) => return self.pg_new_schema(conn, db),
@@ -989,7 +1010,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }
