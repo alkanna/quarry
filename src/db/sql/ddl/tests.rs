@@ -939,14 +939,14 @@ fn check_constraints_are_written_for_each_engine() {
     let off = CheckConstraint { not_enforced: true, ..chk("chk_off", "total > 0") };
     assert!(alt(&[Change::AddCheck(off.clone())]).ends_with("CHECK (total > 0) NOT ENFORCED"));
     assert!(maria(&[Change::AddCheck(off)]).is_err());
-    assert!(alt(&[Change::AddCheck(CheckConstraint { not_valid: true, ..chk("c", "a > 0") })]).is_err());
-    assert!(alt(&[Change::AddCheck(CheckConstraint { no_inherit: true, ..chk("c", "a > 0") })]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(CheckConstraint { not_valid: true, ..chk("c", "a > 0") })]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(CheckConstraint { no_inherit: true, ..chk("c", "a > 0") })]).is_err());
     // a condition must stay one expression
     for bad in ["", "  ", "a > 0); DROP TABLE t; --", "a > 0 -- x", "a > 0 # x", "a > 0 /* x */", "(a > 0", "note = 'open"] {
-        assert!(alt(&[Change::AddCheck(chk("c", bad))]).is_err(), "{bad:?}");
+        assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk("c", bad))]).is_err(), "{bad:?}");
     }
-    assert!(alt(&[Change::AddCheck(chk("", "a > 0"))]).is_err());
-    assert!(alt(&[Change::AddCheck(chk(&"n".repeat(65), "a > 0"))]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk("", "a > 0"))]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk(&"n".repeat(65), "a > 0"))]).is_err());
     assert_eq!(Change::AddCheck(chk("c", "a > 0")).describe(), "Add check c");
     assert_eq!(Change::DropCheck("c".into()).describe(), "Drop check c");
 }
