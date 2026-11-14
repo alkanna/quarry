@@ -61,6 +61,23 @@ impl App {
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
 
+    /// Test only: opens the dialog on `plan` as if the server had answered, over a pool that never connects, because the demo has no
+    /// server for `sql_explain` to ask.
+    #[cfg(test)]
+    pub(in crate::app) fn demo_explain(&mut self, text: &str, plan: &str) {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let _guard = rt.enter();
+        let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
+        let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: Dialect::MySql, opts: crate::db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
+        let conn = self.t().map_or(0, |t| t.sel.conn);
+        let analyze = plan::analyze_mode(text, Dialect::MySql, false);
+        let x = SqlExplain { req: 1, busy: true, stmt: text.into(), conn, tab_db: "shop".into(), dialect: Dialect::MySql, db, schema: "shop".into(), plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None };
+        self.modal = Some(Modal::SqlExplain(Box::new(x)));
+        let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
+        let set = db::sql::ResultSet { cols: vec![col], rows: db::Row::from_doc(&mongodb::bson::doc! { "EXPLAIN": plan }).into_iter().collect(), ..db::sql::ResultSet::new(text) };
+        self.sql_explained(1, vec![set]);
+    }
+
     fn sql_explain_send(&mut self, x: &mut SqlExplain, analyze: Option<Analyze>) {
         self.req += 1;
         (x.req, x.busy, x.asked) = (self.req, true, analyze);

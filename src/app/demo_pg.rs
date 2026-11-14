@@ -220,7 +220,7 @@ impl App {
 
     /// The orders table of the design as the Structure, Info, Relations and Triggers views show it: a bigint identity
     /// key, a unique uuid, a CHECK, a foreign key to customers, a generated column and a trigger, as step 4 reads them.
-    fn pg_structure_demo(&mut self, which: &str) {
+    pub(super) fn pg_structure_demo(&mut self, which: &str) {
         let view = match which {
             "structure" => View::Structure,
             "info" => View::Info,
