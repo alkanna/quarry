@@ -226,8 +226,13 @@ fn hex(s: &str, bs: bool) -> String {
 }
 
 /// LIKE patterns treat % and _ as wildcards, so a search for them literally needs backslashes.
-pub(super) fn like_escape(s: &str) -> String {
+fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// `like_escape` for a pattern written with `ESCAPE '!'`, which every server and sql_mode reads the same way.
+pub(super) fn like_bang(s: &str) -> String {
+    s.replace('!', "!!").replace('%', "!%").replace('_', "!_")
 }
 
 /// A pattern from `like_escape` as a literal. Under NO_BACKSLASH_ESCAPES MySQL's LIKE has no escape character at
@@ -273,7 +278,8 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
     let other = group_of(r.kind) == Group::Other;
     let len = if group_of(r.kind) == Group::Text { "CHAR_LENGTH" } else { "LENGTH" };
     let n = || if is_number(v(0)) { v(0).trim().to_string() } else { "0".into() };
-    if d == Dialect::Postgres && let Some(sql) = pg_rule_sql(r, &c, n()) {
+    let like = |pre: &str, suf: &str| like_lit(&format!("{pre}{}{suf}", like_escape(v(0))), d, bs);
+    if d == Dialect::Postgres && let Some(sql) = pg_rule_sql(r, &c, n) {
         return sql;
     }
     match r.op {
@@ -291,12 +297,12 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
         Between => format!("{c} BETWEEN {} AND {}", val(r.kind, v(0), bs), val(r.kind, v(1), bs)),
         IsNull => format!("{c} IS NULL"),
         NotNull => format!("{c} IS NOT NULL"),
-        Contains => format!("{c} LIKE {}", like_lit(&format!("%{}%", like_escape(v(0))), d, bs)),
-        NotContains => format!("{c} NOT LIKE {}", like_lit(&format!("%{}%", like_escape(v(0))), d, bs)),
-        StartsWith => format!("{c} LIKE {}", like_lit(&format!("{}%", like_escape(v(0))), d, bs)),
-        NotStartsWith => format!("{c} NOT LIKE {}", like_lit(&format!("{}%", like_escape(v(0))), d, bs)),
-        EndsWith => format!("{c} LIKE {}", like_lit(&format!("%{}", like_escape(v(0))), d, bs)),
-        NotEndsWith => format!("{c} NOT LIKE {}", like_lit(&format!("%{}", like_escape(v(0))), d, bs)),
+        Contains => format!("{c} LIKE {}", like("%", "%")),
+        NotContains => format!("{c} NOT LIKE {}", like("%", "%")),
+        StartsWith => format!("{c} LIKE {}", like("", "%")),
+        NotStartsWith => format!("{c} NOT LIKE {}", like("", "%")),
+        EndsWith => format!("{c} LIKE {}", like("%", "")),
+        NotEndsWith => format!("{c} NOT LIKE {}", like("%", "")),
         Like => format!("{c} LIKE {}", lit(v(0), bs)),
         NotLike => format!("{c} NOT LIKE {}", lit(v(0), bs)),
         Regexp => format!("{c} REGEXP {}", lit(v(0), bs)),
@@ -319,39 +325,28 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
 }
 
 /// PostgreSQL's spelling of the operators whose MySQL form it does not have. Its jsonpath reads the same `$.a.b`.
-fn pg_rule_sql(r: &Rule, c: &str, n: String) -> Option<String> {
+fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
     use Op::*;
     let v = |i: usize| super::value::pg_lit(r.values.get(i).map(|s| s.as_str()).unwrap_or(""));
-    let unit = match r.values.get(1).map(|s| s.as_str()) {
-        Some("hours") => "hours",
-        Some("weeks") => "weeks",
-        Some("months") => "months",
-        _ => "days",
-    };
-    let other = group_of(r.kind) == Group::Other;
     // MySQL's 0x literal and LENGTH of a JSON value are not PostgreSQL; bytea takes '\x..' and the rest compare as text.
-    let typed = |x: &str| match r.kind {
-        Kind::Binary if is_hex(x.trim()) => super::value::pg_lit(&format!("\\x{}", x.trim().trim_start_matches("0x").trim_start_matches("0X"))),
-        _ => super::value::pg_lit(x),
+    let typed = || match r.values.first().map(|s| s.trim()) {
+        Some(x) if r.kind == Kind::Binary && is_hex(x) => super::value::pg_lit(&format!("\\x{}", x.trim_start_matches("0x").trim_start_matches("0X"))),
+        _ => v(0),
     };
-    let side = match r.kind {
-        Kind::Json => format!("{c}::text"),
-        Kind::Binary => c.to_string(),
-        _ => format!("{c}::text"),
-    };
-    let first = r.values.first().map(|s| s.as_str()).unwrap_or("");
+    let side = || if r.kind == Kind::Binary { c.to_string() } else { format!("{c}::text") };
+    let other = group_of(r.kind) == Group::Other;
     Some(match r.op {
-        Eq if other && r.kind == Kind::Json => format!("{c} = {}::jsonb", typed(first)),
-        Ne if other && r.kind == Kind::Json => format!("{c} <> {}::jsonb", typed(first)),
-        Eq if other => format!("{side} = {}", typed(first)),
-        Ne if other => format!("{side} <> {}", typed(first)),
-        LenEq if other => format!("octet_length({side}) = {n}"),
-        LenGt if other => format!("octet_length({side}) > {n}"),
-        LenLt if other => format!("octet_length({side}) < {n}"),
+        Eq if r.kind == Kind::Json => format!("{c} = {}::jsonb", v(0)),
+        Ne if r.kind == Kind::Json => format!("{c} <> {}::jsonb", v(0)),
+        Eq if other => format!("{} = {}", side(), typed()),
+        Ne if other => format!("{} <> {}", side(), typed()),
+        LenEq if other => format!("octet_length({}) = {}", side(), n()),
+        LenGt if other => format!("octet_length({}) > {}", side(), n()),
+        LenLt if other => format!("octet_length({}) < {}", side(), n()),
         Regexp => format!("{c}::text ~ {}", v(0)),
         NotRegexp => format!("{c}::text !~ {}", v(0)),
         Today => format!("{c}::date = CURRENT_DATE"),
-        Last => format!("{c} >= NOW() - INTERVAL '{n} {unit}'"),
+        Last => format!("{c} >= NOW() - INTERVAL '{} {}'", n(), unit_sql(r.values.get(1).map_or("", |s| s.as_str()))),
         ThisWeek => format!("date_trunc('week', {c}) = date_trunc('week', CURRENT_DATE)"),
         ThisMonth => format!("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)"),
         SetContains => format!("{} = ANY(string_to_array({c}::text, ','))", v(0)),
@@ -753,7 +748,7 @@ mod tests {
         let sql = |col: &str, kind: Kind, op: Op, values: &[&str]| rule_sql(&Rule { col: col.into(), kind, op, values: values.iter().map(|s| s.to_string()).collect() }, Dialect::Postgres, false);
         assert_eq!(sql("name", Kind::Text, Op::Regexp, &["^a"]), "\"name\"::text ~ '^a'");
         assert_eq!(sql("created_at", Kind::DateTime, Op::Today, &[]), "\"created_at\"::date = CURRENT_DATE");
-        assert_eq!(sql("created_at", Kind::DateTime, Op::Last, &["3", "weeks"]), "\"created_at\" >= NOW() - INTERVAL '3 weeks'");
+        assert_eq!(sql("created_at", Kind::DateTime, Op::Last, &["3", "weeks"]), "\"created_at\" >= NOW() - INTERVAL '3 WEEK'");
         assert_eq!(sql("data", Kind::Json, Op::JsonHasPath, &["$.a.b"]), "jsonb_path_exists(\"data\"::jsonb, '$.a.b')");
         for op in [Op::Regexp, Op::Today, Op::ThisWeek, Op::ThisMonth, Op::JsonContains] {
             let s = sql("c", Kind::Text, op, &["x"]);

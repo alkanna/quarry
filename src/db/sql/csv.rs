@@ -422,7 +422,7 @@ pub(super) fn quoted_list(args: &str) -> Vec<String> {
                 open = false;
                 out.push(std::mem::take(&mut cur));
             }
-            // COLUMN_TYPE escapes a backslash in a member, as schema::enum_values reads it.
+            // COLUMN_TYPE writes a backslash in a member escaped.
             ('\\', true) => cur.extend(it.next()),
             (_, true) => cur.push(c),
             _ => {}

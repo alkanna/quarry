@@ -504,7 +504,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let mut q = sqlx::query(&sql);
         if let Some(p) = prefix {
             // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
-            q = q.bind(format!("{}%", p.replace('!', "!!").replace('%', "!%").replace('_', "!_")));
+            q = q.bind(format!("{}%", super::rules::like_bang(p)));
         }
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
@@ -542,7 +542,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
             }
         }
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
-        let pattern = prefix.map(|p| format!("{}%", p.replace('!', "!!").replace('%', "!%").replace('_', "!_")));
+        let pattern = prefix.map(|p| format!("{}%", super::rules::like_bang(p)));
         let t = Instant::now();
         let rows = super::pg::read::in_read_only(pc, db, &short, async |c| {
             let mut q = sqlx::query(&sql).persistent(false);
@@ -590,7 +590,7 @@ async fn key_search(db: &Db, schema: &str, table: &str, key: &str, q: &str, know
     let as_text = |c: &str| if pg { format!("{}::text", d.quote_ident(c)) } else { format!("CAST({} AS CHAR)", d.quote_ident(c)) };
     let lit = |s: &str| if pg { value::pg_lit(s) } else { value::lit(s, db.backslash_escapes()) };
     // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
-    let pat = q.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+    let pat = super::rules::like_bang(q);
     let shown = kt.label.as_deref().map_or_else(|| "''".to_string(), as_text);
     let mut sql = format!("SELECT {} AS k, {shown} AS l FROM {}", as_text(key), d.qualified(schema, table));
     if !q.is_empty() && kt.big {

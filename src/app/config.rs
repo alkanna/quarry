@@ -473,6 +473,12 @@ pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> s
 }
 
 impl App {
+    /// Whether this run may read the Keychain. The demo and fixture mode (QUARRY_TEST_JSON) use connection ids that
+    /// overlap real ones, so a read would reach the user's real server. Tests mock the vault, so they may.
+    pub(super) fn keychain_on(&self) -> bool {
+        !self.demo && (!self.ephemeral || cfg!(test))
+    }
+
     pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
         if self.ephemeral {
             return;

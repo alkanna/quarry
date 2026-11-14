@@ -764,8 +764,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            let new = all.split_off(f.rest.len().min(all.len()));
-            self.set_staged(restage(self.staged(), f.from.as_deref(), new));
+            self.set_staged(restage(self.staged(), f.from.as_deref(), all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }
@@ -931,9 +930,8 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            let mut all = f.view.take().map(|v| v.all).unwrap_or_default();
-            let new = all.split_off(f.rest.len().min(all.len()));
-            self.set_staged(restage(self.staged(), None, new));
+            let all = f.view.take().map(|v| v.all).unwrap_or_default();
+            self.set_staged(restage(self.staged(), None, all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }
@@ -983,10 +981,11 @@ fn may_answer_tab(sel: &Sel, answer: (u64, &str, &str, &str)) -> bool {
     sel.conn == conn && sel.coll == table && (sel.db.is_empty() || sel.db == db) && (database.is_empty() || sel.schema.is_empty() || sel.schema == schema)
 }
 
-/// The staged list once a column or index dialog stages `new`. It starts from the list as it is now, not the snapshot the
-/// dialog took when it opened: an Apply that finished meanwhile emptied the list, and the snapshot would stage those changes
-/// again. `replaces` is the column whose earlier staged edit the dialog took over.
-fn restage(now: &[Change], replaces: Option<&str>, new: Vec<Change>) -> Vec<Change> {
+/// The staged list once a structure dialog stages `all`, its snapshot of the list (`rest_len` changes long) followed by its
+/// own changes. It starts from the list as it is now, not the snapshot: an Apply that finished meanwhile emptied the list,
+/// and the snapshot would stage those changes again. `replaces` is the column whose earlier staged edit the dialog took over.
+pub(in crate::app) fn restage(now: &[Change], replaces: Option<&str>, mut all: Vec<Change>, rest_len: usize) -> Vec<Change> {
+    let new = all.split_off(rest_len.min(all.len()));
     let mut staged: Vec<Change> = now.iter().filter(|c| !matches!(c, Change::Modify { from, .. } if Some(from.as_str()) == replaces)).cloned().collect();
     staged.extend(new);
     staged
@@ -1058,10 +1057,11 @@ mod tests {
         let add = |n: &str| Change::Add { def: ColDef::new(n, "INT"), pos: Pos::Keep };
         let modify = |from: &str, n: &str| Change::Modify { from: from.into(), def: ColDef::new(n, "INT"), pos: Pos::Keep };
         // the snapshot held add(a), which an Apply has since run: only the dialog's own change is staged
-        assert_eq!(restage(&[], None, vec![add("b")]), vec![add("b")]);
-        assert_eq!(restage(&[add("c")], None, vec![add("b")]), vec![add("c"), add("b")]);
+        assert_eq!(restage(&[], None, vec![add("b")], 0), vec![add("b")]);
+        assert_eq!(restage(&[], None, vec![add("a"), add("b")], 1), vec![add("b")], "the snapshot part is not staged again");
+        assert_eq!(restage(&[add("c")], None, vec![add("b")], 0), vec![add("c"), add("b")]);
         // editing a column whose edit was staged replaces that edit
-        assert_eq!(restage(&[modify("x", "y"), add("c")], Some("x"), vec![modify("x", "z")]), vec![add("c"), modify("x", "z")]);
-        assert_eq!(restage(&[Change::DropIndex("i".into())], None, vec![Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())]), vec![Change::DropIndex("i".into()), Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())]);
+        assert_eq!(restage(&[modify("x", "y"), add("c")], Some("x"), vec![modify("x", "z")], 0), vec![add("c"), modify("x", "z")]);
+        assert_eq!(restage(&[Change::DropIndex("i".into())], None, vec![Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())], 0), vec![Change::DropIndex("i".into()), Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())]);
     }
 }

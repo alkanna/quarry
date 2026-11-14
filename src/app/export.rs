@@ -180,11 +180,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let sql = t.sql.is_some();
         let set = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))));
-        let shown = match src {
-            Src::Query => set.map_or(0, |x| x.rows.len()),
-            Src::Shell => t.shell.docs.len(),
-            Src::Content => t.docs.len(),
-        };
+        let shown = shown_count(t, src);
         let paged = set.is_some_and(|x| x.page.is_some());
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
@@ -224,11 +220,7 @@ impl App {
         // Opened from a row menu or the selection bar, the dialog was made while the grid had its rows out of the tab,
         // so it counted none; they are back by the time it draws.
         if f.shown == 0 && let Some(t) = self.t() {
-            f.shown = match f.src {
-                Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map_or(0, |x| x.rows.len()),
-                Src::Shell => t.shell.docs.len(),
-                Src::Content => t.docs.len(),
-            };
+            f.shown = shown_count(t, f.src);
         }
         let where_ = self.t().map(|t| t.sel.ns()).unwrap_or_default();
         dialog_head(ui, &Head::new("Export rows").sub(where_).glyph(glyphs::download));
@@ -459,6 +451,15 @@ struct Ask {
     all_pages: bool,
     all_ok: bool,
     has_selected: bool,
+}
+
+/// The rows of `src` on screen: the selected Query result, the Shell's results or the Content page.
+fn shown_count(t: &Tab, src: Src) -> usize {
+    match src {
+        Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map_or(0, |x| x.rows.len()),
+        Src::Shell => t.shell.docs.len(),
+        Src::Content => t.docs.len(),
+    }
 }
 
 /// The scope the dialog starts on: every page when that was asked for and is allowed, else the checked rows, else what is shown.

@@ -68,11 +68,11 @@ impl App {
                     if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
                     }
-                    self.dropping_db = Some((conn, db));
+                    self.dropping = Some((conn, db, String::new()));
                 }
                 Danger::DropCollAt { db, coll, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
-                    self.dropping_coll = Some((conn, db.clone(), coll.clone()));
+                    self.dropping = Some((conn, db.clone(), coll.clone()));
                     self.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
                 }
                 Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),

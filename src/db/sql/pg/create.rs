@@ -755,13 +755,7 @@ async fn table_info(db: &Db, schema: &str, table: &str, read_only: bool) -> Res<
     let est = found.first().and_then(|r| r.int("est")).filter(|n| *n >= 0).map(|n| n as u64);
     let kind = found.first().and_then(|r| text(r, "kind")).unwrap_or_default();
     // The keyword has to match the relation, or the server refuses the DROP it is asked to simulate.
-    let word = match kind.as_str() {
-        "v" => "VIEW",
-        "m" => "MATERIALIZED VIEW",
-        "f" => "FOREIGN TABLE",
-        "S" => "SEQUENCE",
-        _ => "TABLE",
-    };
+    let word = drop_word(&kind);
     let (total, lines) = cascade_effects(db, schema, &format!("DROP {word} {name} CASCADE"), Some(&format!("pg_class:{oid}")), None, read_only).await?;
     let mut info = DropInfo { exists: true, rows: est, rows_estimated: true, dependents_total: total, dependents: lines, ..Default::default() };
     // An exact count within a short wait, else the estimate stays and the dialog says "about".
@@ -1089,21 +1083,27 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
     run.map_err(|f| fail_text(f, |what| format!("Nothing was created: {what} changed since the dialog read it. Pick the key again.")))
 }
 
-async fn drop_table(db: &Db, schema: &str, table: &str, view: bool, cascade: bool, read_only: bool) -> Res<()> {
-    let mut sql = drop_table_sql(schema, table, view, cascade)?;
-    // The sidebar lists a materialized view as a view and a foreign table as a table, and the server refuses DROP VIEW
-    // or DROP TABLE on them, so the keyword follows the relation as in `table_info`.
-    let kind = "SELECT c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)";
-    let found = read(db, schema, &[(kind, vec![Param::Text(D.qualified(schema, table))])]).await.ok().and_then(|mut r| r.pop());
-    let word = match found.as_ref().and_then(|r| r.first()).and_then(|r| text(r, "kind")).as_deref() {
-        Some("m") => Some("MATERIALIZED VIEW"),
-        Some("f") => Some("FOREIGN TABLE"),
-        _ => None,
-    };
-    if let Some(w) = word {
-        sql = sql.replacen(if view { "DROP VIEW" } else { "DROP TABLE" }, &format!("DROP {w}"), 1);
+/// The DROP keyword for a relation of pg_class kind `relkind`.
+fn drop_word(relkind: &str) -> &'static str {
+    match relkind {
+        "v" => "VIEW",
+        "m" => "MATERIALIZED VIEW",
+        "f" => "FOREIGN TABLE",
+        "S" => "SEQUENCE",
+        _ => "TABLE",
     }
+}
+
+async fn drop_table(db: &Db, schema: &str, table: &str, view: bool, cascade: bool, read_only: bool) -> Res<()> {
+    let plain = drop_table_sql(schema, table, view, cascade)?;
     in_tx(db, schema, read_only, async |tx| {
+        // The sidebar lists a materialized view as a view and a foreign table as a table, and the server refuses DROP VIEW
+        // or DROP TABLE on them, so the keyword follows the relation as in `table_info`. Read in the same transaction.
+        let kind = tx.fetch_bound("SELECT c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)", &[Param::Text(D.qualified(schema, table))]).await.map_err(se)?;
+        let sql = match kind.first().and_then(|r| text(r, "kind")).filter(|k| matches!(k.as_str(), "m" | "f")) {
+            Some(k) => plain.replacen(if view { "DROP VIEW" } else { "DROP TABLE" }, &format!("DROP {}", drop_word(&k)), 1),
+            None => plain.clone(),
+        };
         exec(tx, db, schema, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, table)) {
             (_, Some(why)) => why,
             (Some("2BP01"), _) => format!("{}\nTick CASCADE in the confirmation to drop what depends on it too. Nothing was dropped.", se(x)),

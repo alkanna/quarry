@@ -549,11 +549,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            // Only this dialog's changes are added to the list as it is now: an Apply that finished while it was open
-            // has emptied the list, and putting back the snapshot would stage those changes a second time.
-            let mut staged = self.staged().to_vec();
-            staged.extend(all.split_off(f.rest.len().min(all.len())));
-            self.set_staged(staged);
+            self.set_staged(super::alter::restage(self.staged(), None, all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }

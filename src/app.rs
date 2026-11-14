@@ -177,9 +177,10 @@ pub struct App {
     tree_x: egui::Rangef,
     insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
-    dropping_db: Option<(u64, String)>,
-    /// A collection drop awaiting its answer; its undo entries go once the server confirms it.
-    dropping_coll: Option<(u64, String, String)>,
+    /// A database or collection drop awaiting its answer, as (connection, database, collection), the collection empty
+    /// for a whole database. A database stays hidden from the sidebar meanwhile and comes back if the drop fails; undo
+    /// entries go only once the server confirms.
+    dropping: Option<(u64, String, String)>,
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
@@ -365,8 +366,7 @@ impl App {
             char_w: 0.0,
             tree_x: egui::Rangef::NOTHING,
             insert: None,
-            dropping_db: None,
-            dropping_coll: None,
+            dropping: None,
             copying: Default::default(),
             export_job: None,
             sql_job: None,

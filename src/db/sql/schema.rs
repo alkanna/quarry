@@ -48,26 +48,7 @@ pub fn enum_values(ty: &str) -> Vec<String> {
     let l = ty.trim();
     let Some(body) = l.get(..4).filter(|p| p.eq_ignore_ascii_case("enum") || p.eq_ignore_ascii_case("set(")).map(|_| l) else { return Vec::new() };
     let Some(open) = body.find('(') else { return Vec::new() };
-    let (mut out, mut cur, mut inside) = (Vec::new(), String::new(), false);
-    let mut chars = body[open + 1..].chars().peekable();
-    while let Some(c) = chars.next() {
-        match (inside, c) {
-            (false, '\'') => inside = true,
-            (true, '\'') if chars.peek() == Some(&'\'') => {
-                cur.push('\'');
-                chars.next();
-            }
-            (true, '\'') => {
-                inside = false;
-                out.push(std::mem::take(&mut cur));
-            }
-            // A backslash escapes the next char in the declaration text the server returns.
-            (true, '\\') => cur.extend(chars.next()),
-            (true, c) => cur.push(c),
-            (false, _) => {}
-        }
-    }
-    out
+    super::csv::quoted_list(&body[open + 1..])
 }
 
 #[cfg(test)]
