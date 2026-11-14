@@ -10,7 +10,6 @@ use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
-const LATER: &str = "Comes with writes";
 
 /// What the four views keep per tab.
 #[derive(Default)]
@@ -60,6 +59,9 @@ pub(in crate::app) enum Act {
     Copy(String),
     Open { db: String, table: String },
     Refresh,
+    /// Opens the Query view with this maintenance statement for the table, to read the result there.
+    Maintain(&'static str),
+    Truncate,
     NewColumn,
     EditColumn(usize),
     DuplicateColumn(usize),
@@ -166,6 +168,18 @@ impl App {
                     s.st.load = Load::Idle;
                 }
                 self.request_structure();
+            }
+            Act::Maintain(verb) => {
+                let sel = self.tabs[self.cur].sel.clone();
+                let text = format!("{verb} TABLE {};", self.dialect_of(sel.conn).qualified(sel.space(), &sel.coll));
+                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    s.query = text;
+                }
+                self.tabs[self.cur].view = View::Sql;
+            }
+            Act::Truncate => {
+                let sel = self.tabs[self.cur].sel.clone();
+                self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
             }
             Act::NewColumn => self.open_col_form(None),
             Act::EditColumn(i) => self.open_col_form(Some(i)),
@@ -586,6 +600,8 @@ impl App {
             ("Comment", s.comment.clone()),
             ]
         };
+        let (is_view, writable) = (self.sel_is_view(), self.sel_writable());
+        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&sel.db.as_str());
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -604,10 +620,19 @@ impl App {
                 if !pg {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        for name in ["Analyze", "Optimize", "Check"] {
-                            ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
+                        // Analyze and Optimize write table statistics and files, so they follow the write lock; Check only reads.
+                        for (name, stmt, writes) in [("Analyze", "ANALYZE", true), ("Optimize", "OPTIMIZE", true), ("Check", "CHECK", false)] {
+                            let on = !is_view && (!writes || writable);
+                            let note = if is_view { "A view has no table to maintain" } else { "Read-only: unlock writes to run this" };
+                            if ui.add_enabled(on, egui::Button::new(name)).on_hover_text(format!("Open the Query view with {stmt} TABLE filled in")).on_disabled_hover_text(note).clicked() {
+                                acts.push(Act::Maintain(stmt));
+                            }
                         }
-                        ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
+                        let can_empty = !is_view && writable && !system;
+                        let note = if system { "Belongs to the server" } else if is_view { "A view has no rows to empty" } else { "Read-only: unlock writes to empty this table" };
+                        if ui.add_enabled_ui(can_empty, |ui| danger(ui, "Truncate...")).inner.on_hover_text("Deletes every row and keeps the table").on_disabled_hover_text(note).clicked() {
+                            acts.push(Act::Truncate);
+                        }
                     });
                 }
             });

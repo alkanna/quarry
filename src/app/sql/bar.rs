@@ -63,6 +63,8 @@ pub(in crate::app) struct Bar {
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
     pub(in crate::app) ac: Ac,
     pub(in crate::app) wants: Wants,
+    /// Set by the Explain button; `sql_content` runs the same entry point as Cmd+E.
+    pub(in crate::app) explain: bool,
     /// Initial open states; only the offline demo sets them.
     pub(in crate::app) preset: Preset,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
@@ -1176,8 +1178,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             copy = quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked();
-            // Step 8 adds Explain.
-            quiet_enabled(ui, false, "Explain").on_disabled_hover_text("Coming with the Query view");
+            b.explain = quiet(ui, "Explain").on_hover_text("Explain the SELECT in a new Query tab (Cmd+E)").clicked();
         });
     });
     // The full SELECT, folded under the bar in SQL mode.

@@ -769,6 +769,18 @@ impl App {
         App::checked_docs(&t.checked, Rows::Raw(&t.docs))
     }
 
+    /// File > Insert Document on a SQL tab: the row form lives on the Content grid, so the tab goes there first.
+    pub(in crate::app) fn sql_insert_row_menu(&mut self) {
+        if self.t().is_none_or(|t| t.sel.coll.is_empty()) {
+            return self.warn("Open a table first to insert a row.");
+        }
+        self.set_view(View::Documents);
+        if let Some(why) = self.sql_edit_block() {
+            return self.warn(why);
+        }
+        self.sql_new_row(None);
+    }
+
     /// Opens the insert form, filled from `from` for a duplicate.
     fn sql_new_row(&mut self, from: Option<Document>) {
         if !self.sel_writable() {

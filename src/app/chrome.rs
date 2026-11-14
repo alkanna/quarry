@@ -133,7 +133,9 @@ impl App {
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
             self.set_view(View::Documents);
-            ctx.memory_mut(|m| m.request_focus(query_id("QUERY")));
+            // The SQL bar's text field exists only in SQL mode, so Rules mode switches over to it. Its text is already written out.
+            let sql_tab = self.tm().and_then(|t| t.sql.as_mut()).map(|s| s.bar.c.sql = true).is_some();
+            ctx.memory_mut(|m| m.request_focus(query_id(if sql_tab { "SQL-WHERE" } else { "QUERY" })));
         }
         if k(cmd, Key::Comma) {
             self.modal = Some(Modal::Settings);

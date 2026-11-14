@@ -97,7 +97,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 38] = [
+const SHORTCUTS: [(&str, &str); 39] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -111,6 +111,7 @@ const SHORTCUTS: [(&str, &str); 38] = [
     ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
     ("Cmd+[, Cmd+]", "Back and forward through the tabs you visited"),
     ("Cmd+Alt+1 to Cmd+Alt+8", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell, Watch"),
+    ("", "On a SQL tab: Content, Structure, Relations, Triggers, Info, Query, Shell"),
     ("Cmd+F", "Focus the query"),
     ("Cmd+Shift+F", "Find a collection in the sidebar"),
     ("Up, Down", "Select the previous or next document"),
@@ -668,6 +669,7 @@ impl App {
                 self.modal = Some(Modal::Settings);
             }
             Act::Export if !self.tabs.is_empty() => self.export(),
+            Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
             Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),
             Act::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             _ => {}
