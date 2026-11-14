@@ -382,8 +382,10 @@ mod tests {
         assert_eq!(flatten("[]").unwrap_err(), "The text holds no objects to import.");
         assert_eq!(flatten("[{}]").unwrap_err(), "The objects have no keys.");
         assert_eq!(flatten("   ").unwrap_err(), "The text holds no objects to import.");
+        // A nested cell is kept as raw text and compacted by a loop, so deep nesting needs no stack and is written whole.
         let deep = format!("[{{\"a\": {}1{}}}]", "[".repeat(200), "]".repeat(200));
-        assert!(flatten(&deep).unwrap_err().contains("recursion limit"));
+        let f = flatten(&deep).unwrap();
+        assert_eq!((f.rows, f.nested.as_slice()), (1, [true].as_slice()));
     }
 
     #[test]

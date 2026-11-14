@@ -12,7 +12,7 @@ use super::write::{writer_conn, SqlUndo};
 use super::{Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Databases the server owns; creating or dropping them is refused before a statement exists.
 pub const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "mysql", "performance_schema", "sys"];
@@ -1232,7 +1232,7 @@ mod tests {
             (m, co)
         }
         fn drop_info(&self, schema: &str, table: &str) -> (DropInfo, Duration) {
-            let t = Instant::now();
+            let t = std::time::Instant::now();
             self.w.sql_drop_info(1, self.db.clone(), schema.into(), table.into());
             let Msg::SqlDropInfo { res, .. } = self.next() else { panic!("expected SqlDropInfo") };
             (res.unwrap_or_else(|x| panic!("{}: {x}", self.label)), t.elapsed())
