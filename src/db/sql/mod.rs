@@ -465,7 +465,8 @@ impl Addr {
         Some(a)
     }
 
-    /// Reads what a user pastes into the PostgreSQL card.
+    /// Reads what a user pastes into the PostgreSQL card. The form calls `from_paste_for`.
+    #[cfg(test)]
     pub fn from_paste(text: &str) -> Result<Addr, String> {
         Addr::from_paste_for(text, Engine::Postgres)
     }

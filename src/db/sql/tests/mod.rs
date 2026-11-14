@@ -135,6 +135,7 @@ fn mysql_paste_names_the_right_card_without_echoing_input() {
 #[test]
 fn mysql_options_carry_the_client_certificate_files() {
     use crate::db::sql::pg::cert::tests::{make_certs, temp_dir};
+    use sqlx::ConnectOptions;
     let d = temp_dir("my-opts");
     if make_certs(&d, "db.test", "app").is_none() {
         eprintln!("openssl not found, skipped");
