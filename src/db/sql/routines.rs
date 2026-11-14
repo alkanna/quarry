@@ -581,9 +581,9 @@ struct Session<'a> {
 impl Steps for Session<'_> {
     async fn run(&mut self, sql: &str) -> Res<()> {
         let t = std::time::Instant::now();
-        // DROP FUNCTION and DROP PROCEDURE are refused by the prepared protocol (1295), so they go as text; the statement is
-        // our own, names quoted by us. A CREATE is prepared, so the server parses exactly one statement whatever follows it.
-        let res = if sql.starts_with("DROP ") {
+        // Routine DDL is refused by the prepared protocol (1295) on MySQL, DROP and CREATE alike, so it goes as text. The text is the
+        // person's own definition and runs with their own rights; the server reads the CREATE with its whole body as one statement.
+        let res = {
             let mut s = sqlx::raw_sql(sql).fetch_many(&mut *self.c);
             let mut out = Ok(());
             while let Some(item) = futures_util::StreamExt::next(&mut s).await {
@@ -593,10 +593,7 @@ impl Steps for Session<'_> {
                 }
             }
             out
-        } else {
-            sqlx::query(sql).persistent(false).execute(&mut *self.c).await.map(|_| ())
         };
-        self.db.note(self.schema, sql, t, &res);
         res.map_err(se)
     }
 }
