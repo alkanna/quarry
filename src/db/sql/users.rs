@@ -1302,12 +1302,14 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
     let d = db.dialect;
     // What each role about to be taken away carries, read first: undo gives it back with the role. The same read
     // cuts the role changes to what is not so already, and a rename leaves the account's grants as they are.
-    let (before, defaults) = if plan.roles_revoke.is_empty() && plan.roles_grant.is_empty() {
-        (Vec::new(), Vec::new())
+    let before = if plan.roles_revoke.is_empty() && plan.roles_grant.is_empty() {
+        Vec::new()
     } else {
-        (grants_of(c, m, acct).await.map_err(|x| format!("Could not read the roles of {}: {x}", acct.label()))?, default_roles(c, d, acct).await)
+        grants_of(c, m, acct).await.map_err(|x| format!("Could not read the roles of {}: {x}", acct.label()))?
     };
     let (roles_grant, roles_revoke, left) = trim_roles(&roles_of(&before), &plan.roles_grant, &plan.roles_revoke);
+    // Only a role taken away needs to know whether it was a default one, for its undo.
+    let defaults = if roles_revoke.is_empty() { Vec::new() } else { default_roles(c, d, acct).await };
     let plan = &AccountPlan { roles_grant, roles_revoke, ..plan.clone() };
     let total = plan_sql(m, d, acct, plan)?.len();
     let mut done = 0;

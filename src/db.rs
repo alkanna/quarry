@@ -288,7 +288,8 @@ pub enum Msg {
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
     /// `copied` names the collection a duplicate wrote, to end its spinner.
-    DbChanged { conn: u64, db: String, copied: Option<String>, res: Res<String> },
+    /// `dropped` names what a drop removed: the collection, or empty for the whole database.
+    DbChanged { conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: Res<String> },
     Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
@@ -443,7 +444,7 @@ fn shell_date(arg: &str) -> String {
         return dates::moment("now", now).unwrap_or_default();
     }
     if let Ok(ms) = arg.parse::<i64>() {
-        return format!("{{\"$date\":{{\"$numberLong\":\"{ms}\"}}}}");
+        return dates::date_json(ms);
     }
     dates::moment(arg, now).unwrap_or_else(|| format!("{{\"$date\":\"{arg}\"}}"))
 }

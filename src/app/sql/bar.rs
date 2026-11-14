@@ -893,10 +893,11 @@ fn write_rules(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dial
     let mut all = b.rules.clone();
     all.extend(b.draft.clone());
     let out = rules::to_sql(&all, b.any, d, bs);
+    // `src` already equals the text when nothing changed, so it is only copied on a change.
     if out != *text {
         *text = out;
+        b.src = text.clone();
     }
-    b.src = text.clone();
 }
 
 /// Draws the bar and the clause chips. Returns true when the query should run.

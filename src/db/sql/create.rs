@@ -583,16 +583,12 @@ async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, d: 
 /// The connection id and what tells this server from another one behind the same address (a proxy or a load
 /// balancer may hand each pool connection to a different backend, where the same id is someone else). The same
 /// columns as the Server window's Kill check, with the port added. None when they cannot be read.
-fn whoami_sql(d: Dialect) -> Option<&'static str> {
-    match d {
-        Dialect::MySql => Some("SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@server_uuid, @@port) AS who"),
-        Dialect::MariaDb => Some("SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@hostname, @@port, @@server_id) AS who"),
-        Dialect::Postgres => None,
-    }
+fn whoami_sql(d: Dialect) -> &'static str {
+    if d == Dialect::MariaDb { "SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@hostname, @@port, @@server_id) AS who" } else { "SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@server_uuid, @@port) AS who" }
 }
 
 async fn whoami(c: &mut sqlx::MySqlConnection, d: Dialect) -> Option<(u64, String)> {
-    let r = sqlx::query(whoami_sql(d)?).fetch_one(&mut *c).await.ok()?;
+    let r = sqlx::query(whoami_sql(d)).fetch_one(&mut *c).await.ok()?;
     let who = text(&r, "who").filter(|w| !w.trim_matches('/').is_empty())?;
     Some((super::structure::num(&r, "n")?, who))
 }
@@ -950,10 +946,9 @@ mod tests {
     fn a_count_cut_short_is_stopped_with_kill_query_on_the_same_server_only() {
         for d in [Dialect::MySql, Dialect::MariaDb] {
             assert_eq!(d.cancel(7), "KILL QUERY 7");
-            assert!(whoami_sql(d).is_some_and(|q| q.contains("CONNECTION_ID()") && q.contains("@@port")), "{d:?}");
-            one_statement(whoami_sql(d).unwrap());
+            assert!(whoami_sql(d).contains("CONNECTION_ID()") && whoami_sql(d).contains("@@port"), "{d:?}");
+            one_statement(whoami_sql(d));
         }
-        assert!(whoami_sql(Dialect::Postgres).is_none());
     }
 
     /// Review finding 4: tables and databases another client named `a.b`, ` lead` or `x.y` could not be dropped

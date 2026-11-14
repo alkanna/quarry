@@ -85,7 +85,7 @@ impl App {
                     }
                 },
                 Msg::Command { tag, res } => self.on_command(tag, res),
-                Msg::DbChanged { conn, db, copied, res } => self.on_db_changed(conn, db, copied, res),
+                Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
                 Msg::WatchEvent { req, doc } => self.watch_event(req, doc),
                 Msg::WatchDone { req, res } => self.watch_done(req, res),
                 Msg::IndexInfo { key, res } => match res {
@@ -517,7 +517,7 @@ impl App {
         }
     }
 
-    fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, res: db::Res<String>) {
+    fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: db::Res<String>) {
         if let Some(to) = copied {
             // Listed now so the row does not blink out before the reload below answers.
             if res.is_ok() && let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
@@ -526,7 +526,6 @@ impl App {
             }
             self.copying.remove(&(conn, db.clone(), to));
         }
-        let dropped = self.dropping.take_if(|d| d.0 == conn && d.1 == db).map(|d| d.2);
         match res {
             Ok(m) => {
                 // Only a drop the server confirmed forgets its undo entries; a refused one keeps them.

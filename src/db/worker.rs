@@ -182,8 +182,9 @@ impl Worker {
         self.spawn(async move {
             // renameCollection only runs on the admin database.
             let on = if cmd.contains_key("renameCollection") { "admin".to_string() } else { db.clone() };
+            let dropped = cmd.get_str("drop").ok().map(str::to_string).or_else(|| cmd.contains_key("dropDatabase").then(String::new));
             let res = client.database(&on).run_command(cmd).await.map(|_| done).map_err(e);
-            Msg::DbChanged { conn, db, copied: None, res }
+            Msg::DbChanged { conn, db, copied: None, dropped, res }
         });
     }
 
@@ -232,7 +233,7 @@ impl Worker {
                 Ok(format!("Duplicated {from} to {to}"))
             }
             .await;
-            Msg::DbChanged { conn, db, copied: Some(to), res }
+            Msg::DbChanged { conn, db, copied: Some(to), dropped: None, res }
         });
     }
 

@@ -96,16 +96,21 @@ fn run_schema_of(t: &Tab) -> String {
 /// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement. Export of a
 /// result uses it too, so the statement reads the same tables it ran against.
 pub(in crate::app) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
-    if db.dialect == db::sql::Dialect::Postgres {
-        return (db.at(&run_db(t)), run_schema_of(t));
-    }
-    (db, run_db(t))
+    let (rd, rs) = t.sql.as_ref().map_or(("", ""), |s| (s.run_db.as_str(), s.run_schema.as_str()));
+    target_of(t, db, rd, rs)
 }
 
 /// `run_target` of the run whose results are shown, for statements read again from them.
 pub(in crate::app) fn ran_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
-    let Some((rd, rs)) = t.sql.as_ref().and_then(|s| s.ran_in.as_ref()) else { return run_target(t, db) };
-    let d = if rd.is_empty() { t.sel.db.clone() } else { rd.clone() };
+    match t.sql.as_ref().and_then(|s| s.ran_in.as_ref()) {
+        Some((rd, rs)) => target_of(t, db, rd, rs),
+        None => run_target(t, db),
+    }
+}
+
+/// The target for a picked database `rd` (empty for the tab's own) and typed schema `rs`.
+fn target_of(t: &Tab, db: db::sql::Db, rd: &str, rs: &str) -> (db::sql::Db, String) {
+    let d = if rd.is_empty() { t.sel.db.clone() } else { rd.to_string() };
     if db.dialect == db::sql::Dialect::Postgres {
         return (db.at(&d), run_schema_choice(rs, rd, &t.sel.db, &t.sel.schema));
     }
