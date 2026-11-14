@@ -333,7 +333,9 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
         Some(x) if r.kind == Kind::Binary && is_hex(x) => super::value::pg_lit(&format!("\\x{}", x.trim_start_matches("0x").trim_start_matches("0X"))),
         _ => v(0),
     };
-    let side = || if r.kind == Kind::Binary { c.to_string() } else { format!("{c}::text") };
+    // `c` already ends in ::text for uuid, inet and the other text-like kinds (see `rule_sql`).
+    let txt = if c.ends_with("::text") { c.to_string() } else { format!("{c}::text") };
+    let side = || if r.kind == Kind::Binary { c.to_string() } else { txt.clone() };
     let other = group_of(r.kind) == Group::Other;
     Some(match r.op {
         Eq if r.kind == Kind::Json => format!("{c} = {}::jsonb", v(0)),
@@ -343,13 +345,13 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
         LenEq if other => format!("octet_length({}) = {}", side(), n()),
         LenGt if other => format!("octet_length({}) > {}", side(), n()),
         LenLt if other => format!("octet_length({}) < {}", side(), n()),
-        Regexp => format!("{c}::text ~ {}", v(0)),
-        NotRegexp => format!("{c}::text !~ {}", v(0)),
+        Regexp => format!("{txt} ~ {}", v(0)),
+        NotRegexp => format!("{txt} !~ {}", v(0)),
         Today => format!("{c}::date = CURRENT_DATE"),
         Last => format!("{c} >= NOW() - INTERVAL '{} {}'", n(), unit_sql(r.values.get(1).map_or("", |s| s.as_str()))),
         ThisWeek => format!("date_trunc('week', {c}) = date_trunc('week', CURRENT_DATE)"),
         ThisMonth => format!("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)"),
-        SetContains => format!("{} = ANY(string_to_array({c}::text, ','))", v(0)),
+        SetContains => format!("{} = ANY(string_to_array({txt}, ','))", v(0)),
         JsonPathEq => format!("jsonb_path_query_first({c}::jsonb, {}) #>> '{{}}' = {}", v(0), v(1)),
         JsonContains => format!("{c}::jsonb @> {}::jsonb", v(0)),
         JsonHasPath => format!("jsonb_path_exists({c}::jsonb, {})", v(0)),
