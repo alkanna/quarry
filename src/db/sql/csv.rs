@@ -27,6 +27,8 @@ pub enum Open {
     Mem(std::io::Cursor<Shared>),
     /// A gzip file read as the text inside it. Boxed because it holds an `Open` itself.
     Gz(Box<flate2::read::MultiGzDecoder<Open>>),
+    /// The first bytes already read to sniff the format, put back in front of the rest.
+    Peeked(Box<std::io::Chain<std::io::Cursor<Vec<u8>>, Open>>),
 }
 
 impl Read for Open {
@@ -35,6 +37,7 @@ impl Read for Open {
             Open::File(f) => f.read(buf),
             Open::Mem(c) => c.read(buf),
             Open::Gz(g) => g.read(buf),
+            Open::Peeked(p) => p.read(buf),
         }
     }
 }
@@ -68,8 +71,13 @@ impl Source {
 
     /// `open` for a SQL script: a gzip file is decompressed as it is read, so a dump written with the .gz option runs as it is.
     pub fn open_script(&self) -> std::io::Result<Open> {
-        let raw = self.open()?;
-        Ok(if self.is_gzip() { Open::Gz(Box::new(flate2::read::MultiGzDecoder::new(raw))) } else { raw })
+        let mut raw = self.open()?;
+        // Sniffed on this handle: a pipe or a file being written cannot be opened a second time without losing the bytes read.
+        let mut head = Vec::with_capacity(2);
+        (&mut raw).take(2).read_to_end(&mut head)?;
+        let gz = head == [0x1f, 0x8b];
+        let raw = Open::Peeked(Box::new(std::io::Cursor::new(head).chain(raw)));
+        Ok(if gz { Open::Gz(Box::new(flate2::read::MultiGzDecoder::new(raw))) } else { raw })
     }
 
     /// The size of the script `open_script` reads, which the progress of a run is measured against. A gzip file ends with the
@@ -1155,6 +1163,10 @@ mod tests {
         // Plain text passes through, and so does a file whose name has no .gz but whose bytes are gzip.
         let plain = Source::Mem(Arc::new(text.clone().into_bytes()));
         assert_eq!((read(&plain), plain.script_len()), (text.clone(), text.len() as u64));
+        // A plain script, even a one or two byte one, reads back whole: the sniffed bytes are not lost.
+        for t in ["", "S", "SELECT 1;\n"] {
+            assert_eq!(read(&Source::Mem(Arc::new(t.as_bytes().to_vec()))), t);
+        }
         // Concatenated members, which `cat a.sql.gz b.sql.gz` makes, read as one script.
         let mut two = gz("SELECT 1;\n");
         two.extend(gz("SELECT 2;\n"));
