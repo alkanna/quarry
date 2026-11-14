@@ -11,7 +11,8 @@ fn recv(rx: &Receiver<Msg>) -> Msg {
 pub(super) fn shape(st: &Structure) -> Vec<String> {
     let cols = st.columns.iter().map(|c| format!("col {}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check));
     let idx = st.indexes.iter().map(|i| format!("idx {}|{}|{}|{}|{}|{}", i.name, i.unique, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), i.kind, i.comment, i.invisible));
-    cols.chain(idx).collect()
+    let checks = st.checks.iter().map(super::sim::check_line);
+    cols.chain(idx).chain(checks).collect()
 }
 
 struct Env {
@@ -54,6 +55,11 @@ impl Env {
     /// Applies the changes, checks `after` on the new structure, undoes and checks the old shape is back.
     fn round_trip(&mut self, label: &str, changes: Vec<Change>, after: impl FnOnce(&Structure)) {
         self.fresh();
+        self.round_trip_here(label, changes, after);
+    }
+
+    /// `round_trip` on the table as it is, for a test that sets it up first.
+    fn round_trip_here(&mut self, label: &str, changes: Vec<Change>, after: impl FnOnce(&Structure)) {
         let before = self.structure();
         let (d, v) = (self.db.dialect, self.db.version.clone());
         let m = Mode::of(&self.db.sql_mode);
@@ -191,6 +197,32 @@ fn live(var: &str) {
     // The table is still there and still holds its rows.
     let rows: i64 = e.w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_ddl.t").fetch_one(&e.pool).await.unwrap() });
     assert_eq!(rows, 2);
+
+    // CHECK constraints: added, dropped, and edited as a drop and an add of the same name in one ALTER, each undone.
+    let chk = |name: &str, expr: &str| CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() };
+    let find = |st: &Structure, n: &str| st.checks.iter().find(|k| k.name == n).cloned();
+    if e.db.dialect.enforces_checks(&e.db.version) {
+        e.round_trip("add check", vec![Change::AddCheck(chk("chk_price", "price >= 0"))], |st| assert!(find(st, "chk_price").is_some_and(|k| k.expr.contains("price") && !k.not_enforced), "{:?}", st.checks));
+        e.fresh();
+        e.exec("ALTER TABLE quarry_ddl.t ADD CONSTRAINT chk_name CHECK (CHAR_LENGTH(name) > 0)");
+        e.round_trip_here("drop check", vec![Change::DropCheck("chk_name".into())], |st| assert!(find(st, "chk_name").is_none(), "{:?}", st.checks));
+        e.round_trip_here("edit check", vec![Change::DropCheck("chk_name".into()), Change::AddCheck(chk("chk_name", "CHAR_LENGTH(name) > 1"))], |st| assert!(find(st, "chk_name").is_some_and(|k| k.expr.contains("> 1")), "{:?}", st.checks));
+        // The server refuses an add that existing rows break, and the table is left as it was.
+        let (d, v) = (e.db.dialect, e.db.version.clone());
+        let st = e.structure();
+        let p = plan(d, &v, Mode::of(&e.db.sql_mode), "t", &st, &[Change::AddCheck(chk("chk_never", "price > 100"))]).unwrap();
+        e.w.sql_alter(1, e.db.clone(), "quarry_ddl".into(), "t".into(), p.sql(), Mode::of(&e.db.sql_mode), None, false, "done".into());
+        let Msg::SqlAltered { res, .. } = recv(&e.rx) else { panic!("expected SqlAltered") };
+        assert!(res.is_err());
+        assert!(find(&e.structure(), "chk_never").is_none());
+        if d == Dialect::MySql {
+            e.round_trip("add a check that is not enforced", vec![Change::AddCheck(CheckConstraint { not_enforced: true, ..chk("chk_off", "price > 100") })], |st| assert!(find(st, "chk_off").is_some_and(|k| k.not_enforced), "{:?}", st.checks));
+        }
+    } else {
+        // A server that parses a CHECK and ignores it is refused before anything runs.
+        let st = e.structure();
+        assert!(plan(e.db.dialect, &e.db.version, Mode::of(&e.db.sql_mode), "t", &st, &[Change::AddCheck(chk("chk_price", "price >= 0"))]).unwrap_err().contains("ignores"));
+    }
 
     // Writes stay locked until the caller unlocks them.
     e.w.sql_alter(1, e.db.clone(), "quarry_ddl".into(), "t".into(), "ALTER TABLE `t` DROP COLUMN `note`".into(), Mode::of(&e.db.sql_mode), None, true, "done".into());

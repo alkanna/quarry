@@ -36,7 +36,7 @@ pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_
     let (mut ran, mut seen, mut lost) = (0, None, false);
     let res: Res<String> = crate::db::sql_scope(db.conn, &schema, async {
         let st = load(db, &schema, &table).await?;
-        let now = snapshot(&st, &u.cols, &u.idx, &u.fks);
+        let now = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
         if now.len() != u.expect.len() {
             return Err("Undo refused: the table could not be compared with how the change left it.".to_string());
         }
@@ -85,7 +85,7 @@ impl Worker {
             let undo = match (res.is_ok(), undo) {
                 (true, Some(mut u)) => match load(&db, &schema, &table).await {
                     Ok(st) => {
-                        u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
+                        u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
                         Some(undo_action(conn, &schema, &table, u))
                     }
                     Err(err) => {

@@ -1,8 +1,8 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
 //! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
-use crate::db::sql::ddl::{check_expr, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
-use crate::db::sql::structure::ForeignKey;
+use crate::db::sql::ddl::{check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
+use crate::db::sql::structure::{CheckConstraint, ForeignKey};
 use crate::db::sql::value::lit;
 use crate::db::sql::Dialect;
 
@@ -75,6 +75,10 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
     if !c.comment.is_empty() {
         s.push_str(&format!(" COMMENT {}", lit(&c.comment, m.bs)));
     }
+    if let (Some(chk), Dialect::MariaDb) = (&c.check, d) {
+        check_expr_of("CHECK expression", chk, m)?;
+        s.push_str(&format!(" CHECK ({chk})"));
+    }
     Ok(s)
 }
 
@@ -135,6 +139,19 @@ pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, S
     Ok(format!("ADD CONSTRAINT {}\n    FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", d.quote_ident(&k.name), names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
 }
 
+/// ADD CONSTRAINT .. CHECK. The expression stays one expression, since the server runs it on every row written later.
+pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
+    check_ident(&k.name, "A check constraint")?;
+    check_expr_of("CHECK expression", &k.expr, m)?;
+    if k.not_valid || k.no_inherit {
+        return Err("Only PostgreSQL has NOT VALID and NO INHERIT.".into());
+    }
+    if k.not_enforced && d == Dialect::MariaDb {
+        return Err("MariaDB has no NOT ENFORCED for a CHECK.".into());
+    }
+    Ok(format!("ADD CONSTRAINT {} CHECK ({}){}", d.quote_ident(&k.name), k.expr.trim(), if k.not_enforced { " NOT ENFORCED" } else { "" }))
+}
+
 pub(in crate::db::sql) fn drop_index(d: Dialect, name: &str) -> String {
     if name == "PRIMARY" { "DROP PRIMARY KEY".into() } else { format!("DROP INDEX {}", d.quote_ident(name)) }
 }
@@ -144,7 +161,11 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
     Ok(match c {
         Change::Add { def, pos } => vec![format!("ADD COLUMN {} {}{}", d.quote_ident(&def.name), definition(d, m, def)?, position(d, pos))],
         Change::Modify { from, def, pos } if *from == def.name => vec![format!("MODIFY {} {}{}", d.quote_ident(from), definition(d, m, def)?, position(d, pos))],
-        Change::Modify { from, def, pos } => vec![format!("CHANGE COLUMN {} {} {}{}", d.quote_ident(from), d.quote_ident(&def.name), definition(d, m, def)?, position(d, pos))],
+        Change::Modify { from, def, pos } => {
+            // A column CHECK names its column, which the rename would leave behind in the text.
+            let renamed = ColDef { check: def.check.as_ref().map(|c| c.replace(&d.quote_ident(from), &d.quote_ident(&def.name))), ..def.clone() };
+            vec![format!("CHANGE COLUMN {} {} {}{}", d.quote_ident(from), d.quote_ident(&def.name), definition(d, m, &renamed)?, position(d, pos))]
+        }
         Change::Drop(n) => vec![format!("DROP COLUMN {}", d.quote_ident(n))],
         Change::AddIndex(ix) => vec![add_index(d, m, ix)?],
         Change::DropIndex(n) => vec![drop_index(d, n)],
@@ -152,6 +173,9 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
         Change::DropFk(n) => vec![format!("DROP FOREIGN KEY {}", d.quote_ident(n))],
         Change::RenameFk { .. } => return Err("MySQL and MariaDB cannot rename a foreign key. Drop it and add it again under the new name.".into()),
         Change::SetFkDeferral { .. } => return Err("MySQL and MariaDB have no deferred foreign keys.".into()),
+        Change::AddCheck(k) => vec![add_check(d, m, k)?],
+        // MySQL has DROP CHECK from 8.0.16 and takes DROP CONSTRAINT only from 8.0.19. MariaDB drops a CHECK with DROP CONSTRAINT.
+        Change::DropCheck(n) => vec![format!("DROP {} {}", if d == Dialect::MySql { "CHECK" } else { "CONSTRAINT" }, d.quote_ident(n))],
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
@@ -172,6 +196,12 @@ pub fn alter(d: Dialect, version: &str, m: Mode, table: &str, changes: &[Change]
     let can = d.can_rename_index(version);
     let mut lines = Vec::new();
     for c in changes {
+        if matches!(c, Change::AddCheck(_)) && !d.enforces_checks(version) {
+            return Err(format!("This server ({}) parses a CHECK and ignores it. A CHECK needs MySQL 8.0.16 or newer, or MariaDB 10.2.1.", version.trim()));
+        }
+        if matches!(c, Change::AddCheck(k) if k.not_enforced) && !d.can_not_enforce(version) {
+            return Err("NOT ENFORCED needs MySQL 8.0.16 or newer.".into());
+        }
         lines.extend(clause(d, m, can, c)?);
     }
     Ok(format!("ALTER TABLE {}\n  {}", d.quote_ident(table), lines.join(",\n  ")))

@@ -914,6 +914,8 @@ pub(super) enum Modal {
     /// Add or edit a column of the open SQL table, with its ALTER preview.
     ColEdit(Box<ColForm>),
     IdxEdit(Box<IdxForm>),
+    /// Add or edit a CHECK constraint of the open SQL table, with its ALTER preview.
+    CheckEdit(Box<super::sql::checks::CheckForm>),
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),

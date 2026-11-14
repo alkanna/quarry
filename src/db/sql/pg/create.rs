@@ -485,7 +485,7 @@ fn fingerprint(st: &Structure) -> Vec<String> {
     let cols: Vec<String> = st.columns.iter().map(|c| c.name.clone()).collect();
     let idx: Vec<String> = st.indexes.iter().map(|i| i.name.clone()).collect();
     let mut v = vec![format!("columns {}", cols.join(","))];
-    v.extend(snapshot(st, &cols, &idx, &[]).into_iter().map(|(k, x)| format!("{k}={}", x.unwrap_or_default())));
+    v.extend(snapshot(st, &cols, &idx, &[], &[]).into_iter().map(|(k, x)| format!("{k}={}", x.unwrap_or_default())));
     v.extend(table_state(st));
     v
 }
@@ -985,7 +985,7 @@ pub(in crate::db::sql) async fn check_ids(db: &Db, schema: &str, table: &str, id
     }
 }
 
-async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
+pub(super) async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT to_regclass($1)::oid::text AS n", &[Param::Text(name.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
 }
@@ -1021,7 +1021,7 @@ struct Made {
 /// The first function a CHECK of the table `$1` (an oid) reaches that is not IMMUTABLE, with its constraint: called by name, behind an
 /// operator or through a cast. pg_depend records what the server resolved, so an overload, a search_path hit or a user operator is
 /// the function that really runs. Built-ins are pinned and never recorded, which the name list of `check_constraint_pg` covers.
-const CHECK_VOLATILE: &str = "WITH d AS (
+pub(super) const CHECK_VOLATILE: &str = "WITH d AS (
     SELECT k.conname, d.refclassid, d.refobjid FROM pg_constraint k JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass AND d.objid = k.oid
     WHERE k.conrelid = $1::text::oid AND k.contype = 'c'
 ), f AS (
@@ -1029,7 +1029,7 @@ const CHECK_VOLATILE: &str = "WITH d AS (
     UNION ALL SELECT d.conname, o.oprcode::oid FROM d JOIN pg_operator o ON o.oid = d.refobjid WHERE d.refclassid = 'pg_operator'::regclass
     UNION ALL SELECT d.conname, c.castfunc FROM d JOIN pg_cast c ON c.oid = d.refobjid WHERE d.refclassid = 'pg_cast'::regclass AND c.castfunc <> 0
 )
-SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2 LIMIT 1";
+SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2";
 
 /// Refuses a CHECK that reaches a function that is not IMMUTABLE. PostgreSQL assumes a CHECK is immutable and runs it on every row
 /// written, so a volatile or stable user function there (one that writes, calls out or reads other tables) would act on each insert.

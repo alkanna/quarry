@@ -121,6 +121,70 @@ pub struct Constraint {
     pub def: String,
 }
 
+/// A table CHECK constraint, as its engine reports it. The expression is what goes between the brackets of
+/// `CHECK (...)`. A CHECK written on a column is one of these on MySQL, and MariaDB keeps it apart in `Column::check`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CheckConstraint {
+    pub name: String,
+    pub expr: String,
+    /// PostgreSQL: added NOT VALID, so the rows already in the table were never checked.
+    pub not_valid: bool,
+    /// PostgreSQL: not inherited by child tables.
+    pub no_inherit: bool,
+    /// MySQL 8.0.16 and PostgreSQL 18: NOT ENFORCED, so the server keeps the CHECK and never evaluates it.
+    pub not_enforced: bool,
+}
+
+impl CheckConstraint {
+    /// A PostgreSQL check constraint from the text `pg_get_constraintdef` gives, such as `CHECK ((a > 0)) NO INHERIT NOT VALID`.
+    /// None for any other kind of constraint.
+    pub fn from_pg(c: &Constraint) -> Option<CheckConstraint> {
+        if c.kind != 'c' {
+            return None;
+        }
+        let rest = c.def.trim().strip_prefix("CHECK")?.trim_start().strip_prefix('(')?;
+        let b: Vec<char> = rest.chars().collect();
+        let (mut i, mut depth) = (0, 1);
+        while i < b.len() {
+            match b[i] {
+                q @ ('\'' | '"') => {
+                    // A backslash escapes inside an E'...' string, which the catalog writes for a value that has one.
+                    let escapes = q == '\'' && i > 0 && matches!(b[i - 1], 'e' | 'E') && (i < 2 || !(b[i - 2].is_alphanumeric() || b[i - 2] == '_'));
+                    i += 1;
+                    while i < b.len() {
+                        if escapes && b[i] == '\\' {
+                            i += 2;
+                        } else if b[i] == q {
+                            if b.get(i + 1) == Some(&q) {
+                                i += 2;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+        let expr: String = b[..i].iter().collect();
+        let tail: String = b[i + 1..].iter().collect::<String>().to_ascii_uppercase();
+        Some(CheckConstraint { name: c.name.clone(), expr: expr.trim().to_string(), not_valid: tail.contains("NOT VALID"), no_inherit: tail.contains("NO INHERIT"), not_enforced: tail.contains("NOT ENFORCED") })
+    }
+}
+
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
 /// to the table itself; in `referenced_by` it belongs to `table`, which points here.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -255,6 +319,9 @@ pub struct Structure {
     /// PostgreSQL primary key, unique, check and exclusion constraints. Empty on MySQL, whose keys are indexes and
     /// whose CHECKs are not read here.
     pub constraints: Vec<Constraint>,
+    /// The table's CHECK constraints on every engine. On PostgreSQL they are read from `constraints`. MariaDB before 10.5.10
+    /// does not report a CHECK written on a column, so it is missing here and in `Column::check`.
+    pub checks: Vec<CheckConstraint>,
     /// The schema of a PostgreSQL table, which also says the structure came from PostgreSQL. None on MySQL, where the
     /// database is the namespace and the statements are written for a session switched to it.
     pub pg_schema: Option<String>,
@@ -513,6 +580,27 @@ pub(super) fn constraints(rows: &[SqlRow]) -> Vec<Constraint> {
     rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect()
 }
 
+/// The CHECK constraints among PostgreSQL's constraints.
+pub(super) fn pg_checks(cons: &[Constraint]) -> Vec<CheckConstraint> {
+    cons.iter().filter_map(CheckConstraint::from_pg).collect()
+}
+
+/// MySQL 8.0.16 and later list every CHECK of the table here, one written on a column included. MariaDB names a column CHECK
+/// after its column and reports it in `Column::check`, so only its table level ones are read here. A server without the view
+/// (MySQL before 8.0.16 parses a CHECK and drops it) has none to list.
+async fn table_checks(db: &Db, schema: &str, table: &str) -> Vec<CheckConstraint> {
+    let rows = match db.dialect {
+        Dialect::MySql => query(db, "SELECT cc.CONSTRAINT_NAME AS name, cc.CHECK_CLAUSE AS expr, tc.ENFORCED = 'NO' AS not_enforced FROM information_schema.CHECK_CONSTRAINTS cc JOIN information_schema.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK' ORDER BY cc.CONSTRAINT_NAME", schema, table).await,
+        Dialect::MariaDb => match query(db, "SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS expr, 0 AS not_enforced FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Table' ORDER BY CONSTRAINT_NAME", schema, table).await {
+            Ok(r) => Ok(r),
+            // Before 10.5.10 there is no LEVEL column, and the view lists only the table level ones.
+            Err(_) => query(db, "SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS expr, 0 AS not_enforced FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? ORDER BY CONSTRAINT_NAME", schema, table).await,
+        },
+        Dialect::Postgres => return Vec::new(),
+    };
+    rows.unwrap_or_default().iter().map(|r| CheckConstraint { name: s(r, "name"), expr: s(r, "expr"), not_enforced: r.int("not_enforced").is_some_and(|n| n != 0), ..Default::default() }).collect()
+}
+
 /// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
@@ -533,6 +621,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
         Dialect::Postgres => {
             if let Ok(rows) = query(db, super::pg::catalog::CONSTRAINTS, schema, table).await {
                 st.constraints = constraints(&rows);
+                st.checks = pg_checks(&st.constraints);
             }
             // Not optional: an undo of a dropped column trusts this list to say what went with the column.
             st.pg_deps = col_deps(&query(db, super::pg::catalog::COLUMN_DEPS, schema, table).await?);
@@ -548,7 +637,8 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
             "SELECT CONSTRAINT_NAME AS name, NULL AS srid, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Column'",
         ),
     };
-    let (idx, cols) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table));
+    let (idx, cols, checks) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table), table_checks(db, schema, table));
+    st.checks = checks;
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
@@ -598,6 +688,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         status: status(&stat),
         create: create.and_then(|r| text_at(&r, 1)).unwrap_or_default(),
         constraints: Vec::new(),
+        checks: Vec::new(),
         pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
         pg_deps: Vec::new(),
     };

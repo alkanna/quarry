@@ -6,7 +6,7 @@ use crate::app::*;
 use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
-use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
+use db::sql::structure::{CheckConstraint, Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
@@ -17,8 +17,8 @@ const LATER: &str = "Comes with writes";
 pub(in crate::app) struct StructState {
     pub(in crate::app) load: Load,
     pub(in crate::app) data: Option<Structure>,
-    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
-    pub(in crate::app) sel: [Option<usize>; 5],
+    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers, checks.
+    pub(in crate::app) sel: [Option<usize>; 6],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(in crate::app) staged: Vec<Change>,
     /// The statement and warnings of `staged`, kept between frames.
@@ -74,6 +74,9 @@ pub(in crate::app) enum Act {
     NewIndex,
     EditIndex(usize),
     DropIndex(usize),
+    NewCheck,
+    EditCheck(usize),
+    DropCheck(usize),
     Unstage(usize),
     Discard,
     Apply,
@@ -107,7 +110,7 @@ impl App {
 
     /// The loaded structure, taken out of the tab while the view draws it (put back with `keep`).
     /// Draws the wait or the error and returns None until there is data.
-    fn take_structure(&mut self, ui: &mut egui::Ui) -> Option<(Structure, [Option<usize>; 5])> {
+    fn take_structure(&mut self, ui: &mut egui::Ui) -> Option<(Structure, [Option<usize>; 6])> {
         let st = &self.tabs[self.cur].sql.as_ref()?.st;
         if st.data.is_none() && matches!(st.load, Load::Idle) {
             self.request_structure();
@@ -144,7 +147,7 @@ impl App {
         }
     }
 
-    fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 5], acts: Vec<Act>) {
+    fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 6], acts: Vec<Act>) {
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             (s.st.data, s.st.sel) = (Some(data), sel);
         }
@@ -180,6 +183,9 @@ impl App {
             Act::NewIndex => self.open_idx_form(None),
             Act::EditIndex(i) => self.open_idx_form(Some(i)),
             Act::DropIndex(i) => self.stage_drop_index(i),
+            Act::NewCheck => self.open_check_form(None),
+            Act::EditCheck(i) => self.open_check_form(Some(i)),
+            Act::DropCheck(i) => self.stage_drop_check(i),
             Act::Unstage(i) => self.unstage(i),
             Act::Discard => self.discard_staged(),
             Act::Apply => self.request_alter_apply(),
@@ -209,6 +215,7 @@ impl App {
         let col = sel[0].filter(|i| *i < d.columns.len());
         let conn = self.t().map_or(0, |t| t.sel.conn);
         let pg = self.is_pg(conn);
+        let dialect = self.alter_env().0;
         let (order, unsigned, collation, cardinality) = (self.supports(conn, db::sql::Feature::ColumnOrder), self.supports(conn, db::sql::Feature::Unsigned), self.supports(conn, db::sql::Feature::Collation), self.supports(conn, db::sql::Feature::IndexCardinality));
         let mut left = Vec::new();
         edit_row_with(ui, editable, note, |ui, on| {
@@ -345,6 +352,64 @@ impl App {
             }
             if let (Some(r), true) = (hit.double, editable) {
                 acts.push(Act::EditIndex(r));
+            }
+            ui.add_space(14.0);
+            let ck = sel[5].filter(|i| *i < d.checks.len());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                caption(ui, "CHECK CONSTRAINTS");
+                stat_chip(ui, &d.checks.len().to_string());
+                right_group(ui, |ui| {
+                    if quiet_enabled(ui, editable, "+ Check").on_hover_text("Add a CHECK constraint").on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::NewCheck);
+                    }
+                    if let Some(i) = ck {
+                        if quiet_enabled(ui, editable, "Drop").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::DropCheck(i));
+                        }
+                        if quiet_enabled(ui, editable, "Edit").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::EditCheck(i));
+                        }
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            if d.checks.is_empty() {
+                ui.label(RichText::new("This table has no CHECK constraints.").size(TXT_SMALL).color(FAINT()));
+            } else {
+                let heads = [gc("Name", 2.0), gc("Expression", 4.6), gc("State", 1.6)];
+                let mut cmenu = |ui: &mut egui::Ui, r: usize| {
+                    if ui.add_enabled(editable, egui::Button::new("Edit check")).on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::EditCheck(r));
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.add_enabled_ui(editable, |ui| {
+                        if danger_item(ui, "Drop check").clicked() {
+                            acts.push(Act::DropCheck(r));
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_disabled_hover_text(why);
+                    ui.separator();
+                    if ui.button("Copy expression").clicked() {
+                        acts.push(Act::Copy(d.checks[r].expr.clone()));
+                        ui.close();
+                    }
+                };
+                let hit = grid_ex(ui, "checks", &heads, d.checks.len(), sel[5], |ui, rect, r, c| {
+                    if c == 0 && staged.iter().any(|s| matches!(s, Change::DropCheck(n) if *n == d.checks[r].name)) {
+                        ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, ALERT());
+                    }
+                    check_cell(ui, rect, &d.checks[r], c, dialect)
+                }, Some(&mut cmenu));
+                if let Some(r) = hit.click {
+                    sel[5] = Some(r);
+                }
+                if let (Some(r), true) = (hit.double, editable) {
+                    acts.push(Act::EditCheck(r));
+                }
             }
         });
         self.hold_staged(staged, memo);
@@ -802,6 +867,30 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
     }
 }
 
+fn check_cell(ui: &egui::Ui, rect: Rect, k: &CheckConstraint, col: usize, dialect: db::sql::Dialect) {
+    let mono = || FontId::monospace(TXT_SMALL);
+    match col {
+        0 => put(ui, rect, &k.name, mono(), TEXT(), false),
+        1 => put(ui, rect, &k.expr, mono(), TEXT(), false),
+        _ => {
+            // MySQL says whether a CHECK is enforced; PostgreSQL says only the unusual: NOT VALID and NO INHERIT.
+            let mut v: Vec<&str> = Vec::new();
+            if k.not_valid {
+                v.push("NOT VALID");
+            }
+            if k.no_inherit {
+                v.push("NO INHERIT");
+            }
+            if k.not_enforced {
+                v.push("NOT ENFORCED");
+            } else if dialect == db::sql::Dialect::MySql {
+                v.push("ENFORCED");
+            }
+            put(ui, rect, &v.join(", "), mono(), MUTED(), false);
+        }
+    }
+}
+
 /// A bordered table with a header row, striped rows and a row number. `cell` paints one cell and
 /// may add widgets over it. Returns the row that was clicked.
 fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, cell: impl FnMut(&mut egui::Ui, Rect, usize, usize)) -> Option<usize> {
@@ -1020,6 +1109,7 @@ impl App {
                 ix("idx_customer_created", false, &[("customer_id", false), ("created_at", true)], 4402, "Recent orders per customer"),
                 ix("fk_orders_customer", false, &[("customer_id", false)], 1190, "Made for the foreign key"),
             ],
+            checks: vec![db::sql::structure::CheckConstraint { name: "chk_orders_total".into(), expr: "`total` >= 0".into(), ..Default::default() }, db::sql::structure::CheckConstraint { name: "chk_orders_currency".into(), expr: "`currency` in (_utf8mb4'EUR',_utf8mb4'USD',_utf8mb4'GBP')".into(), ..Default::default() }],
             foreign_keys: vec![fk("fk_orders_customer", "orders", "customer_id", "customers", "id", "CASCADE", "RESTRICT"), fk("fk_orders_currency", "orders", "currency", "currencies", "code", "CASCADE", "SET NULL")],
             referenced_by: vec![fk("fk_items_order", "order_items", "order_id", "orders", "id", "CASCADE", "CASCADE"), fk("fk_payments_order", "payments", "order_id", "orders", "id", "CASCADE", "RESTRICT"), fk("fk_shipments_order", "shipments", "order_id", "orders", "id", "CASCADE", "RESTRICT")],
             triggers: vec![Trigger {
@@ -1064,7 +1154,7 @@ impl App {
         t.selected = None;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(d);
-            s.st.sel = [Some(3), None, Some(0), None, Some(0)];
+            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
     }
 }

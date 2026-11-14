@@ -207,6 +207,26 @@ impl Dialect {
         }
     }
 
+    /// MySQL keeps and enforces a CHECK from 8.0.16 and parses and ignores it before. MariaDB enforces it from 10.2.1.
+    pub fn enforces_checks(self, version: &str) -> bool {
+        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
+        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
+        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        match self {
+            Dialect::MySql => (at(0), at(1), at(2)) >= (8, 0, 16),
+            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 2, 1),
+            Dialect::Postgres => true,
+        }
+    }
+
+    /// A CHECK can be NOT ENFORCED on MySQL from 8.0.16. MariaDB has no such clause, and PostgreSQL 18 has one the editor leaves to a query.
+    pub fn can_not_enforce(self, version: &str) -> bool {
+        match self {
+            Dialect::MySql => self.enforces_checks(version),
+            Dialect::MariaDb | Dialect::Postgres => false,
+        }
+    }
+
     /// A DEFAULT that is an expression. Both engines take the timestamp functions bare; MySQL 8 wants every
     /// other expression in parentheses and MariaDB accepts them.
     pub fn default_expr(self, e: &str) -> String {

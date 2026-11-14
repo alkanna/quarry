@@ -9,6 +9,7 @@ pub(in crate::db::sql) struct Sim {
     pub(in crate::db::sql) cols: Vec<(String, Result<ColDef, String>)>,
     pub(in crate::db::sql) idx: Vec<IndexDef>,
     pub(in crate::db::sql) fks: Vec<ForeignKey>,
+    pub(in crate::db::sql) checks: Vec<CheckConstraint>,
     /// PostgreSQL drops a column together with every index that holds it, puts a new column last and cannot place one.
     pg: bool,
     /// PostgreSQL: what the server drops with each column, as read from the catalog.
@@ -19,7 +20,7 @@ pub(in crate::db::sql) struct Sim {
 
 impl Sim {
     pub(in crate::db::sql) fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.is_pg(), deps: st.pg_deps.clone(), notes: Vec::new() }
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), checks: st.checks.clone(), pg: st.is_pg(), deps: st.pg_deps.clone(), notes: Vec::new() }
     }
 
     /// An index the server can use for a key on these columns: it starts with them, in order, whole.
@@ -31,6 +32,11 @@ impl Sim {
     /// there; MySQL compares them without case.
     pub(in crate::db::sql) fn fk_at(&self, name: &str) -> Option<usize> {
         self.fks.iter().position(|k| fk_name_is(self.pg, &k.name, name))
+    }
+
+    /// Where a CHECK is. PostgreSQL tells `c` from `C`; MySQL and MariaDB compare constraint names without case.
+    pub(in crate::db::sql) fn check_at(&self, name: &str) -> Option<usize> {
+        self.checks.iter().position(|k| fk_name_is(self.pg, &k.name, name))
     }
 
     /// The index to drop along with a key: one named like the key on exactly its columns is what the server
@@ -251,6 +257,17 @@ impl Sim {
                 (k.deferrable, k.deferred) = (*deferrable, *deferred);
                 Ok(vec![back])
             }
+            Change::AddCheck(k) => {
+                if self.check_at(&k.name).is_some() {
+                    return Err(format!("The table already has a check constraint called {}.", k.name));
+                }
+                self.checks.push(k.clone());
+                Ok(vec![Change::DropCheck(k.name.clone())])
+            }
+            Change::DropCheck(name) => {
+                let i = self.check_at(name).ok_or_else(|| format!("Check constraint {name} is not on the table."))?;
+                Ok(vec![Change::AddCheck(self.checks.remove(i))])
+            }
         }
     }
 }
@@ -271,6 +288,15 @@ pub fn indexes_after(st: &Structure, changes: &[Change]) -> Vec<String> {
         let _ = sim.apply(c);
     }
     sim.idx.into_iter().map(|i| i.name).collect()
+}
+
+/// The CHECK names after the changes, for the duplicate check of the CHECK form.
+pub fn checks_after(st: &Structure, changes: &[Change]) -> Vec<String> {
+    let mut sim = Sim::of(st);
+    for c in changes {
+        let _ = sim.apply(c);
+    }
+    sim.checks.into_iter().map(|k| k.name).collect()
 }
 
 /// The name a column ends up with once `later` ran.
@@ -340,10 +366,11 @@ pub struct AlterUndo {
     pub loss: Vec<String>,
     /// The sql_mode the steps' literals are written for.
     pub mode: Mode,
-    /// The columns, indexes and foreign keys the steps touch.
+    /// The columns, indexes, foreign keys and CHECKs the steps touch.
     pub cols: Vec<String>,
     pub idx: Vec<String>,
     pub fks: Vec<String>,
+    pub checks: Vec<String>,
     /// `snapshot` of those right after the change ran, filled by the worker.
     pub expect: Vec<(String, Option<String>)>,
     /// PostgreSQL: the other tables the steps lock and rely on, and the keys they add whose rows are checked first.
@@ -391,6 +418,7 @@ pub struct Expect {
     pub cols: Vec<String>,
     pub idx: Vec<String>,
     pub fks: Vec<String>,
+    pub checks: Vec<String>,
     pub snap: Vec<(String, Option<String>)>,
     /// PostgreSQL: every index, constraint and dependent of the table when the plan was made, for a plan (a column drop)
     /// whose undo relies on the table having none besides these. A name list cannot see one that another session added.
@@ -437,8 +465,8 @@ pub(super) fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &
     groups.reverse();
     let steps = groups.iter().map(|g| alter(d, version, m, table, g)).collect::<Result<Vec<_>, _>>()?;
     let loss = undo_loss(&sim, &groups);
-    let (cols, idx, fks) = touched(&groups);
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new(), refs: Vec::new(), orphans: Vec::new(), groups })
+    let (cols, idx, fks, checks) = touched(&groups);
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, checks, expect: Vec::new(), refs: Vec::new(), orphans: Vec::new(), groups })
 }
 
 /// The statements that put the table back, from the structure read before the changes ran. Err says why
@@ -482,9 +510,9 @@ pub(in crate::db::sql) fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<
     out
 }
 
-/// The column, index and foreign key names the undo steps read or write, with no repeats.
-pub(in crate::db::sql) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let (mut cols, mut idx, mut fks): (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
+/// The column, index, foreign key and CHECK names the undo steps read or write, with no repeats.
+pub(in crate::db::sql) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let (mut cols, mut idx, mut fks, mut checks): (Vec<String>, Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     fn add(v: &mut Vec<String>, n: &str) {
         if !v.iter().any(|x| same_name(x, n)) {
             v.push(n.to_string());
@@ -547,12 +575,25 @@ pub(in crate::db::sql) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<S
                 add_exact(&mut fks, name);
                 None
             }
+            Change::AddCheck(k) => {
+                add_exact(&mut checks, &k.name);
+                None
+            }
+            Change::DropCheck(n) => {
+                add_exact(&mut checks, n);
+                None
+            }
         };
         if let Some(Pos::After(n)) = pos {
             add(&mut cols, n);
         }
     }
-    (cols, idx, fks)
+    (cols, idx, fks, checks)
+}
+
+/// A CHECK in one comparable line, with everything the editor can write back.
+pub(in crate::db::sql) fn check_line(k: &CheckConstraint) -> String {
+    format!("{}|{}|{}|{}|{}", k.name, k.expr, k.not_valid, k.no_inherit, k.not_enforced)
 }
 
 /// A foreign key in one comparable line, with everything the editor can write back.
@@ -574,7 +615,7 @@ pub fn ref_state(st: &Structure, cols: &[String]) -> Vec<String> {
 /// How the server shows each named column, index and foreign key, or None when it is not there. Two snapshots are
 /// equal when nothing an undo relies on changed in between. Every part is compared exactly, table names too: both
 /// snapshots come from the same server, which spells a name the same way each time whatever lower_case_table_names is.
-pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String]) -> Vec<(String, Option<String>)> {
+pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String], checks: &[String]) -> Vec<(String, Option<String>)> {
     let col = |n: &String| {
         let c = st.columns.iter().find(|c| same_name(&c.name, n));
         (format!("column {n}"), c.map(|c| format!("{}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}{}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check, c.default_raw.as_ref().map_or(String::new(), |r| format!("|{r}")))))
@@ -587,7 +628,11 @@ pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String])
         let k = st.foreign_keys.iter().find(|k| fk_name_is(st.is_pg(), &k.name, n));
         (format!("foreign key {n}"), k.map(fk_line))
     };
-    cols.iter().map(col).chain(idx.iter().map(index)).chain(fks.iter().map(fk)).collect()
+    let check = |n: &String| {
+        let k = st.checks.iter().find(|k| fk_name_is(st.is_pg(), &k.name, n));
+        (format!("check {n}"), k.map(check_line))
+    };
+    cols.iter().map(col).chain(idx.iter().map(index)).chain(fks.iter().map(fk)).chain(checks.iter().map(check)).collect()
 }
 
 /// What the staged changes cost that undo cannot give back. Shown in the preview.
@@ -605,6 +650,13 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
             }
             if k.not_valid {
                 out.push(format!("{} is added NOT VALID: the rows already in the table are not checked, and undo brings back the same unchecked key.", k.name));
+            }
+        }
+        if let (Change::AddCheck(k), true) = (c, before.is_pg()) {
+            if k.not_valid {
+                out.push(format!("{} is added NOT VALID: the rows already in the table are not checked, and undo brings back the same unchecked constraint.", k.name));
+            } else if before.status.rows.is_none_or(|r| r > 0) {
+                out.push(format!("PostgreSQL checks every row of the table for {} while it holds an exclusive lock, and refuses the constraint if one fails. On a big table add it NOT VALID instead.", k.name));
             }
         }
         let _ = fk_sim.apply(c);
