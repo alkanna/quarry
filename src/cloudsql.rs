@@ -1,5 +1,5 @@
-//! Cloud SQL for PostgreSQL: starts Google's cloud-sql-proxy for the life of a connection, on a private unix socket (a
-//! localhost port on Windows), finds instances through the gcloud CLI, and finds or downloads the proxy program.
+//! Cloud SQL for PostgreSQL and MySQL: starts Google's cloud-sql-proxy for the life of a connection, on a private unix socket
+//! (a localhost port on Windows, and for MySQL everywhere), finds instances through the gcloud CLI, and finds or downloads the proxy program.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -26,7 +26,16 @@ pub struct CloudSql {
     /// Sign in with the Google identity instead of a saved password.
     pub iam: bool,
     pub ip: IpKind,
+    /// A MySQL instance, which the proxy serves on a localhost port: sqlx names the socket file of a PostgreSQL socket folder
+    /// itself, and has no way to say where the proxy puts a MySQL one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mysql: bool,
 }
+
+/// Whether IAM database authentication is offered for MySQL instances. sqlx 0.8 can send the cleartext password the
+/// mysql_clear_password plugin wants (`enable_cleartext_plugin`, which `worker::open_full` turns on for an IAM connection),
+/// but the sign-in has not been tried against a live Cloud SQL instance, so the browser and the form keep it off.
+pub const MYSQL_IAM: bool = false;
 
 /// Where the proxy program and gcloud were found, from Settings or the app's own search. None means the worker searches.
 #[derive(Clone, Default)]
@@ -189,7 +198,7 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
     #[cfg(test)]
     if std::env::current_exe().ok().as_deref() == Some(exe) {
         let target = tests::STUB_TARGET.lock().unwrap().clone();
-        return open_with(timeout, native_tcp(), false, move |at| {
+        return open_with(timeout, native_tcp() || conf.mysql, false, move |at| {
             let mut c = tests::stub(if target.is_some() { "forward" } else { "listen" })(at);
             if let Some(t) = &target {
                 c.env("QUARRY_STUB_TARGET", t);
@@ -208,7 +217,7 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
     };
     // The proxy runs gcloud itself with --gcloud-auth, and an app opened from Finder has no gcloud on its PATH.
     let path = gcloud.as_deref().and_then(path_with_parent);
-    open_with(timeout, native_tcp(), acct, |at| {
+    open_with(timeout, native_tcp() || conf.mysql, acct, |at| {
         let mut c = tokio::process::Command::new(exe);
         c.args(proxy_args(conf, at, acct));
         if let Some(p) = &path {
@@ -217,6 +226,20 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
         c
     })
     .await
+}
+
+/// `open` with the proxy program and gcloud looked up the way a connection does: the paths Settings gave, else a search.
+pub async fn open_found(conf: &CloudSql, tools: &Tools, timeout: Duration) -> Result<CloudProxy, String> {
+    let gcloud = tools.gcloud.clone().or_else(|| find_gcloud(""));
+    let exe = match tools.proxy.clone() {
+        Some(p) => Some(p),
+        None => {
+            let g = gcloud.clone();
+            tokio::task::spawn_blocking(move || find_proxy("", g.as_deref())).await.ok().flatten()
+        }
+    };
+    let exe = exe.ok_or_else(|| format!("{PROXY_MISSING}. Download it from the connection's error card or the Cloud SQL browser, or set its path in Settings."))?;
+    open(conf, &exe, gcloud, timeout).await
 }
 
 /// A fresh socket folder, or a free port when `tcp`.
@@ -633,14 +656,26 @@ pub struct Instance {
     pub iam: bool,
 }
 
+impl Instance {
+    pub fn mysql(&self) -> bool {
+        self.version.starts_with("MYSQL_")
+    }
+
+    /// Whether Use may turn IAM sign-in on for this instance: its flag is on and the engine's sign-in is offered.
+    pub fn iam_usable(&self) -> bool {
+        self.iam && (!self.mysql() || MYSQL_IAM)
+    }
+}
+
 pub fn instances(gcloud: &Path, project: &str) -> Result<Vec<Instance>, String> {
     if !valid_project(project) {
         return Err(format!("Cloud SQL: \"{project}\" is not a project id."));
     }
-    parse_instances(&run_gcloud(gcloud, &["--format=json", "sql", "instances", "list", &format!("--project={project}"), "--filter=databaseVersion:POSTGRES*"])?)
+    parse_instances(&run_gcloud(gcloud, &["--format=json", "sql", "instances", "list", &format!("--project={project}"), "--filter=databaseVersion:POSTGRES* OR databaseVersion:MYSQL*"])?)
 }
 
-/// Only PostgreSQL instances are kept, whatever the filter let through.
+/// Only PostgreSQL and MySQL instances are kept, whatever the filter let through.
+/// The IAM flag has a dot in PostgreSQL's name and an underscore in MySQL's.
 pub fn parse_instances(json: &str) -> Result<Vec<Instance>, String> {
     #[derive(Deserialize, Default)]
     #[serde(default, rename_all = "camelCase")]
@@ -683,12 +718,12 @@ pub fn parse_instances(json: &str) -> Result<Vec<Instance>, String> {
     }
     let v: Vec<Raw> = serde_json::from_str(json).map_err(|e| format!("Cloud SQL: gcloud returned an unexpected instance list ({e})"))?;
     Ok(v.into_iter()
-        .filter(|r| r.database_version.starts_with("POSTGRES_") && !r.connection_name.is_empty())
+        .filter(|r| (r.database_version.starts_with("POSTGRES_") || r.database_version.starts_with("MYSQL_")) && !r.connection_name.is_empty())
         .map(|r| Instance {
             public_ip: r.ip_addresses.iter().any(|i| i.r#type == "PRIMARY"),
             private_ip: r.ip_addresses.iter().any(|i| i.r#type == "PRIVATE"),
             psc: r.settings.ip_configuration.psc_config.psc_enabled,
-            iam: r.settings.database_flags.iter().any(|f| f.name == "cloudsql.iam_authentication" && f.value == "on"),
+            iam: r.settings.database_flags.iter().any(|f| matches!(f.name.as_str(), "cloudsql.iam_authentication" | "cloudsql_iam_authentication") && f.value == "on"),
             connection_name: r.connection_name,
             name: r.name,
             region: r.region,
@@ -820,7 +855,7 @@ pub(crate) mod tests {
     use super::*;
 
     fn conf(iam: bool, ip: IpKind) -> CloudSql {
-        CloudSql { instance: "proj-1:europe-west1:db-main".into(), iam, ip }
+        CloudSql { instance: "proj-1:europe-west1:db-main".into(), iam, ip, mysql: false }
     }
 
     #[test]
@@ -923,19 +958,33 @@ pub(crate) mod tests {
       {"connectionName":"proj-1:us-east1:psc","name":"psc","region":"us-east1","databaseVersion":"POSTGRES_17","state":"STOPPED",
        "settings":{"ipConfiguration":{"pscConfig":{"pscEnabled":true}}}},
       {"connectionName":"proj-1:us-east1:idle","name":"idle","region":"us-east1","databaseVersion":"POSTGRES_14","state":"RUNNABLE","settings":{"activationPolicy":"NEVER"}},
-      {"connectionName":"proj-1:us-east1:shop","name":"shop","region":"us-east1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE"}
+      {"connectionName":"proj-1:us-east1:shop","name":"shop","region":"us-east1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"databaseFlags":[{"name":"cloudsql_iam_authentication","value":"on"}]}},
+      {"connectionName":"proj-1:us-east1:legacy","name":"legacy","region":"us-east1","databaseVersion":"SQLSERVER_2019_STANDARD","state":"RUNNABLE"}
     ]"#;
 
     #[test]
-    fn instances_parse_and_keep_only_postgres() {
+    fn instances_parse_and_keep_only_postgres_and_mysql() {
         let v = parse_instances(INSTANCES).unwrap();
-        assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["main", "internal", "psc", "idle"]);
+        assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["main", "internal", "psc", "idle", "shop"]);
+        // MySQL names its IAM flag with an underscore, and IAM sign-in is not offered for it.
+        assert!(v[4].mysql() && v[4].iam && !v[4].iam_usable() && v[4].public_ip);
+        assert!(!v[0].mysql() && v[0].iam_usable());
         assert_eq!(v[3].state, "STOPPED", "an instance set to never run is stopped, as gcloud's list says");
         assert!(v[0].public_ip && v[0].iam && !v[0].private_ip && !v[0].psc);
         assert!(v[1].private_ip && !v[1].public_ip && !v[1].iam);
         assert!(v[2].psc && v[2].state == "STOPPED");
         assert!(parse_instances("[]").unwrap().is_empty());
         assert!(parse_instances("not json").is_err());
+    }
+
+    #[test]
+    fn a_mysql_instance_is_served_on_a_localhost_port() {
+        let c = CloudSql { instance: "proj-1:us-east1:shop".into(), iam: false, ip: IpKind::Private, mysql: true };
+        assert_eq!(proxy_args(&c, &Listen::Tcp(5501), false), ["proj-1:us-east1:shop", "--port", "5501", "--address", "127.0.0.1", "--private-ip"]);
+        // The flag is only written for a MySQL instance, so a connection saved before MySQL loads and saves unchanged.
+        assert!(!serde_json::to_string(&conf(false, IpKind::Public)).unwrap().contains("mysql"));
+        assert!(serde_json::to_string(&c).unwrap().contains("\"mysql\":true"));
+        assert!(!serde_json::from_str::<CloudSql>(r#"{"instance":"p:r:i"}"#).unwrap().mysql);
     }
 
     #[test]

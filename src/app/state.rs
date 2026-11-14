@@ -1361,9 +1361,10 @@ impl ConnForm {
         a
     }
 
-    /// The Cloud SQL settings when they apply: only PostgreSQL goes through the proxy.
+    /// The Cloud SQL settings when they apply: PostgreSQL and MySQL go through the proxy, and only while the form is on the
+    /// engine of the instance that was picked.
     pub(super) fn cloud_on(&self) -> Option<&crate::cloudsql::CloudSql> {
-        self.cloud_sql.as_ref().filter(|_| self.engine == db::sql::Engine::Postgres)
+        self.cloud_sql.as_ref().filter(|c| self.engine == if c.mysql { db::sql::Engine::MySql } else { db::sql::Engine::Postgres })
     }
 
     pub(super) fn net(&self) -> db::Net {
@@ -1371,7 +1372,7 @@ impl ConnForm {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
             // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
             proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
-            cloud_sql: self.cloud_sql.clone().filter(|_| self.engine == db::sql::Engine::Postgres),
+            cloud_sql: self.cloud_on().cloned(),
             tools: Default::default(),
             key_passphrase: (self.engine == db::sql::Engine::Postgres && !self.pg_key_pass.is_empty()).then(|| self.pg_key_pass.clone()),
         }

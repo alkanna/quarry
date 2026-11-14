@@ -3,10 +3,13 @@
 //! errors in the window so a missing privilege is not announced every 2 seconds. View only: no SET anywhere.
 
 use crate::app::*;
+use db::sql::server::locks::Locks;
 use db::sql::server::{metrics, rate, Answer, KillTarget, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+mod locks;
 
 pub(in crate::app) const POLL: Duration = Duration::from_secs(2);
 /// After a failed read a polling tab tries again this often, so one dropped packet does not end the polling and a
@@ -88,6 +91,7 @@ pub(in crate::app) enum SqlServerTab {
     Status,
     #[default]
     Processes,
+    Locks,
 }
 
 #[derive(Default)]
@@ -101,6 +105,9 @@ pub(in crate::app) struct SqlServerWin {
     procs_req: u64,
     vars_req: u64,
     procs_wait: bool,
+    locks_req: u64,
+    locks_wait: bool,
+    locks: Option<db::Res<std::sync::Arc<Locks>>>,
     vars_wait: bool,
     /// When to ask for the processes again; None asks on the next frame.
     next: Option<Instant>,
@@ -169,6 +176,7 @@ impl SqlServerWin {
             "variables" => SqlServerTab::Variables,
             "overview" => SqlServerTab::Overview,
             "status" => SqlServerTab::Status,
+            "locks" => SqlServerTab::Locks,
             _ => SqlServerTab::Processes,
         };
         // Two samples 2.5 s apart, so the demo goes through the same rate math as a live server.
@@ -193,6 +201,7 @@ impl SqlServerWin {
         s.uptime = Some(41 * 86_400 + 3 * 3600);
         s.sel = Some(8812);
         s.auto = true;
+        s.locks = Some(Ok(std::sync::Arc::new(demo_locks(&rows))));
         s.procs = Some(Ok(Processes { rows, me: 8901, uptime: s.uptime, identity: String::new() }));
         s.var_filter = "timeout".into();
         s.vars = Some(Ok(Variables { rows: vars, global: false, defaults: true, uptime: s.uptime }));
@@ -204,6 +213,30 @@ pub(in crate::app) fn up_text(secs: u64) -> String {
     let (d, h, m) = (secs / 86_400, secs / 3600, secs / 60);
     let plural = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
     if d > 0 { plural(d, "day") } else if h > 0 { plural(h, "hour") } else { plural(m, "minute") }
+}
+
+/// Canned locks for the offline demo: an idle transaction on `orders` holds the row two writers wait for, and a third
+/// queues behind one of them, so the tab shows a chain two deep.
+fn demo_locks(procs: &[Proc]) -> Locks {
+    use db::sql::server::locks::{LockWait, Trx};
+    let p = Proc::new;
+    let mut all: Vec<Proc> = procs.to_vec();
+    all.push(p(8830, "app", "10.0.2.33:40990", "shop", "Query", 41.0, "updating", "UPDATE orders SET status = 'shipped' WHERE id = 90211"));
+    all.push(p(8841, "jane", "10.0.8.5:52210", "shop", "Query", 33.0, "Waiting for table metadata lock", "ALTER TABLE orders ADD COLUMN note TEXT"));
+    all.push(p(8850, "report", "10.0.4.12:51710", "shop", "Query", 29.0, "Waiting for table metadata lock", "SELECT COUNT(*) FROM orders"));
+    all.retain(|x| x.id != 8790);
+    all.push(p(8790, "app", "10.0.2.31:40118", "shop", "Sleep", 118.0, "", ""));
+    let wait = |waiter: u64, blocker: u64, kind: &str, on: &str, mode: &str| LockWait { waiter, blocker, kind: kind.into(), on: on.into(), mode: mode.into() };
+    let trx = |id: u64, open: f64, waiting: Option<f64>, q: &str| (id, Trx { id, open_secs: Some(open), wait_secs: waiting, query: q.into() });
+    Locks {
+        waits: vec![wait(8830, 8790, "Row", "shop.orders (PRIMARY)", "X,REC_NOT_GAP"), wait(8841, 8790, "Metadata", "shop.orders", "EXCLUSIVE"), wait(8850, 8841, "Metadata", "shop.orders", "SHARED_READ")],
+        procs: all.into_iter().map(|x| (x.id, x)).collect(),
+        trx: [trx(8790, 124.0, None, ""), trx(8830, 41.0, Some(41.0), "UPDATE orders SET status = 'shipped' WHERE id = 90211")].into_iter().collect(),
+        me: 8901,
+        identity: String::new(),
+        notes: Vec::new(),
+        source: "performance_schema.data_lock_waits",
+    }
 }
 
 /// The process list rows the filter and "Hide sleeping" leave: the filter matches user, database or query.
@@ -240,7 +273,7 @@ impl App {
         let r = banded(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
             let up = s.uptime.map(|u| format!("  ·  up {}", up_text(u))).unwrap_or_default();
-            const TABS: [(SqlServerTab, &str); 4] = [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes")];
+            const TABS: [(SqlServerTab, &str); 5] = [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes"), (SqlServerTab::Locks, "Locks")];
             let labels = TABS.map(|t| t.1);
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
             if let Some(i) = dialog_head(ui, &Head::new("Server").sub(format!("{name}  ·  {}{up}", product.trim())).glyph(glyphs::server).tabs(&labels, active)) && TABS[i].0 != s.tab {
@@ -258,11 +291,12 @@ impl App {
                         SqlServerTab::Overview => overview_view(ui, &mut s),
                         SqlServerTab::Status => status_view(ui, &mut s, max),
                         SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut kill),
+                        SqlServerTab::Locks => locks::locks_view(ui, &mut s, max, &mut kill),
                         SqlServerTab::Variables => vars_view(ui, &mut s, max),
                     }
                 }
             });
-            let auto = s.tab == SqlServerTab::Processes && s.auto;
+            let auto = matches!(s.tab, SqlServerTab::Processes | SqlServerTab::Locks) && s.auto;
             open = !dialog_foot(ui, |ui| {
                 let done = ui.button("Done").on_hover_text("Esc").clicked();
                 if auto {
@@ -307,6 +341,18 @@ impl App {
                 self.req += 1;
                 (s.procs_req, s.procs_wait, s.refresh) = (self.req, true, false);
                 self.worker.sql_server_processes(db.clone(), self.req);
+            }
+            SqlServerTab::Locks => {
+                if s.auto {
+                    ctx.request_repaint_after(POLL);
+                }
+                let due = s.refresh || s.locks.is_none() || (s.auto && s.next.is_none_or(|t| now >= t));
+                if s.locks_wait || !due {
+                    return;
+                }
+                self.req += 1;
+                (s.locks_req, s.locks_wait, s.refresh) = (self.req, true, false);
+                self.worker.sql_server_locks(db.clone(), self.req);
             }
             SqlServerTab::Overview | SqlServerTab::Status => {
                 let overview = s.tab == SqlServerTab::Overview;
@@ -399,6 +445,13 @@ impl App {
                     Err(_) => s.confirm = None,
                 }
                 s.procs = Some(r);
+            }
+            Answer::Locks(r) if req == s.locks_req => {
+                s.locks_wait = false;
+                s.next = Some(Instant::now() + retry_after(r.is_ok()));
+                // A pending Kill follows its thread only while it is the same statement on the same server.
+                s.confirm = s.confirm.take().filter(|c| r.as_ref().is_ok_and(|l| locks::confirm_still_ok(c, l)));
+                s.locks = Some(r.map(std::sync::Arc::new));
             }
             Answer::Vars(r) if req == s.vars_req => {
                 s.vars_wait = false;

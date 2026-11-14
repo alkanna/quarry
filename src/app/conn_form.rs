@@ -409,6 +409,11 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
     ui.end_row();
     form_label(ui, "IAM sign-in");
     ui.horizontal(|ui| {
+        if conf.mysql && !crate::cloudsql::MYSQL_IAM {
+            conf.iam = false;
+            ui.label(RichText::new("Not offered for MySQL instances, which sign in with a database password").color(MUTED()));
+            return;
+        }
         let was = conf.iam;
         let t = toggle(ui, &mut conf.iam);
         t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, conf.iam, "Sign in with IAM"));
@@ -443,8 +448,8 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
     }
     form_label(ui, "Database");
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut f.addr.database).hint_text("postgres").desired_width(200.0).margin(FIELD_MARGIN));
-        ui.label(RichText::new("Optional, empty opens postgres").size(TXT_SMALL).color(FAINT()));
+        ui.add(egui::TextEdit::singleline(&mut f.addr.database).hint_text(if conf.mysql { "All databases" } else { "postgres" }).desired_width(200.0).margin(FIELD_MARGIN));
+        ui.label(RichText::new(if conf.mysql { "Optional, opens this one first" } else { "Optional, empty opens postgres" }).size(TXT_SMALL).color(FAINT()));
     });
     ui.end_row();
     f.cloud_sql = Some(conf);
@@ -717,7 +722,7 @@ impl App {
                     pick = Some((db::sql::Engine::Postgres, "postgres"));
                 }
                 engine_card(ui, "SQ", "SQLite", "Coming later", FAINT(), false, false);
-                if quiet(ui, "Add from Cloud SQL…").on_hover_text("Fill this form from a PostgreSQL instance your gcloud account can reach").clicked() {
+                if quiet(ui, "Add from Cloud SQL…").on_hover_text("Fill this form from a PostgreSQL or MySQL instance your gcloud account can reach").clicked() {
                     browse = true;
                 }
                 if let Some((engine, scheme)) = pick {

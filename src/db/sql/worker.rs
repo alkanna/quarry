@@ -170,11 +170,16 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     if a.engine() == super::Engine::Postgres {
         return super::pg::open(a, timeout, net, adv, info).await;
     }
-    if net.cloud_sql.is_some() {
-        return Err("Cloud SQL connections are for PostgreSQL only".into());
+    if net.cloud_sql.is_some() && net.ssh.is_some() {
+        return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
+    // Held until the connection is dropped, which ends the proxy.
+    let cloud = match &net.cloud_sql {
+        Some(conf) => Some(crate::cloudsql::open_found(conf, &net.tools, timeout).await?),
+        None => None,
+    };
     let tunnel = match &net.ssh {
         // The socket only matters when sqlx checks the certificate's name.
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity)).await?),
@@ -182,12 +187,19 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     };
     // sqlx checks the certificate against the host it is given. Through the tunnel's socket that stays the name typed;
     // Windows has only the tunnel's port, so there the name checked is 127.0.0.1.
-    let (host, port) = match &tunnel {
-        Some(t) if t.socket.is_none() => ("127.0.0.1".to_string(), t.port),
+    let (host, port) = match (&tunnel, &cloud) {
+        (Some(t), _) if t.socket.is_none() => ("127.0.0.1".to_string(), t.port),
+        (_, Some(p)) => ("127.0.0.1".to_string(), p.port),
         _ => (a.host.clone(), a.port),
     };
+    // The proxy already encrypts to the instance, and the instance's certificate would not match 127.0.0.1.
+    let ssl = if cloud.is_some() { SslMode::Disabled } else { a.ssl_mode };
     // The sqlx defaults change how the server reads user SQL (|| as concat, UTC), so they are turned off.
-    let mut o = MySqlConnectOptions::new().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(a.ssl_mode)).pipes_as_concat(false).no_engine_substitution(false).timezone(None);
+    let mut o = MySqlConnectOptions::new().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(ssl)).pipes_as_concat(false).no_engine_substitution(false).timezone(None);
+    // An IAM sign-in has no password: the server asks for the token as a cleartext password, and the proxy supplies it.
+    if net.cloud_sql.as_ref().is_some_and(|c| c.iam) {
+        o = o.enable_cleartext_plugin(true);
+    }
     if let Some(s) = tunnel.as_ref().and_then(|t| t.socket.as_ref()) {
         o = o.socket(s);
     }
@@ -231,7 +243,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
-    Ok((db, dbs, tunnel.map(crate::db::Way::Ssh), ti))
+    Ok((db, dbs, tunnel.map(crate::db::Way::Ssh).or(cloud.map(crate::db::Way::CloudSql)), ti))
 }
 
 /// The databases the login can see, sorted. Text protocol, because SHOW is not preparable on every old server.
@@ -278,7 +290,8 @@ pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, 
 }
 
 /// `make_cols` with the kinds the server's catalog gave the table's columns. PostgreSQL's type names say too little
-/// (a domain, an enum), so its kinds are read from `pg_type` and a MySQL table leaves `kinds` empty.
+/// (a domain, an enum), so its kinds are read from `pg_type`. A MySQL table leaves `kinds` empty, except for the MariaDB
+/// columns that are JSON in all but name.
 pub(super) fn make_cols_kinds<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, kinds: &HashMap<String, Kind>, reserve_id: bool) -> Vec<Col> {
     let mut out: Vec<Col> = cols
         .iter()
@@ -395,11 +408,25 @@ fn pg_extra<R: Cells>(r: &R) -> String {
     v.join(" ")
 }
 
+/// On MariaDB, the LONGTEXT columns declared JSON, as (table, column) pairs for the whole schema or for one table. They read as
+/// `Kind::Json` everywhere a column kind comes from. A server without CHECK_CONSTRAINTS (before 10.2) or a login that cannot
+/// read it just leaves them as text.
+pub(super) async fn json_alias_cols(db: &Db, schema: &str, table: Option<&str>) -> HashSet<(String, String)> {
+    if db.dialect != Dialect::MariaDb {
+        return HashSet::new();
+    }
+    let rows = match table {
+        Some(t) => db.meta(schema, db.dialect.json_checks(true), [schema, t]).await,
+        None => db.meta(schema, db.dialect.json_checks(false), [schema]).await,
+    };
+    super::structure::json_check_pairs(&rows.unwrap_or_default()).into_iter().collect()
+}
+
 /// Column types and the primary key, from information_schema.
 async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
     let cols = async { if d == Dialect::Postgres { pg_columns(db, schema, table).await } else { db.meta(schema, d.columns(), [schema, table]).await } };
-    let (cols, idx) = tokio::try_join!(cols, db.meta(schema, d.indexes(), [schema, table]))?;
+    let (cols, idx, json) = tokio::try_join!(cols, db.meta(schema, d.indexes(), [schema, table]), async { Ok::<_, String>(json_alias_cols(db, schema, Some(table)).await) })?;
     let meta = cols
         .iter()
         .filter_map(|r| {
@@ -408,7 +435,11 @@ async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, 
             Some((text(r, "name")?, (text(r, "full_type")?, nullable, extra)))
         })
         .collect();
-    let kinds = if d == Dialect::Postgres { cols.iter().filter_map(|r| Some((text(r, "name")?, pg_kind(r)))).collect() } else { HashMap::new() };
+    let kinds = if d == Dialect::Postgres {
+        cols.iter().filter_map(|r| Some((text(r, "name")?, pg_kind(r)))).collect()
+    } else {
+        cols.iter().filter(|r| text(r, "full_type").is_some_and(|t| t.eq_ignore_ascii_case("longtext"))).filter_map(|r| text(r, "name")).filter(|n| json.contains(&(table.to_string(), n.clone()))).map(|n| (n, Kind::Json)).collect()
+    };
     // A Postgres key is named by the table, so the index query says which one is the primary key.
     let pk = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
     Ok((meta, kinds, pk))
@@ -474,6 +505,7 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
     let d = db.dialect;
     let p = [schema];
     let (tables, cols, fks) = tokio::try_join!(db.meta(schema, d.tables(), p), db.meta(schema, d.all_columns(), p), db.meta(schema, d.all_foreign_keys(), p))?;
+    let json = json_alias_cols(db, schema, None).await;
     let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
     let mut out: Vec<SchemaTable> = tables
         .iter()
@@ -486,7 +518,7 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
         let (Some(t), Some(name), Some(ty)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
         let Some(table) = out.iter_mut().find(|x| x.name == t) else { continue };
         let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
-        let kind = if d == Dialect::Postgres { pg_kind(r) } else { kind_of_full(&ty) };
+        let kind = if d == Dialect::Postgres { pg_kind(r) } else if ty.eq_ignore_ascii_case("longtext") && json.contains(&(t.clone(), name.clone())) { Kind::Json } else { kind_of_full(&ty) };
         table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind, key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
     }
     Ok(Schema { tables: out })
@@ -1101,9 +1133,8 @@ mod tests {
             assert!(c.nullable, "{}", c.name);
         }
         let kinds: Vec<Kind> = cols.iter().map(|c| c.kind).collect();
-        // MariaDB stores JSON as LONGTEXT, so it is text there.
-        let json = if db.dialect == Dialect::MariaDb { Kind::Text } else { Kind::Json };
-        assert_eq!(kinds, [Kind::Int, Kind::Int, Kind::UInt, Kind::Int, Kind::Decimal, Kind::Float, Kind::Text, Kind::Text, Kind::Binary, Kind::Date, Kind::DateTime, Kind::Time, Kind::Year, json, Kind::Enum, Kind::Set, Kind::Bit]);
+        // MariaDB stores JSON as LONGTEXT with a json_valid CHECK, which is read back as JSON.
+        assert_eq!(kinds, [Kind::Int, Kind::Int, Kind::UInt, Kind::Int, Kind::Decimal, Kind::Float, Kind::Text, Kind::Text, Kind::Binary, Kind::Date, Kind::DateTime, Kind::Time, Kind::Year, Kind::Json, Kind::Enum, Kind::Set, Kind::Bit]);
         assert!(!cols[0].nullable);
     }
 
