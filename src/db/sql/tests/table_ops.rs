@@ -99,7 +99,7 @@ fn live_pg_a_table_is_copied_renamed_and_emptied() {
         l.w.sql_rename(1, db.clone(), s.clone(), s.clone(), moved.clone(), true, false);
         let (res, undo) = renamed_answer(l.next());
         assert!(res.is_ok(), "{var}: {res:?}");
-        assert_eq!(l.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{moved}'")), "1", "{var}");
+        assert_eq!(t.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{moved}'")), "1", "{var}");
         l.w.sql_undo(db.clone(), undo.expect("a schema rename has an undo"), Vec::new(), false);
         assert!(renamed_answer(l.next()).0.is_ok(), "{var}");
         // A table another one points at refuses to be emptied alone, and the dialog is told which one points at it.
