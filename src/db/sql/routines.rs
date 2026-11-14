@@ -86,7 +86,7 @@ pub fn list_sql(d: Dialect) -> &'static str {
                 WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') \
                 ORDER BY p.proname, 3";
     }
-    "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, '' AS args, COALESCE(DTD_IDENTIFIER, '') AS returns, COALESCE(ROUTINE_BODY, '') AS lang FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE') ORDER BY ROUTINE_NAME, ROUTINE_TYPE"
+    "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, '' AS args, COALESCE(DTD_IDENTIFIER, '') AS `returns`, COALESCE(ROUTINE_BODY, '') AS lang FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE') ORDER BY ROUTINE_NAME, ROUTINE_TYPE"
 }
 
 /// A row of `list_sql`, read through `get` so a test needs no server.
@@ -183,7 +183,7 @@ pub const PG_PARAMS: &str = "SELECT (a.n)::int::text AS pos, COALESCE((p.proargn
     FROM pg_proc p CROSS JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[])) WITH ORDINALITY AS a(t, n) WHERE p.oid = $1::oid ORDER BY a.n";
 
 /// MySQL's detail row. Params: [schema, name, type].
-pub const MY_DETAIL: &str = "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, COALESCE(DTD_IDENTIFIER, '') AS returns, COALESCE(ROUTINE_BODY, '') AS lang, COALESCE(SECURITY_TYPE, '') AS security, COALESCE(IS_DETERMINISTIC, '') AS deterministic, \
+pub const MY_DETAIL: &str = "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, COALESCE(DTD_IDENTIFIER, '') AS `returns`, COALESCE(ROUTINE_BODY, '') AS lang, COALESCE(SECURITY_TYPE, '') AS security, COALESCE(IS_DETERMINISTIC, '') AS is_det, \
     COALESCE(SQL_DATA_ACCESS, '') AS access, COALESCE(ROUTINE_COMMENT, '') AS comment, COALESCE(DEFINER, '') AS definer, COALESCE(ROUTINE_DEFINITION, '') AS body, COALESCE(SQL_MODE, '') AS sql_mode \
     FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ? AND ROUTINE_TYPE = ?";
 
@@ -241,7 +241,7 @@ pub fn my_detail(get: &dyn Fn(&str) -> Option<String>, params: Vec<Param>, creat
         lang: g("lang"),
         security: g("security"),
         owner: g("definer"),
-        behavior: if g("deterministic").eq_ignore_ascii_case("YES") { "DETERMINISTIC".into() } else { "NOT DETERMINISTIC".into() },
+        behavior: if g("is_det").eq_ignore_ascii_case("YES") { "DETERMINISTIC".into() } else { "NOT DETERMINISTIC".into() },
         data_access: g("access"),
         comment: g("comment"),
         sql_mode: g("sql_mode"),
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn mysql_detail_without_show_create_falls_back_to_the_body() {
-        let pairs = [("name", "f"), ("kind", "FUNCTION"), ("body", "RETURN 1"), ("deterministic", "YES"), ("security", "DEFINER")];
+        let pairs = [("name", "f"), ("kind", "FUNCTION"), ("body", "RETURN 1"), ("is_det", "YES"), ("security", "DEFINER")];
         let d = my_detail(&row(&pairs), Vec::new(), None).unwrap();
         assert_eq!(d.source, "RETURN 1");
         assert!(d.header_missing.is_some());
