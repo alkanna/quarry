@@ -8,7 +8,7 @@
 
 use crate::db::sql::create::{Ddl, DropInfo};
 use crate::db::sql::ddl::{fk_problem, ref_state, snapshot, ColDef};
-use crate::db::sql::pg::ddl::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock};
+use crate::db::sql::pg::ddl::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, in_tx, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock, REFRESH_NEXT};
 use crate::db::sql::exec::{sql_state, Cells, Conn, SqlRow, Tx};
 use sqlx::Connection as _;
 use crate::db::sql::structure::{num, Column, ForeignKey, Index, IndexCol, Structure};
@@ -40,10 +40,8 @@ pub fn system_db(name: &str) -> bool {
 /// How many dependent objects a confirmation lists before it says "and N more".
 pub(in crate::db::sql) const LISTED: usize = 20;
 
-const LOCKED: &str = "Writes are locked on this connection. Unlock them first.";
-
 /// A name this app creates. PostgreSQL would take a newline or a tab, but nobody could type it back.
-fn new_name(what: &str, name: &str) -> Res<()> {
+pub(in crate::db::sql) fn new_name(what: &str, name: &str) -> Res<()> {
     name_ok(name, what)?;
     if name.chars().any(|c| c.is_control()) {
         return Err(format!("{what} name cannot contain control characters or line breaks."));
@@ -776,7 +774,7 @@ async fn table_info(db: &Db, schema: &str, table: &str, read_only: bool) -> Res<
 /// on a session, and its backends are not read-only to begin with.
 async fn maintenance(db: &Db, read_only: bool) -> Res<Conn> {
     if read_only {
-        return Err(LOCKED.into());
+        return Err(write::LOCKED.into());
     }
     let mut c = db.acquire_conn().await?;
     if !db.pooler() && let Err(x) = c.execute(&format!("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '{WRITE_LOCK_SECS}s'")).await {
@@ -948,15 +946,6 @@ async fn begin<'c>(c: &'c mut Conn, db: &Db, scope: &str) -> Res<Tx<'c>> {
     Ok(tx)
 }
 
-/// One write transaction of a create or a drop, ended by COMMIT, or by ROLLBACK when `body` failed (`run_locked`). A failed COMMIT
-/// does not say that nothing changed, so it says so.
-pub(super) async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
-    let run = run_locked(db, scope, read_only, &[], "Refresh the lists and check before running it again.", async |tx| body(tx).await.map_err(Fail::Run)).await;
-    run.map_err(|f| match f {
-        Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
-    })
-}
-
 pub(super) async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT oid::text AS n FROM pg_namespace WHERE nspname = $1", &[Param::Text(schema.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
@@ -1050,7 +1039,7 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
         let name = D.qualified(&s, &t);
         Lock { gone: Some(format!("the referenced table {name} (it is gone)")), name, mode: "SHARE ROW EXCLUSIVE", plain_only: false }
     }).collect();
-    let run = run_locked(db, &spec.schema, read_only, &locks, "Refresh the lists and check before running it again.", async |tx| {
+    let run = run_locked(db, &spec.schema, read_only, &locks, REFRESH_NEXT, async |tx| {
         let own = spec.as_structure();
         for k in spec.fks.iter().filter(|k| !spec.self_ref(k)) {
             let (ps, name) = (spec.parent_schema(k), D.qualified(spec.parent_schema(k), &k.ref_table));
@@ -1268,8 +1257,8 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
     out
 }
 
-pub(super) fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
+pub(in crate::db::sql) fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
+    write::undo_action(conn, &db.pg_database(), schema, table, undo)
 }
 
 pub(super) fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {

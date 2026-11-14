@@ -5,7 +5,7 @@
 //! A routine is identified by its kind and name on MySQL and MariaDB, where a function and a procedure may share a name, and
 //! by kind, name and identity arguments on PostgreSQL, where overloads share one. `Routine::key` is that identity.
 
-use super::lex::{tokens, Tok};
+use super::lex::{tokens, unquote_ident, Tok};
 use super::value::{lit, pg_lit};
 use super::worker::{text, text_at};
 use super::{se, Db, Dialect};
@@ -148,8 +148,6 @@ pub struct Detail {
     pub header_missing: Option<String>,
     /// The argument list as the server prints it.
     pub signature: String,
-    pub returns: String,
-    pub lang: String,
     /// DEFINER or INVOKER.
     pub security: String,
     /// MySQL: the account the routine runs as. PostgreSQL: the owner.
@@ -211,19 +209,15 @@ pub fn pg_detail(get: &dyn Fn(&str) -> Option<String>, params: Vec<Param>) -> Op
         read_only: routine.kind == Kind::Function && behavior != "VOLATILE",
         routine: Some(routine),
         source: def,
-        header_missing: None,
         signature: g("signature"),
-        returns: g("returns"),
-        lang: g("lang"),
         security: g("security"),
         owner: g("owner"),
         behavior: behavior.into(),
-        data_access: String::new(),
         comment: g("comment"),
         params,
         oid: g("oid"),
         seen,
-        sql_mode: String::new(),
+        ..Default::default()
     })
 }
 
@@ -237,8 +231,6 @@ pub fn my_detail(get: &dyn Fn(&str) -> Option<String>, params: Vec<Param>, creat
         None => (g("body"), Some("SHOW CREATE needs the SHOW_ROUTINE privilege, or to be the routine's definer, so only the body is shown and it cannot be edited here.".to_string())),
     };
     Some(Detail {
-        returns: g("returns"),
-        lang: g("lang"),
         security: g("security"),
         owner: g("definer"),
         behavior: if g("is_det").eq_ignore_ascii_case("YES") { "DETERMINISTIC".into() } else { "NOT DETERMINISTIC".into() },
@@ -250,9 +242,7 @@ pub fn my_detail(get: &dyn Fn(&str) -> Option<String>, params: Vec<Param>, creat
         header_missing,
         signature,
         params,
-        oid: String::new(),
-        seen: String::new(),
-        read_only: false,
+        ..Default::default()
     })
 }
 
@@ -277,50 +267,52 @@ pub fn template(d: Dialect, kind: Kind, schema: &str) -> String {
     }
 }
 
+/// A CREATE statement lexed once, for what its head says and for putting OR REPLACE into it.
+struct Create<'a> {
+    sql: &'a str,
+    toks: Vec<(Tok, std::ops::Range<usize>)>,
+}
+
+impl<'a> Create<'a> {
+    fn new(d: Dialect, sql: &'a str) -> Self {
+        Create { sql, toks: tokens(sql, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect() }
+    }
+
+    fn word(&self, k: usize, s: &str) -> bool {
+        self.toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && self.sql[r.clone()].eq_ignore_ascii_case(s))
+    }
+
+    /// The kind, the database or schema the name is qualified with, and the name, when the lexer finds them.
+    fn head(&self) -> Option<(Kind, Option<String>, Option<String>)> {
+        if !self.word(0, "CREATE") {
+            return None;
+        }
+        let at = (1..self.toks.len()).find(|&k| self.word(k, "FUNCTION") || self.word(k, "PROCEDURE"))?;
+        let kind = if self.word(at, "FUNCTION") { Kind::Function } else { Kind::Procedure };
+        let mut k = at + 1;
+        if self.word(k, "IF") && self.word(k + 1, "NOT") && self.word(k + 2, "EXISTS") {
+            k += 3;
+        }
+        let part = |k: usize| self.toks.get(k).filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted)).map(|(_, r)| unquote_ident(&self.sql[r.clone()]));
+        let dot = |k: usize| self.toks.get(k).is_some_and(|(t, r)| *t == Tok::Punct && &self.sql[r.clone()] == ".");
+        // A PostgreSQL name may be quoted with double quotes, which the lexer reads as a string.
+        let (qual, name) = if dot(k + 1) { (part(k), part(k + 2)) } else { (None, part(k)) };
+        Some((kind, qual, name))
+    }
+
+    /// MariaDB's `OR REPLACE` put after CREATE when the text has none.
+    fn with_or_replace(&self) -> String {
+        if !self.word(0, "CREATE") || self.word(1, "OR") {
+            return self.sql.to_string();
+        }
+        let end = self.toks[0].1.end;
+        format!("{} OR REPLACE{}", &self.sql[..end], &self.sql[end..])
+    }
+}
+
 /// What a CREATE statement says about itself: its kind and, when the lexer finds it, its name without the database.
 pub fn head_of(d: Dialect, sql: &str) -> Option<(Kind, Option<String>)> {
-    head_parts(d, sql).map(|(k, _, n)| (k, n))
-}
-
-/// `head_of` with the database or schema the name is qualified with, when it is.
-pub fn head_parts(d: Dialect, sql: &str) -> Option<(Kind, Option<String>, Option<String>)> {
-    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens(sql, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
-    let word = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
-    if !word(0, "CREATE") {
-        return None;
-    }
-    let at = (1..toks.len()).find(|&k| word(k, "FUNCTION") || word(k, "PROCEDURE"))?;
-    let kind = if word(at, "FUNCTION") { Kind::Function } else { Kind::Procedure };
-    let mut k = at + 1;
-    if word(k, "IF") && word(k + 1, "NOT") && word(k + 2, "EXISTS") {
-        k += 3;
-    }
-    let part = |k: usize| toks.get(k).filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted)).map(|(t, r)| unquote(&sql[r.clone()], *t == Tok::Quoted));
-    let dot = |k: usize| toks.get(k).is_some_and(|(t, r)| *t == Tok::Punct && &sql[r.clone()] == ".");
-    // A PostgreSQL name may be quoted with double quotes, which the lexer reads as a string.
-    let (qual, name) = if dot(k + 1) { (part(k), part(k + 2)) } else { (None, part(k)) };
-    Some((kind, qual, name))
-}
-
-fn unquote(tok: &str, quoted: bool) -> String {
-    if !quoted {
-        return tok.to_string();
-    }
-    if tok.len() < 2 {
-        return tok.to_string();
-    }
-    tok[1..tok.len() - 1].replace("``", "`")
-}
-
-/// MariaDB's `OR REPLACE` put after CREATE when the text has none.
-pub fn with_or_replace(d: Dialect, sql: &str) -> String {
-    let toks: Vec<_> = tokens(sql, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
-    let word = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
-    if !word(0, "CREATE") || word(1, "OR") {
-        return sql.to_string();
-    }
-    let end = toks[0].1.end;
-    format!("{} OR REPLACE{}", &sql[..end], &sql[end..])
+    Create::new(d, sql).head().map(|(k, _, n)| (k, n))
 }
 
 /// What saving a routine does: the statements in order, and for MySQL the definition that puts the old one back when the
@@ -347,27 +339,28 @@ pub fn plan(d: Dialect, schema: &str, old: Option<&Detail>, text: &str, recreate
     if text.is_empty() {
         return Err("Write the routine's CREATE statement first.".into());
     }
-    let Some((kind, name)) = head_of(d, text) else { return Err("The definition has to be one CREATE FUNCTION or CREATE PROCEDURE statement.".into()) };
+    let create = Create::new(d, text);
+    let Some((kind, qual, name)) = create.head() else { return Err("The definition has to be one CREATE FUNCTION or CREATE PROCEDURE statement.".into()) };
     let mut notes = Vec::new();
-    let Some(was) = old.and_then(|o| o.routine.as_ref().map(|r| (o, r))) else {
+    let Some((old, r)) = old.and_then(|o| o.routine.as_ref().map(|r| (o, r))) else {
         return Ok(Plan { steps: vec![text.to_string()], restore: None, notes });
     };
-    let (old, r) = was;
     if kind != r.kind {
         return Err(format!("This is a {}, so the text cannot be a {}. Create it as a new routine instead.", r.kind.noun(), kind.noun()));
     }
     if d == Dialect::Postgres {
+        let mut steps = vec![text.to_string()];
         if recreate {
             notes.push("The old routine is dropped and created again: grants made on it are lost, and nothing that depends on it (a trigger, a view, another function) may stand in the way.".into());
-            return Ok(Plan { steps: vec![drop_stmt(d, schema, r), text.to_string()], restore: None, notes });
+            steps.insert(0, drop_stmt(d, schema, r));
         }
-        return Ok(Plan { steps: vec![text.to_string()], restore: None, notes });
+        return Ok(Plan { steps, restore: None, notes });
     }
     if old.header_missing.is_some() {
         return Err("Only the body could be read, so the routine cannot be saved from it.".into());
     }
     // A header qualified with another database would drop this routine and create one elsewhere, which nothing puts back.
-    if let Some(q) = head_parts(d, text).and_then(|h| h.1).filter(|q| !q.eq_ignore_ascii_case(schema)) {
+    if let Some(q) = qual.filter(|q| !q.eq_ignore_ascii_case(schema)) {
         return Err(format!("The header names the database {q}, but this routine is in {schema}. Create it in {q} as a new routine instead."));
     }
     if name.as_deref().is_some_and(|n| !n.eq_ignore_ascii_case(&r.name)) {
@@ -375,7 +368,7 @@ pub fn plan(d: Dialect, schema: &str, old: Option<&Detail>, text: &str, recreate
     }
     if d == Dialect::MariaDb {
         notes.push("MariaDB replaces the routine in one statement.".into());
-        return Ok(Plan { steps: vec![with_or_replace(d, text)], restore: None, notes });
+        return Ok(Plan { steps: vec![create.with_or_replace()], restore: None, notes });
     }
     notes.push("MySQL cannot replace a routine in place: it is dropped and created again. If the CREATE is refused, the old definition is created again. Privileges granted on this routine alone may not survive.".into());
     Ok(Plan { steps: vec![drop_stmt(d, schema, r), text.to_string()], restore: Some(old.source.clone()), notes })
@@ -399,43 +392,56 @@ pub fn inputs(d: &Detail) -> Vec<&Param> {
 pub fn run_script(d: Dialect, schema: &str, detail: &Detail, args: &[Arg], bs: bool) -> Option<String> {
     let r = detail.routine.as_ref()?;
     let name = d.qualified(schema, &r.name);
-    let mut next = args.iter();
-    if d == Dialect::Postgres {
-        let mut parts = Vec::new();
-        for p in &detail.params {
-            if !p.mode.takes_value() {
-                // A procedure lists its OUT arguments in the call, as NULL; a function does not take them at all.
-                if r.kind == Kind::Procedure {
-                    parts.push("NULL".to_string());
-                }
-                continue;
+    Some(if d == Dialect::Postgres { pg_call(&name, r.kind, detail, args) } else { my_call(d, &name, r.kind, detail, args, bs) })
+}
+
+/// The values typed for the inputs in order, then empty ones, so a short list still fills every input.
+fn feed(args: &[Arg]) -> impl Iterator<Item = Arg> + '_ {
+    args.iter().cloned().chain(std::iter::repeat(Arg::default()))
+}
+
+fn pg_call(name: &str, kind: Kind, detail: &Detail, args: &[Arg]) -> String {
+    let mut next = feed(args);
+    let mut parts = Vec::new();
+    for p in &detail.params {
+        if !p.mode.takes_value() {
+            // A procedure lists its OUT arguments in the call, as NULL; a function does not take them at all.
+            if kind == Kind::Procedure {
+                parts.push("NULL".to_string());
             }
-            let a = next.next().cloned().unwrap_or_default();
-            let v = if a.null { format!("NULL::{}", p.ty) } else { format!("{}::{}", pg_lit(&a.value), p.ty) };
-            parts.push(if p.mode == ArgMode::Variadic { format!("VARIADIC {v}") } else { v });
+            continue;
         }
-        let call = format!("{name}({})", parts.join(", "));
-        return Some(if r.kind == Kind::Procedure { format!("CALL {call}") } else { format!("SELECT * FROM {call}") });
+        let a = next.next().unwrap_or_default();
+        let v = if a.null { format!("NULL::{}", p.ty) } else { format!("{}::{}", pg_lit(&a.value), p.ty) };
+        parts.push(if p.mode == ArgMode::Variadic { format!("VARIADIC {v}") } else { v });
     }
+    let call = format!("{name}({})", parts.join(", "));
+    if kind == Kind::Procedure { format!("CALL {call}") } else { format!("SELECT * FROM {call}") }
+}
+
+fn my_call(d: Dialect, name: &str, kind: Kind, detail: &Detail, args: &[Arg], bs: bool) -> String {
     let literal = |a: &Arg| if a.null { "NULL".to_string() } else { lit(&a.value, bs) };
-    if r.kind == Kind::Function {
+    if kind == Kind::Function {
         let parts: Vec<String> = args.iter().map(literal).collect();
-        return Some(format!("SELECT {name}({}) AS {}", parts.join(", "), d.quote_ident("result")));
+        return format!("SELECT {name}({}) AS {}", parts.join(", "), d.quote_ident("result"));
     }
+    let mut next = feed(args);
     let (mut sets, mut parts, mut outs) = (Vec::new(), Vec::new(), Vec::new());
     for (i, p) in detail.params.iter().enumerate() {
         let var = format!("@quarry_p{}", i + 1);
+        // An output without a name is read under its variable's name.
+        let alias = |var: &str| format!("{var} AS {}", d.quote_ident(if p.name.is_empty() { &var[1..] } else { &p.name }));
         match p.mode {
             ArgMode::Out => {
-                outs.push(format!("{var} AS {}", d.quote_ident(if p.name.is_empty() { &var[1..] } else { &p.name })));
+                outs.push(alias(&var));
                 parts.push(var);
             }
             ArgMode::InOut => {
-                sets.push(format!("SET {var} = {};", literal(&next.next().cloned().unwrap_or_default())));
-                outs.push(format!("{var} AS {}", d.quote_ident(if p.name.is_empty() { &var[1..] } else { &p.name })));
+                sets.push(format!("SET {var} = {};", literal(&next.next().unwrap_or_default())));
+                outs.push(alias(&var));
                 parts.push(var);
             }
-            _ => parts.push(literal(&next.next().cloned().unwrap_or_default())),
+            _ => parts.push(literal(&next.next().unwrap_or_default())),
         }
     }
     let mut script = sets.join("\n");
@@ -446,7 +452,7 @@ pub fn run_script(d: Dialect, schema: &str, detail: &Detail, args: &[Arg], bs: b
     if !outs.is_empty() {
         script.push_str(&format!("\nSELECT {};", outs.join(", ")));
     }
-    Some(script)
+    script
 }
 
 // ---------- the MySQL sequence ----------
@@ -752,7 +758,7 @@ mod tests {
         assert_eq!(p.steps.len(), 1);
         assert!(p.steps[0].starts_with("CREATE OR REPLACE DEFINER="), "{}", p.steps[0]);
         assert!(p.restore.is_none());
-        assert_eq!(with_or_replace(Dialect::MariaDb, "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1"), "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1");
+        assert_eq!(Create::new(Dialect::MariaDb, "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1").with_or_replace(), "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1");
     }
 
     #[test]

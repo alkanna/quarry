@@ -1084,6 +1084,28 @@ pub(in crate::db::sql) async fn run_locked<T>(db: &Db, scope: &str, read_only: b
     }
 }
 
+/// What a create, drop, rename or view change says when the COMMIT did not confirm.
+pub(in crate::db::sql) const REFRESH_NEXT: &str = "Refresh the lists and check before running it again.";
+
+impl From<Fail> for String {
+    fn from(f: Fail) -> String {
+        match f {
+            Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
+        }
+    }
+}
+
+/// One write transaction of a create, a drop, a rename or a view change, ended by COMMIT, or by ROLLBACK when `body` failed
+/// (`run_locked`). A failed COMMIT does not say that nothing changed, so it says so.
+pub(in crate::db::sql) async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
+    run_locked(db, scope, read_only, &[], REFRESH_NEXT, async |tx| body(tx).await.map_err(Fail::Run)).await.map_err(String::from)
+}
+
+/// `exec` for a statement on the object `name`, where a lock timeout names the session that holds the lock.
+pub(in crate::db::sql) async fn exec_named(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str, name: &str) -> Res<()> {
+    exec(tx, db, schema, sql).await.map_err(|x| lock_error(&x, name).unwrap_or_else(|| se(x)))
+}
+
 /// The note for a plan that did not run. `changed` words a refusal because the objects were not as expected, which reads
 /// differently for each feature and for an undo.
 pub(in crate::db::sql) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String {

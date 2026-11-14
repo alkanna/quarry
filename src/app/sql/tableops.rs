@@ -3,6 +3,7 @@
 //! `db::sql::pg::tableops`. MySQL's own Empty table is the drop dialog's (`DropKind::Truncate`).
 
 use crate::app::sql::create::{list_and, plural, sql_block, DropKind};
+use crate::app::sql::ns::sel_of;
 use crate::app::*;
 use db::sql::create::DropInfo;
 use db::sql::pg::tableops as pgops;
@@ -20,6 +21,8 @@ pub(in crate::app) struct RenameForm {
     from: String,
     to: String,
     focused: bool,
+    /// The statement shown, kept while the new name stays as it is.
+    preview: Option<(String, Result<String, String>)>,
 }
 
 pub(in crate::app) struct DupForm {
@@ -30,6 +33,8 @@ pub(in crate::app) struct DupForm {
     to: String,
     data: bool,
     focused: bool,
+    /// The statements shown, kept while the new name and the choice of rows stay as they are.
+    preview: Option<((String, bool), Result<String, String>)>,
 }
 
 /// Empty a PostgreSQL table, with the two options TRUNCATE has.
@@ -56,6 +61,33 @@ fn trunc_lead(table: &str, conn: &str, info: &DropInfo) -> String {
     format!("This deletes every row of {table}{rows} on {conn}. The table and its structure stay. It cannot be undone.")
 }
 
+impl RenameForm {
+    /// The statement for the current name, built again only when the name changes.
+    fn preview(&mut self, pg: bool, d: db::sql::Dialect) -> Result<String, String> {
+        let (key, built) = self.preview.take().filter(|p| p.0 == self.to).unwrap_or_else(|| {
+            let built = match (pg, self.kind) {
+                (true, DropKind::Schema) => pgops::rename_schema_sql(&self.from, &self.to),
+                (true, k) => pgops::rename_sql(if k == DropKind::View { "VIEW" } else { "TABLE" }, &self.schema, &self.from, &self.to),
+                (false, _) => myops::rename_table_sql(d, &self.schema, &self.from, &self.to, false),
+            };
+            (self.to.clone(), built.map(|sql| format!("{sql};")))
+        });
+        self.preview.insert((key, built)).1.clone()
+    }
+}
+
+impl DupForm {
+    /// Both statements for the current name and choice, built again only when one of them changes.
+    fn preview(&mut self, pg: bool, d: db::sql::Dialect) -> Result<String, String> {
+        let key = (self.to.clone(), self.data);
+        let (key, built) = self.preview.take().filter(|p| p.0 == key).unwrap_or_else(|| {
+            let built = if pg { pgops::duplicate_preview(&self.schema, &self.from, &self.to, self.data) } else { myops::duplicate_preview(d, &self.schema, &self.from, &self.to, self.data, false) };
+            (key, built.map(|v| v.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")))
+        });
+        self.preview.insert((key, built)).1.clone()
+    }
+}
+
 impl App {
     /// The tabs open on `table` of `schema` (every table of it when `table` is empty). On PostgreSQL a tab without a schema of its own
     /// belongs to the one the sidebar shows.
@@ -71,8 +103,28 @@ impl App {
     }
 
     fn session_of(&self, conn: u64, database: &str) -> Option<db::sql::Db> {
-        let sql = self.conn(conn).and_then(|c| c.sql.clone())?;
+        let sql = self.live_sql(conn)?;
         Some(if database.is_empty() { sql } else { sql.at(database) })
+    }
+
+    /// What a change needs to run: the session and whether the connection is read-only. Says why and answers None in the demo, on a
+    /// locked connection (which asks to unlock) and while not connected.
+    fn write_session(&mut self, conn: u64, database: &str) -> Option<(db::sql::Db, bool)> {
+        if self.demo {
+            self.ok("Offline demo: no database is connected.");
+            return None;
+        }
+        if !self.conn_writable(conn) {
+            if self.conn(conn).is_some() {
+                self.modal = Some(Modal::Unlock(conn, None));
+            }
+            return None;
+        }
+        let Some(sql) = self.session_of(conn, database) else {
+            self.warn_offline();
+            return None;
+        };
+        Some((sql, !self.conn_writable(conn)))
     }
 
     /// `db` is the database the sidebar menu was opened on and `name` the table, view or schema.
@@ -80,23 +132,16 @@ impl App {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_rename_ask(conn, db, name, kind));
         }
-        let (database, schema) = match (self.is_pg(conn), kind) {
-            (true, DropKind::Schema) => (db, name.clone()),
-            (true, _) => {
-                let s = self.sel_schema(&Sel { conn, db: db.clone(), ..Default::default() });
-                (db, s)
-            }
-            (false, _) => (String::new(), db),
-        };
-        self.modal = Some(Modal::SqlRename(Box::new(RenameForm { conn, database, schema, kind, to: name.clone(), from: name, focused: false })));
+        let (database, schema) = if self.is_pg(conn) && kind == DropKind::Schema { (db, name.clone()) } else { self.form_ns(conn, db) };
+        self.modal = Some(Modal::SqlRename(Box::new(RenameForm { conn, database, schema, kind, to: name.clone(), from: name, focused: false, preview: None })));
     }
 
     pub(in crate::app) fn sql_duplicate_ask(&mut self, conn: u64, db: String, name: String) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_duplicate_ask(conn, db, name));
         }
-        let (database, schema) = if self.is_pg(conn) { (db.clone(), self.sel_schema(&Sel { conn, db, ..Default::default() })) } else { (String::new(), db) };
-        self.modal = Some(Modal::SqlDuplicate(Box::new(DupForm { conn, database, schema, to: format!("{name}_copy"), from: name, data: true, focused: false })));
+        let (database, schema) = self.form_ns(conn, db);
+        self.modal = Some(Modal::SqlDuplicate(Box::new(DupForm { conn, database, schema, to: format!("{name}_copy"), from: name, data: true, focused: false, preview: None })));
     }
 
     pub(in crate::app) fn pg_truncate_ask(&mut self, conn: u64, db: String, table: String) {
@@ -104,7 +149,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.pg_truncate_ask(conn, db, table));
         }
         let schema = self.sel_schema(&Sel { conn, db: db.clone(), ..Default::default() });
-        if let Some(sql) = self.session_of(conn, &db).filter(|_| !self.demo) {
+        if let Some(sql) = self.session_of(conn, &db) {
             self.worker.pg_truncate_info(conn, sql, db.clone(), schema.clone(), table.clone());
         }
         self.modal = Some(Modal::PgTruncate(Box::new(TruncForm { conn, database: db, schema, table, typed: String::new(), restart: false, cascade: false, info: None })));
@@ -132,7 +177,7 @@ impl App {
             (true, _) => format!("in {}.{} ", f.database, f.schema),
         };
         dialog_head(ui, &Head::new(format!("Rename {noun} {}", f.from)).sub(format!("{place}on {}", self.conn_name(f.conn))).glyph(glyphs::pencil));
-        let taken = f.kind != DropKind::Schema && f.to != f.from && self.tables_of(&Sel { conn: f.conn, db: if pg { f.database.clone() } else { f.schema.clone() }, schema: if pg { f.schema.clone() } else { String::new() }, coll: String::new() }).iter().any(|t| *t == f.to);
+        let taken = f.kind != DropKind::Schema && f.to != f.from && self.table_listed(&sel_of(f.conn, &f.database, &f.schema, String::new()), &f.to);
         let built = dialog_body(ui, |ui| {
             stacked_field(ui, &format!("New {noun} name"), "", |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut f.to).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
@@ -143,13 +188,9 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            let built = match (pg, f.kind) {
-                (true, DropKind::Schema) => pgops::rename_schema_sql(&f.from, &f.to),
-                (true, k) => pgops::rename_sql(if k == DropKind::View { "VIEW" } else { "TABLE" }, &f.schema, &f.from, &f.to),
-                (false, _) => myops::rename_table_sql(d, &f.schema, &f.from, &f.to, false),
-            };
+            let built = f.preview(pg, d);
             match &built {
-                Ok(sql) => sql_block(ui, &format!("{sql};")),
+                Ok(sql) => sql_block(ui, sql),
                 Err(e) => {
                     sql_block(ui, if pg { "ALTER ... RENAME TO \"name\";" } else { "RENAME TABLE `old` TO `name`;" });
                     if f.to != f.from {
@@ -194,15 +235,7 @@ impl App {
     }
 
     fn sql_rename_run(&mut self, f: &RenameForm) {
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(f.conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(f.conn, None));
-        }
-        let Some(sql) = self.session_of(f.conn, &f.database) else { return self.warn_offline() };
-        let ro = !self.conn_writable(f.conn);
+        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
         self.worker.sql_rename(f.conn, sql, f.schema.clone(), f.from.clone(), f.to.clone(), f.kind == DropKind::Schema, ro);
     }
 
@@ -262,8 +295,7 @@ impl App {
         let (pg, d) = (self.is_pg(f.conn), self.dialect_of(f.conn));
         let place = if pg { format!("in {}.{} ", f.database, f.schema) } else { format!("in {} ", f.schema) };
         dialog_head(ui, &Head::new(format!("Duplicate {}", f.from)).sub(format!("{place}on {}", self.conn_name(f.conn))).glyph(glyphs::copy));
-        let sel = Sel { conn: f.conn, db: if pg { f.database.clone() } else { f.schema.clone() }, schema: if pg { f.schema.clone() } else { String::new() }, coll: String::new() };
-        let taken = self.tables_of(&sel).iter().any(|t| *t == f.to);
+        let taken = self.table_listed(&sel_of(f.conn, &f.database, &f.schema, String::new()), &f.to);
         let built = dialog_body(ui, |ui| {
             stacked_field(ui, "New table name", "", |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut f.to).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
@@ -287,14 +319,9 @@ impl App {
                 f.data = true;
             }
             ui.add_space(10.0);
-            // Both statements as they run; the column list of the second is read from the server, so the preview shows `*`.
-            let built = if pg {
-                pgops::duplicate_stmts(&f.schema, &f.from, &f.to, f.data.then(|| [pgops::CopyCol { name: "*".into(), identity: None }]).as_ref().map(|c| &c[..]))
-            } else {
-                myops::duplicate_stmts(d, &f.schema, &f.from, &f.to, f.data.then(|| ["*".to_string()]).as_ref().map(|c| &c[..]), false)
-            };
+            let built = f.preview(pg, d);
             match &built {
-                Ok(v) => sql_block(ui, &v.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n").replace("\"*\"", "*").replace("`*`", "*")),
+                Ok(text) => sql_block(ui, text),
                 Err(e) => {
                     sql_block(ui, "CREATE TABLE ...;");
                     if f.to != f.from && !f.to.is_empty() {
@@ -330,15 +357,7 @@ impl App {
     }
 
     fn sql_duplicate_run(&mut self, f: &DupForm) {
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(f.conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(f.conn, None));
-        }
-        let Some(sql) = self.session_of(f.conn, &f.database) else { return self.warn_offline() };
-        let ro = !self.conn_writable(f.conn);
+        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
         self.worker.sql_duplicate(f.conn, sql, f.schema.clone(), f.from.clone(), f.to.clone(), f.data, ro);
     }
 
@@ -408,15 +427,7 @@ impl App {
     }
 
     fn pg_truncate_run(&mut self, f: &TruncForm) {
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(f.conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(f.conn, None));
-        }
-        let Some(sql) = self.session_of(f.conn, &f.database) else { return self.warn_offline() };
-        let ro = !self.conn_writable(f.conn);
+        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
         self.worker.pg_truncate(f.conn, sql, f.schema.clone(), f.table.clone(), f.restart, f.cascade, ro);
     }
 

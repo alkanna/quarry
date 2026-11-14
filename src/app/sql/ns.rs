@@ -27,6 +27,16 @@ pub(in crate::app) fn split_ns(dialect: db::sql::Dialect, base_db: &str, ns: &st
     if dialect == db::sql::Dialect::Postgres { (base_db.to_string(), ns.to_string()) } else { (ns.to_string(), String::new()) }
 }
 
+/// The selection of a (database, schema) pair as the forms hold them: `database` is empty on MySQL, where `schema` is the database.
+pub(in crate::app) fn sel_of(conn: u64, database: &str, schema: &str, coll: String) -> Sel {
+    if database.is_empty() { Sel { conn, db: schema.to_string(), schema: String::new(), coll } } else { Sel { conn, db: database.to_string(), schema: schema.to_string(), coll } }
+}
+
+/// Whether a namespace belongs to the server: `schema` on PostgreSQL, `db` on MySQL, where the database is the namespace.
+pub(in crate::app) fn system_ns(pg: bool, schema: &str, db: &str) -> bool {
+    if pg { db::sql::pg::create::system_schema(schema) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db) }
+}
+
 /// The schemas the switcher lists: the user ones, and the system ones when asked for.
 pub(in crate::app) fn listed_schemas(all: &[db::sql::PgSchema], system: bool) -> Vec<&db::sql::PgSchema> {
     all.iter().filter(|s| system || !s.system).collect()
@@ -82,12 +92,32 @@ impl App {
 
     /// The tables and views of the schema a selection points at, once loaded.
     pub(in crate::app) fn tables_of(&self, sel: &Sel) -> Vec<String> {
-        let Some(c) = self.conn(sel.conn) else { return Vec::new() };
+        self.tables_ref(sel).to_vec()
+    }
+
+    /// Whether the schema a selection points at lists `name`, without copying the list for a check drawn every frame.
+    pub(in crate::app) fn table_listed(&self, sel: &Sel, name: &str) -> bool {
+        self.tables_ref(sel).iter().any(|t| t == name)
+    }
+
+    fn tables_ref(&self, sel: &Sel) -> &[String] {
+        let Some(c) = self.conn(sel.conn) else { return &[] };
         if c.meta.engine == db::sql::Engine::Postgres {
             let ns = if sel.schema.is_empty() { c.pg_picked(&sel.db) } else { &sel.schema };
-            return c.tables_in(&sel.db, ns).cloned().unwrap_or_default();
+            return c.tables_in(&sel.db, ns).map_or(&[], |v| v.as_slice());
         }
-        c.dbs.iter().find(|d| d.0 == sel.db).and_then(|d| d.1.clone()).unwrap_or_default()
+        c.dbs.iter().find(|d| d.0 == sel.db).and_then(|d| d.1.as_deref()).unwrap_or(&[])
+    }
+
+    /// The (database, schema) a form takes for the sidebar database `db`: on PostgreSQL the database and the schema the sidebar shows,
+    /// on MySQL no database and `db` as the schema.
+    pub(in crate::app) fn form_ns(&self, conn: u64, db: String) -> (String, String) {
+        if self.is_pg(conn) {
+            let schema = self.sel_schema(&Sel { conn, db: db.clone(), ..Default::default() });
+            (db, schema)
+        } else {
+            (String::new(), db)
+        }
     }
 
     /// A selection of `db` in the schema the sidebar shows, for a table or a new Query tab opened from there.
@@ -96,7 +126,7 @@ impl App {
     }
 
     /// The session of `conn` for a read the demo never sends, or None while not connected.
-    fn session(&self, conn: u64) -> Option<db::sql::Db> {
+    pub(in crate::app) fn live_sql(&self, conn: u64) -> Option<db::sql::Db> {
         if self.demo {
             return None;
         }
@@ -105,7 +135,7 @@ impl App {
 
     /// Asks for the schemas of an opened PostgreSQL database. The tables of the picked one follow when they arrive.
     pub(in crate::app) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
-        let Some(sql) = self.session(conn) else { return };
+        let Some(sql) = self.live_sql(conn) else { return };
         self.sql_asked.insert((conn, db.to_string()));
         self.worker.sql_schemas(conn, sql, db.to_string());
     }
@@ -113,7 +143,7 @@ impl App {
     /// Loads the tables of one schema unless they are held or on their way.
     pub(in crate::app) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
         // Without a session nothing is sent and nothing is marked asked, so the load happens once it exists.
-        let Some(sql) = self.session(conn) else { return };
+        let Some(sql) = self.live_sql(conn) else { return };
         if schema.is_empty() || !self.pg_tables_asked.insert(conn, db, schema) {
             return;
         }

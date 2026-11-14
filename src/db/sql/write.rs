@@ -68,6 +68,12 @@ pub struct PgIds {
     pub table: String,
 }
 
+/// The undo entry of a structure-level change on `coll` of `schema`, with no row keys or oids to check. `database` is the
+/// PostgreSQL database, empty on MySQL.
+pub(in crate::db::sql) fn undo_action(conn: u64, database: &str, schema: &str, coll: &str, undo: SqlUndo) -> UndoAction {
+    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: coll.into(), kind: UndoKind::Sql { database: database.into(), cols: Vec::new(), undo, ids: Default::default() } }
+}
+
 impl SqlUndo {
     /// Key column names, read off the first row: undo of a delete re-inserts the rows and needs them.
     pub fn pk_names(&self) -> Vec<String> {

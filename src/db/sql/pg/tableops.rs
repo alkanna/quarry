@@ -1,28 +1,19 @@
 //! PostgreSQL: renaming a table, view or schema, copying a table, and emptying one. Each runs in one transaction, so a failed
 //! step leaves nothing behind; `db::sql::tableops` picks these for a PostgreSQL connection.
 
-use super::create::{create_schema_sql, drop_word, entry, in_tx, namespace_oid, relation_oid, state_in, system_schema};
+use super::create::{create_schema_sql, drop_word, entry, namespace_oid, new_name, relation_oid, state_in, system_schema};
 use crate::db::errors::truncate_refused;
 use crate::db::sql::create::DropInfo;
 use crate::db::sql::exec::{sql_state, Cells};
-use crate::db::sql::pg::ddl::{exec, lock_error, name_ok, q, set_path};
+use crate::db::sql::pg::ddl::{exec, exec_named, in_tx, lock_error, q, set_path};
 use crate::db::sql::structure::num;
-use crate::db::sql::value::Param;
+use crate::db::sql::value::{pg_lit, Param};
 use crate::db::sql::worker::text;
 use crate::db::sql::write::SqlUndo;
 use crate::db::sql::{se, Db, Dialect};
 use crate::db::{Res, UndoAction};
 
 const D: Dialect = Dialect::Postgres;
-
-/// A name this app gives: PostgreSQL would take a tab or a newline, but nobody could type it back.
-fn new_name(what: &str, name: &str) -> Res<()> {
-    name_ok(name, what)?;
-    if name.chars().any(|c| c.is_control()) {
-        return Err(format!("{what} name cannot contain control characters or line breaks."));
-    }
-    Ok(())
-}
 
 fn existing(what: &str, name: &str) -> Res<()> {
     if name.is_empty() {
@@ -79,6 +70,30 @@ pub struct CopyCol {
 /// value (a generated column refuses one), with OVERRIDING SYSTEM VALUE when an identity column is ALWAYS. The copy's identity
 /// sequences are new and start at 1, so each is moved up to the largest value copied or the next insert would collide.
 pub fn duplicate_stmts(schema: &str, from: &str, to: &str, cols: Option<&[CopyCol]>) -> Res<Vec<String>> {
+    let (a, b, create) = like_stmt(schema, from, to)?;
+    let mut v = vec![create];
+    let Some(cols) = cols.filter(|c| !c.is_empty()) else { return Ok(v) };
+    let list = cols.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
+    let over = if cols.iter().any(|c| c.identity == Some('a')) { "OVERRIDING SYSTEM VALUE " } else { "" };
+    v.push(format!("INSERT INTO {b} ({list}) {over}SELECT {list} FROM {a}"));
+    for c in cols.iter().filter(|c| c.identity.is_some()) {
+        v.push(format!("SELECT setval(pg_get_serial_sequence({}, {}), m) FROM (SELECT max({}) AS m FROM {b}) t WHERE m IS NOT NULL", pg_lit(&b), pg_lit(&c.name), q(&c.name)));
+    }
+    Ok(v)
+}
+
+/// `duplicate_stmts` as the dialog previews it: the column list is read from the server when the copy runs, so it shows `*`.
+pub fn duplicate_preview(schema: &str, from: &str, to: &str, data: bool) -> Res<Vec<String>> {
+    let (a, b, create) = like_stmt(schema, from, to)?;
+    let mut v = vec![create];
+    if data {
+        v.push(format!("INSERT INTO {b} (*) SELECT * FROM {a}"));
+    }
+    Ok(v)
+}
+
+/// The checks of a copy, the two qualified names and the statement that makes the structure.
+fn like_stmt(schema: &str, from: &str, to: &str) -> Res<(String, String, String)> {
     existing("A schema", schema)?;
     existing("A table", from)?;
     new_name("A table", to)?;
@@ -89,16 +104,8 @@ pub fn duplicate_stmts(schema: &str, from: &str, to: &str, cols: Option<&[CopyCo
         return Err("Give the copy a name other than the original's.".into());
     }
     let (a, b) = (D.qualified(schema, from), D.qualified(schema, to));
-    let mut v = vec![format!("CREATE TABLE {b} (LIKE {a} INCLUDING ALL)")];
-    let Some(cols) = cols.filter(|c| !c.is_empty()) else { return Ok(v) };
-    let list = cols.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
-    let over = if cols.iter().any(|c| c.identity == Some('a')) { "OVERRIDING SYSTEM VALUE " } else { "" };
-    v.push(format!("INSERT INTO {b} ({list}) {over}SELECT {list} FROM {a}"));
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    for c in cols.iter().filter(|c| c.identity.is_some()) {
-        v.push(format!("SELECT setval(pg_get_serial_sequence({}, {}), m) FROM (SELECT max({}) AS m FROM {b}) t WHERE m IS NOT NULL", lit(&b), lit(&c.name), q(&c.name)));
-    }
-    Ok(v)
+    let create = format!("CREATE TABLE {b} (LIKE {a} INCLUDING ALL)");
+    Ok((a, b, create))
 }
 
 const KIND: &str = "SELECT c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)";
@@ -120,7 +127,7 @@ pub(in crate::db::sql) async fn rename(db: &Db, schema: &str, from: &str, to: &s
     if whole {
         let sql = rename_schema_sql(from, to)?;
         let oid = in_tx(db, from, read_only, async |tx| {
-            exec(tx, db, from, &sql).await.map_err(|x| lock_error(&x, from).unwrap_or_else(|| se(x)))?;
+            exec_named(tx, db, from, &sql, from).await?;
             namespace_oid(tx, to).await?.ok_or_else(|| "The schema was renamed but cannot be read back.".to_string())
         })
         .await?;
@@ -130,7 +137,7 @@ pub(in crate::db::sql) async fn rename(db: &Db, schema: &str, from: &str, to: &s
         let kind = tx.fetch_bound(KIND, &[Param::Text(D.qualified(schema, from))]).await.map_err(se)?;
         let Some(kind) = kind.first().and_then(|r| text(r, "kind")) else { return Err(format!("{from} is not in {schema} any more.")) };
         let sql = rename_sql(drop_word(&kind), schema, from, to)?;
-        exec(tx, db, schema, &sql).await.map_err(|x| lock_error(&x, from).unwrap_or_else(|| se(x)))?;
+        exec_named(tx, db, schema, &sql, from).await?;
         relation_oid(tx, &D.qualified(schema, to)).await?.ok_or_else(|| "The table was renamed but cannot be read back.".to_string())
     })
     .await?;
@@ -146,7 +153,7 @@ pub(in crate::db::sql) async fn undo_rename(db: &Db, schema: &str, now: &str, fr
             if !token.is_empty() && namespace_oid(tx, schema).await?.as_deref() != Some(token) {
                 return Err(gone(schema));
             }
-            exec(tx, db, schema, &sql).await.map_err(|x| lock_error(&x, schema).unwrap_or_else(|| se(x)))
+            exec_named(tx, db, schema, &sql, schema).await
         })
         .await;
     }
@@ -158,7 +165,7 @@ pub(in crate::db::sql) async fn undo_rename(db: &Db, schema: &str, now: &str, fr
             return Err(gone(now));
         }
         let sql = rename_sql(drop_word(&kind), schema, now, from)?;
-        exec(tx, db, schema, &sql).await.map_err(|x| lock_error(&x, now).unwrap_or_else(|| se(x)))
+        exec_named(tx, db, schema, &sql, now).await
     })
     .await
 }
