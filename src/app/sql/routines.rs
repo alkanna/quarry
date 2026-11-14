@@ -442,7 +442,7 @@ impl App {
         let conn_name = self.conn(w.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let screen = ctx.content_rect();
         let mut acts = WinActs::default();
-        let r = banded(egui::Id::new(("quarry-layer", "routine-window"))).show(ctx, |ui| {
+        let r = banded(egui::Id::unique(("quarry-layer", "routine-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.6).clamp(640.0, 920.0)));
             let ns = if w.dialect == db::sql::Dialect::Postgres { format!("{} / {}", w.db, w.schema) } else { w.db.clone() };
             let sub = format!("{conn_name} · {} · {ns}", w.kind.noun());
@@ -545,7 +545,7 @@ fn facts(ui: &mut egui::Ui, d: &Detail, dialect: db::sql::Dialect) {
 
 /// The SQL text area with line numbers and token colors, read-only unless `editable`. Returns whether the text changed.
 fn code_editor(ui: &mut egui::Ui, text: &mut String, dialect: db::sql::Dialect, editable: bool, height: f32) -> bool {
-    let id = egui::Id::new("routine-source");
+    let id = egui::Id::unique("routine-source");
     let focused = ui.memory(|m| m.has_focus(id));
     let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
         crate::ui::editor::memo_galley(ui, 1, buf.as_str(), wrap, || {

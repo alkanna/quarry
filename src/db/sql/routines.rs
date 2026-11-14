@@ -10,6 +10,7 @@ use super::value::{lit, pg_lit};
 use super::worker::{text, text_at};
 use super::{se, Db, Dialect};
 use crate::db::{Msg, Res, Worker};
+use sqlx::Connection;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Kind {
@@ -579,9 +580,9 @@ impl Steps for Session<'_> {
     }
 }
 
-async fn my_save(db: &Db, schema: &str, old: Option<&Detail>, text: &str, read_only: bool) -> Result<Option<Routine>, Failure> {
-    let plan = plan(db.dialect, schema, old, text, false).map_err(Failure::plain)?;
-    let (kind, name) = head_of(db.dialect, text.trim()).and_then(|(k, n)| Some((k, n?))).ok_or_else(|| Failure::plain("The name of the routine could not be read from the text."))?;
+async fn my_save(db: &Db, schema: &str, old: Option<&Detail>, body: &str, read_only: bool) -> Result<Option<Routine>, Failure> {
+    let plan = plan(db.dialect, schema, old, body, false).map_err(Failure::plain)?;
+    let (kind, name) = head_of(db.dialect, body.trim()).and_then(|(k, n)| Some((k, n?))).ok_or_else(|| Failure::plain("The name of the routine could not be read from the text."))?;
     let existing = db.meta(schema, "SELECT ROUTINE_NAME AS name FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE = ? AND ROUTINE_NAME = ?", [schema, kind.word(), name.as_str()]).await.map_err(Failure::plain)?;
     // A new routine never replaces one: MariaDB's OR REPLACE typed into a template would otherwise overwrite it unasked.
     if old.is_none() && !existing.is_empty() {

@@ -918,8 +918,9 @@ impl App {
     /// when the connection is not open.
     pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
         let Some(c) = self.conn(conn) else { return false };
+        let (sql, client) = (c.sql.clone(), c.client.clone());
         self.routines_forget(conn, db);
-        match (c.sql.clone(), c.client.clone()) {
+        match (sql, client) {
             (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
             (Some(sql), _) => {
                 self.sql_refresh_schema(conn, db, "");

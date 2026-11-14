@@ -9,6 +9,7 @@ mod pg_pgbouncer;
 mod pg_read;
 mod pg_roles;
 mod pg_shell;
+mod routines;
 mod pg_write;
 mod tls;
 
