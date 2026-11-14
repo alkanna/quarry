@@ -672,7 +672,7 @@ fn schema_block(name: &str) -> String {
 /// dump's own schemas can be made behind a pooler that refuses every other DO block. The name is read back and the block
 /// rebuilt from it, so only that one text passes, whatever the name holds; a pg_ name is refused since the dump never
 /// writes one and pg_temp would stay on the backend.
-fn is_schema_block(stmt: &str) -> bool {
+pub(crate) fn is_schema_block(stmt: &str) -> bool {
     use crate::db::sql::lex::Tok;
     let Some(body) = stmt.strip_prefix("DO ") else { return false };
     let Some(tag_end) = body.strip_prefix('$').and_then(|r| r.find('$')).map(|i| i + 2) else { return false };
@@ -1664,7 +1664,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                             Some(crate::db::sql::run::POOLER_TX)
                         } else if lex::needs_no_transaction(&p.text, D) {
                             Some(crate::db::sql::run::POOLER_NO_TX)
-                        } else if lex::session_state(&p.text, D) && !is_schema_block(&p.text) {
+                        } else if lex::session_state(&p.text, D) {
                             Some(crate::db::sql::run::POOLER_SESSION)
                         } else {
                             None
@@ -1896,7 +1896,7 @@ mod tests {
     fn a_dump_schema_block_runs_behind_a_pooler_and_nothing_like_it_does() {
         for n in ["app", "Odd \"Schema", "it's \\ x", "a; DROP TABLE t", "x\"\"", "$quarry$"] {
             let b = schema_block(n);
-            assert!(lex::session_state(&b, D), "{b}: a DO block is refused behind a pooler by default");
+            assert!(!lex::session_state(&b, D), "{b}: the shared pooler gate lets the dump's own block through");
             assert!(is_schema_block(&b), "{b}");
         }
         let b = schema_block("app");
