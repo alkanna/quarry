@@ -258,6 +258,8 @@ pub enum Msg {
     /// A table, view or PostgreSQL schema was renamed, or a rename was undone. `schema` is the schema holding it (the old name for a schema rename), `whole` is set for a schema rename. A refused undo hands its entry back.
     SqlRenamed { conn: u64, database: String, schema: String, from: String, to: String, whole: bool, res: Res<String>, undo: Option<UndoAction> },
     SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// An answer about the routines (functions and procedures) of a SQL schema: the list, one definition, a save or a drop; `req` is 0 for the list.
+    SqlRoutine { conn: u64, req: u64, ans: sql::routines::Answer },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
     /// What SHOW GRANTS says for the account the Users window asked about with `req`.

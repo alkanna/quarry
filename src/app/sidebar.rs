@@ -522,6 +522,7 @@ impl App {
         let mut toggle = None;
         let mut open = None;
         let mut side: Vec<SideAct> = Vec::new();
+        let mut routine_acts: Vec<RAct> = Vec::new();
         let mut connect = false;
         let mut revealed = false;
         let mut lazy: Vec<String> = Vec::new();
@@ -575,7 +576,7 @@ impl App {
                     matches.extend(extra);
                     matches.sort();
                 }
-                if !filter.is_empty() && matches.is_empty() {
+                if !filter.is_empty() && matches.is_empty() && self.routines_matching(id, &ns, &filter) == 0 {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
@@ -628,6 +629,12 @@ impl App {
                             if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
                                 side.push(SideAct::SqlRunFile(db_name.clone()));
                             }
+                        }
+                        {
+                            // Functions and procedures of this database, or of the schema the switcher shows on PostgreSQL.
+                            ui.separator();
+                            let (ns_name, sys) = if pg { (picked, db::sql::pg::create::system_schema(picked)) } else { (db_name.as_str(), db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str())) };
+                            Self::routines_new_items(ui, db_name, ns_name, pg, writable, sys, &mut routine_acts);
                         }
                         if pg {
                             // PostgreSQL's items stay enabled on a locked connection and ask to unlock, like the structure editor does.
@@ -877,6 +884,10 @@ impl App {
                             }
                         });
                     }
+                    if sql && (!pg || !picked.is_empty()) {
+                        let sys = if pg { db::sql::pg::create::system_schema(picked) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str()) };
+                        self.routines_group(ui, id, db_name, if pg { picked } else { db_name }, &filter, pg, writable, sys, &mut routine_acts);
+                    }
                     ui.add_space(4.0);
                 });
             }
@@ -919,6 +930,9 @@ impl App {
         for a in side {
             self.side_act(id, a);
         }
+        for a in routine_acts {
+            self.routine_act(id, a);
+        }
     }
 
     /// The switcher row of an open PostgreSQL database, with the pick made this frame. Nothing until its schemas arrived.
@@ -934,7 +948,9 @@ impl App {
     /// when the connection is not open.
     pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
         let Some(c) = self.conn(conn) else { return false };
-        match (c.sql.clone(), c.client.clone()) {
+        let (sql, client) = (c.sql.clone(), c.client.clone());
+        self.routines_forget(conn, db);
+        match (sql, client) {
             (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
             (Some(sql), _) => {
                 self.sql_refresh_schema(conn, db, "");

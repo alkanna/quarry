@@ -186,6 +186,8 @@ impl App {
                 self.pg_server = Some(PgServerWin::demo(CONN, which));
             }
             "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
+            // The same panes as QUARRY_TEST_SQL=routines, over the public schema.
+            v if v.starts_with("routines") => self.demo_routines(CONN, DB, SCHEMA, true, v.trim_start_matches("routines").trim_start_matches('-')),
             _ => {}
         }
     }
