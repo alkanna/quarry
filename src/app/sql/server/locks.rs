@@ -3,8 +3,9 @@
 //! frees it, so that button is the one that stays on for it.
 
 use super::*;
-use db::sql::server::locks::{chains, LockWait, Locks};
+use db::sql::server::locks::{LockWait, Locks};
 use db::sql::server::{one_line, Proc};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 const LOCK_COLS: [(&str, f32); 5] = [("Id", ID_W), ("User", 110.0), ("Db", 100.0), ("Lock", 150.0), ("On", 210.0)];
@@ -31,10 +32,10 @@ pub(super) fn confirm_still_ok(c: &Confirm, l: &Locks) -> bool {
 }
 
 /// The statement a thread shows: what it runs now, or the one its transaction is stuck on when the process list has none.
-fn statement(l: &Locks, id: u64) -> String {
+fn statement(l: &Locks, id: u64) -> Cow<'_, str> {
     match l.procs.get(&id) {
-        Some(p) if !p.line.is_empty() => p.line.clone(),
-        _ => l.trx.get(&id).map(|t| one_line(&t.query, 300)).unwrap_or_default(),
+        Some(p) if !p.line.is_empty() => Cow::Borrowed(&p.line),
+        _ => Cow::Owned(l.trx.get(&id).map(|t| one_line(&t.query, 300)).unwrap_or_default()),
     }
 }
 
@@ -66,7 +67,7 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
         }
         Some(Ok(l)) => l.clone(),
     };
-    let ch = chains(&l.waits);
+    let ch = s.chains.clone();
     // The thread that read the list is Quarry's too.
     let mut own = s.own.clone();
     own.entry(l.me).or_insert_with(|| "Server window".to_string());
@@ -86,7 +87,7 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
         let mut deeper: Option<(u64, u64, u64)> = None;
         egui::ScrollArea::vertical().id_salt("sql-locks").max_height(max_h - 30.0).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for c in &ch {
+            for c in ch.iter() {
                 blocker_row(ui, s, &l, &own, c.head, w, kill);
                 let mut parents: Vec<u64> = vec![c.head];
                 for (id, depth) in &c.waiting {
@@ -126,10 +127,10 @@ fn blocker_row(ui: &mut egui::Ui, s: &mut SqlServerWin, l: &Locks, own: &HashMap
     let mine = own.contains_key(&id);
     paint_cell(ui, l1, rect.left(), LOCK_COLS[0].1, &id.to_string(), C_NUMBER(), true, false);
     let mut x = rect.left() + LOCK_COLS[0].1;
-    paint_cell(ui, l1, x, LOCK_COLS[1].1, &proc.map(|p| p.user.clone()).unwrap_or_default(), BRIGHT(), true, false);
+    paint_cell(ui, l1, x, LOCK_COLS[1].1, proc.map_or("", |p| p.user.as_str()), BRIGHT(), true, false);
     let qx = x;
     x += LOCK_COLS[1].1;
-    paint_cell(ui, l1, x, LOCK_COLS[2].1, &proc.map(|p| p.db.clone()).unwrap_or_default(), BRIGHT(), true, false);
+    paint_cell(ui, l1, x, LOCK_COLS[2].1, proc.map_or("", |p| p.db.as_str()), BRIGHT(), true, false);
     x += LOCK_COLS[2].1;
     let g = ui.painter().layout_no_wrap("Blocker".into(), FontId::proportional(TXT_SMALL), ALERT());
     let bw = g.size().x;
@@ -143,7 +144,7 @@ fn blocker_row(ui: &mut egui::Ui, s: &mut SqlServerWin, l: &Locks, own: &HashMap
     };
     paint_cell(ui, l1, x + bw + 4.0, (rect.right() - BTNS_W - x - bw).max(40.0), &what, color, false, false);
     let line = statement(l, id);
-    let (line, line_color) = if line.is_empty() { (if idle { "No statement is running; the transaction is only open.".to_string() } else { String::new() }, FAINT()) } else { (line, MUTED()) };
+    let (line, line_color) = if line.is_empty() { (Cow::Borrowed(if idle { "No statement is running; the transaction is only open." } else { "" }), FAINT()) } else { (line, MUTED()) };
     paint_cell(ui, l2, qx, (rect.right() - BTNS_W - qx).max(60.0), &line, line_color, true, false);
     if mine && resp.hovered() {
         resp.clone().on_hover_text("Quarry's own session. Stop it where it runs: Kill is not offered for it.");
@@ -189,9 +190,9 @@ fn waiter_row(ui: &mut egui::Ui, l: &Locks, id: u64, edge: Option<&LockWait>, de
     ui.painter().line_segment([egui::pos2(tx, rect.center().y), egui::pos2(tx + 6.0, rect.center().y)], stroke);
     paint_cell(ui, rect, rect.left() + indent, LOCK_COLS[0].1 - indent, &id.to_string(), C_NUMBER(), true, false);
     let mut x = rect.left() + LOCK_COLS[0].1;
-    paint_cell(ui, rect, x, LOCK_COLS[1].1, &proc.map(|p| p.user.clone()).unwrap_or_default(), BRIGHT(), true, false);
+    paint_cell(ui, rect, x, LOCK_COLS[1].1, proc.map_or("", |p| p.user.as_str()), BRIGHT(), true, false);
     x += LOCK_COLS[1].1;
-    paint_cell(ui, rect, x, LOCK_COLS[2].1, &proc.map(|p| p.db.clone()).unwrap_or_default(), BRIGHT(), true, false);
+    paint_cell(ui, rect, x, LOCK_COLS[2].1, proc.map_or("", |p| p.db.as_str()), BRIGHT(), true, false);
     x += LOCK_COLS[2].1;
     let (mode, on) = edge.map(|e| (if e.mode.is_empty() { e.kind.clone() } else { format!("{} {}", e.kind, e.mode) }, e.on.clone())).unwrap_or_default();
     let strong = edge.is_some_and(|e| e.mode.starts_with("X") || e.mode == "EXCLUSIVE");

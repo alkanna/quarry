@@ -230,6 +230,16 @@ impl Dialect {
         }
     }
 
+    /// MariaDB keeps the status variables in information_schema, MySQL 8 only in performance_schema.
+    pub fn global_status_table(self) -> &'static str {
+        if self == Dialect::MariaDb { "information_schema.GLOBAL_STATUS" } else { "performance_schema.global_status" }
+    }
+
+    /// MySQL drops a CHECK by its own keyword, MariaDB by the generic CONSTRAINT.
+    pub fn drop_check_word(self) -> &'static str {
+        if self == Dialect::MySql { "CHECK" } else { "CONSTRAINT" }
+    }
+
     /// MySQL counts milliseconds but only limits SELECT statements. MariaDB counts seconds, as a
     /// float, and limits every statement.
     pub fn session_timeout(self, ms: u64) -> String {

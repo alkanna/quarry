@@ -203,11 +203,7 @@ fn init_names(stmt: &str) -> Vec<String> {
 /// What a failed KILL means to the person who pressed it, from the server's error number: 1095 is "not owner
 /// of thread" (it needs CONNECTION_ADMIN or SUPER), 1094 an id that is already gone.
 pub fn kill_error(err: &sqlx::Error) -> String {
-    let n = match err {
-        sqlx::Error::Database(d) => d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().map(|m| m.number()),
-        _ => None,
-    };
-    match n {
+    match mysql_number(err) {
         Some(1095 | 1227) => "Your account cannot kill this one: stopping another user's statement or connection needs the CONNECTION_ADMIN privilege (or SUPER).".into(),
         Some(1094) => "That connection is already gone.".into(),
         _ => e(err),

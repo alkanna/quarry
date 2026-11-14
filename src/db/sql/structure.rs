@@ -783,22 +783,22 @@ async fn usage(db: &Db, schema: &str, table: &str, st: &mut Structure) {
         }
         return;
     }
-    // A server with the schema off still has the tables in some versions, and they stay empty, so the switch is read first.
-    let on = db.meta(schema, "SELECT @@performance_schema AS on_", []).await.ok().and_then(|r| r.first().and_then(|r| num(r, "on_")));
-    if on != Some(1) {
+    // A server with the schema off still has the tables in some versions, and they stay empty, so the switch decides which
+    // answer is used. The three reads are independent, so they share one round trip.
+    let uptime_sql = format!("SELECT VARIABLE_VALUE AS v FROM {} WHERE VARIABLE_NAME = 'Uptime'", d.global_status_table());
+    let (on, used, up) = tokio::join!(db.meta(schema, "SELECT @@performance_schema AS on_", []), query(db, MY_USAGE, schema, table), db.meta(schema, &uptime_sql, []));
+    if on.ok().and_then(|r| r.first().and_then(|r| num(r, "on_"))) != Some(1) {
         st.usage.unavailable = "Index use is counted by performance_schema, which is off on this server. Turn it on in the server configuration and restart it.".into();
         return;
     }
-    match query(db, MY_USAGE, schema, table).await {
+    match used {
         Ok(rows) => {
             for r in &rows {
                 if let Some(ix) = st.indexes.iter_mut().find(|i| i.name == s(r, "name")) {
                     ix.scans = num(r, "scans");
                 }
             }
-            // MariaDB keeps the status variables in information_schema, MySQL 8 only in performance_schema.
-            let from = if d == Dialect::MariaDb { "information_schema.GLOBAL_STATUS" } else { "performance_schema.global_status" };
-            st.usage.uptime = db.meta(schema, &format!("SELECT VARIABLE_VALUE AS v FROM {from} WHERE VARIABLE_NAME = 'Uptime'"), []).await.ok().and_then(|r| r.first().and_then(|r| text(r, "v")?.trim().parse().ok()));
+            st.usage.uptime = up.ok().and_then(|r| r.first().and_then(|r| text(r, "v")?.trim().parse().ok()));
         }
         Err(_) => st.usage.unavailable = "This login cannot read performance_schema, which counts how often an index is used.".into(),
     }
