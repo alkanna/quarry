@@ -2,7 +2,6 @@
 //! Where, Include and CONCURRENTLY options with the index usage note, offline on the demo structures.
 
 use super::sql_structure::replace;
-use super::sql_tableops::{disabled, shows};
 use super::*;
 use db::sql::ddl::Change;
 
@@ -48,7 +47,7 @@ fn the_checks_of_the_table_are_listed_in_their_section() {
     ui.show("CHECK CONSTRAINTS");
     ui.show("checks row 1");
     ui.show("checks row 2");
-    assert!(!shows(&ui, "This table has no CHECK constraints."), "a table with checks says it has none");
+    assert!(!ui.shows("This table has no CHECK constraints."), "a table with checks says it has none");
     ui.h.state_mut().tabs[0].sql.as_mut().and_then(|s| s.st.data.as_mut()).expect("the structure").checks.clear();
     ui.settle();
     ui.show("This table has no CHECK constraints.");
@@ -59,12 +58,10 @@ fn the_checks_of_the_table_are_listed_in_their_section() {
 fn a_locked_connection_cannot_add_a_check() {
     let Some(mut ui) = my_structure() else { return };
     ui.show("+ Check");
-    assert!(!disabled(&ui, "+ Check"), "an unlocked connection cannot add a check");
-    for c in &mut ui.h.state_mut().conns {
-        c.writable = false;
-    }
+    assert!(!ui.disabled("+ Check"), "an unlocked connection cannot add a check");
+    ui.lock();
     ui.settle();
-    assert!(disabled(&ui, "+ Check"), "a locked connection can add a check");
+    assert!(ui.disabled("+ Check"), "a locked connection can add a check");
 }
 
 #[test]
@@ -74,14 +71,14 @@ fn adding_a_check_previews_its_statement_and_stages_one_change() {
     assert!(matches!(ui.app().modal, Some(Modal::CheckEdit(_))), "+ Check did not open the dialog");
     // The name starts from the table's, so only the condition is left to type.
     ui.show("Check name");
-    assert!(shows(&ui, "Write the condition every row must meet."), "an empty condition is not explained");
-    assert!(disabled(&ui, "Stage change"), "an empty condition armed Stage change");
+    assert!(ui.shows("Write the condition every row must meet."), "an empty condition is not explained");
+    assert!(ui.disabled("Stage change"), "an empty condition armed Stage change");
     replace(&mut ui, "Check condition", "total < 100000");
-    assert!(shows(&ui, "chk_orders"), "the preview does not name the constraint");
-    assert!(shows(&ui, "CHECK (total < 100000)"), "the preview does not hold the condition");
-    assert!(!disabled(&ui, "Stage change"), "a condition did not arm Stage change");
+    assert!(ui.shows("chk_orders"), "the preview does not name the constraint");
+    assert!(ui.shows("CHECK (total < 100000)"), "the preview does not hold the condition");
+    assert!(!ui.disabled("Stage change"), "a condition did not arm Stage change");
     ui.click("Keep it without enforcing it (NOT ENFORCED)");
-    assert!(shows(&ui, "NOT ENFORCED"), "the option is not in the preview");
+    assert!(ui.shows("NOT ENFORCED"), "the option is not in the preview");
     ui.click("Stage change");
     assert!(ui.app().modal.is_none(), "staging left the dialog open");
     match staged(&ui).as_slice() {
@@ -97,8 +94,8 @@ fn a_name_the_table_already_has_blocks_the_check() {
     ui.show("Check name");
     replace(&mut ui, "Check name", "chk_orders_total");
     replace(&mut ui, "Check condition", "total < 5");
-    assert!(shows(&ui, "The table already has a check constraint called chk_orders_total."), "no note says the name is taken");
-    assert!(disabled(&ui, "Stage change"), "a taken name armed Stage change");
+    assert!(ui.shows("The table already has a check constraint called chk_orders_total."), "no note says the name is taken");
+    assert!(ui.disabled("Stage change"), "a taken name armed Stage change");
     ui.click("Cancel");
     assert!(ui.app().modal.is_none() && staged(&ui).is_empty(), "Cancel left something behind");
 }
@@ -109,10 +106,10 @@ fn editing_a_check_stages_a_drop_and_an_add_together() {
     open_row(&mut ui, "checks row 1");
     assert!(matches!(ui.app().modal, Some(Modal::CheckEdit(_))), "a double click on a check did not open its dialog");
     ui.show("Check condition");
-    assert!(shows(&ui, "Nothing is changed yet."), "an untouched edit offers a statement");
-    assert!(disabled(&ui, "Stage change"), "an untouched edit armed Stage change");
+    assert!(ui.shows("Nothing is changed yet."), "an untouched edit offers a statement");
+    assert!(ui.disabled("Stage change"), "an untouched edit armed Stage change");
     replace(&mut ui, "Check condition", "`total` >= 1");
-    assert!(!disabled(&ui, "Stage change"));
+    assert!(!ui.disabled("Stage change"));
     ui.click("Stage change");
     match staged(&ui).as_slice() {
         [Change::DropCheck(old), Change::AddCheck(new)] => assert!(old == "chk_orders_total" && new.name == "chk_orders_total" && new.expr == "`total` >= 1", "the pair is not the old check and its replacement"),
@@ -143,7 +140,7 @@ fn the_index_usage_note_says_since_when_the_counts_run_or_why_there_are_none() {
     ui.show("use counted since 2026-11-10 08:00");
     touch(&mut ui, |d| d.usage.unavailable = "pg_stat_user_indexes cannot be read".into());
     ui.show("use not counted");
-    assert!(!shows(&ui, "use counted"), "an unreadable count shows a since note");
+    assert!(!ui.shows("use counted"), "an unreadable count shows a since note");
 }
 
 #[test]
@@ -152,21 +149,21 @@ fn the_postgres_index_form_offers_method_where_include_and_concurrently() {
     open_row(&mut ui, "indexes row 3");
     assert!(matches!(ui.app().modal, Some(Modal::IdxEdit(_))), "a double click on an index did not open its dialog");
     ui.show("Index method");
-    assert!(shows(&ui, "Nothing is changed yet."), "an untouched edit offers a statement");
+    assert!(ui.shows("Nothing is changed yet."), "an untouched edit offers a statement");
     ui.click("Index method");
     ui.click("hash");
-    assert!(shows(&ui, "USING hash"), "the method is not in the preview");
+    assert!(ui.shows("USING hash"), "the method is not in the preview");
     // Only btree takes INCLUDE, so the rest of the form is tried on it.
     ui.click("Index method");
     ui.click("btree");
-    assert!(!shows(&ui, "USING hash"), "the method stayed after btree was picked");
+    assert!(!ui.shows("USING hash"), "the method stayed after btree was picked");
     replace(&mut ui, "Index condition", "status <> 'cancelled'");
-    assert!(shows(&ui, "WHERE status <> 'cancelled'"), "the condition is not in the preview");
+    assert!(ui.shows("WHERE status <> 'cancelled'"), "the condition is not in the preview");
     replace(&mut ui, "Included columns", "total, note");
-    assert!(shows(&ui, r#"INCLUDE ("total", "note")"#), "the included columns are not in the preview");
+    assert!(ui.shows(r#"INCLUDE ("total", "note")"#), "the included columns are not in the preview");
     ui.click("Build concurrently");
-    assert!(shows(&ui, r#"CREATE INDEX CONCURRENTLY "idx_orders_status""#), "CONCURRENTLY is not in the preview");
-    assert!(shows(&ui, "cannot run inside a transaction block"), "the preview does not say it runs on its own");
+    assert!(ui.shows(r#"CREATE INDEX CONCURRENTLY "idx_orders_status""#), "CONCURRENTLY is not in the preview");
+    assert!(ui.shows("cannot run inside a transaction block"), "the preview does not say it runs on its own");
     ui.click("Stage change");
     match staged(&ui).as_slice() {
         [Change::DropIndex(old), Change::AddIndex(new)] => {
@@ -183,9 +180,9 @@ fn a_key_constraint_takes_no_method_condition_or_concurrently() {
     // orders_public_id_key backs a unique constraint, so it is plain btree on its columns.
     open_row(&mut ui, "indexes row 2");
     ui.show("Index method");
-    assert!(disabled(&ui, "Index method"), "a constraint's index offers a method");
-    assert!(disabled(&ui, "Index condition"), "a constraint's index offers a condition");
-    assert!(disabled(&ui, "Build concurrently"), "a constraint's index offers CONCURRENTLY");
+    assert!(ui.disabled("Index method"), "a constraint's index offers a method");
+    assert!(ui.disabled("Index condition"), "a constraint's index offers a condition");
+    assert!(ui.disabled("Build concurrently"), "a constraint's index offers CONCURRENTLY");
     // INCLUDE is the one option a unique constraint has.
-    assert!(!disabled(&ui, "Included columns"));
+    assert!(!ui.disabled("Included columns"));
 }

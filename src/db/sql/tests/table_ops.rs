@@ -1,7 +1,7 @@
 //! Live tests of renaming and duplicating tables, renaming a PostgreSQL schema, and emptying a PostgreSQL table. They run on every
 //! server named by the QUARRY_TEST_* variables and skip the ones that are unset.
 
-use crate::db::sql::testing::{every_pg, every_server, unique_name, PgFixture};
+use crate::db::sql::testing::{every_pg, every_server, unique_name, MyFixture, PgFixture};
 use crate::db::{Msg, Res, UndoAction};
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ fn live_mysql_a_table_is_renamed_and_copied_with_its_generated_columns() {
     every_server(|l, var| {
         let next = || l.rx.recv_timeout(Duration::from_secs(20)).expect("worker answer");
         let s = unique_name("qto");
-        l.sql(&format!("CREATE DATABASE `{s}`"));
+        let _fx = MyFixture::new(l, &s, "");
         l.sql(&format!("CREATE TABLE `{s}`.src (id INT AUTO_INCREMENT PRIMARY KEY, n INT, d INT GENERATED ALWAYS AS (n * 2) STORED, v INT GENERATED ALWAYS AS (n + 1) VIRTUAL)"));
         l.sql(&format!("INSERT INTO `{s}`.src (n) VALUES (1), (2), (3)"));
         // With rows: the generated columns are left out of the INSERT, and there is no undo because the copy is never empty.
@@ -49,7 +49,6 @@ fn live_mysql_a_table_is_renamed_and_copied_with_its_generated_columns() {
         // A locked connection refuses.
         l.w.sql_rename(1, l.db.clone(), s.clone(), "cp".into(), "cp9".into(), false, true);
         assert!(renamed_answer(next()).0.is_err(), "{var}");
-        l.sql(&format!("DROP DATABASE `{s}`"));
     });
 }
 

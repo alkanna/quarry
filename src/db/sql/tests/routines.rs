@@ -3,7 +3,7 @@
 //! restore, drop, and the scripts that run one. Each test works in a database or schema of its own.
 
 use crate::db::sql::routines::*;
-use crate::db::sql::testing::{every_pg, every_server, unique_name, Live, LivePg};
+use crate::db::sql::testing::{every_pg, every_server, unique_name, Live, LivePg, MyFixture};
 use crate::db::sql::{Db, Dialect};
 use crate::db::Msg;
 use std::sync::mpsc::Receiver;
@@ -49,8 +49,7 @@ fn live_mysql_routines_list_view_create_edit_restore_and_drop() {
     every_server(|l: &Live, var| {
         let db = "quarry_rt_my";
         let d = l.db.dialect;
-        l.sql(&format!("DROP DATABASE IF EXISTS {db}"));
-        l.sql(&format!("CREATE DATABASE {db} CHARACTER SET utf8mb4"));
+        let _fx = MyFixture::with_charset(l, db, "CHARACTER SET utf8mb4", "");
         l.sql(&format!("CREATE FUNCTION {db}.f_add(a INT) RETURNS INT DETERMINISTIC RETURN a + 1"));
         l.sql(&format!("CREATE PROCEDURE {db}.p_inc(IN a INT, OUT b INT) BEGIN SET b = a + 1; END"));
         // A function and a procedure may share a name, so the list keys them by kind as well.
@@ -111,7 +110,6 @@ fn live_mysql_routines_list_view_create_edit_restore_and_drop() {
         // Drop.
         drop_it(&l.w, &l.rx, &l.db, db, &f, false).unwrap_or_else(|e| panic!("{var}: {}", e.why));
         assert!(find(&list_of(&l.w, &l.rx, &l.db, db, db), Kind::Function, "f_add").is_none(), "{var}");
-        l.sql(&format!("DROP DATABASE {db}"));
     });
 }
 

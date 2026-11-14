@@ -255,6 +255,34 @@ impl Drop for PgFixture<'_> {
     }
 }
 
+/// A fresh MySQL database dropped again when the test ends, also when it panics. One a failed run left behind is dropped
+/// by the next run's fixture.
+pub struct MyFixture<'a> {
+    pub l: &'a Live,
+    pub name: String,
+}
+
+impl<'a> MyFixture<'a> {
+    pub fn new(l: &'a Live, name: &str, ddl: &str) -> Self {
+        Self::with_charset(l, name, "", ddl)
+    }
+
+    /// `charset` is the tail of CREATE DATABASE, such as `CHARACTER SET utf8mb4`.
+    pub fn with_charset(l: &'a Live, name: &str, charset: &str, ddl: &str) -> Self {
+        l.sql(&format!("DROP DATABASE IF EXISTS `{name}`; CREATE DATABASE `{name}` {charset}"));
+        if !ddl.is_empty() {
+            l.sql(ddl);
+        }
+        MyFixture { l, name: name.into() }
+    }
+}
+
+impl Drop for MyFixture<'_> {
+    fn drop(&mut self) {
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS `{}`", self.name)).execute(&self.l.pool).await });
+    }
+}
+
 /// A name that no other test or run uses, for what a test makes on a server shared with the rest: `base`, the process id and a counter.
 pub fn unique_name(base: &str) -> String {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

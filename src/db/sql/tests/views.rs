@@ -2,7 +2,7 @@
 //! QUARRY_TEST_MARIADB and every PostgreSQL server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13. Each test works in a
 //! database or schema of its own.
 
-use crate::db::sql::testing::{every_pg, every_server, unique_name, Live, LivePg};
+use crate::db::sql::testing::{every_pg, every_server, unique_name, Live, LivePg, MyFixture};
 use crate::db::sql::view::{ViewDef, ViewDone, ViewSpec};
 use crate::db::sql::write::SqlUndo;
 use crate::db::{Msg, Res, UndoAction, UndoKind};
@@ -58,7 +58,7 @@ impl Live {
 fn live_a_mysql_view_is_made_read_back_edited_and_undone() {
     every_server(|l, var| {
         let db = unique_name("qvw");
-        l.sql(&format!("CREATE DATABASE `{db}`; CREATE TABLE `{db}`.t (id INT PRIMARY KEY, n INT); INSERT INTO `{db}`.t VALUES (1, 3), (2, 9)"));
+        let _fx = MyFixture::new(l, &db, &format!("CREATE TABLE `{db}`.t (id INT PRIMARY KEY, n INT); INSERT INTO `{db}`.t VALUES (1, 3), (2, 9)"));
         let made = l.save_view(spec(&db, "big", &format!("SELECT id FROM `{db}`.t WHERE n > 5;"), false));
         assert!(made.res.is_ok() && made.kind == ViewDone::Created, "{var}: {:?}", made.res);
         let create_undo = made.undo.expect("a create keeps an undo");
@@ -95,7 +95,6 @@ fn live_a_mysql_view_is_made_read_back_edited_and_undone() {
         assert!(bad.res.is_err() && !l.view_exists(&db, "bad") && l.one(&format!("SELECT COUNT(*) FROM `{db}`.t")) == "2", "{var}");
         let gone = l.view_def(&db, "t");
         assert!(gone.is_err(), "{var}: a table is no view");
-        l.sql(&format!("DROP DATABASE `{db}`"));
     });
 }
 
@@ -103,11 +102,10 @@ fn live_a_mysql_view_is_made_read_back_edited_and_undone() {
 fn live_the_undo_of_a_mysql_create_drops_the_view_it_made() {
     every_server(|l, var| {
         let db = unique_name("qvw");
-        l.sql(&format!("CREATE DATABASE `{db}`; CREATE TABLE `{db}`.t (id INT PRIMARY KEY)"));
+        let _fx = MyFixture::new(l, &db, &format!("CREATE TABLE `{db}`.t (id INT PRIMARY KEY)"));
         let made = l.save_view(spec(&db, "v", &format!("SELECT * FROM `{db}`.t"), false));
         let gone = l.undo_view(made.undo.unwrap());
         assert!(gone.res.is_ok() && gone.kind == ViewDone::Removed && gone.undo.is_none() && !l.view_exists(&db, "v"), "{var}: {:?}", gone.res);
-        l.sql(&format!("DROP DATABASE `{db}`"));
     });
 }
 

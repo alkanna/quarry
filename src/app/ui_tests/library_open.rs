@@ -37,11 +37,6 @@ fn open(ui: &mut UiApp, id: u64, how: How) {
     ui.settle();
 }
 
-/// Whether the app said `part`: in the status line, where the offline demo's notes go, or in a toast.
-fn said(a: &App, part: &str) -> bool {
-    a.status.contains(part) || a.last_problem().contains(part)
-}
-
 fn sql_of(a: &App) -> &SqlTab {
     a.t().and_then(|t| t.sql.as_ref()).expect("a SQL tab")
 }
@@ -186,7 +181,7 @@ fn cmd_enter_in_the_editor_runs_the_query_after_a_click_in_the_library() {
     let before = ui.app().tabs.len();
     ui.key(CMD, egui::Key::Enter);
     assert_eq!(ui.app().tabs.len(), before, "the library script ran instead of the editor's query");
-    assert!(said(ui.app(), "Offline demo"), "the editor's query did not run: {}", ui.app().last_problem());
+    assert!(ui.said("Offline demo"), "the editor's query did not run: {}", ui.app().last_problem());
 }
 
 #[test]
@@ -214,7 +209,7 @@ fn return_alt_return_and_cmd_enter_act_on_the_selected_script() {
     pick(&mut ui, 10);
     ui.key(CMD, egui::Key::Enter);
     assert!(sql_of(ui.app()).query.contains("revenue per month"));
-    assert!(said(ui.app(), "Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
+    assert!(ui.said("Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
 }
 
 /// Steps frames until the linked-file reads and writes on the worker are back.
@@ -310,7 +305,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "DELETE FROM carts WHERE id = 1", "shop", "");
     open(&mut ui, id, How::Run);
     // It runs, as a read-only run: the server refuses the write. Nothing is held back for a notice.
-    assert!(said(ui.app(), "Offline demo"), "{}", ui.app().last_problem());
+    assert!(ui.said("Offline demo"), "{}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.is_empty());
 
     // A pipeline with a write stage stops at the read-only gate.
@@ -325,7 +320,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     let id = add(ui.h.state_mut(), "shell", 1, "Clean", "async function run() {\n  return await orders.deleteMany({ a: 1 });\n}", "shop", "");
     open(&mut ui, id, How::Run);
     assert!(!matches!(ui.app().modal, Some(Modal::ShellWrite(_))));
-    assert!(said(ui.app(), "the shell needs a real connection"), "{}", ui.app().last_problem());
+    assert!(ui.said("the shell needs a real connection"), "{}", ui.app().last_problem());
 }
 
 #[test]
@@ -335,11 +330,11 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     ui.h.state_mut().status.clear();
     open(&mut ui, id, How::Run);
     assert!(sql_of(ui.app()).query.contains("DELETE FROM carts"));
-    assert!(!said(ui.app(), "Offline demo"), "it ran: {}", ui.app().last_problem());
+    assert!(!ui.said("Offline demo"), "it ran: {}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.contains(&ui.app().t().unwrap().uid));
     ui.show("This script writes");
     ui.click_nth("Run all", 0);
-    assert!(said(ui.app(), "Offline demo"), "Run all in the notice did not run it: {}", ui.app().last_problem());
+    assert!(ui.said("Offline demo"), "Run all in the notice did not run it: {}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.is_empty());
 
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
@@ -366,9 +361,9 @@ fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
     ui.h.state_mut().status.clear();
     open(&mut ui, id, How::Here);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$group")));
-    assert!(!said(ui.app(), "nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
+    assert!(!ui.said("nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
     open(&mut ui, id, How::Run);
-    assert!(said(ui.app(), "nothing to run"), "Run did not run it: {}", ui.app().last_problem());
+    assert!(ui.said("nothing to run"), "Run did not run it: {}", ui.app().last_problem());
 }
 
 /// An app with no demo flag, where a script on a connection that is not ready waits for it.

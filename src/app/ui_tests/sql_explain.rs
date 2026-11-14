@@ -2,7 +2,6 @@
 //! the worker's answer fills it (`App::demo_explain`), and Cmd+E and the Explain buttons are checked up to the point where the server
 //! would be asked.
 
-use super::sql_tableops::{disabled, shows};
 use super::*;
 
 const STMT: &str = "SELECT id FROM orders";
@@ -27,12 +26,12 @@ fn the_dialog_shows_the_plan_its_cost_and_what_to_fix() {
     let Some(mut ui) = explain_open(PLAN) else { return };
     assert!(matches!(ui.app().modal, Some(Modal::SqlExplain(_))), "the explain dialog is not open");
     ui.show("NODE");
-    assert!(shows(&ui, "1 nodes"), "the head does not count the plan nodes");
-    assert!(shows(&ui, "cost 1,250"), "the head does not give the plan's cost");
-    assert!(shows(&ui, "Full table scan on orders: about 900,000 rows are read."), "the full scan is not flagged");
-    assert!(shows(&ui, "orders"), "the node does not name its table");
+    assert!(ui.shows("1 nodes"), "the head does not count the plan nodes");
+    assert!(ui.shows("cost 1,250"), "the head does not give the plan's cost");
+    assert!(ui.shows("Full table scan on orders: about 900,000 rows are read."), "the full scan is not flagged");
+    assert!(ui.shows("orders"), "the node does not name its table");
     // Nothing has run the statement, so the dialog offers ANALYZE and has not used it.
-    assert!(!disabled(&ui, "Run with ANALYZE"), "ANALYZE is not offered on a read");
+    assert!(!ui.disabled("Run with ANALYZE"), "ANALYZE is not offered on a read");
     ui.click("Close");
     assert!(ui.app().modal.is_none(), "Close left the dialog open");
 }
@@ -46,7 +45,7 @@ fn the_plan_and_raw_toggle_swaps_the_node_grid_for_the_server_text() {
     assert!(ui.h.query_by_label("NODE").is_none(), "the node grid stays under Raw");
     assert!(has_value(&ui, "query_block"), "Raw does not show the server's text");
     // The warnings belong to the plan and stay in both views.
-    assert!(shows(&ui, "Full table scan on orders"));
+    assert!(ui.shows("Full table scan on orders"));
     ui.click("Plan");
     ui.show("NODE");
     assert!(!has_value(&ui, "query_block"), "the raw text stays under Plan");
