@@ -388,7 +388,17 @@ const METHODS: [&str; 6] = ["btree", "hash", "gin", "gist", "brin", "spgist"];
 /// CREATE INDEX, then its comment. An index name belongs to the schema, so only the table is written after ON.
 fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, String> {
     if ix.functional {
-        return Err(format!("Index {} has a part this editor cannot write: an expression, a condition, included columns or an operator class.", ix.name));
+        // Only an undo gets here with an index the fields cannot describe: the server's own text puts back exactly what it had.
+        // A constraint's index is not made by CREATE INDEX, so those stay out.
+        if ix.raw.starts_with("CREATE ") && !ix.constraint && ix.kind != IndexKind::Primary {
+            name_ok(&ix.name, "An index")?;
+            let mut out = vec![ix.raw.clone()];
+            if !ix.comment.is_empty() {
+                out.push(comment_stmt(&format!("INDEX {}", D.qualified(schema, &ix.name)), &ix.comment)?);
+            }
+            return Ok(out);
+        }
+        return Err(format!("Index {} has a part this editor cannot write: an expression, an operator class, a collation, a sort of NULLs, storage options or a tablespace.", ix.name));
     }
     if matches!(ix.kind, IndexKind::Fulltext | IndexKind::Spatial) {
         return Err("PostgreSQL has no FULLTEXT or SPATIAL index. Use a gin or gist index.".into());
@@ -403,10 +413,26 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
     if !method.is_empty() && !METHODS.contains(&method.as_str()) {
         return Err(format!("{method:?} is not an index method."));
     }
+    let btree = method.is_empty() || method == "btree";
+    let predicate = ix.predicate.trim();
+    let include = if ix.include.is_empty() {
+        String::new()
+    } else {
+        if !matches!(method.as_str(), "" | "btree" | "gist" | "spgist") {
+            return Err(format!("A {method} index cannot have INCLUDE columns. Only btree, gist and spgist can."));
+        }
+        for c in &ix.include {
+            name_ok(c, "An included column")?;
+        }
+        format!(" INCLUDE ({})", ix.include.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "))
+    };
     let mut out = Vec::new();
     if ix.kind == IndexKind::Primary || ix.constraint {
-        if ix.cols.iter().any(|c| c.desc) || !(method.is_empty() || method == "btree") {
+        if ix.cols.iter().any(|c| c.desc) || !btree {
             return Err("A primary key or unique constraint is a plain btree on its columns, without sort order.".into());
+        }
+        if !predicate.is_empty() || ix.concurrently {
+            return Err("A primary key or unique constraint cannot be partial or built CONCURRENTLY. Add a unique index for that.".into());
         }
         let what = if ix.kind == IndexKind::Primary { "PRIMARY KEY" } else { "UNIQUE" };
         let defer = match (ix.deferrable, ix.deferred) {
@@ -414,7 +440,7 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
             (true, false) => " DEFERRABLE",
             _ => "",
         };
-        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols}){defer}", q(&ix.name)));
+        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols}){include}{defer}", q(&ix.name)));
         if !ix.con_comment.is_empty() {
             out.push(comment_stmt(&format!("CONSTRAINT {} ON {t}", q(&ix.name)), &ix.con_comment)?);
         }
@@ -422,13 +448,93 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
         if ix.deferrable || ix.deferred {
             return Err("Only a primary key or unique constraint can be deferred.".into());
         }
+        if ix.kind == IndexKind::Unique && !btree {
+            return Err("Only a btree index can be UNIQUE.".into());
+        }
+        if !btree && ix.cols.iter().any(|c| c.desc) {
+            return Err("Only a btree index has a sort order.".into());
+        }
         let using = if method.is_empty() { String::new() } else { format!(" USING {method}") };
-        out.push(format!("CREATE {}INDEX {} ON {t}{using} ({cols})", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, q(&ix.name)));
+        let wher = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
+        out.push(format!("CREATE {}INDEX {}{} ON {t}{using} ({cols}){include}{wher}", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, if ix.concurrently { "CONCURRENTLY " } else { "" }, q(&ix.name)));
     }
     if !ix.comment.is_empty() {
         out.push(comment_stmt(&format!("INDEX {}", D.qualified(schema, &ix.name)), &ix.comment)?);
     }
     Ok(out)
+}
+
+/// The quoted name of the index a CREATE INDEX CONCURRENTLY step makes.
+fn concurrent_name(step: &str) -> Option<&str> {
+    let rest = step.strip_prefix("CREATE INDEX CONCURRENTLY ").or_else(|| step.strip_prefix("CREATE UNIQUE INDEX CONCURRENTLY "))?;
+    let b = rest.as_bytes();
+    if b.first() != Some(&b'"') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() {
+        if b[i] == b'"' {
+            if b.get(i + 1) == Some(&b'"') {
+                i += 2;
+                continue;
+            }
+            return Some(&rest[..=i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The steps that run in the plan's transaction, and the ones that cannot: CREATE INDEX CONCURRENTLY is refused inside a
+/// transaction block, and so is the comment on the index it makes, which has to wait for the index.
+pub(in crate::db::sql) fn split_steps(steps: &[String]) -> (Vec<&String>, Vec<&String>) {
+    let (mut now, mut later) = (Vec::new(), Vec::new());
+    let mut names: Vec<&str> = Vec::new();
+    for s in steps {
+        if let Some(n) = concurrent_name(s) {
+            names.push(n);
+            later.push(s);
+        } else if s.starts_with("COMMENT ON INDEX ") && names.iter().any(|n| s.contains(&format!(".{n} IS "))) {
+            later.push(s);
+        } else {
+            now.push(s);
+        }
+    }
+    (now, later)
+}
+
+/// Runs the steps that cannot share the plan's transaction, one at a time on a connection of their own, after it committed.
+/// A build that fails leaves an INVALID index behind, which is dropped again so a retry does not meet its name.
+async fn run_concurrent(db: &Db, schema: &str, steps: &[String]) -> Result<(), Fail> {
+    let n = steps.len();
+    let unsure = |what: String| Fail::Unknown(format!("{what}. The other changes were already applied, and the index was not built. Reload the structure and stage it again."));
+    let mut conn = write::writer_conn(db, schema, false).await.map_err(&unsure)?;
+    // The session is read-only and has a statement timeout, and this statement runs outside the transaction that lifts both.
+    // The connection is closed after, so none of it reaches the next user of a connection.
+    let prep = [db.pg_set_path(schema), "SET default_transaction_read_only = off".to_string(), "SET statement_timeout = 0".to_string()];
+    let mut res = Ok(());
+    for p in &prep {
+        if let Err(e) = conn.execute(p).await {
+            res = Err(unsure(se(e)));
+            break;
+        }
+    }
+    if res.is_ok() {
+        for (i, s) in steps.iter().enumerate() {
+            let t = Instant::now();
+            let out = conn.execute(s).await;
+            db.note(schema, s, t, &out);
+            if let Err(e) = out {
+                if let Some(name) = concurrent_name(s) {
+                    let _ = conn.execute(&format!("DROP INDEX IF EXISTS {}.{name}", q(schema))).await;
+                }
+                res = Err(unsure(format!("{} (concurrent statement {} of {})", se(e), i + 1, n)));
+                break;
+            }
+        }
+    }
+    let _ = conn.close().await;
+    res
 }
 
 /// The statements of one change, written against the table as it is before the change (`sim`).
@@ -986,11 +1092,18 @@ pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &
             Lock { name, mode, plain_only: false, gone }
         })
         .collect();
-    run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
-        checked_run(tx, db, schema, table, steps, expect, undo).await?;
+    let (now, later) = split_steps(steps);
+    let now: Vec<String> = now.into_iter().cloned().collect();
+    let ids = run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
+        checked_run(tx, db, schema, table, &now, expect, undo).await?;
         Ok(ids_in(tx, schema, table).await)
     })
-    .await
+    .await?;
+    if !later.is_empty() {
+        let later: Vec<String> = later.into_iter().cloned().collect();
+        run_concurrent(db, schema, &later).await?;
+    }
+    Ok(ids)
 }
 
 async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
@@ -1291,6 +1404,80 @@ mod tests {
         let p = plan("t", &st, &[Change::AddIndex(ix)]).unwrap();
         assert_eq!(p.steps, ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_note_pkey\" PRIMARY KEY (\"note\")"]);
         assert_eq!(p.undo.unwrap().steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_note_pkey\"", "ALTER TABLE \"public\".\"t\" ALTER COLUMN \"note\" DROP NOT NULL"]);
+    }
+
+    fn ix_on(name: &str, cols: &[&str]) -> IndexDef {
+        IndexDef { name: name.into(), cols: cols.iter().map(|c| crate::db::sql::ddl::IdxCol { name: (*c).into(), prefix: None, desc: false }).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_create_index_carries_its_method_condition_include_and_concurrently() {
+        let t = "\"public\".\"t\"";
+        let base = ix_on("t_n", &["name"]);
+        let add = |ix: IndexDef| steps(&[Change::AddIndex(ix)]);
+        assert_eq!(add(IndexDef { method: "hash".into(), ..base.clone() }), [format!("CREATE INDEX \"t_n\" ON {t} USING hash (\"name\")")]);
+        assert_eq!(add(IndexDef { kind: IndexKind::Unique, predicate: "note IS NOT NULL".into(), ..base.clone() }), [format!("CREATE UNIQUE INDEX \"t_n\" ON {t} (\"name\") WHERE note IS NOT NULL")]);
+        assert_eq!(add(IndexDef { include: vec!["note".into()], ..base.clone() }), [format!("CREATE INDEX \"t_n\" ON {t} (\"name\") INCLUDE (\"note\")")]);
+        let all = IndexDef { kind: IndexKind::Unique, method: "btree".into(), include: vec!["note".into()], predicate: "id > 0".into(), concurrently: true, comment: "why".into(), ..base.clone() };
+        assert_eq!(add(all), [format!("CREATE UNIQUE INDEX CONCURRENTLY \"t_n\" ON {t} USING btree (\"name\") INCLUDE (\"note\") WHERE id > 0"), "COMMENT ON INDEX \"public\".\"t_n\" IS 'why'".to_string()]);
+        // a unique constraint can carry INCLUDE columns, and nothing else of these
+        let uq = IndexDef { kind: IndexKind::Unique, constraint: true, include: vec!["note".into()], ..base.clone() };
+        assert_eq!(add(uq.clone()), [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_n\" UNIQUE (\"name\") INCLUDE (\"note\")")]);
+        let st = table();
+        let refused = |ix: IndexDef| plan("t", &st, &[Change::AddIndex(ix)]).err().unwrap_or_default();
+        assert!(refused(IndexDef { method: "hash".into(), include: vec!["note".into()], ..base.clone() }).contains("INCLUDE"));
+        assert!(refused(IndexDef { method: "gin".into(), kind: IndexKind::Unique, ..base.clone() }).contains("UNIQUE"));
+        assert!(refused(IndexDef { method: "bogus".into(), ..base.clone() }).contains("not an index method"));
+        assert!(refused(IndexDef { concurrently: true, ..uq.clone() }).contains("CONCURRENTLY"));
+        assert!(refused(IndexDef { predicate: "id > 0".into(), ..uq }).contains("partial"));
+        let mut desc = ix_on("t_d", &["name"]);
+        desc.cols[0].desc = true;
+        assert!(refused(IndexDef { method: "gist".into(), ..desc }).contains("sort order"));
+    }
+
+    #[test]
+    fn a_concurrent_index_runs_after_the_transaction_with_its_comment_and_is_undone_by_a_drop() {
+        let ix = IndexDef { concurrently: true, comment: "why".into(), ..ix_on("t_n", &["name"]) };
+        let p = plan("t", &table(), &[Change::DropIndex("t_name".into()), Change::AddIndex(ix)]).unwrap();
+        let (now, later) = split_steps(&p.steps);
+        assert_eq!(now.len(), 1);
+        assert!(now[0].starts_with("DROP INDEX"));
+        assert_eq!(later.len(), 2);
+        assert!(later[0].starts_with("CREATE INDEX CONCURRENTLY \"t_n\"") && later[1].starts_with("COMMENT ON INDEX"));
+        let sql = p.sql();
+        let (drop, note, create) = (sql.find("DROP INDEX").unwrap(), sql.find("cannot run inside a transaction").unwrap(), sql.find("CONCURRENTLY \"t_n\"").unwrap());
+        assert!(drop < note && note < create, "{sql}");
+        // the undo is a plain DROP, which runs in the transaction
+        let undo = p.undo.unwrap();
+        assert_eq!(undo.steps[0], "DROP INDEX \"public\".\"t_n\"");
+        assert!(undo.steps.iter().all(|s| split_steps(std::slice::from_ref(s)).1.is_empty()), "{:?}", undo.steps);
+        // without a concurrent index the preview is the plain script
+        assert!(!plan("t", &table(), &[Change::DropIndex("t_name".into())]).unwrap().sql().contains("CONCURRENTLY"));
+        // a name with a quote in it is read to its end
+        assert_eq!(concurrent_name("CREATE INDEX CONCURRENTLY \"a\"\" ON \" ON t (x)"), Some("\"a\"\" ON \""));
+    }
+
+    #[test]
+    fn any_index_can_be_dropped_and_undone_from_the_servers_own_text() {
+        let raw = "CREATE INDEX t_part ON public.t USING btree (name text_pattern_ops) WHERE (note IS NOT NULL)";
+        let mut st = table();
+        st.indexes.push(Index { complex: true, ..index("t_part", raw, &["name"]) });
+        let p = plan("t", &st, &[Change::DropIndex("t_part".into())]).unwrap();
+        assert_eq!(p.steps, ["DROP INDEX \"public\".\"t_part\"".to_string()]);
+        assert_eq!(p.undo.unwrap().steps, [raw.to_string()]);
+        // a constraint's index is not made by CREATE INDEX, so its drop is still not undoable
+        let mut st = table();
+        st.indexes.push(Index { complex: true, constraint: true, unique: true, ..index("t_ex", "CREATE UNIQUE INDEX t_ex ON public.t USING btree (name) INCLUDE (note) WITH (fillfactor=70)", &["name"]) });
+        assert!(plan("t", &st, &[Change::DropIndex("t_ex".into())]).unwrap().undo.is_err());
+    }
+
+    #[test]
+    fn a_partial_or_covering_index_is_read_into_the_form_and_written_back_the_same() {
+        let ix = Index { predicate: "(note IS NOT NULL)".into(), include: vec!["note".into()], ..index("t_p", "CREATE INDEX t_p ON public.t USING btree (name) INCLUDE (note) WHERE (note IS NOT NULL)", &["name"]) };
+        let d = IndexDef::from_index(&ix);
+        assert!(!d.functional);
+        assert_eq!((d.predicate.as_str(), d.include.as_slice()), ("(note IS NOT NULL)", &["note".to_string()][..]));
+        assert_eq!(steps(&[Change::AddIndex(d)]), ["CREATE INDEX \"t_p\" ON \"public\".\"t\" (\"name\") INCLUDE (\"note\") WHERE (note IS NOT NULL)".to_string()]);
     }
 
     #[test]

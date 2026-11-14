@@ -51,6 +51,8 @@ pub(in crate::app) struct IdxForm {
     avail: Vec<(String, String)>,
     rest: Vec<Change>,
     view: Option<IdxView>,
+    /// The INCLUDE columns as typed, comma separated, which `def.include` follows.
+    include_text: String,
 }
 
 /// The checks, the plan and the warnings of the index as it stands, kept until the definition changes.
@@ -308,7 +310,8 @@ impl App {
         let staged = self.staged().to_vec();
         let from = i.and_then(|i| st.indexes.get(i)).map(IndexDef::from_index);
         if let Some(f) = from.as_ref().filter(|f| f.functional) {
-            return self.warn(format!("{} has an expression part, which this editor cannot write back. Change it with a query.", f.name));
+            let why = if self.alter_env().0 == Dialect::Postgres { "an expression, operator class, collation, NULLS order, storage option or tablespace" } else { "an expression part" };
+            return self.warn(format!("{} has {why}, which this editor cannot write back. Change it with a query. Dropping it can still be undone.", f.name));
         }
         if let Some(f) = &from && staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
             return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
@@ -320,13 +323,14 @@ impl App {
         })).unwrap_or_default();
         let avail = after.iter().map(|n| (n.clone(), ty(n))).collect();
         let def = from.clone().unwrap_or_default();
-        self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { from, def, avail, rest: staged, view: None })));
+        self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { include_text: def.include.join(", "), from, def, avail, rest: staged, view: None })));
     }
 
     pub(in crate::app) fn stage_drop_index(&mut self, i: usize) {
         let Some(ix) = self.structure().and_then(|s| s.indexes.get(i)) else { return };
         // The server reports the expression in a form undo could not add back.
-        if ix.cols.iter().any(|c| c.expr.is_some()) {
+        // PostgreSQL's own text of the index brings it back exactly, so only MySQL's functional parts are refused.
+        if ix.def.is_empty() && ix.cols.iter().any(|c| c.expr.is_some()) {
             return self.warn(format!("{} has an expression part, so dropping it here could not be undone. Drop it with a query.", ix.name));
         }
         let name = ix.name.clone();
@@ -837,6 +841,29 @@ impl App {
             }
             ui.end_row();
 
+            if pg {
+                // A primary key or a unique constraint is plain btree on its columns, so the options belong to a plain index.
+                let plain = !primary && !f.def.constraint;
+                form_label(ui, "Method");
+                ui.add_enabled_ui(plain, |ui| {
+                    let shown = if f.def.method.is_empty() { "btree".to_string() } else { f.def.method.clone() };
+                    let combo = egui::ComboBox::from_id_salt("idxmethod").width(160.0).selected_text(shown.clone()).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for m in ["btree", "hash", "gin", "gist", "brin", "spgist"] {
+                            if ui.selectable_label(shown == m, m).clicked() {
+                                f.def.method = if m == "btree" { String::new() } else { m.to_string() };
+                            }
+                        }
+                    });
+                    combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, plain, "Index method"));
+                });
+                ui.end_row();
+
+                form_label(ui, "Where");
+                ui.add_enabled(plain, egui::TextEdit::singleline(&mut f.def.predicate).font(egui::TextStyle::Monospace).hint_text("a partial index: only rows that match, like status = 'open'").desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, plain, "Index condition"));
+                ui.end_row();
+            }
+
             form_label(ui, "Columns");
             ui.vertical(|ui| {
                 // The key's column order matters, so the rows drag to reorder, or Alt+Up and Alt+Down on the focused one.
@@ -892,6 +919,27 @@ impl App {
                 }
             });
             ui.end_row();
+
+            if pg {
+                // A primary key or unique constraint can be given INCLUDE columns, but not a condition or CONCURRENTLY.
+                form_label(ui, "Include");
+                ui.add(egui::TextEdit::singleline(&mut f.include_text).font(egui::TextStyle::Monospace).hint_text("columns kept in the index but not in its key, comma separated").desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Included columns"));
+                f.def.include = f.include_text.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+                ui.end_row();
+
+                let plain = !primary && !f.def.constraint;
+                if !plain {
+                    f.def.concurrently = false;
+                    f.def.predicate.clear();
+                }
+                form_label(ui, "Build");
+                ui.horizontal(|ui| {
+                    let r = ui.add_enabled_ui(plain, |ui| toggle(ui, &mut f.def.concurrently)).inner.on_hover_text("CREATE INDEX CONCURRENTLY does not block writes while it builds, but it takes longer and runs on its own after the other staged changes").on_disabled_hover_text("Only a plain index can be built concurrently");
+                    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, plain, f.def.concurrently, "Build concurrently"));
+                    ui.label(RichText::new("Concurrently, without blocking writes").color(MUTED()));
+                });
+                ui.end_row();
+            }
 
             form_label(ui, "Comment");
             ui.add(egui::TextEdit::singleline(&mut f.def.comment).desired_width(f32::INFINITY));

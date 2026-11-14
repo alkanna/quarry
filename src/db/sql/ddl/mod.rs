@@ -209,6 +209,15 @@ pub struct IndexDef {
     pub deferred: bool,
     /// PostgreSQL: the comment on the constraint, apart from the one on its index.
     pub con_comment: String,
+    /// PostgreSQL: the WHERE condition of a partial index, as `pg_get_expr` prints it or as the person writes it.
+    pub predicate: String,
+    /// PostgreSQL: columns stored in the index beside its key (INCLUDE).
+    pub include: Vec<String>,
+    /// PostgreSQL: CREATE INDEX CONCURRENTLY, which cannot run in the transaction the other changes share.
+    pub concurrently: bool,
+    /// PostgreSQL: `pg_get_indexdef`, the server's own text for the index. Only an index that `functional` says the fields
+    /// cannot describe is written from it, which is what lets an undo bring any dropped index back exactly.
+    pub raw: String,
 }
 
 impl IndexDef {
@@ -228,7 +237,7 @@ impl IndexDef {
         };
         let functional = ix.cols.iter().any(|c| c.expr.is_some()) || (pg && ix.complex) || (ix.constraint && !ix.primary && !ix.unique);
         let method = if pg && !ix.kind.eq_ignore_ascii_case("btree") { ix.kind.to_ascii_lowercase() } else { String::new() };
-        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional, constraint: ix.constraint, method, deferrable: ix.deferrable, deferred: ix.deferred, con_comment: ix.con_comment.clone() }
+        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional, constraint: ix.constraint, method, deferrable: ix.deferrable, deferred: ix.deferred, con_comment: ix.con_comment.clone(), predicate: ix.predicate.clone(), include: ix.include.clone(), concurrently: false, raw: if pg { ix.def.clone() } else { String::new() } }
     }
 }
 

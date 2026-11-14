@@ -90,6 +90,25 @@ pub struct Index {
     pub deferred: bool,
     /// PostgreSQL: the comment on the constraint that owns the index, which is not the index's own.
     pub con_comment: String,
+    /// PostgreSQL: the WHERE condition of a partial index as `pg_get_expr` prints it, empty when there is none.
+    pub predicate: String,
+    /// PostgreSQL: the INCLUDE columns, which are stored in the index but are not part of its key.
+    pub include: Vec<String>,
+    /// How many times the index was used since the statistics were last reset, None when the server does not say.
+    pub scans: Option<u64>,
+    /// PostgreSQL 16 and later: when the index was last used, as the server prints the timestamp.
+    pub last_scan: Option<String>,
+}
+
+/// Where the per index usage counts of a structure come from and why there may be none.
+#[derive(Clone, Debug, Default)]
+pub struct IndexUsage {
+    /// Why no index has a count (performance_schema is off, the view cannot be read). Empty when counts were read.
+    pub unavailable: String,
+    /// PostgreSQL: when the statistics of the database were last reset, as the server prints it. Empty when never.
+    pub reset: String,
+    /// MySQL and MariaDB: how long the server has been up, which is as far back as the counts go.
+    pub uptime: Option<u64>,
 }
 
 /// An object the server drops together with a PostgreSQL column, from `pg_depend`.
@@ -260,6 +279,7 @@ pub struct Structure {
     pub pg_schema: Option<String>,
     /// PostgreSQL: what depends on each column, so dropping a column can say what goes with it. Empty on MySQL.
     pub pg_deps: Vec<ColDep>,
+    pub usage: IndexUsage,
 }
 
 impl Structure {
@@ -412,7 +432,7 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
             last.complex |= r.int("complex") == Some(1);
         } else {
             let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment") });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment"), predicate: s(r, "pred"), include: text(r, "incl").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), scans: None, last_scan: None });
         }
     }
     out
@@ -566,6 +586,57 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
     Ok(())
 }
 
+/// The PostgreSQL view of index use, with the reset time of the database's statistics beside it. `last_idx_scan` exists from 16 on,
+/// so it is read through the row's JSON, which leaves it out on older servers.
+const PG_USAGE: &str = "SELECT s.indexrelname::text AS name, s.idx_scan::bigint AS scans, to_jsonb(s) ->> 'last_idx_scan' AS last_scan, \
+     (SELECT d.stats_reset::text FROM pg_stat_database d WHERE d.datname = current_database()) AS reset \
+     FROM pg_stat_user_indexes s WHERE s.schemaname = $1 AND s.relname = $2";
+
+/// The rows exist once the table has been opened since the server started, so a table with none says nothing instead of zero.
+const MY_USAGE: &str = "SELECT INDEX_NAME AS name, COUNT_STAR AS scans FROM performance_schema.table_io_waits_summary_by_index_usage WHERE OBJECT_SCHEMA = ? AND OBJECT_NAME = ? AND INDEX_NAME IS NOT NULL";
+
+/// Reads how often each index was used. It never fails the structure: a server or role that cannot say leaves the counts
+/// empty and the reason in `st.usage`.
+async fn usage(db: &Db, schema: &str, table: &str, st: &mut Structure) {
+    let d = db.dialect;
+    if d == Dialect::Postgres {
+        match query(db, PG_USAGE, schema, table).await {
+            Ok(rows) => {
+                for r in &rows {
+                    if st.usage.reset.is_empty() {
+                        st.usage.reset = s(r, "reset");
+                    }
+                    if let Some(ix) = st.indexes.iter_mut().find(|i| i.name == s(r, "name")) {
+                        ix.scans = num(r, "scans");
+                        ix.last_scan = text(r, "last_scan");
+                    }
+                }
+            }
+            Err(_) => st.usage.unavailable = "The server did not let this login read pg_stat_user_indexes.".into(),
+        }
+        return;
+    }
+    // A server with the schema off still has the tables in some versions, and they stay empty, so the switch is read first.
+    let on = db.meta(schema, "SELECT @@performance_schema AS on_", []).await.ok().and_then(|r| r.first().and_then(|r| num(r, "on_")));
+    if on != Some(1) {
+        st.usage.unavailable = "Index use is counted by performance_schema, which is off on this server. Turn it on in the server configuration and restart it.".into();
+        return;
+    }
+    match query(db, MY_USAGE, schema, table).await {
+        Ok(rows) => {
+            for r in &rows {
+                if let Some(ix) = st.indexes.iter_mut().find(|i| i.name == s(r, "name")) {
+                    ix.scans = num(r, "scans");
+                }
+            }
+            // MariaDB keeps the status variables in information_schema, MySQL 8 only in performance_schema.
+            let from = if d == Dialect::MariaDb { "information_schema.GLOBAL_STATUS" } else { "performance_schema.global_status" };
+            st.usage.uptime = db.meta(schema, &format!("SELECT VARIABLE_VALUE AS v FROM {from} WHERE VARIABLE_NAME = 'Uptime'"), []).await.ok().and_then(|r| r.first().and_then(|r| text(r, "v")?.trim().parse().ok()));
+        }
+        Err(_) => st.usage.unavailable = "This login cannot read performance_schema, which counts how often an index is used.".into(),
+    }
+}
+
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view. PostgreSQL composes a table's text from what is read below.
@@ -600,8 +671,10 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         constraints: Vec::new(),
         pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
         pg_deps: Vec::new(),
+        usage: IndexUsage::default(),
     };
     extras(db, schema, table, &mut st).await?;
+    usage(db, schema, table, &mut st).await;
     if d == Dialect::Postgres {
         let kind = stat.first().and_then(|r| text(r, "kind")).unwrap_or_default();
         pg_finish(db, schema, table, &kind, &mut st).await?;

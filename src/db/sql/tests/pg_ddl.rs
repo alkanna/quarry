@@ -218,11 +218,16 @@ fn indexes_and_constraints_are_made_renamed_and_dropped() {
         t.apply(&[Change::AddIndex(index("t_pk2", IndexKind::Primary, &["name", "id"]))]);
         let st = t.structure();
         assert!(st.indexes.iter().any(|i| i.primary && i.name == "t_pk2" && i.cols.len() == 2), "{var}");
-        // an index the editor cannot write back is refused instead of being dropped for good
-        t.sql("CREATE INDEX t_partial ON t (qty) WHERE qty > 1");
-        let err = t.plan(&[Change::DropIndex("t_partial".into())]).unwrap().undo.unwrap_err();
-        assert!(err.contains("cannot be read back"), "{var}: {err}");
-        assert!(t.plan(&[Change::AddIndex(IndexDef::from_index(&t.structure().indexes.iter().find(|i| i.name == "t_partial").unwrap().clone()))]).unwrap_err().contains("cannot write"), "{var}");
+        // an index the editor cannot write is dropped and undone from the server's own text, and comes back exactly
+        t.sql("CREATE INDEX t_partial ON t (note text_pattern_ops) WHERE qty > 1");
+        t.sql("COMMENT ON INDEX t_partial IS 'by pattern'");
+        let before = t.shape();
+        let a = t.apply(&[Change::DropIndex("t_partial".into())]);
+        assert!(t.structure().indexes.iter().all(|i| i.name != "t_partial"), "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        let back = t.structure().indexes.into_iter().find(|i| i.name == "t_partial").unwrap();
+        assert!(back.complex && back.comment == "by pattern" && back.predicate.contains("qty"), "{var}");
     });
 }
 
@@ -545,6 +550,37 @@ fn a_type_text_that_is_a_whole_column_clause_is_refused_by_the_server() {
 }
 
 #[test]
+fn an_index_with_a_condition_included_columns_a_method_and_concurrently_is_built_and_undone() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "ixopts", TABLE_DDL);
+        let before = t.shape();
+        let mut partial = index("t_opts", IndexKind::Index, &["name"]);
+        (partial.predicate, partial.include) = ("qty > 1".into(), vec!["note".into()]);
+        let a = t.apply(&[Change::AddIndex(partial)]);
+        let got = t.structure().indexes.into_iter().find(|i| i.name == "t_opts").unwrap();
+        assert!(!got.complex && got.predicate.contains("qty") && got.include == ["note"], "{var}: {got:?}");
+        // read back into the form it is the same index, so an edit of anything else keeps the condition
+        let def = IndexDef::from_index(&got);
+        assert!(!def.functional && def.predicate == got.predicate && def.include == got.include, "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        // a concurrent build runs after the transaction of the other changes, and the undo is a plain drop of both
+        let mut conc = index("t_conc", IndexKind::Index, &["note"]);
+        (conc.concurrently, conc.method, conc.comment) = (true, "hash".into(), "built apart".into());
+        let a = t.apply(&[add(ColDef::new("extra", "text")), Change::AddIndex(conc)]);
+        let st = t.structure();
+        let ix = st.indexes.iter().find(|i| i.name == "t_conc").unwrap();
+        assert!(t.col("extra").is_some() && ix.kind == "HASH" && ix.comment == "built apart", "{var}");
+        assert_eq!(t.one("SELECT indisvalid::text FROM pg_index WHERE indexrelid = 't_conc'::regclass"), "true", "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        // every index has a use count, and the statistics reset time of the database is read beside them
+        let st = t.structure();
+        assert!(st.usage.unavailable.is_empty() && st.indexes.iter().all(|i| i.scans.is_some()), "{var}: {:?}", st.usage);
+    });
+}
+
+#[test]
 fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
     every_pg(|l, var| {
         let t = fixture(l, var, "plain", TABLE_DDL);
@@ -556,8 +592,6 @@ fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
         t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(t.shape(), before, "{var}");
         let mut complex = vec![
-            "CREATE INDEX c1 ON t (name) WHERE qty > 1",
-            "CREATE INDEX c2 ON t (name) INCLUDE (qty)",
             "CREATE INDEX c3 ON t (note text_pattern_ops)",
             "CREATE INDEX c4 ON t (name NULLS FIRST)",
             "CREATE INDEX c5 ON t (name DESC NULLS LAST)",
@@ -571,7 +605,7 @@ fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
         for ddl in &complex {
             t.sql(ddl);
         }
-        for ddl in ["CREATE INDEX p1 ON t (name DESC)", "CREATE INDEX p2 ON t (name DESC NULLS FIRST)", "CREATE INDEX p3 ON t (qty NULLS LAST)", "CREATE INDEX p4 ON t USING hash (name)"] {
+        for ddl in ["CREATE INDEX p1 ON t (name DESC)", "CREATE INDEX p2 ON t (name DESC NULLS FIRST)", "CREATE INDEX p3 ON t (qty NULLS LAST)", "CREATE INDEX p4 ON t USING hash (name)", "CREATE INDEX p5 ON t (name) WHERE qty > 1", "CREATE INDEX p6 ON t (name) INCLUDE (qty)"] {
             t.sql(ddl);
         }
         for i in t.structure().indexes {
