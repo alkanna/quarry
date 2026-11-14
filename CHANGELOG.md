@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0](https://github.com/alkanna/quarry/compare/v0.46.1...v0.47.0) (2026-11-14)
+
+
+### Features
+
+* SQL feature parity with MongoDB, parity bug fixes, and the window remembers its size ([#233](https://github.com/alkanna/quarry/issues/233)) ([a2c45f9](https://github.com/alkanna/quarry/commit/a2c45f96762593ebe15188dce4b0fc8e14d089ef))
+
 ## [0.46.1](https://github.com/alkanna/quarry/compare/v0.46.0...v0.46.1) (2026-11-14)
 
 
