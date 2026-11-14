@@ -75,7 +75,7 @@ impl App {
         let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: Dialect::MySql, opts: crate::db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
         let conn = self.t().map_or(0, |t| t.sel.conn);
         let analyze = plan::analyze_mode(text, Dialect::MySql, false);
-        let x = SqlExplain { req: 1, busy: true, stmt: text.into(), conn, tab_db: "shop".into(), dialect: Dialect::MySql, db, schema: "shop".into(), plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None };
+        let x = SqlExplain { req: 1, busy: true, stmt: text.into(), conn, tab_db: "shop".into(), dialect: Dialect::MySql, db, schema: "shop".into(), plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false };
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
         let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
         let set = db::sql::ResultSet { cols: vec![col], rows: db::Row::from_doc(&mongodb::bson::doc! { "EXPLAIN": plan }).into_iter().collect(), ..db::sql::ResultSet::new(text) };

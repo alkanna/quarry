@@ -594,6 +594,7 @@ impl Steps for Session<'_> {
             }
             out
         };
+        self.db.note(self.schema, sql, t, &res);
         res.map_err(se)
     }
 }
