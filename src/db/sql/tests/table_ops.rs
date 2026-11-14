@@ -77,7 +77,8 @@ fn live_pg_a_table_is_copied_renamed_and_emptied() {
         assert_eq!(t.one("SELECT count(*) FROM pg_constraint WHERE conrelid = 'child2'::regclass AND contype = 'f'"), "0", "{var}");
         assert_eq!(t.one("SELECT count(*) FROM pg_constraint WHERE conrelid = 'child2'::regclass AND contype = 'p'"), "1", "{var}");
         l.w.sql_undo(db.clone(), undo.unwrap(), Vec::new(), false);
-        assert!(ddl_answer(l.next()).0.is_ok(), "{var}");
+        let undone = ddl_answer(l.next()).0;
+        assert!(undone.is_ok(), "{var}: {undone:?}");
         assert_eq!(t.one("SELECT to_regclass('child2') IS NULL"), "true", "{var}");
         // A view is not copied.
         l.w.sql_duplicate(1, db.clone(), s.clone(), "v".into(), "v_copy".into(), false, false);
