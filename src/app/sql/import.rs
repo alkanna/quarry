@@ -1,17 +1,26 @@
-//! The Import dialog of a SQL table: a CSV file, how to read it, which column goes where, and what the check of
-//! every value found. The check reads the whole file in a thread of its own, so the dialog stays quick on a big file.
+//! The Import dialog of a SQL table: a CSV, JSON or JSON Lines file (or pasted text), how to read it, which column goes
+//! where, and what the check of every value found. The check reads the whole file in a thread of its own, so the dialog
+//! stays quick on a big file. JSON is flattened to CSV once, when it is opened, and everything after reads that CSV.
 
 use crate::app::*;
 use db::sql::csv::{self, DateFmt, Enc, Mapping, Opts, Report, Source, TableInfo};
+use db::sql::json;
 use db::sql::import::{self, Dup, ImportPlan};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 /// The file being imported and everything read from it.
 pub(in crate::app) struct FileState {
+    /// What the checks and the import read: the file itself for CSV, the CSV a JSON file was flattened to.
     src: Source,
+    /// What the person gave, which Back and an unlock open again.
+    origin: Source,
     name: String,
+    /// Bytes of `src`, which the progress is counted in, and of `origin`, which the dialog shows.
     size: u64,
+    shown_size: u64,
+    /// Set for JSON and JSON Lines.
+    json: Option<JsonFile>,
     opts: Opts,
     header: bool,
     /// What the encoding looked like when the file was opened, shown beside the choice.
@@ -51,10 +60,30 @@ fn hash_of(v: &impl std::hash::Hash) -> u64 {
     h.finish()
 }
 
+/// What a JSON file said about itself when it was flattened.
+struct JsonFile {
+    /// One object per line rather than one array.
+    lines: bool,
+    /// By key: whether any row holds an object or array there, which is written as JSON text.
+    nested: Vec<bool>,
+}
+
 impl FileState {
-    fn open(src: Source, name: String) -> Result<FileState, String> {
-        let (opts, header) = csv::sniff(&src)?;
-        let mut f = FileState { size: src.len(), src, name, opts, header, detected: opts.enc, names: Vec::new(), sample: Vec::new(), map: Mapping { map: Vec::new(), fmts: Vec::new(), empty_null: true }, read_key: u64::MAX, check_key: u64::MAX, report: None, rx: None, cancel: Arc::new(AtomicBool::new(false)), epoch: 0 };
+    /// `name` is the file's name; None for pasted text, which is named by what it turned out to be.
+    fn open(origin: Source, name: Option<String>) -> Result<FileState, String> {
+        let head = origin.head(64 << 10).map_err(|e| format!("Could not read the file: {e}"))?;
+        let is_json = json::looks_like_json(name.as_deref().unwrap_or(""), &head);
+        let name = name.unwrap_or_else(|| if is_json { "Pasted JSON" } else { "Pasted CSV" }.into());
+        let blank = |src: Source, opts: Opts, header: bool, json: Option<JsonFile>| FileState { size: src.len(), shown_size: origin.len(), origin: origin.clone(), src, json, name: name.clone(), opts, header, detected: opts.enc, names: Vec::new(), sample: Vec::new(), map: Mapping { map: Vec::new(), fmts: Vec::new(), empty_null: true }, read_key: u64::MAX, check_key: u64::MAX, report: None, rx: None, cancel: Arc::new(AtomicBool::new(false)), epoch: 0 };
+        let mut f = if is_json {
+            let flat = json::flatten(&json::read_text(&origin)?)?;
+            // The flattened text is plain UTF-8 CSV, so the reading options are fixed and the dialog does not offer them.
+            let opts = Opts { delim: ',', quote: Some('"'), enc: Enc::Utf8 };
+            blank(Source::Mem(Arc::new(flat.csv)), opts, true, Some(JsonFile { lines: flat.lines, nested: flat.nested }))
+        } else {
+            let (opts, header) = csv::sniff(&origin)?;
+            blank(origin.clone(), opts, header, None)
+        };
         f.resample()?;
         Ok(f)
     }
@@ -125,8 +154,17 @@ impl Drop for FileState {
     }
 }
 
+/// The text on the clipboard as an import source, or why there is none.
+fn clipboard_source() -> Result<Source, String> {
+    let text = arboard::Clipboard::new().and_then(|mut c| c.get_text()).map_err(|e| format!("Could not read the clipboard: {e}"))?;
+    if text.trim().is_empty() {
+        return Err("The clipboard holds no text.".into());
+    }
+    Ok(Source::Mem(Arc::new(text.into_bytes())))
+}
+
 fn pick_csv() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().add_filter("CSV", &["csv", "tsv", "txt"]).pick_file()
+    rfd::FileDialog::new().add_filter("CSV, JSON and JSON Lines", &["csv", "tsv", "txt", "json", "jsonl", "ndjson"]).pick_file()
 }
 
 fn quote_label(q: Option<char>) -> &'static str {
@@ -141,6 +179,14 @@ impl App {
     /// Opens the Import dialog for `table`, asking for the file first.
     pub(in crate::app) fn open_sql_import(&mut self, conn: u64, db: String, schema: String, table: String) {
         self.open_sql_import_with(conn, db, schema, table, None);
+    }
+
+    /// Opens the Import dialog for `table` over the text on the clipboard, CSV or JSON.
+    pub(in crate::app) fn open_sql_import_paste(&mut self, conn: u64, db: String, schema: String, table: String) {
+        match clipboard_source() {
+            Ok(src) => self.open_sql_import_with(conn, db, schema, table, Some(src)),
+            Err(e) => self.warn(e),
+        }
     }
 
     /// `src` is the file to read; None asks for one in the system dialog, so a test hands it in.
@@ -158,8 +204,8 @@ impl App {
             },
         };
         let name = match &src {
-            Source::File(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            Source::Mem(_) => "data.csv".into(),
+            Source::File(p) => Some(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            Source::Mem(_) => None,
         };
         let file = match FileState::open(src, name) {
             Ok(f) => f,
@@ -211,8 +257,8 @@ impl App {
         }
         let rep_rows = f.file.report.as_ref().map(|r| r.rows);
         let sub = match rep_rows {
-            Some(n) => format!("{} \u{b7} {} rows \u{b7} {}", f.file.name, group(&n.to_string()), human_bytes(f.file.size as usize)),
-            None => format!("{} \u{b7} {}", f.file.name, human_bytes(f.file.size as usize)),
+            Some(n) => format!("{} \u{b7} {} rows \u{b7} {}", f.file.name, group(&n.to_string()), human_bytes(f.file.shown_size as usize)),
+            None => format!("{} \u{b7} {}", f.file.name, human_bytes(f.file.shown_size as usize)),
         };
         ui.label(RichText::new(sub).size(TXT_SMALL).color(MUTED()));
         ui.add_space(8.0);
@@ -241,11 +287,17 @@ impl App {
         }
         let Some(Ok(info)) = f.info.clone() else { return };
         egui::Grid::new("imp-opts").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 10.0).show(ui, |ui| {
-            form_label(ui, "Separator");
+            form_label(ui, if f.file.json.is_some() { "Format" } else { "Separator" });
             ui.horizontal(|ui| {
-                segmented(ui, &mut f.file.opts.delim, &[(',', ","), (';', ";"), ('\t', "Tab"), ('|', "|")]);
-                ui.add_space(14.0);
-                ui.checkbox(&mut f.file.header, "First row is the header");
+                if let Some(j) = &f.file.json {
+                    ui.label(RichText::new(if j.lines { "JSON Lines, one object per line" } else { "JSON array of objects" }).size(TXT_SMALL).color(MUTED()));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Each key is a column. Nested objects and arrays are written as JSON text.").size(TXT_CAPTION).color(FAINT()));
+                } else {
+                    segmented(ui, &mut f.file.opts.delim, &[(',', ","), (';', ";"), ('\t', "Tab"), ('|', "|")]);
+                    ui.add_space(14.0);
+                    ui.checkbox(&mut f.file.header, "First row is the header");
+                }
             });
             ui.end_row();
             form_label(ui, "Duplicate keys");
@@ -264,19 +316,23 @@ impl App {
             ui.end_row();
             form_label(ui, "Reading");
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Quote").size(TXT_SMALL).color(MUTED()));
-                segmented(ui, &mut f.file.opts.quote, &[(Some('"'), quote_label(Some('"'))), (Some('\''), quote_label(Some('\''))), (None, "None")]);
-                ui.add_space(8.0);
-                ui.label(RichText::new("Encoding").size(TXT_SMALL).color(MUTED()));
-                let det = f.file.detected;
-                egui::ComboBox::from_id_salt("imp-enc").width(130.0).selected_text(f.file.opts.enc.label()).show_ui(ui, |ui| {
-                    menu_look(ui);
-                    for (e, l) in Enc::ALL {
-                        ui.selectable_value(&mut f.file.opts.enc, e, if e == det { format!("{l} (detected)") } else { l.to_string() });
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(RichText::new("Empty is").size(TXT_SMALL).color(MUTED())).on_hover_text("What an empty value becomes in a text column. Other columns always get NULL.");
+                // A JSON file was read once, with the encoding its bytes show, so only CSV has these to choose.
+                if f.file.json.is_none() {
+                    ui.label(RichText::new("Quote").size(TXT_SMALL).color(MUTED()));
+                    segmented(ui, &mut f.file.opts.quote, &[(Some('"'), quote_label(Some('"'))), (Some('\''), quote_label(Some('\''))), (None, "None")]);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Encoding").size(TXT_SMALL).color(MUTED()));
+                    let det = f.file.detected;
+                    egui::ComboBox::from_id_salt("imp-enc").width(130.0).selected_text(f.file.opts.enc.label()).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for (e, l) in Enc::ALL {
+                            ui.selectable_value(&mut f.file.opts.enc, e, if e == det { format!("{l} (detected)") } else { l.to_string() });
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+                let tip = if f.file.json.is_some() { "What a key an object lacks, and an empty string, become in a text column. Other columns always get NULL, and a JSON null is always NULL." } else { "What an empty value becomes in a text column. Other columns always get NULL." };
+                ui.label(RichText::new("Empty is").size(TXT_SMALL).color(MUTED())).on_hover_text(tip);
                 segmented(ui, &mut f.file.map.empty_null, &[(true, "NULL"), (false, "Empty text")]);
             });
             ui.end_row();
@@ -290,7 +346,7 @@ impl App {
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("imp-cols").max_height(270.0).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new("imp-cols").num_columns(4).spacing([16.0, 7.0]).show(ui, |ui| {
-                    for h in ["CSV column", "Table column", "First values", "Check"] {
+                    for h in [if f.file.json.is_some() { "Key" } else { "CSV column" }, "Table column", "First values", "Check"] {
                         ui.label(RichText::new(h).size(TXT_SMALL).color(MUTED()));
                     }
                     ui.end_row();
@@ -334,6 +390,8 @@ impl App {
                                     if ui.add(egui::Label::new(mono(how.into(), WARNING())).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Click to read the dates the other way round").clicked() {
                                         flip = Some(ci);
                                     }
+                                } else if f.file.json.as_ref().is_some_and(|j| j.nested.get(ci).copied().unwrap_or(false)) && info.cols[t].kind != db::sql::value::Kind::Json {
+                                    ui.label(mono("Written as JSON text".into(), WARNING())).on_hover_text("This key holds objects or arrays, and the column is not a JSON column, so the value is stored as its JSON text.");
                                 } else {
                                     ui.label(mono("OK".into(), SUCCESS()));
                                 }
@@ -419,7 +477,7 @@ impl App {
         } else {
             None
         };
-        let (mut start, mut back, mut unlock) = (false, false, false);
+        let (mut start, mut back, mut paste, mut unlock) = (false, false, false, false);
         ui.add_space(8.0);
         // One button high: a bare right to left layout fills the height the dialog's scroll area offers, the whole window.
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.spacing().interact_size.y), egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -430,6 +488,7 @@ impl App {
                 r.on_disabled_hover_text(why);
             }
             back = ui.button("Back").on_hover_text("Choose another file").clicked();
+            paste = ui.button("Paste").on_hover_text("Import the text on the clipboard instead, CSV or JSON").clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -440,9 +499,10 @@ impl App {
         if start {
             self.start_sql_import(f, &info, undo.is_ok());
             *keep = false;
-        } else if back {
-            if let Some(p) = pick_csv() {
-                match FileState::open(Source::File(p.clone()), p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) {
+        } else if back || paste {
+            let next = if back { pick_csv().map(|p| (Source::File(p.clone()), p.file_name().map(|n| n.to_string_lossy().into_owned()))) } else { clipboard_source().map(|s| (s, None)).map_err(|e| self.warn(e)).ok() };
+            if let Some((src, name)) = next {
+                match FileState::open(src, name) {
                     Ok(mut file) => {
                         file.remap(&info);
                         f.file = file;
@@ -452,7 +512,7 @@ impl App {
             }
         } else if unlock {
             *keep = false;
-            let (conn, db, schema, table, src) = (f.conn, f.db.clone(), f.schema.clone(), f.table.clone(), f.file.src.clone());
+            let (conn, db, schema, table, src) = (f.conn, f.db.clone(), f.schema.clone(), f.table.clone(), f.file.origin.clone());
             // The form is built again after the unlock, with the choices made in this one.
             let (opts, header, map, dup) = (f.file.opts, f.file.header, f.file.map.clone(), f.dup);
             self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| {
@@ -484,8 +544,9 @@ impl App {
             csv.push_str(&format!("{},{},{},{},{},{:02}/11/2026 12:41,{}\n", 4410 + i, 800 + i % 700, ["paid", "shipped", "paid"][i as usize % 3], amount, ["EUR", "EUR", "USD"][i as usize % 3], 1 + i % 28, ["web", "app", "web"][i as usize % 3]));
         }
         let src = Source::Mem(Arc::new(csv.into_bytes()));
-        let Ok(mut file) = FileState::open(src, "orders-2026-11.csv".into()) else { return };
+        let Ok(mut file) = FileState::open(src, Some("orders-2026-11.csv".into())) else { return };
         file.size = 182 * 1024;
+        file.shown_size = file.size;
         let col = |name: &str, ty: &str, nullable: bool, auto: bool| db::sql::csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, extra: if auto { "auto_increment".into() } else { String::new() }, ..Default::default() }, false);
         let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false, pk_deferrable: false };
         file.remap(&info);
@@ -499,4 +560,53 @@ impl App {
 
 fn job_rows(j: &Option<crate::app::sql::dump::SqlJob>) -> u64 {
     j.as_ref().map_or(0, |j| j.total_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem(t: &str) -> Source {
+        Source::Mem(Arc::new(t.as_bytes().to_vec()))
+    }
+
+    fn strings(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
+    }
+
+    #[test]
+    fn json_text_opens_as_columns_named_by_its_keys() {
+        let f = FileState::open(mem(r#"[{"id":1,"tags":["a"],"name":"x"},{"id":2,"name":"y"}]"#), None).unwrap();
+        assert_eq!(f.names, ["id", "tags", "name"]);
+        assert_eq!(f.sample, strings(&[&["1", r#"["a"]"#, "x"], &["2", "", "y"]]));
+        assert_eq!(f.name, "Pasted JSON");
+        let j = f.json.as_ref().unwrap();
+        assert!(!j.lines && j.nested == [false, true, false]);
+        // The progress is counted in the text that is read, which is the flattened one.
+        assert_eq!(f.size, f.src.len());
+    }
+
+    #[test]
+    fn json_lines_and_csv_text_are_told_apart_without_a_file_name() {
+        let lines = FileState::open(mem("{\"a\":1}\n{\"a\":2}\n"), None).unwrap();
+        assert!(lines.json.as_ref().is_some_and(|j| j.lines));
+        let csv = FileState::open(mem("a,b\n1,2\n"), None).unwrap();
+        assert!(csv.json.is_none());
+        assert_eq!((csv.names.clone(), csv.name.as_str()), (vec!["a".to_string(), "b".to_string()], "Pasted CSV"));
+    }
+
+    #[test]
+    fn flattened_json_is_checked_with_missing_keys_null_and_nested_values_as_text() {
+        let col = |name: &str, ty: &str, nullable: bool| csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, ..Default::default() }, false);
+        let cols = vec![col("id", "int", false), col("name", "varchar(10)", true), col("doc", "json", true)];
+        let f = FileState::open(mem(r#"[{"id":1,"name":"a","doc":{"k":[1]}},{"id":2,"doc":null},{"id":3,"name":null}]"#), None).unwrap();
+        let map = Mapping { map: csv::auto_map(&f.names, &cols), fmts: vec![DateFmt::DayFirst; f.names.len()], empty_null: true };
+        let rep = csv::analyze(&f.src, f.opts, f.header, &cols, &map, f.names.len(), &AtomicBool::new(false));
+        assert_eq!((rep.rows, rep.bad_rows, rep.error), (3, 0, None));
+        // A key the first object lacks, for a NOT NULL column, is a problem the check reports as an empty CSV value is.
+        let f = FileState::open(mem(r#"[{"name":"a"},{"id":2,"name":"b"}]"#), None).unwrap();
+        let map = Mapping { map: csv::auto_map(&f.names, &cols), fmts: vec![DateFmt::DayFirst; f.names.len()], empty_null: true };
+        let rep = csv::analyze(&f.src, f.opts, f.header, &cols, &map, f.names.len(), &AtomicBool::new(false));
+        assert_eq!(rep.bad_rows, 1);
+    }
 }

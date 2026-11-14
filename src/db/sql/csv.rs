@@ -235,6 +235,19 @@ impl<R: Read> Chars<R> {
     }
 }
 
+/// All of `bytes` as text in the encoding `enc`, a byte order mark dropped. For files read whole, like JSON.
+pub fn decode_text(bytes: &[u8], enc: Enc) -> Result<String, String> {
+    if enc == Enc::Utf8 && let Ok(s) = std::str::from_utf8(bytes) {
+        return Ok(s.strip_prefix('\u{feff}').unwrap_or(s).to_string());
+    }
+    let mut ch = Chars::new(std::io::Cursor::new(bytes), enc);
+    let mut out = String::with_capacity(bytes.len());
+    while let Some(c) = ch.next()? {
+        out.push(c);
+    }
+    Ok(out)
+}
+
 /// The largest value a field may hold. A quote that never closes would otherwise swallow the whole file.
 const FIELD_MAX: usize = 16 << 20;
 

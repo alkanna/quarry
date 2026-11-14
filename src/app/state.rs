@@ -494,6 +494,9 @@ pub(super) struct SqlTab {
     pub(super) qanchor: Option<usize>,
     /// The selected row of that page, whose record Tab opens. Cleared with the checks.
     pub(super) qsel: Option<usize>,
+    /// Alignment, widths, pins, hidden columns and highlights of Query results, by the column names of a result. Kept
+    /// for this tab only: ad hoc results have no table to save them under.
+    pub(super) qprefs: HashMap<Vec<String>, ColPrefs>,
     /// The run the shown results belong to, which their row counts answer to, and the result tab being
     /// read at another page (its answer replaces only that tab).
     pub(super) sets_req: u64,
@@ -1399,8 +1402,10 @@ pub(super) enum SideAct {
     Analyze(String, String),
     /// A Query tab for a SQL database.
     NewQuery(String),
-    /// Import a CSV file into a SQL table (database, table).
+    /// Import a CSV, JSON or JSON Lines file into a SQL table (database, table).
     SqlImport(String, String),
+    /// The same, from the text on the clipboard.
+    SqlImportPaste(String, String),
     /// Export a SQL dump of a database, with the table to start from when there is one.
     SqlDump(String, Option<String>),
     /// Run a script file on a SQL database.
