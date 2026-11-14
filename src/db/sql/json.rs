@@ -125,7 +125,9 @@ impl J {
 }
 
 /// What a JSON file became.
+// The dialog re-reads names and rows from the CSV itself; they are kept for the tests and for callers that skip it.
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Flat {
     /// CSV text with a header row, comma separated and quoted where it needs to be.
     pub csv: Vec<u8>,
