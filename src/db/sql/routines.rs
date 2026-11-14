@@ -279,6 +279,11 @@ pub fn template(d: Dialect, kind: Kind, schema: &str) -> String {
 
 /// What a CREATE statement says about itself: its kind and, when the lexer finds it, its name without the database.
 pub fn head_of(d: Dialect, sql: &str) -> Option<(Kind, Option<String>)> {
+    head_parts(d, sql).map(|(k, _, n)| (k, n))
+}
+
+/// `head_of` with the database or schema the name is qualified with, when it is.
+pub fn head_parts(d: Dialect, sql: &str) -> Option<(Kind, Option<String>, Option<String>)> {
     let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens(sql, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let word = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
     if !word(0, "CREATE") {
@@ -293,8 +298,8 @@ pub fn head_of(d: Dialect, sql: &str) -> Option<(Kind, Option<String>)> {
     let part = |k: usize| toks.get(k).filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted)).map(|(t, r)| unquote(&sql[r.clone()], *t == Tok::Quoted));
     let dot = |k: usize| toks.get(k).is_some_and(|(t, r)| *t == Tok::Punct && &sql[r.clone()] == ".");
     // A PostgreSQL name may be quoted with double quotes, which the lexer reads as a string.
-    let name = if dot(k + 1) { part(k + 2) } else { part(k) };
-    Some((kind, name))
+    let (qual, name) = if dot(k + 1) { (part(k), part(k + 2)) } else { (None, part(k)) };
+    Some((kind, qual, name))
 }
 
 fn unquote(tok: &str, quoted: bool) -> String {
@@ -360,6 +365,10 @@ pub fn plan(d: Dialect, schema: &str, old: Option<&Detail>, text: &str, recreate
     }
     if old.header_missing.is_some() {
         return Err("Only the body could be read, so the routine cannot be saved from it.".into());
+    }
+    // A header qualified with another database would drop this routine and create one elsewhere, which nothing puts back.
+    if let Some(q) = head_parts(d, text).and_then(|h| h.1).filter(|q| !q.eq_ignore_ascii_case(schema)) {
+        return Err(format!("The header names the database {q}, but this routine is in {schema}. Create it in {q} as a new routine instead."));
     }
     if name.as_deref().is_some_and(|n| !n.eq_ignore_ascii_case(&r.name)) {
         return Err(format!("The name is {}, not {}. A different name would make another {}; use New {} for that.", name.unwrap_or_default(), r.name, r.kind.noun(), r.kind.noun()));
@@ -734,6 +743,17 @@ mod tests {
         assert!(p.steps[0].starts_with("CREATE OR REPLACE DEFINER="), "{}", p.steps[0]);
         assert!(p.restore.is_none());
         assert_eq!(with_or_replace(Dialect::MariaDb, "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1"), "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1");
+    }
+
+    #[test]
+    fn a_header_in_another_database_is_not_an_edit() {
+        for d in [Dialect::MySql, Dialect::MariaDb] {
+            let old = detail(d, "CREATE FUNCTION `add`(a INT) RETURNS INT RETURN a");
+            let err = plan(d, "shop", Some(&old), "CREATE FUNCTION `archive`.`add`(a INT) RETURNS INT RETURN a", false).unwrap_err();
+            assert!(err.contains("archive") && err.contains("shop"), "{err}");
+            assert!(plan(d, "shop", Some(&old), "CREATE FUNCTION `shop`.`add`(a INT) RETURNS INT RETURN a", false).is_ok());
+            assert!(plan(d, "shop", Some(&old), "CREATE FUNCTION `add`(a INT) RETURNS INT RETURN a", false).is_ok());
+        }
     }
 
     #[test]
