@@ -2,7 +2,6 @@
 //! The rows are counted first, the write must match exactly that count inside its transaction, and the old rows are kept
 //! for undo when there are no more than the import keeps.
 
-use super::exec::Cells;
 use super::import::UNDO_MAX_ROWS;
 use super::value::Param;
 use super::worker::{make_cols_kinds, num_at, one_read, table_meta, to_row};
@@ -301,5 +300,35 @@ mod tests {
     #[test]
     fn undo_is_kept_up_to_the_import_cap() {
         assert!(undo_fits(UNDO_MAX_ROWS) && !undo_fits(UNDO_MAX_ROWS + 1));
+    }
+
+    #[test]
+    fn live_a_write_that_matches_another_count_than_the_dialog_showed_changes_nothing() {
+        super::super::testing::every_server(|l, var| {
+            l.sql("CREATE DATABASE IF NOT EXISTS quarry_bulk");
+            l.sql("DROP TABLE IF EXISTS quarry_bulk.moved");
+            l.sql("CREATE TABLE quarry_bulk.moved (id INT PRIMARY KEY, name VARCHAR(20), qty INT)");
+            l.sql("INSERT INTO quarry_bulk.moved VALUES (1, 'alpha', 10), (2, 'beta', 20), (3, 'gamma', 30)");
+            let filter = "qty > 15 OR name = 'alpha'";
+            let p = l.w.rt.block_on(prep(&l.db, "quarry_bulk", "moved", filter)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!((p.count, p.pk.clone()), (3, vec!["id".to_string()]), "{var}");
+            // A count of 2 stands for rows that changed between the count and the confirm: with or without the capture, the
+            // write is rolled back.
+            for undo in [true, false] {
+                let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 2, undo };
+                let err = l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, false)).err().unwrap_or_else(|| panic!("{var}: the write ran"));
+                assert!(err.starts_with("Nothing was changed"), "{var}: {err}");
+                assert_eq!(l.count("quarry_bulk.moved"), 3, "{var}, undo {undo}");
+            }
+            // A locked connection writes nothing either.
+            let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 3, undo: true };
+            assert!(l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, true)).is_err(), "{var}");
+            assert_eq!(l.count("quarry_bulk.moved"), 3, "{var}");
+            let (msg, undo, _) = l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, false)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(msg, "Deleted 3 rows from moved", "{var}");
+            assert!(matches!(undo, Some((SqlUndo::Delete(ref rows), _)) if rows.len() == 3), "{var}");
+            assert_eq!(l.count("quarry_bulk.moved"), 0, "{var}");
+            l.sql("DROP TABLE quarry_bulk.moved");
+        });
     }
 }

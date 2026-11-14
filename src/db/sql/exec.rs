@@ -441,8 +441,8 @@ impl Tx<'_> {
     /// here, so it is only for text the caller has checked is one.
     pub async fn fetch_text(&mut self, sql: &str) -> Result<Vec<SqlRow>, sqlx::Error> {
         match self {
-            Tx::My(t) => raw_sql(sql).fetch_all(&mut **t).await.map(SqlRow::wrap),
-            Tx::Pg(t) => raw_sql(sql).fetch_all(&mut **t).await.map(SqlRow::wrap_pg),
+            Tx::My(t) => (&mut **t).fetch_all(sql).await.map(SqlRow::wrap),
+            Tx::Pg(t) => (&mut **t).fetch_all(sql).await.map(SqlRow::wrap_pg),
         }
     }
 
