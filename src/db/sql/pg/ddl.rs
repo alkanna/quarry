@@ -1095,7 +1095,7 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
         exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())))?;
     }
     let added: Vec<String> = expect.checks.iter().filter(|n| steps.iter().any(|s| s.starts_with(&add_check_head(schema, table, n)))).cloned().collect();
-    if !added.is_empty() {
+    if !added.is_empty() && !undo {
         added_checks_immutable(tx, schema, table, &added).await?;
     }
     Ok(())

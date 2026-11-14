@@ -246,6 +246,8 @@ impl App {
         def.name = ddl::free_name(&names, &c.name);
         // A second counter or a second copy of a unique key would not be a copy.
         def.auto_increment = false;
+        // A MariaDB column CHECK names the column it was read from.
+        def.check = None;
         // PostgreSQL has no column order, so the copy goes last.
         let pos = if self.alter_env().0 == Dialect::Postgres { Pos::Keep } else { Pos::After(self.name_after(&c.name)) };
         self.show_col_form(None, def, pos, self.staged().to_vec());

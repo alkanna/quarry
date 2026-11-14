@@ -207,6 +207,11 @@ fn live(var: &str) {
         e.exec("ALTER TABLE quarry_ddl.t ADD CONSTRAINT chk_name CHECK (CHAR_LENGTH(name) > 0)");
         e.round_trip_here("drop check", vec![Change::DropCheck("chk_name".into())], |st| assert!(find(st, "chk_name").is_none(), "{:?}", st.checks));
         e.round_trip_here("edit check", vec![Change::DropCheck("chk_name".into()), Change::AddCheck(chk("chk_name", "CHAR_LENGTH(name) > 1"))], |st| assert!(find(st, "chk_name").is_some_and(|k| k.expr.contains("> 1")), "{:?}", st.checks));
+        // The server reports a condition's string literals in its own spelling, which has to be read back and written again.
+        e.fresh();
+        e.exec("ALTER TABLE quarry_ddl.t ADD CONSTRAINT chk_str CHECK (name <> 'it''s' AND name <> 'b;c' AND name <> 'x\\\\y' AND kind IN ('a', 'b'))");
+        e.round_trip_here("drop a check with strings", vec![Change::DropCheck("chk_str".into())], |st| assert!(find(st, "chk_str").is_none(), "{:?}", st.checks));
+        e.round_trip_here("edit a check with strings", vec![Change::DropCheck("chk_str".into()), Change::AddCheck(chk("chk_str", "name <> 'z''z'"))], |st| assert!(find(st, "chk_str").is_some_and(|k| k.expr.contains("z")), "{:?}", st.checks));
         // The server refuses an add that existing rows break, and the table is left as it was.
         let (d, v) = (e.db.dialect, e.db.version.clone());
         let st = e.structure();
