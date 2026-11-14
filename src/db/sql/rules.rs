@@ -337,7 +337,16 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
     let txt = if c.ends_with("::text") { c.to_string() } else { format!("{c}::text") };
     let side = || if r.kind == Kind::Binary { c.to_string() } else { txt.clone() };
     let other = group_of(r.kind) == Group::Other;
+    // LIKE is case-sensitive on PostgreSQL while MySQL's default collations match without regard to case, so the text
+    // operators use ILIKE to find the same rows on both. The pattern is escaped with backslashes, the default escape of both.
+    let like = |pre: &str, suf: &str| like_lit(&format!("{pre}{}{suf}", like_escape(r.values.first().map_or("", |s| s.as_str()))), Dialect::Postgres, false);
     Some(match r.op {
+        Contains => format!("{c} ILIKE {}", like("%", "%")),
+        NotContains => format!("{c} NOT ILIKE {}", like("%", "%")),
+        StartsWith => format!("{c} ILIKE {}", like("", "%")),
+        NotStartsWith => format!("{c} NOT ILIKE {}", like("", "%")),
+        EndsWith => format!("{c} ILIKE {}", like("%", "")),
+        NotEndsWith => format!("{c} NOT ILIKE {}", like("%", "")),
         Eq if r.kind == Kind::Json => format!("{c} = {}::jsonb", v(0)),
         Ne if r.kind == Kind::Json => format!("{c} <> {}::jsonb", v(0)),
         Eq if other => format!("{} = {}", side(), typed()),
@@ -637,8 +646,11 @@ fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
         [b, x, a, y] if word(b, "BETWEEN") && word(a, "AND") => mk(c, Op::Between, vec![value_of(x)?, value_of(y)?]),
         [i, ..] if word(i, "IN") => mk(c, Op::In, list_of(&rest[1..])?.0),
         [n, i, ..] if word(n, "NOT") && word(i, "IN") => mk(c, Op::NotIn, list_of(&rest[2..])?.0),
-        [l, T::Str(s)] if word(l, "LIKE") => like(s, false).or_else(|| mk(c, Op::Like, vec![s.clone()])),
-        [n, l, T::Str(s)] if word(n, "NOT") && word(l, "LIKE") => like(s, true).or_else(|| mk(c, Op::NotLike, vec![s.clone()])),
+        // On PostgreSQL only ILIKE is what the structured text operators write; a LIKE is the person's own, case-sensitive one.
+        [l, T::Str(s)] if word(l, "LIKE") => if d == Dialect::Postgres { mk(c, Op::Like, vec![s.clone()]) } else { like(s, false).or_else(|| mk(c, Op::Like, vec![s.clone()])) },
+        [n, l, T::Str(s)] if word(n, "NOT") && word(l, "LIKE") => if d == Dialect::Postgres { mk(c, Op::NotLike, vec![s.clone()]) } else { like(s, true).or_else(|| mk(c, Op::NotLike, vec![s.clone()])) },
+        [l, T::Str(s)] if d == Dialect::Postgres && word(l, "ILIKE") => like(s, false),
+        [n, l, T::Str(s)] if d == Dialect::Postgres && word(n, "NOT") && word(l, "ILIKE") => like(s, true),
         [r, T::Str(s)] if word(r, "REGEXP") => mk(c, Op::Regexp, vec![s.clone()]),
         [n, r, T::Str(s)] if word(n, "NOT") && word(r, "REGEXP") => mk(c, Op::NotRegexp, vec![s.clone()]),
         [T::Cmp(">="), n, T::P('('), T::P(')'), T::P('-'), iv, T::Num(k), u] if word(n, "NOW") && word(iv, "INTERVAL") => {
@@ -846,6 +858,28 @@ mod tests {
             let s = sql("c", Kind::Text, op, &["x"]);
             assert!(!s.contains("REGEXP") && !s.contains("CURDATE") && !s.contains("YEARWEEK") && !s.contains("JSON_"), "{s}");
         }
+    }
+
+    #[test]
+    fn postgres_text_rules_match_without_regard_to_case() {
+        let rule = |op: Op, v: &str| Rule { col: "name".into(), kind: Kind::Text, op, values: vec![v.into()] };
+        let d = Dialect::Postgres;
+        assert_eq!(rule_sql(&rule(Op::Contains, "ann"), d, false), "\"name\" ILIKE '%ann%'");
+        assert_eq!(rule_sql(&rule(Op::NotContains, "ann"), d, false), "\"name\" NOT ILIKE '%ann%'");
+        assert_eq!(rule_sql(&rule(Op::StartsWith, "ann"), d, false), "\"name\" ILIKE 'ann%'");
+        assert_eq!(rule_sql(&rule(Op::NotEndsWith, "ann"), d, false), "\"name\" NOT ILIKE '%ann'");
+        assert_eq!(rule_sql(&rule(Op::Contains, "50%"), d, false), "\"name\" ILIKE '%50\\%%'");
+        // MySQL keeps LIKE, which its default collations already match without regard to case.
+        assert_eq!(rule_sql(&rule(Op::Contains, "ann"), Dialect::MySql, true), "`name` LIKE '%ann%'");
+        // ILIKE reads back into the same rule; a LIKE typed by the person is case-sensitive and stays a plain LIKE rule.
+        let c = [("name".to_string(), Kind::Text)];
+        for op in [Op::Contains, Op::NotContains, Op::StartsWith, Op::NotStartsWith, Op::EndsWith, Op::NotEndsWith] {
+            let r = rule(op, "ann");
+            assert_eq!(parse(&rule_sql(&r, d, false), &c, d, false), Some((vec![r], false)), "{op:?}");
+        }
+        assert_eq!(parse("\"name\" LIKE '%ann%'", &c, d, false), Some((vec![rule(Op::Like, "%ann%")], false)));
+        assert_eq!(parse("\"name\" NOT LIKE 'ann%'", &c, d, false), Some((vec![rule(Op::NotLike, "ann%")], false)));
+        assert!(parse("`name` ILIKE '%ann%'", &c, Dialect::MySql, true).is_none());
     }
 
     #[test]
