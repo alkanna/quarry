@@ -77,8 +77,9 @@ fn live_pg_a_table_is_copied_renamed_and_emptied() {
         assert_eq!(t.one("SELECT count(*) FROM pg_constraint WHERE conrelid = 'child2'::regclass AND contype = 'f'"), "0", "{var}");
         assert_eq!(t.one("SELECT count(*) FROM pg_constraint WHERE conrelid = 'child2'::regclass AND contype = 'p'"), "1", "{var}");
         l.w.sql_undo(db.clone(), undo.unwrap(), Vec::new(), false);
-        assert!(ddl_answer(l.next()).0.is_ok(), "{var}");
-        assert_eq!(t.one("SELECT to_regclass('child2') IS NULL"), "true", "{var}");
+        let undone = ddl_answer(l.next()).0;
+        assert!(undone.is_ok(), "{var}: {undone:?}");
+        assert_eq!(t.one("SELECT to_regclass('child2') IS NULL"), "t", "{var}");
         // A view is not copied.
         l.w.sql_duplicate(1, db.clone(), s.clone(), "v".into(), "v_copy".into(), false, false);
         assert!(ddl_answer(l.next()).0.is_err(), "{var}");
@@ -86,10 +87,10 @@ fn live_pg_a_table_is_copied_renamed_and_emptied() {
         l.w.sql_rename(1, db.clone(), s.clone(), "parent2".into(), "parent3".into(), false, false);
         let (res, undo) = renamed_answer(l.next());
         assert!(res.is_ok(), "{var}: {res:?}");
-        assert_eq!(t.one("SELECT to_regclass('parent3') IS NOT NULL"), "true", "{var}");
+        assert_eq!(t.one("SELECT to_regclass('parent3') IS NOT NULL"), "t", "{var}");
         l.w.sql_undo(db.clone(), undo.expect("a rename has an undo"), Vec::new(), false);
         assert!(renamed_answer(l.next()).0.is_ok(), "{var}");
-        assert_eq!(t.one("SELECT to_regclass('parent2') IS NOT NULL"), "true", "{var}");
+        assert_eq!(t.one("SELECT to_regclass('parent2') IS NOT NULL"), "t", "{var}");
         l.w.sql_rename(1, db.clone(), s.clone(), "v".into(), "v2".into(), false, false);
         assert!(renamed_answer(l.next()).0.is_ok(), "{var}");
         assert_eq!(t.one("SELECT relkind::text FROM pg_class WHERE oid = to_regclass('v2')"), "v", "{var}");
@@ -98,7 +99,7 @@ fn live_pg_a_table_is_copied_renamed_and_emptied() {
         l.w.sql_rename(1, db.clone(), s.clone(), s.clone(), moved.clone(), true, false);
         let (res, undo) = renamed_answer(l.next());
         assert!(res.is_ok(), "{var}: {res:?}");
-        assert_eq!(l.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{moved}'")), "1", "{var}");
+        assert_eq!(t.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{moved}'")), "1", "{var}");
         l.w.sql_undo(db.clone(), undo.expect("a schema rename has an undo"), Vec::new(), false);
         assert!(renamed_answer(l.next()).0.is_ok(), "{var}");
         // A table another one points at refuses to be emptied alone, and the dialog is told which one points at it.

@@ -5,7 +5,7 @@ use super::create::{create_schema_sql, drop_word, entry, in_tx, namespace_oid, r
 use crate::db::errors::truncate_refused;
 use crate::db::sql::create::DropInfo;
 use crate::db::sql::exec::{sql_state, Cells};
-use crate::db::sql::pg::ddl::{exec, lock_error, name_ok, q};
+use crate::db::sql::pg::ddl::{exec, lock_error, name_ok, q, set_path};
 use crate::db::sql::structure::num;
 use crate::db::sql::value::Param;
 use crate::db::sql::worker::text;
@@ -184,6 +184,8 @@ pub(in crate::db::sql) async fn duplicate(db: &Db, conn: u64, schema: &str, from
             exec(tx, db, schema, s).await.map_err(|x| lock_error(&x, from).unwrap_or_else(|| if stmts.len() > 1 { format!("{} (statement {} of {}). Nothing was created.", se(x), i + 1, stmts.len()) } else { se(x) }))?;
         }
         let oid = relation_oid(tx, &D.qualified(schema, to)).await?.ok_or_else(|| "The table was made but cannot be read back.".to_string())?;
+        // Read under the path the undo reads under, or a serial default prints its sequence with a schema in one and without in the other.
+        set_path(tx, db, schema).await.map_err(se)?;
         let state = state_in(tx, schema, to).await?;
         Ok((oid, state))
     })
