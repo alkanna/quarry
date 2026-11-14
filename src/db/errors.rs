@@ -15,6 +15,8 @@ pub enum ErrKind {
     Timeout,
     Duplicate,
     Validation,
+    /// A CHECK constraint of a SQL table refused a row: MySQL 3819, MariaDB 4025, PostgreSQL 23514.
+    Check,
     Missing,
     Syntax,
     Other,
@@ -29,6 +31,8 @@ pub enum Fix {
     RaiseLimit,
     Refresh,
     Validator,
+    /// Opens the Structure view of a SQL table, whose CREATE TABLE text lists its constraints.
+    Structure,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -178,6 +182,17 @@ fn verb(cmd: Option<&str>) -> &'static str {
     }
 }
 
+/// The constraint a CHECK refusal names: MySQL's "Check constraint 'c' is violated.", MariaDB's "CONSTRAINT `c` failed for `db`.`t`"
+/// and PostgreSQL's `violates check constraint "c"`. A server that words it in another language gives no name.
+fn check_name(raw: &str) -> Option<String> {
+    let after = |key: &str, quote: char, end: char| {
+        let r = &raw[raw.find(key)? + key.len()..];
+        let r = r.strip_prefix(quote)?;
+        r.split_once(end).map(|(n, _)| n.to_string()).filter(|n| !n.is_empty())
+    };
+    after("Check constraint ", '\'', '\'').or_else(|| after("CONSTRAINT ", '`', '`')).or_else(|| after("check constraint ", '"', '"'))
+}
+
 /// The duplicate key's field and value: Mongo's "dup key: { number: 4410 }", MySQL's "Duplicate entry '4410' for key 'orders.number'".
 fn dup_key(e: &str) -> Option<(String, String)> {
     if let Some(i) = e.find("dup key: { ") {
@@ -238,7 +253,9 @@ pub fn classify(raw: &str) -> ErrKind {
         ErrKind::Timeout
     } else if matches!(n, Some(11000 | 11001 | 1062 | 1586)) || pg == Some("23505") || raw.contains("E11000") {
         ErrKind::Duplicate
-    } else if matches!(n, Some(121 | 3819 | 4025)) || low.contains("document failed validation") {
+    } else if matches!(n, Some(3819 | 4025)) && mongo_code(raw).is_none() || pg == Some("23514") {
+        ErrKind::Check
+    } else if matches!(n, Some(121)) || low.contains("document failed validation") {
         ErrKind::Validation
     } else if matches!(n, Some(26 | 1146 | 1049)) || matches!(pg, Some("42P01" | "3F000" | "3D000")) || low.contains("ns does not exist") || low.contains("ns not found") {
         ErrKind::Missing
@@ -346,9 +363,10 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ErrKind::Duplicate => {
             let dup = dup_key(raw);
             let index = raw.find("index: ").map(|i| raw[i + 7..].split(' ').next().unwrap_or_default().to_string()).or_else(|| raw.find("unique constraint \"").map(|i| raw[i + 19..].split('"').next().unwrap_or_default().to_string()));
+            let what = if my.is_some() || pg_code(raw).is_some() { "row" } else { "document" };
             ex.title = match &dup {
-                Some((f, v)) => format!("Another document already has {f} {v}"),
-                None => "Another document already has this unique value".into(),
+                Some((f, v)) => format!("Another {what} already has {f} {v}"),
+                None => format!("Another {what} already has this unique value"),
             };
             ex.hint = match index {
                 Some(i) => format!("The {i} index on {ns} allows each value once."),
@@ -360,6 +378,18 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.title = format!("The document breaks the validator of {ns}");
             ex.hint = "The collection's validation rules refused it. Open Validator to see the rules.".into();
             ex.fixes = vec![Fix::Validator];
+        }
+        ErrKind::Check => {
+            let table = if cx.ns.is_empty() { "this table".to_string() } else { cx.ns.clone() };
+            ex.title = match check_name(raw) {
+                Some(n) => format!("The row breaks the check constraint {n}"),
+                None => "The row breaks a check constraint".into(),
+            };
+            ex.hint = format!("A CHECK constraint on {table} refused the value, so nothing was changed. The CREATE TABLE text in Structure shows the rule.");
+            // Without a table there is no Structure view to open.
+            if !cx.ns.is_empty() {
+                ex.fixes = vec![Fix::Structure];
+            }
         }
         ErrKind::Missing => {
             ex.title = format!("{ns} no longer exists");
@@ -478,7 +508,6 @@ fn pg_wording(code: Option<&str>, said: &str) -> Option<(String, String)> {
         "22003" | "22001" => ("That value is too large for the column", server),
         "23502" => ("This column does not allow NULL", server),
         "23503" => ("Other rows depend on this value", server),
-        "23514" => ("The value breaks a check constraint", server),
         "55P03" => ("Another session holds a lock on this table", format!("The write waited {} seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.", super::sql::WRITE_LOCK_SECS)),
         "25006" => ("This connection is read-only", server),
         _ => return None,
@@ -692,6 +721,31 @@ mod tests {
     }
 
     #[test]
+    fn check_violations_are_sql_wording_with_a_structure_fix() {
+        let with_ns = ErrCtx { ns: "shop.orders".into(), ..cx() };
+        let my = explain("error returned from database: 3819 (HY000): Check constraint 'chk_total' is violated.", &with_ns);
+        assert_eq!((my.kind, my.title.as_str(), my.fixes.as_slice()), (ErrKind::Check, "The row breaks the check constraint chk_total", &[Fix::Structure][..]));
+        assert!(!my.hint.contains("validator") && !my.hint.contains("document"));
+        let maria = explain("error returned from database: 4025 (23000): CONSTRAINT `chk_total` failed for `shop`.`orders`", &with_ns);
+        assert_eq!((maria.kind, maria.title.as_str()), (ErrKind::Check, "The row breaks the check constraint chk_total"));
+        let pg = explain("error returned from database: 23514: new row for relation \"orders\" violates check constraint \"chk_total\"", &with_ns);
+        assert_eq!((pg.kind, pg.title.as_str(), pg.fixes.as_slice()), (ErrKind::Check, "The row breaks the check constraint chk_total", &[Fix::Structure][..]));
+        // No table in the context means no Structure view to open.
+        assert!(explain("error returned from database: 3819 (HY000): Check constraint 'c' is violated.", &ErrCtx::default()).fixes.is_empty());
+        // MongoDB keeps its validator wording and button.
+        let mongo = explain("Command failed: Error code 121 (DocumentValidationFailure): Document failed validation", &with_ns);
+        assert_eq!((mongo.kind, mongo.fixes.as_slice()), (ErrKind::Validation, &[Fix::Validator][..]));
+    }
+
+    #[test]
+    fn duplicate_titles_say_row_on_sql() {
+        let my = explain("error returned from database: 1062 (23000): Duplicate entry '4410' for key 'orders.number'", &cx());
+        assert_eq!(my.title, "Another row already has number 4410");
+        let pg = explain("error returned from database: 23505: duplicate key value violates unique constraint \"u\"\nKey (email)=(a@b.c) already exists.", &cx());
+        assert!(pg.title.starts_with("Another row already has"));
+    }
+
+    #[test]
     fn postgres_errors_are_told_apart_by_sqlstate() {
         let e = explain("error returned from database: 23505: duplicate key value violates unique constraint \"users_email_key\"\nDetail: Key (email)=(a@b.c) already exists.", &cx());
         assert_eq!((e.kind, e.code.as_deref()), (ErrKind::Duplicate, Some("23505")));
@@ -743,7 +797,6 @@ mod tests {
         assert_eq!(ex("error returned from database: 22001: value too long for type character varying(3)").title, "That value is too large for the column");
         assert_eq!(ex("error returned from database: 23502: null value in column \"n\" of relation \"t\" violates not-null constraint").title, "This column does not allow NULL");
         assert_eq!(ex("error returned from database: 23503: update or delete on table \"p\" violates foreign key constraint \"fk\" on table \"c\"").title, "Other rows depend on this value");
-        assert_eq!(ex("error returned from database: 23514: new row for relation \"t\" violates check constraint \"c\"").title, "The value breaks a check constraint");
         let lock = ex("error returned from database: 55P03: canceling statement due to lock timeout");
         assert_eq!(lock.title, "Another session holds a lock on this table");
         assert!(lock.hint.contains("Nothing was changed") && !lock.hint.contains("index"));
@@ -760,7 +813,7 @@ mod tests {
         assert_eq!(ex("error returned from database: 22003: Wert \"99999999999\" ist au\u{df}erhalb des g\u{fc}ltigen Bereichs f\u{fc}r Typ integer").title, "That value is too large for the column");
         assert_eq!(ex("error returned from database: 23502: NULL-Wert in Spalte \"n\" verletzt Not-Null-Constraint").title, "This column does not allow NULL");
         assert_eq!(ex("error returned from database: 23503: la mise \u{e0} jour viole la contrainte de cl\u{e9} \u{e9}trang\u{e8}re \"fk\"").title, "Other rows depend on this value");
-        assert_eq!(ex("error returned from database: 23514: la nouvelle ligne viole la contrainte de v\u{e9}rification \"c\"").title, "The value breaks a check constraint");
+        assert_eq!(ex("error returned from database: 23514: la nouvelle ligne viole la contrainte de v\u{e9}rification \"c\"").title, "The row breaks a check constraint");
         assert_eq!(ex("error returned from database: 55P03: storniere Anfrage wegen Sperr-Timeout").title, "Another session holds a lock on this table");
         assert_eq!(ex("error returned from database: 25006: kann UPDATE in einer Read-Only-Transaktion nicht ausf\u{fc}hren").title, "This connection is read-only");
         let t = ex("error returned from database: 57014: storniere Anfrage wegen Statement-Timeout");

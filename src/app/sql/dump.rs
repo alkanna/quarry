@@ -162,7 +162,7 @@ impl App {
         if c.sql.is_none() {
             return self.warn_offline();
         }
-        let Some(p) = rfd::FileDialog::new().add_filter("SQL", &["sql", "txt"]).pick_file() else { return };
+        let Some(p) = rfd::FileDialog::new().add_filter("SQL", &["sql", "txt", "gz"]).pick_file() else { return };
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.open_run_form(conn, db, Source::File(p), name);
     }
@@ -431,7 +431,7 @@ impl App {
             let sql = sql.at(&f.db);
             let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
             self.req += 1;
-            let job = SqlJob::new(self.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.len());
+            let job = SqlJob::new(self.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.script_len());
             self.worker.sql_run_file(job.req, sql, space, f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
             self.sql_job = Some(job);
             self.ok(format!("Running {}", f.name));

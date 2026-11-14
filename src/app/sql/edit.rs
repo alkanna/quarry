@@ -685,7 +685,7 @@ impl App {
             let ch: Vec<_> = db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").collect();
             cells += ch.len();
             if summary.is_empty() {
-                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)), bs);
+                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(d, v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)), bs);
                 let set: Vec<String> = ch.iter().take(2).map(|(p, _, b)| format!("{} = {}", d.quote_ident(p), lit(p, b.as_ref()))).collect();
                 let wh: Vec<String> = dr.current.get_document("_id").map(|k| k.iter().map(|(n, v)| format!("{} = {}", d.quote_ident(n), lit(n, Some(v)))).collect()).unwrap_or_default();
                 summary = format!("UPDATE {} SET {}{} WHERE {}", d.quote_ident(&sel.coll), set.join(", "), if ch.len() > 2 { ", …" } else { "" }, wh.join(" AND "));
@@ -876,7 +876,7 @@ impl App {
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
-        let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
+        let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
         // `pk IN (...)` for one key column, a row-value list for several.
         let key_list = || -> String {
             if pk.len() == 1 {
@@ -998,10 +998,10 @@ impl App {
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);
         let lit = match &parsed {
-            Ok(v) => copy::sql_literal(Some(v), is_numeric(col.kind), bs),
+            Ok(v) => copy::sql_literal(d, Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
         egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));
@@ -1117,7 +1117,7 @@ impl App {
                 CellAct::FilterValue => {
                     let numeric = self.sql_col(&col).is_some_and(|c| is_numeric(c.kind));
                     let q = self.sql_dialect().quote_ident(&col);
-                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
+                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(self.sql_dialect(), Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
                     t.filter_txt = text;
                     t.page = 0;

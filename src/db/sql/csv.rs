@@ -25,6 +25,8 @@ impl AsRef<[u8]> for Shared {
 pub enum Open {
     File(std::fs::File),
     Mem(std::io::Cursor<Shared>),
+    /// A gzip file read as the text inside it. Boxed because it holds an `Open` itself.
+    Gz(Box<flate2::read::MultiGzDecoder<Open>>),
 }
 
 impl Read for Open {
@@ -32,6 +34,7 @@ impl Read for Open {
         match self {
             Open::File(f) => f.read(buf),
             Open::Mem(c) => c.read(buf),
+            Open::Gz(g) => g.read(buf),
         }
     }
 }
@@ -56,6 +59,36 @@ impl Source {
             Source::File(p) => std::fs::metadata(p).map_or(0, |m| m.len()),
             Source::Mem(b) => b.len() as u64,
         }
+    }
+
+    /// Whether the bytes are gzip, told by their magic number and not the file name, so a dump renamed without .gz still runs.
+    fn is_gzip(&self) -> bool {
+        self.head(2).is_ok_and(|h| h == [0x1f, 0x8b])
+    }
+
+    /// `open` for a SQL script: a gzip file is decompressed as it is read, so a dump written with the .gz option runs as it is.
+    pub fn open_script(&self) -> std::io::Result<Open> {
+        let raw = self.open()?;
+        Ok(if self.is_gzip() { Open::Gz(Box::new(flate2::read::MultiGzDecoder::new(raw))) } else { raw })
+    }
+
+    /// The size of the script `open_script` reads, which the progress of a run is measured against. A gzip file ends with the
+    /// size of its text modulo 4 GiB, which is as close as a stream gets without reading it twice.
+    pub fn script_len(&self) -> u64 {
+        use std::io::{Seek, SeekFrom};
+        let len = self.len();
+        if len < 18 || !self.is_gzip() {
+            return len;
+        }
+        let mut tail = [0u8; 4];
+        let read = match self {
+            Source::File(p) => std::fs::File::open(p).and_then(|mut f| f.seek(SeekFrom::End(-4)).and_then(|_| f.read_exact(&mut tail))),
+            Source::Mem(b) => {
+                tail.copy_from_slice(&b[b.len() - 4..]);
+                Ok(())
+            }
+        };
+        if read.is_err() { len } else { u32::from_le_bytes(tail) as u64 }
     }
 
     /// The first `max` bytes, enough to find the format.
@@ -1082,5 +1115,42 @@ mod tests {
         let m = Mapping { map: vec![Some(1), Some(1), None], fmts: vec![], empty_null: true };
         assert_eq!(m.duplicate_target(), Some(1));
         assert_eq!(Mapping { map: vec![Some(0), None, Some(1)], ..m }.duplicate_target(), None);
+    }
+
+    #[test]
+    fn a_gzip_script_reads_back_as_its_text() {
+        use std::io::Write;
+        let text = "CREATE TABLE t (a int);\nINSERT INTO t VALUES (1);\n".repeat(50);
+        let gz = |t: &str| {
+            let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            w.write_all(t.as_bytes()).unwrap();
+            w.finish().unwrap()
+        };
+        let read = |src: &Source| {
+            let mut out = String::new();
+            src.open_script().unwrap().read_to_string(&mut out).unwrap();
+            out
+        };
+        let zipped = Source::Mem(Arc::new(gz(&text)));
+        assert_eq!(read(&zipped), text);
+        assert_eq!(zipped.script_len(), text.len() as u64);
+        // Plain text passes through, and so does a file whose name has no .gz but whose bytes are gzip.
+        let plain = Source::Mem(Arc::new(text.clone().into_bytes()));
+        assert_eq!((read(&plain), plain.script_len()), (text.clone(), text.len() as u64));
+        // Concatenated members, which `cat a.sql.gz b.sql.gz` makes, read as one script.
+        let mut two = gz("SELECT 1;\n");
+        two.extend(gz("SELECT 2;\n"));
+        assert_eq!(read(&Source::Mem(Arc::new(two))), "SELECT 1;\nSELECT 2;\n");
+        // A file on disk takes the same path.
+        let path = std::env::temp_dir().join(format!("quarry-gz-test-{}.sql.gz", std::process::id()));
+        std::fs::write(&path, gz(&text)).unwrap();
+        let file = Source::File(path.clone());
+        assert_eq!((read(&file), file.script_len()), (text.clone(), text.len() as u64));
+        let _ = std::fs::remove_file(&path);
+        // A damaged file is an error and not an empty script.
+        let mut bad = gz(&text);
+        bad.truncate(bad.len() / 2);
+        let mut out = String::new();
+        assert!(Source::Mem(Arc::new(bad)).open_script().unwrap().read_to_string(&mut out).is_err());
     }
 }
