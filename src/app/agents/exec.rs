@@ -133,7 +133,7 @@ fn ns_label(call: &Call) -> String {
 fn for_mongo(call: &Call) -> Option<bool> {
     use Call as C;
     match call {
-        C::Find { .. } | C::Aggregate { .. } | C::Count { .. } | C::Explain { .. } | C::Insert { .. } | C::Update { .. } | C::Delete { .. } | C::AggregateInto { .. } | C::CreateCollection { .. } | C::DropCollection { .. } | C::RunCommand { .. } | C::RunShell { .. } => Some(true),
+        C::Find { .. } | C::Aggregate { .. } | C::Count { .. } | C::Explain { .. } | C::Insert { .. } | C::Update { .. } | C::Delete { .. } | C::AggregateInto { .. } | C::CreateCollection { .. } | C::DropCollection { .. } | C::RunCommand { .. } => Some(true),
         C::SelectRows { .. } | C::QuerySql { .. } | C::SqlInsertRows { .. } | C::SqlUpdateRows { .. } | C::SqlDeleteRows { .. } | C::CreateTable { .. } | C::DropTable { .. } | C::RunSql { .. } => Some(false),
         _ => None,
     }
@@ -318,7 +318,7 @@ impl App {
         let dialect = dialect_of(c);
         let live = LiveState { connected: c.status == Status::Ready, writable: c.writable, always_writable: self.prefs.always_writable, sql: dialect };
         match for_mongo(call) {
-            Some(true) if !mongo => return Err(("This tool works on MongoDB connections. Use select_rows or query_sql on SQL connections.".into(), "wrong_engine")),
+            Some(true) if !mongo => return Err(("This tool works on MongoDB connections. Use select_rows, query_sql or run_shell on SQL connections.".into(), "wrong_engine")),
             Some(false) if mongo => return Err(("This tool works on SQL connections. Use find, aggregate or count on MongoDB.".into(), "wrong_engine")),
             _ => {}
         }
@@ -529,7 +529,7 @@ impl App {
         };
         let dialect = self.conn(conn).and_then(dialect_of);
         let class = tools::classify(&call, dialect);
-        let write = changes_server(&call, class, writable);
+        let write = changes_server(&call, class, writable, dialect.is_some());
         let structure = write && class != OpClass::ChangeData;
         let targets = if write { call.targets() } else { Vec::new() };
         let job = db::AgentJob { activity: id, conn, target, call, rules, limits: self.agents.cfg.limits.clone(), scope, snap, keep_undo, writable, shell };
@@ -537,26 +537,43 @@ impl App {
         self.agents.exec.running.insert(id, Running { run, conn, approved, write, targets, structure });
     }
 
-    /// The Bun job of a run_shell call, built like the Shell tab's: the connection's address comes from the keychain here
-    /// and goes only to the runner, with the agent time limit for each operation. The policy runs the shell only once the
-    /// connection is unlocked; `readOnly` still follows the lock in case that ever changes.
-    /// The secrets in that address come back beside the job, so the output loses them before the agent sees it; they are
+    /// The Bun job of a run_shell call, built like the Shell tab's, with the agent time limit for each operation.
+    /// MongoDB: the connection's address comes from the keychain here and goes only to the runner. The policy runs the
+    /// shell only once the connection is unlocked; `readOnly` still follows the lock in case that ever changes. The
+    /// secrets in that address come back beside the job, so the output loses them before the agent sees it; they are
     /// never logged or audited.
-    fn agent_shell_job(&self, conn: u64, db: &str, script: &str, writable: bool) -> Result<(db::ShellJob, db::Redact), String> {
-        // The demo and the tests never read the keychain.
+    /// SQL: the runner gets no address and no password. Its one connection is a relay on the connection's own pool, read
+    /// only unless `writable`, with `database` as the MySQL database or PostgreSQL schema, as run_sql takes it. The
+    /// settings of Change data and Change structure go with it, for the relay to check each statement against.
+    fn agent_shell_job(&self, conn: u64, db: &str, script: &str, writable: bool) -> Result<db::AgentShell, String> {
+        // The demo and the tests never read the keychain, nor run Bun.
         if self.ephemeral {
             return Err("The shell is not available in this Quarry window.".into());
         }
         let runtime = super::super::tools::find_bun(&self.prefs.shell_runtime).ok_or("Bun is needed for the shell, and the user has not installed it.")?;
         let c = self.conn(conn).ok_or("This connection was removed from Quarry.")?;
-        let uri = stored_uri(conn).map_err(uri_err)?;
         let name = c.meta.name.clone();
-        let colls: Vec<String> = c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default();
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
+        let timeout = self.agents.cfg.limits.secs.max(1) as u64 * 1000;
+        let job = |input: Value, sql: Vec<(String, db::SqlRelay)>| db::ShellJob { runtime: runtime.clone(), dir: config_dir().join("shell"), input: input.to_string(), packages: self.prefs.shell_packages.clone(), sql };
+        if let Some(sql) = c.sql.clone() {
+            let p = self.agents.cfg.conn(conn).ok_or("This connection is not shared with agents.")?;
+            let pg = sql.dialect == Dialect::Postgres;
+            // The agent names a schema of the connected database on PostgreSQL, the one whose catalog the policy read.
+            let schema = if pg && db.is_empty() { "public".to_string() } else { db.to_string() };
+            let key = if pg { ns_key(&sql.pg_database(), &schema) } else { schema.clone() };
+            let tables: Vec<String> = self.sql_schema.get(&(conn, key)).map(|s| s.tables.iter().map(|t| t.name.clone()).collect()).unwrap_or_default();
+            let entry = json!({ "name": name, "db": if pg { sql.pg_database() } else { schema.clone() }, "tables": tables, "dialect": if pg { "postgres" } else { "mysql" } });
+            let input = json!({ "mongo": [], "sql": [entry], "code": script, "packages": packages, "timeoutMs": timeout, "main": name });
+            let relay = db::SqlRelay { db: sql, schema, read_only: !writable, conn_id: Default::default() };
+            return Ok(db::AgentShell { job: job(input, vec![(name, relay)]), redact: db::Redact::default(), sql: Some(policy::ShellSql::new(p)) });
+        }
+        let uri = stored_uri(conn).map_err(uri_err)?;
+        let colls: Vec<String> = c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default();
         let proxy = self.shell_proxy(conn);
         let redact = db::Redact::new(&uri, &proxy["password"].as_str().map(String::from).into_iter().collect::<Vec<_>>());
-        let input = json!({ "mongo": [{ "name": name, "uri": uri, "db": db, "proxy": proxy, "collections": colls, "readOnly": !writable }], "sql": [], "code": script, "packages": packages, "timeoutMs": self.agents.cfg.limits.secs.max(1) as u64 * 1000, "main": name }).to_string();
-        Ok((db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages: self.prefs.shell_packages.clone(), sql: Vec::new() }, redact))
+        let input = json!({ "mongo": [{ "name": name, "uri": uri, "db": db, "proxy": proxy, "collections": colls, "readOnly": !writable }], "sql": [], "code": script, "packages": packages, "timeoutMs": timeout, "main": name });
+        Ok(db::AgentShell { job: job(input, Vec::new()), redact, sql: None })
     }
 
     /// Whether the connection's writes are unlocked right now.
@@ -585,8 +602,16 @@ impl App {
                     f.push(format!("Runs read-only: {name} is locked for writes.\nUnlock it in Quarry first to let it write."));
                 }
             }
-            // Never "read-only": the shell's guard lives in the script's own process, so the policy asks to unlock instead.
-            Call::RunShell { .. } => f.push("What this changes can't be undone from Agent activity.".to_string()),
+            Call::RunShell { .. } => {
+                f.push("What this changes can't be undone from Agent activity.".to_string());
+                // Only on SQL: the MongoDB shell's guard lives in the script's own process, so the policy asks to unlock instead.
+                if let Some(p) = self.conn(conn).filter(|c| c.meta.engine.is_sql()).and_then(|_| self.agents.cfg.conn(conn)) {
+                    if locked {
+                        f.push(format!("Runs read-only: {name} is locked for writes.\nUnlock it in Quarry first to let it write."));
+                    }
+                    f.push(sql_script_fact(p));
+                }
+            }
             _ => {}
         }
         f
@@ -804,13 +829,26 @@ impl App {
     }
 }
 
+/// What Quarry checks on each statement of a SQL script, for its approval: the settings it was allowed under.
+fn sql_script_fact(p: &crate::agents::config::ConnPolicy) -> String {
+    use crate::agents::config::Mode;
+    let mut refused = vec!["user and role statements", "server credentials and activity"];
+    if p.change == Mode::Never {
+        refused.push("data changes");
+    }
+    if p.structure == Mode::Never {
+        refused.push("structure changes");
+    }
+    format!("Quarry checks each statement the script sends and refuses {}. Rows are scrubbed by the data rules before the script sees them.", refused.join(", "))
+}
+
 /// Whether a started call can change the server: a cancel then lets it finish so its end is recorded, and open tabs on
-/// what it reaches are told. Free SQL on a locked connection runs read-only and changes nothing. The shell always counts,
-/// since its read-only guard is not a boundary.
-fn changes_server(call: &Call, class: OpClass, writable: bool) -> bool {
+/// what it reaches are told. Free SQL and SQL scripts on a locked connection run read-only and change nothing. The
+/// MongoDB shell always counts, since its read-only guard is not a boundary.
+fn changes_server(call: &Call, class: OpClass, writable: bool, sql: bool) -> bool {
     match call {
         Call::RunSql { .. } => writable,
-        Call::RunShell { .. } => true,
+        Call::RunShell { .. } => writable || !sql,
         _ => matches!(class, OpClass::ChangeData | OpClass::ChangeStructure),
     }
 }
@@ -1065,6 +1103,76 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open", "allowed, then no client in the test");
     }
 
+    /// A MySQL connection marked open without a pool, shared for reading and writing, with no rule presets so nothing hides
+    /// data.
+    fn shared_sql(app: &mut App, engine: db::sql::Engine) {
+        app.conns.push(Conn::new(ConnMeta { id: CONN, name: "shop".into(), engine, ..Default::default() }, Status::Ready));
+        app.agents.cfg.enabled = true;
+        app.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
+        app.agents.cfg.conns.insert(CONN, ConnPolicy { access: Access::ReadWrite, scripts: Mode::Allow, structure: Mode::Never, ..Default::default() });
+    }
+
+    fn sql_script() -> Value {
+        json!({ "connection": "shop", "database": "shop", "script": "async function run() { return await sql`SELECT id FROM users` }" })
+    }
+
+    /// run_shell reaches SQL connections. A locked one never asks to unlock: the script's statements come back through
+    /// Quarry's relay, which runs them read-only, and allowing it leaves the connection locked. The approval says so and
+    /// names what each statement is checked for.
+    #[test]
+    fn run_shell_on_sql_runs_read_only_when_locked() {
+        for engine in [db::sql::Engine::MySql, db::sql::Engine::Postgres] {
+            let mut h = app();
+            let ctx = h.ctx.clone();
+            let app = h.state_mut();
+            shared_sql(app, engine);
+            let mut rx = call(app, &ctx, 1, "run_shell", sql_script());
+            assert!(rx.try_recv().is_err(), "{engine:?}: every script asks");
+            let ask = app.agents.asks[0].clone();
+            assert!(!ask.why.unlock && ask.why.always && !ask.why.session_ok, "{engine:?}: {:?}", ask.why);
+            assert!(ask.facts.iter().any(|f| f.starts_with("Runs read-only")), "{engine:?}: {:?}", ask.facts);
+            let checks = ask.facts.iter().find(|f| f.starts_with("Quarry checks each statement")).expect("the statement checks are listed");
+            assert!(checks.contains("user and role") && checks.contains("structure changes") && !checks.contains("data changes"), "{checks}");
+            assert!(!app.agent_run_writable(&app.agents.exec.pending[&ask.id]), "{engine:?}: queued locked, runs read-only");
+            app.agent_answer(ask.id, Answer::Once);
+            assert!(!app.conns[0].writable, "{engine:?}: allowing a SQL script never unlocks");
+            assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open", "{engine:?}: allowed, then no pool in the test");
+            // Unlocked when it was queued, it may write.
+            app.conns[0].writable = true;
+            let _rx = call(app, &ctx, 2, "run_shell", sql_script());
+            let ask = app.agents.asks[0].clone();
+            assert!(app.agent_run_writable(&app.agents.exec.pending[&ask.id]));
+            assert!(!ask.facts.iter().any(|f| f.starts_with("Runs read-only")), "{:?}", ask.facts);
+        }
+    }
+
+    /// The same settings hold for SQL scripts as for free SQL: rules that hide data turn them off, shared read only and
+    /// Never refuse them.
+    #[test]
+    fn run_shell_on_sql_follows_the_connection_settings() {
+        let mut h = app();
+        let ctx = h.ctx.clone();
+        let app = h.state_mut();
+        shared_sql(app, db::sql::Engine::MySql);
+        // The Secrets preset hides password, and with no catalog loaded every column could be one.
+        app.agents.cfg.presets = Default::default();
+        app.agents.rev += 1;
+        let e = refused(&mut call(app, &ctx, 1, "run_shell", sql_script()));
+        assert!(e.message.contains("the shell are off"), "{}", e.message);
+        app.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
+        app.agents.rev += 1;
+        app.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::Read;
+        let e = refused(&mut call(app, &ctx, 2, "run_shell", sql_script()));
+        assert!(e.message.contains("shared read only"), "{}", e.message);
+        app.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::ReadWrite;
+        app.agents.cfg.conns.get_mut(&CONN).unwrap().scripts = Mode::Never;
+        let e = refused(&mut call(app, &ctx, 3, "run_shell", sql_script()));
+        assert!(e.message.contains("Run scripts is set to Never"), "{}", e.message);
+        // MongoDB tools still refuse a SQL connection, and say the shell works there.
+        let e = refused(&mut call(app, &ctx, 4, "find", json!({ "connection": "shop", "database": "shop", "collection": "users" })));
+        assert!(e.code == "wrong_engine" && e.message.contains("run_shell"), "{}", e.message);
+    }
+
     /// A structure change has no undo, so a cancel never stops it half way: it finishes and the Activity says how it
     /// ended, here failing on a server nobody answers at.
     #[test]
@@ -1171,12 +1279,15 @@ mod tests {
     fn what_counts_as_a_change() {
         let c = |call: Call, writable: bool| {
             let class = tools::classify(&call, Some(Dialect::MySql));
-            changes_server(&call, class, writable)
+            changes_server(&call, class, writable, true)
         };
         let run = || Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE t SET a = 1".into() };
         assert!(!c(run(), false), "free SQL on a locked connection runs read-only and marks no tab");
         assert!(c(run(), true));
-        assert!(c(Call::RunShell { conn: ConnRef::Id(1), db: None, script: "async function run() { return 1 }".into() }, true));
+        let shell = || Call::RunShell { conn: ConnRef::Id(1), db: None, script: "async function run() { return 1 }".into() };
+        assert!(c(shell(), true));
+        assert!(!c(shell(), false), "a SQL script on a locked connection runs read-only");
+        assert!(changes_server(&shell(), OpClass::RunScripts, false, false), "the MongoDB shell's guard is not a boundary");
         let cmd = |d: mongodb::bson::Document| Call::RunCommand { conn: ConnRef::Id(1), db: "shop".into(), command: d };
         assert!(c(cmd(mongodb::bson::doc! { "drop": "x" }), true));
         assert!(!c(cmd(mongodb::bson::doc! { "ping": 1 }), true));

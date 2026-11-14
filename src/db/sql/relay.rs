@@ -157,6 +157,17 @@ fn fill_pg_with(text: &str, count_of_values: usize, literal: impl Fn(usize) -> R
     Ok(out)
 }
 
+/// What an agent's script adds to the relay's own checks. The SQL of a script is only known as it runs, so each statement
+/// is checked here once its values are filled in, and each row and error is cleaned before the script can see it.
+pub trait RelayGate: Sync {
+    /// Refuses a statement, given as it will run.
+    fn statement(&self, stmt: &str, d: Dialect, read_only: bool) -> Res<()>;
+    /// Cleans a row, with the values as read and before they are spelled for the script.
+    fn row(&self, d: &mut Document);
+    /// Cleans an error message, which can quote the values of a row.
+    fn error(&self, e: String) -> String;
+}
+
 /// A shell script's own connection, kept for the whole run so its @variables and transactions persist.
 /// It is the only way a script reaches the server, so the read-only check below covers every write.
 pub struct Relay {
@@ -234,14 +245,15 @@ impl Relay {
     /// `query_args` for plain values, which the live tests of the escaping use.
     #[cfg(test)]
     pub async fn query(&mut self, text: &str, params: &[value::Param]) -> Res<Answer> {
-        self.query_args(text, &params.iter().cloned().map(Arg::Val).collect::<Vec<_>>()).await
+        self.query_args(text, &params.iter().cloned().map(Arg::Val).collect::<Vec<_>>(), None).await
     }
 
     /// Runs one statement. On a locked connection the same check as the Custom Query runs on the final
     /// text, and the session itself is READ ONLY. On PostgreSQL the statement also runs alone in its own
     /// `BEGIN READ ONLY` that is rolled back, because a session guard alone does not hold against
-    /// `set_config('default_transaction_read_only', 'off', false)`.
-    pub async fn query_args(&mut self, text: &str, args: &[Arg]) -> Res<Answer> {
+    /// `set_config('default_transaction_read_only', 'off', false)`. An agent's script passes `gate`, which checks
+    /// the statement first and cleans its rows.
+    pub async fn query_args(&mut self, text: &str, args: &[Arg], gate: Option<&dyn RelayGate>) -> Res<Answer> {
         if self.dead {
             return Err("The connection of this script was lost after an earlier error".into());
         }
@@ -266,6 +278,9 @@ impl Relay {
         };
         if lex::count_with(&stmt, self.dialect, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, self.dialect, !self.backslash, self.ansi) != 1 {
             return Err("Send one statement per query".into());
+        }
+        if let Some(g) = gate {
+            g.statement(&stmt, self.dialect, self.read_only)?;
         }
         if self.read_only {
             lex::read_only_check(&stmt, self.dialect)?;
@@ -320,7 +335,11 @@ impl Relay {
                             cut = true;
                             break;
                         }
-                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson(row.dialect(), c.kind, raw(&row, i))))).collect();
+                        let mut d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), value::to_bson(row.dialect(), c.kind, raw(&row, i)))).collect();
+                        if let Some(g) = gate {
+                            g.row(&mut d);
+                        }
+                        let d: Document = d.into_iter().map(|(k, v)| (k, cell(v))).collect();
                         rows.push(Bson::Document(d).into_relaxed_extjson());
                     }
                     // A CALL has several results; the first one with rows is what the script gets.

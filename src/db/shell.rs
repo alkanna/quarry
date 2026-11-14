@@ -129,7 +129,13 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     Ok(())
 }
 
-pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+    run_shell_gated(req, job, None, send, cancel).await
+}
+
+/// `run_shell` for an agent's script: `gate` checks each SQL statement and cleans each row and error before the script
+/// gets them.
+pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn sql::RelayGate>, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     if let Some(n) = repeated_name(job.sql.iter().map(|(n, _)| n.as_str())) {
@@ -212,7 +218,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                         }
                         let p = params.as_ref().map_err(|x| x.clone())?;
                         let Some(r) = relays.get_mut(&conn) else { return Err("No connection".to_string()) };
-                        let out = r.query_args(&text, p).await;
+                        let out = r.query_args(&text, p, gate).await;
                         // Dropping the relay closes its connection, which ends the transaction and frees its locks.
                         if r.abandoned() {
                             relays.remove(&conn);
@@ -221,6 +227,10 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                         out
                     }
                     .await;
+                    let res = res.map_err(|x| match gate {
+                        Some(g) => g.error(x),
+                        None => x,
+                    });
                     let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
                     let mut answer = serde_json::json!({ "type": "sqlres", "id": v.get("id") });
                     match res {

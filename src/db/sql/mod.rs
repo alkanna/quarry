@@ -41,7 +41,7 @@ pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, Feature, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
 pub use pg::read::PgSchema;
-pub use relay::{Answer, Arg, Relay};
+pub use relay::{Answer, Arg, Relay, RelayGate};
 pub use run::RunHandle;
 pub(crate) use pg::WRITE_LOCK_SECS;
 

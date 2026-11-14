@@ -4,7 +4,7 @@
 
 use super::config::OpClass;
 use crate::db::sql::Dialect;
-use crate::db::sql::lex::{Tok, read_only_check, split_statements, tokens};
+use crate::db::sql::lex::{Tok, nth_reading, read_only_check, readings};
 use mongodb::bson::{Bson, Document};
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
@@ -218,7 +218,10 @@ fn build_tools() -> Vec<ToolDef> {
     ]
 }
 
-const SHELL_DESCRIPTION: &str = "Run JavaScript on a MongoDB connection in Quarry's shell (Node.js MongoDB driver). `script` is a function expression that Quarry calls, such as async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. Its return value and its console.log output come back. `db` is the current database (the `database` argument) and each of its collections is also a global by name. The user approves every script, it is refused where rules hide data, and on a locked connection allowing it unlocks writes.";
+const SHELL_DESCRIPTION: &str = "Run JavaScript in Quarry's shell on a MongoDB, MySQL, MariaDB or PostgreSQL connection. `script` is a function expression that Quarry calls; its return value and its console.log output come back. \
+MongoDB: `db` is the current database (the `database` argument, a Node.js driver Db) and each of its collections is also a global by name, as in async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. On a locked connection allowing it unlocks writes. \
+SQL: there is no `db`. `sql` is a tagged template whose ${values} are sent as values, never as SQL text: await sql`SELECT id, total FROM orders WHERE id = ${id}` returns the rows as an array, with .affected (and .insertId on MySQL) after a write. sql.unsafe(text, values) takes ? placeholders on MySQL and $1, $2 on PostgreSQL. `table(\"orders\")` and a global per table of the `database` argument (the MySQL database or PostgreSQL schema) have find(where, { select, orderBy, limit, offset }), findOne, count, insert, update(where, set) and delete(where). One statement per query. Each statement is checked by Quarry as it runs, and rows are scrubbed by the connection's data rules before the script sees them. On a locked connection the script runs read-only and every write is refused; it never unlocks it. \
+The user approves every script, and it is refused where rules hide data.";
 
 /// The shell runs `return (<script>)` and calls what that gives, so a bare statement fails only after the user approved
 /// it. This cheap check refuses that before any approval, with the form that works.
@@ -228,7 +231,7 @@ fn shell_fn(script: &str) -> Result<String, ArgErr> {
     let head = if after(t, "async") { t["async".len()..].trim_start() } else { t };
     let opens = after(head, "function") || head.starts_with('(');
     if !opens || !(t.contains("=>") || t.contains("function")) {
-        return bad("`script` must be a JavaScript function that Quarry calls, with `db` as the current database, such as: async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. Its return value and console.log output come back.");
+        return bad("`script` must be a JavaScript function that Quarry calls, such as: async function run() { return await db.collection(\"users\").find().limit(5).toArray() } on MongoDB, or async function run() { return await sql`SELECT id FROM users LIMIT 5` } on SQL. Its return value and console.log output come back.");
     }
     Ok(script.to_string())
 }
@@ -647,13 +650,48 @@ fn command_class(command: &Document) -> OpClass {
     OpClass::RunScripts
 }
 
+/// The first two words of each statement under every way a server may read the text, so a verb that an executable
+/// comment or a quote rule hides from one reading is still seen in another.
+fn heads(sql: &str, d: Dialect) -> Vec<(String, String)> {
+    let pair = |w: &mut Vec<String>| {
+        let mut it = std::mem::take(w).into_iter();
+        (it.next().unwrap_or_default(), it.next().unwrap_or_default())
+    };
+    let mut out = Vec::new();
+    for n in 0..readings(d) {
+        let mut w: Vec<String> = Vec::new();
+        for (t, r) in nth_reading(sql, d, n) {
+            if t == Tok::Punct && &sql[r.clone()] == ";" {
+                out.push(pair(&mut w));
+            } else if t == Tok::Word && w.len() < 2 {
+                w.push(sql[r].to_ascii_uppercase());
+            }
+        }
+        out.push(pair(&mut w));
+    }
+    out
+}
+
 /// GRANT, REVOKE and user or role statements, by their first words.
-fn touches_users(sql: &str, d: Dialect) -> bool {
-    split_statements(sql, d).into_iter().any(|(_, stmt)| {
-        let w: Vec<String> = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).take(2).map(|(_, r)| stmt[r].to_ascii_uppercase()).collect();
-        let first = w.first().map(String::as_str).unwrap_or("");
-        let second = w.get(1).map(String::as_str).unwrap_or("");
+pub(crate) fn touches_users(sql: &str, d: Dialect) -> bool {
+    heads(sql, d).iter().any(|(first, second)| {
+        let (first, second) = (first.as_str(), second.as_str());
         matches!(first, "GRANT" | "REVOKE") || (matches!(first, "CREATE" | "ALTER" | "DROP" | "RENAME") && matches!(second, "USER" | "ROLE" | "GROUP")) || (first == "SET" && matches!(second, "PASSWORD" | "ROLE"))
+    })
+}
+
+/// Statements that make, change or drop objects rather than rows, by their first word. TRUNCATE counts: it empties a
+/// table at once and no undo covers it.
+pub(crate) fn changes_structure(sql: &str, d: Dialect) -> bool {
+    heads(sql, d).iter().any(|(first, _)| matches!(first.as_str(), "CREATE" | "ALTER" | "DROP" | "RENAME" | "TRUNCATE" | "COMMENT" | "IMPORT"))
+}
+
+/// A locking read (FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE, FOR KEY SHARE, LOCK IN SHARE MODE) under any reading. It
+/// writes nothing, but holds row locks other sessions wait on.
+pub(crate) fn locks_rows(sql: &str, d: Dialect) -> bool {
+    (0..readings(d)).any(|n| {
+        let w: Vec<String> = nth_reading(sql, d, n).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| sql[r].to_ascii_uppercase()).collect();
+        w.windows(2).any(|p| p[0] == "FOR" && matches!(p[1].as_str(), "UPDATE" | "SHARE" | "NO" | "KEY")) || w.windows(4).any(|p| p[0] == "LOCK" && p[1] == "IN" && p[2] == "SHARE" && p[3] == "MODE")
     })
 }
 
@@ -885,10 +923,40 @@ mod tests {
         }
         for no in ["db.users.find().limit(5).toArray()", "return 1", "await db.collection('x').findOne()", "(1)", "asyncfunction run() { }", "functional()", "x => 1", "async x => 1"] {
             let e = shell(no).unwrap_err().0;
-            assert!(e.contains("async function run()") && e.contains("`db`"), "{no}: {e}");
+            assert!(e.contains("async function run()") && e.contains("db.collection") && e.contains("sql`SELECT"), "{no}: {e}");
         }
+        assert!(shell("async function run() { return await sql`SELECT 1` }").is_ok());
         let d = tool("run_shell").unwrap().description;
         assert!(d.contains("function expression") && d.contains("async function run()") && d.contains("`db` is the current database") && d.contains("return value"), "{d}");
+        // Agents learn what a SQL script gets, and that a locked SQL connection stays read-only.
+        for w in ["MySQL", "PostgreSQL", "there is no `db`", "sql`SELECT", "sql.unsafe", "table(\"orders\")", ".affected", "runs read-only"] {
+            assert!(d.contains(w), "{w}: {d}");
+        }
+    }
+
+    /// The SQL a script sends is classed statement by statement as it runs, under every reading of its text.
+    #[test]
+    fn statement_classes_for_scripts() {
+        let my = Dialect::MySql;
+        let pg = Dialect::Postgres;
+        for s in ["GRANT ALL ON *.* TO x", "/*!50000 GRANT ALL ON *.* TO x */", "SELECT 1; CREATE USER x", "SET PASSWORD = 'x'", "drop role app"] {
+            assert!(touches_users(s, my), "{s}");
+        }
+        assert!(touches_users("ALTER ROLE app WITH PASSWORD 'x'", pg));
+        assert!(!touches_users("SELECT 'GRANT ALL'", my));
+        assert!(!touches_users("CREATE TABLE users (id int)", my));
+        for s in ["CREATE TABLE t (a int)", "drop table t", "ALTER TABLE t ADD c int", "TRUNCATE t", "RENAME TABLE a TO b", "/*!32302 DROP TABLE t */", "SELECT 1; DROP TABLE t"] {
+            assert!(changes_structure(s, my), "{s}");
+        }
+        assert!(changes_structure("COMMENT ON TABLE t IS 'x'", pg) && changes_structure("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1; $$", pg));
+        for s in ["INSERT INTO t VALUES (1)", "UPDATE t SET a = 'DROP TABLE x'", "DELETE FROM t", "SELECT 'CREATE TABLE'"] {
+            assert!(!changes_structure(s, my), "{s}");
+        }
+        for s in ["SELECT * FROM t FOR UPDATE", "select * from t for share", "SELECT * FROM t LOCK IN SHARE MODE", "SELECT * FROM t /*! FOR UPDATE */"] {
+            assert!(locks_rows(s, my), "{s}");
+        }
+        assert!(locks_rows("SELECT * FROM t FOR NO KEY UPDATE", pg) && locks_rows("SELECT * FROM t FOR KEY SHARE", pg));
+        assert!(!locks_rows("SELECT 'FOR UPDATE' FROM t", my) && !locks_rows("INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 1", my));
     }
 
     #[test]
