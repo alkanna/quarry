@@ -125,7 +125,7 @@ impl App {
     /// How many routines of a namespace match the sidebar's filter, so a database whose tables all miss it still shows.
     pub(in crate::app) fn routines_matching(&self, conn: u64, ns: &str, filter: &str) -> usize {
         match self.routines.lists.get(&(conn, ns.to_string())) {
-            Some(Loaded::Ok(l)) if !filter.is_empty() => l.iter().filter(|r| r.name.to_lowercase().contains(filter)).count(),
+            Some(Loaded::Ok(l)) if !filter.is_empty() => l.iter().filter(|r| crate::app::sidebar::contains_ci(&r.name, filter)).count(),
             _ => 0,
         }
     }
@@ -167,7 +167,7 @@ impl App {
             }
             Some(Loaded::Ok(l)) => l,
         };
-        let shown: Vec<&Routine> = list.iter().filter(|r| filter.is_empty() || r.name.to_lowercase().contains(filter)).collect();
+        let shown: Vec<&Routine> = list.iter().filter(|r| filter.is_empty() || crate::app::sidebar::contains_ci(&r.name, filter)).collect();
         if shown.is_empty() {
             return;
         }
@@ -246,7 +246,7 @@ impl App {
     fn routines_load(&mut self, conn: u64, db: String, schema: String) {
         let key = self.routines_key(conn, &db, &schema);
         // A connection without a session (the offline demo) has no routines to read; an empty list ends the asking.
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()).filter(|_| !self.demo) else {
+        let Some(sql) = self.live_sql(conn) else {
             self.routines.lists.entry(key).or_insert(Loaded::Ok(Vec::new()));
             return;
         };
@@ -256,7 +256,7 @@ impl App {
 
     fn routine_window_for(&self, conn: u64, db: String, schema: String, kind: Kind, routine: Option<Routine>) -> RoutineWin {
         let dialect = self.dialect_of(conn);
-        let system = if dialect == db::sql::Dialect::Postgres { db::sql::pg::create::system_schema(&schema) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db.as_str()) };
+        let system = super::ns::system_ns(dialect == db::sql::Dialect::Postgres, &schema, &db);
         RoutineWin { conn, db, schema, dialect, system, kind, routine, detail: None, req: 0, busy: false, error: None, text: String::new(), base: String::new(), editing: false, recreate: false, offer_recreate: false, undo: None, pane: Pane::View, typed: String::new(), args: Vec::new(), memo: None }
     }
 
@@ -264,7 +264,7 @@ impl App {
         let Some(r) = r else { return };
         let mut w = self.routine_window_for(conn, db.clone(), schema.clone(), r.kind, Some(r.clone()));
         w.pane = pane;
-        if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()).filter(|_| !self.demo) {
+        if let Some(sql) = self.live_sql(conn) {
             self.req += 1;
             w.req = self.req;
             self.worker.sql_routine_detail(conn, self.req, sql.at(&db), schema, r);
@@ -352,7 +352,7 @@ impl App {
                 // Read again, so the view shows what the server holds now and Undo has the current routine to work on.
                 w.base = String::new();
                 w.detail = None;
-                if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()).filter(|_| !self.demo) {
+                if let Some(sql) = self.live_sql(conn) {
                     self.req += 1;
                     w.req = self.req;
                     self.worker.sql_routine_detail(conn, self.req, sql.at(&db), schema, r);
@@ -370,8 +370,7 @@ impl App {
         }
         if !self.conn_writable(w.conn) {
             let conn = w.conn;
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.routine_save(restore)))));
-            return;
+            return self.ask_unlock_on(conn, move |a| a.routine_save(restore));
         }
         let Some(w) = self.routines.win.as_mut() else { return };
         // Undo writes the text from before the last save, on the routine as it is now, the way the save went.
@@ -390,7 +389,7 @@ impl App {
         self.req += 1;
         w.req = self.req;
         let (req, read_only) = (self.req, !self.conn_writable(conn));
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
         self.worker.sql_routine_save(conn, req, sql.at(&db), schema, old, text, recreate, read_only);
     }
 
@@ -401,12 +400,11 @@ impl App {
             return self.ok("Offline demo: no database is connected.");
         }
         if !self.conn_writable(conn) {
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.routine_drop()))));
-            return;
+            return self.ask_unlock_on(conn, |a| a.routine_drop());
         }
         self.req += 1;
         let (req, read_only) = (self.req, !self.conn_writable(conn));
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
         if let Some(w) = self.routines.win.as_mut() {
             (w.req, w.busy, w.error) = (req, true, None);
         }
@@ -422,8 +420,7 @@ impl App {
         let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
         let Some(script) = rt::run_script(w.dialect, &schema, detail, &w.args, bs) else { return };
         if !detail.read_only && !self.conn_writable(conn) {
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.routine_run_script(conn, db, script)))));
-            return;
+            return self.ask_unlock_on(conn, move |a| a.routine_run_script(conn, db, script));
         }
         self.routine_run_script(conn, db, script);
     }

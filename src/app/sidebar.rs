@@ -633,7 +633,7 @@ impl App {
                         {
                             // Functions and procedures of this database, or of the schema the switcher shows on PostgreSQL.
                             ui.separator();
-                            let (ns_name, sys) = if pg { (picked, db::sql::pg::create::system_schema(picked)) } else { (db_name.as_str(), db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str())) };
+                            let (ns_name, sys) = (if pg { picked } else { db_name.as_str() }, sql::ns::system_ns(pg, picked, db_name));
                             Self::routines_new_items(ui, db_name, ns_name, pg, writable, sys, &mut routine_acts);
                         }
                         if pg {
@@ -833,7 +833,7 @@ impl App {
                                 }
                                 if is_view {
                                     // PostgreSQL's items stay enabled on a locked connection and ask to unlock; MySQL's wait for the unlock like its other writes.
-                                    let system = if pg { db::sql::pg::create::system_schema(picked) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str()) };
+                                    let system = sql::ns::system_ns(pg, picked, db_name);
                                     if ui.add_enabled(!system && (pg || writable), egui::Button::new("Edit view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to edit a view" }).clicked() {
                                         side.push(SideAct::EditView(db_name.clone(), coll.clone()));
                                     }
@@ -901,7 +901,7 @@ impl App {
                         });
                     }
                     if sql && (!pg || !picked.is_empty()) {
-                        let sys = if pg { db::sql::pg::create::system_schema(picked) } else { db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str()) };
+                        let sys = sql::ns::system_ns(pg, picked, db_name);
                         self.routines_group(ui, id, db_name, if pg { picked } else { db_name }, &filter, pg, writable, sys, &mut routine_acts);
                     }
                     ui.add_space(4.0);
@@ -1072,7 +1072,7 @@ impl App {
 
 /// Whether `name` holds `needle`, which is already lower case, ignoring case. Names are mostly ASCII, so this compares bytes
 /// instead of lower-casing every name on every frame the filter is on.
-fn contains_ci(name: &str, needle: &str) -> bool {
+pub(in crate::app) fn contains_ci(name: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }

@@ -40,11 +40,12 @@ impl ViewForm {
     }
 
     fn spec(&self, pg: bool, drop_first: bool) -> ViewSpec {
-        let mut def = if self.edit { self.def.clone() } else { ViewDef::default() };
-        (def.schema, def.name, def.body) = (self.schema.clone(), self.name.clone(), self.body.clone());
+        // An edit keeps what the dialog has no field for from the definition the server holds.
+        let old = self.edit.then_some(&self.def);
+        let mut def = ViewDef { schema: self.schema.clone(), name: self.name.clone(), body: self.body.clone(), materialized: old.is_some_and(|d| d.materialized), options: old.map(|d| d.options.clone()).unwrap_or_default(), definer: old.and_then(|d| d.definer.clone()), ..Default::default() };
         if !pg {
             (def.algorithm, def.security, def.check) = (self.algorithm.clone(), self.security.clone(), self.check.clone());
-            if !self.edit || !self.keep_definer {
+            if !self.keep_definer {
                 def.definer = None;
             }
         }
@@ -80,7 +81,7 @@ impl App {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_new_view(conn, db, body));
         }
-        let (database, schema) = if self.is_pg(conn) { (db.clone(), self.sel_schema(&Sel { conn, db, ..Default::default() })) } else { (String::new(), db) };
+        let (database, schema) = self.form_ns(conn, db);
         self.modal = Some(Modal::SqlView(Box::new(ViewForm::new(conn, database, schema, String::new(), body, false))));
     }
 
@@ -89,7 +90,7 @@ impl App {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_edit_view(conn, db, name));
         }
-        let (database, schema) = if self.is_pg(conn) { (db.clone(), self.sel_schema(&Sel { conn, db, ..Default::default() })) } else { (String::new(), db) };
+        let (database, schema) = self.form_ns(conn, db);
         let Some(sql) = self.sql_db_for(conn, None) else { return };
         self.worker.sql_view_def(conn, if database.is_empty() { sql } else { sql.at(&database) }, schema.clone(), name.clone());
         self.modal = Some(Modal::SqlView(Box::new(ViewForm::new(conn, database, schema, name, String::new(), true))));

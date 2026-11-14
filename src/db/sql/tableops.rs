@@ -22,6 +22,16 @@ pub fn rename_table_sql(d: Dialect, schema: &str, from: &str, to: &str, fold: bo
 /// then the rows. `cols` are the columns to copy, listed one by one because a generated column refuses a value, and none means
 /// structure only.
 pub fn duplicate_stmts(d: Dialect, schema: &str, from: &str, to: &str, cols: Option<&[String]>, fold: bool) -> Res<Vec<String>> {
+    let list = cols.filter(|c| !c.is_empty()).map(|cols| cols.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", "));
+    copy_stmts(d, schema, from, to, list, fold)
+}
+
+/// `duplicate_stmts` as the dialog previews it: the column list is read from the server when the copy runs, so it shows `*`.
+pub fn duplicate_preview(d: Dialect, schema: &str, from: &str, to: &str, data: bool, fold: bool) -> Res<Vec<String>> {
+    copy_stmts(d, schema, from, to, data.then(|| "*".to_string()), fold)
+}
+
+fn copy_stmts(d: Dialect, schema: &str, from: &str, to: &str, list: Option<String>, fold: bool) -> Res<Vec<String>> {
     check_existing("database", schema)?;
     not_system(schema, fold)?;
     check_existing("table", from)?;
@@ -31,8 +41,7 @@ pub fn duplicate_stmts(d: Dialect, schema: &str, from: &str, to: &str, cols: Opt
     }
     let (a, b) = (d.qualified(schema, from), d.qualified(schema, to));
     let mut v = vec![format!("CREATE TABLE {b} LIKE {a}")];
-    if let Some(cols) = cols.filter(|c| !c.is_empty()) {
-        let list = cols.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    if let Some(list) = list {
         v.push(format!("INSERT INTO {b} ({list}) SELECT {list} FROM {a}"));
     }
     Ok(v)

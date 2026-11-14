@@ -70,6 +70,30 @@ pub struct CopyCol {
 /// value (a generated column refuses one), with OVERRIDING SYSTEM VALUE when an identity column is ALWAYS. The copy's identity
 /// sequences are new and start at 1, so each is moved up to the largest value copied or the next insert would collide.
 pub fn duplicate_stmts(schema: &str, from: &str, to: &str, cols: Option<&[CopyCol]>) -> Res<Vec<String>> {
+    let (a, b, create) = like_stmt(schema, from, to)?;
+    let mut v = vec![create];
+    let Some(cols) = cols.filter(|c| !c.is_empty()) else { return Ok(v) };
+    let list = cols.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
+    let over = if cols.iter().any(|c| c.identity == Some('a')) { "OVERRIDING SYSTEM VALUE " } else { "" };
+    v.push(format!("INSERT INTO {b} ({list}) {over}SELECT {list} FROM {a}"));
+    for c in cols.iter().filter(|c| c.identity.is_some()) {
+        v.push(format!("SELECT setval(pg_get_serial_sequence({}, {}), m) FROM (SELECT max({}) AS m FROM {b}) t WHERE m IS NOT NULL", pg_lit(&b), pg_lit(&c.name), q(&c.name)));
+    }
+    Ok(v)
+}
+
+/// `duplicate_stmts` as the dialog previews it: the column list is read from the server when the copy runs, so it shows `*`.
+pub fn duplicate_preview(schema: &str, from: &str, to: &str, data: bool) -> Res<Vec<String>> {
+    let (a, b, create) = like_stmt(schema, from, to)?;
+    let mut v = vec![create];
+    if data {
+        v.push(format!("INSERT INTO {b} (*) SELECT * FROM {a}"));
+    }
+    Ok(v)
+}
+
+/// The checks of a copy, the two qualified names and the statement that makes the structure.
+fn like_stmt(schema: &str, from: &str, to: &str) -> Res<(String, String, String)> {
     existing("A schema", schema)?;
     existing("A table", from)?;
     new_name("A table", to)?;
@@ -80,15 +104,8 @@ pub fn duplicate_stmts(schema: &str, from: &str, to: &str, cols: Option<&[CopyCo
         return Err("Give the copy a name other than the original's.".into());
     }
     let (a, b) = (D.qualified(schema, from), D.qualified(schema, to));
-    let mut v = vec![format!("CREATE TABLE {b} (LIKE {a} INCLUDING ALL)")];
-    let Some(cols) = cols.filter(|c| !c.is_empty()) else { return Ok(v) };
-    let list = cols.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
-    let over = if cols.iter().any(|c| c.identity == Some('a')) { "OVERRIDING SYSTEM VALUE " } else { "" };
-    v.push(format!("INSERT INTO {b} ({list}) {over}SELECT {list} FROM {a}"));
-    for c in cols.iter().filter(|c| c.identity.is_some()) {
-        v.push(format!("SELECT setval(pg_get_serial_sequence({}, {}), m) FROM (SELECT max({}) AS m FROM {b}) t WHERE m IS NOT NULL", pg_lit(&b), pg_lit(&c.name), q(&c.name)));
-    }
-    Ok(v)
+    let create = format!("CREATE TABLE {b} (LIKE {a} INCLUDING ALL)");
+    Ok((a, b, create))
 }
 
 const KIND: &str = "SELECT c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)";
