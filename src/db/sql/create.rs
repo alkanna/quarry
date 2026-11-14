@@ -652,7 +652,7 @@ pub(super) async fn create_time(c: &mut sqlx::MySqlConnection, schema: &str, tab
 /// mode and runs on this same connection, so a mode changed since connecting (NO_BACKSLASH_ESCAPES turned on
 /// or off) cannot make a backslash in a default value end the string. A changed mode is handed back too, so
 /// the app's previews follow the server from then on.
-async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, Mode, Option<String>)> {
+pub(super) async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, Mode, Option<String>)> {
     let m = Mode::of(&db.sql_mode);
     match ddl::session(db, "", read_only, m).await {
         Ok(c) => Ok((c, m, None)),
@@ -680,7 +680,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
 }
 
 pub(super) fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo, ids: Default::default() } }
+    super::write::undo_action(conn, "", schema, table, undo)
 }
 
 /// The part of a table undo that runs with the table locked: it must still be the table the create made,

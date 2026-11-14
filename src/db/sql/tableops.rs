@@ -4,7 +4,7 @@
 use super::create::{check_existing, check_name, created, folds_case, fresh_stats, not_system, split, stored_name, table_names, create_time, Ddl};
 use super::ddl;
 use super::worker::text;
-use super::write::{writer_conn, SqlUndo};
+use super::write::{undo_action, writer_conn, SqlUndo};
 use super::{se, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::Connection;
@@ -105,7 +105,7 @@ async fn undo_rename_my(db: &Db, schema: &str, now: &str, from: &str, token: &st
 }
 
 pub(super) fn renamed(conn: u64, database: &str, schema: &str, now: &str, from: &str, token: String) -> UndoAction {
-    UndoAction { agent: None, at: std::time::Instant::now(), conn, db: schema.into(), coll: now.into(), kind: UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: SqlUndo::Renamed { from: from.into(), token }, ids: Default::default() } }
+    undo_action(conn, database, schema, now, SqlUndo::Renamed { from: from.into(), token })
 }
 
 impl Worker {

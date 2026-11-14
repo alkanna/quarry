@@ -5,19 +5,18 @@
 //! The undo of a create drops the view and the undo of an edit puts the old definition back, each only while the view is still as
 //! the change left it.
 
-use super::create::SYSTEM_SCHEMAS;
-use super::ddl::{self, Mode};
-use super::exec::{sql_state, SqlRow, Tx};
+use super::create::{mode_session, SYSTEM_SCHEMAS};
+use super::ddl;
+use super::exec::{sql_state, Cells, SqlRow, Tx};
 use super::lex;
-use super::pg::create::system_schema;
-use super::pg::ddl::{exec as pg_exec, lock_error, name_ok, run_locked, set_path, Fail};
+use super::pg::create::{entry, system_schema};
+use super::pg::ddl::{exec as pg_exec, exec_named, in_tx, lock_error, name_ok, set_path};
 use super::value::Param;
 use super::worker::{text, text_at};
 use super::write::SqlUndo;
 use super::{se, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::Connection;
-use std::time::Instant;
 
 const D: Dialect = Dialect::Postgres;
 
@@ -84,26 +83,23 @@ fn check_name(d: Dialect, v: &ViewDef, replace: bool) -> Res<()> {
     if v.schema.is_empty() {
         return Err("Pick the database the view belongs to.".into());
     }
-    if d == Dialect::Postgres {
-        if system_schema(&v.schema) {
-            return Err(format!("{} belongs to the server and is left alone.", v.schema));
-        }
-        if replace {
-            return if v.name.is_empty() || v.name.contains('\0') { Err("The view needs a name.".into()) } else { Ok(()) };
-        }
-        name_ok(&v.name, "View")?;
-        if v.name.chars().any(|c| c.is_control()) {
-            return Err("View name cannot contain control characters or line breaks.".into());
-        }
-        return Ok(());
-    }
-    if SYSTEM_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(&v.schema)) {
+    let system = if d == Dialect::Postgres { system_schema(&v.schema) } else { SYSTEM_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(&v.schema)) };
+    if system {
         return Err(format!("{} belongs to the server and is left alone.", v.schema));
     }
+    let unreadable = v.name.is_empty() || v.name.chars().any(|c| c.is_control());
+    // A view already on the server is edited whatever it is called, as long as the quoted name reads back.
     if replace {
-        return if v.name.is_empty() || v.name.chars().any(|c| c.is_control()) { Err("The view needs a name without control characters.".into()) } else { Ok(()) };
+        return if unreadable { Err("The view needs a name without control characters.".into()) } else { Ok(()) };
     }
-    super::create::check_name("view", &v.name, false)
+    if d != Dialect::Postgres {
+        return super::create::check_name("view", &v.name, false);
+    }
+    name_ok(&v.name, "View")?;
+    if unreadable {
+        return Err("View name cannot contain control characters or line breaks.".into());
+    }
+    Ok(())
 }
 
 /// The text of a view's SELECT as one statement: a read of one SELECT, WITH or TABLE with nothing after it, so the view cannot carry
@@ -161,11 +157,6 @@ pub fn create_view_sql(d: Dialect, s: &ViewSpec) -> Res<String> {
     let definer = v.definer.as_ref().map_or(String::new(), |(u, h)| format!(" DEFINER = {}@{}", d.quote_ident(u), d.quote_ident(h)));
     let tail = if check == "NONE" { String::new() } else { format!("\nWITH {check} CHECK OPTION") };
     Ok(format!("{head} ALGORITHM = {alg}{definer} SQL SECURITY {sec} VIEW {name} AS\n{body}{tail}"))
-}
-
-/// The statement of a PostgreSQL view that is dropped before it is made again.
-pub fn drop_view_sql(d: Dialect, schema: &str, name: &str) -> String {
-    format!("DROP VIEW {}", d.qualified(schema, name))
 }
 
 // Reading a definition.
@@ -305,18 +296,18 @@ async fn read_def(db: &Db, schema: &str, name: &str) -> Res<ViewDef> {
         let rows = db.meta_with(schema, PG_DEF, [schema, name], true).await?;
         return pg_def(&rows, schema, name).ok_or_else(|| format!("{name} is not a view in {schema}."));
     }
-    let rows = db.read_text(schema, &db.dialect.create_stmt(true, schema, name), false).await?;
-    let create = rows.first().and_then(|r| text_at(r, 1)).ok_or_else(|| format!("{name} is not a view in {schema}."))?;
-    parse_create_view(&create).map(|v| ViewDef { schema: schema.into(), name: name.into(), ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
+    def_from_create(&db.read_text(schema, &db.dialect.create_stmt(true, schema, name), false).await?, schema, name)
 }
 
 async fn my_def(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, name: &str) -> Res<ViewDef> {
-    let sql = d.create_stmt(true, schema, name);
-    let rows = sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
-    let create = rows.first().and_then(|r| text_at(r, 1));
-    let (schema, name) = (schema.to_string(), name.to_string());
-    let create = create.ok_or_else(|| format!("{name} is not a view in {schema}."))?;
-    parse_create_view(&create).map(|v| ViewDef { schema, name, ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
+    let rows = sqlx::query(&d.create_stmt(true, schema, name)).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
+    def_from_create(&rows, schema, name)
+}
+
+/// The definition in the first row of a SHOW CREATE VIEW answer, whose second column is the statement.
+fn def_from_create<R: Cells>(rows: &[R], schema: &str, name: &str) -> Res<ViewDef> {
+    let create = rows.first().and_then(|r| text_at(r, 1)).ok_or_else(|| format!("{name} is not a view in {schema}."))?;
+    parse_create_view(&create).map(|v| ViewDef { schema: schema.into(), name: name.into(), ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
 }
 
 async fn pg_def_in(tx: &mut Tx<'_>, schema: &str, name: &str) -> Res<Option<ViewDef>> {
@@ -336,15 +327,6 @@ fn restore_sql(d: Dialect, old: &ViewDef) -> Option<String> {
     create_view_sql(d, &ViewSpec { def: old.clone(), replace: true, drop_first: false }).ok()
 }
 
-/// The sql_mode of the session may have changed since the dialog read it, in which case the statement is read again under the new one.
-async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, Option<String>)> {
-    match ddl::session(db, "", read_only, Mode::of(&db.sql_mode)).await {
-        Ok(c) => Ok((c, None)),
-        Err((_, Some(now))) => ddl::session(db, "", read_only, Mode::of(&now)).await.map(|c| (c, Some(now))).map_err(|(x, _)| x),
-        Err((x, None)) => Err(x),
-    }
-}
-
 /// A refused DEFINER says whose it is, since keeping another account as the definer needs a privilege this login may lack.
 fn definer_note(err: String, definer: &Option<(String, String)>) -> String {
     match definer {
@@ -353,21 +335,20 @@ fn definer_note(err: String, definer: &Option<(String, String)>) -> String {
     }
 }
 
-async fn my_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> (Res<Applied>, Option<String>) {
+async fn my_apply(db: &Db, spec: ViewSpec, read_only: bool) -> (Res<Applied>, Option<String>) {
     let d = db.dialect;
     let (mut c, seen) = match mode_session(db, read_only).await {
-        Ok(x) => x,
+        Ok((c, _, seen)) => (c, seen),
         Err(e) => return (Err(e), None),
     };
-    let (spec, d) = (spec.clone(), d);
     let out = async {
-        let (schema, typed, definer) = (spec.def.schema.clone(), spec.def.name.clone(), spec.def.definer.clone());
+        let ViewDef { schema, name: typed, definer, .. } = spec.def.clone();
         let sql = create_view_sql(d, &spec)?;
         let old = if spec.replace { Some(my_def(&mut c, d, &schema, &typed).await.map_err(|e| format!("Could not read the current definition of {typed}: {e}"))?) } else { None };
         ddl::exec(&mut c, &sql).await.map_err(|e| definer_note(e, &definer))?;
         // A server that folds names stores the view under another spelling than the one typed.
         let find = "SELECT CAST(TABLE_NAME AS CHAR) AS n FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)";
-        let row = sqlx::query(find).bind(schema.clone()).bind(typed.clone()).fetch_all(&mut c).await.map_err(se)?;
+        let row = sqlx::query(find).bind(&schema).bind(&typed).fetch_all(&mut c).await.map_err(se)?;
         let name = row.iter().filter_map(|r| text(r, "n")).find(|n| *n == typed).or_else(|| row.first().and_then(|r| text(r, "n"))).unwrap_or(typed);
         let now = my_def(&mut c, d, &schema, &name).await?;
         Ok(Applied { restore: old.as_ref().and_then(|o| restore_sql(d, o)), name, left: now.body })
@@ -379,47 +360,38 @@ async fn my_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> (Res<Applied>, O
 
 async fn pg_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> Res<Applied> {
     let sql = create_view_sql(D, spec)?;
-    let (spec, owned) = (spec.clone(), db.clone());
-    let drop = drop_view_sql(D, &spec.def.schema, &spec.def.name);
-    let scope = spec.def.schema.clone();
-    let run = run_locked(db, &scope, read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
-        let (db, v) = (&owned, &spec.def);
-        set_path(tx, db, &v.schema).await.map_err(|x| Fail::Run(se(x)))?;
+    let v = &spec.def;
+    let drop = format!("DROP VIEW {}", D.qualified(&v.schema, &v.name));
+    in_tx(db, &v.schema, read_only, async |tx| {
+        set_path(tx, db, &v.schema).await.map_err(se)?;
         let old = if spec.replace {
-            match pg_def_in(tx, &v.schema, &v.name).await.map_err(Fail::Run)? {
-                Some(o) if o.materialized => return Err(Fail::Run(format!("{} is a materialized view, which has no CREATE OR REPLACE.", v.name))),
+            match pg_def_in(tx, &v.schema, &v.name).await? {
+                Some(o) if o.materialized => return Err(format!("{} is a materialized view, which has no CREATE OR REPLACE.", v.name)),
                 Some(o) => Some(o),
-                None => return Err(Fail::Run(format!("The view {} is gone.", v.name))),
+                None => return Err(format!("The view {} is gone.", v.name)),
             }
         } else {
             None
         };
         if spec.drop_first {
             // Without CASCADE the server refuses while another view or object depends on this one, and nothing is dropped.
-            pg_exec(tx, db, &v.schema, &drop).await.map_err(|x| Fail::Run(lock_error(&x, &v.name).unwrap_or_else(|| se(x))))?;
+            exec_named(tx, db, &v.schema, &drop, &v.name).await?;
         }
         if let Err(x) = pg_exec(tx, db, &v.schema, &sql).await {
             let columns = spec.replace && !spec.drop_first && sql_state(&x).as_deref() == Some("42P16");
-            return Err(Fail::Run(if columns { NEEDS_DROP.into() } else { lock_error(&x, &v.name).unwrap_or_else(|| se(x)) }));
+            return Err(if columns { NEEDS_DROP.into() } else { lock_error(&x, &v.name).unwrap_or_else(|| se(x)) });
         }
-        let now = pg_def_in(tx, &v.schema, &v.name).await.map_err(Fail::Run)?.ok_or_else(|| Fail::Run("The view was made but cannot be read back.".into()))?;
+        let now = pg_def_in(tx, &v.schema, &v.name).await?.ok_or("The view was made but cannot be read back.")?;
         Ok(Applied { restore: old.as_ref().and_then(|o| restore_sql(D, o)), name: v.name.clone(), left: now.body })
     })
-    .await;
-    run.map_err(|f| match f {
-        Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
-    })
-}
-
-fn entry(db: &Db, conn: u64, schema: &str, name: &str, u: ViewUndo) -> UndoAction {
-    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: name.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo: SqlUndo::View(Box::new(u)), ids: Default::default() } }
+    .await
 }
 
 /// Puts back or removes what a change did, if the view still reads as the change left it.
 async fn undo_my(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool) -> Res<()> {
     let d = db.dialect;
-    let (mut c, _) = mode_session(db, read_only).await?;
-    let drop = drop_view_sql(d, schema, name);
+    let (mut c, ..) = mode_session(db, read_only).await?;
+    let drop = format!("DROP VIEW {}", d.qualified(schema, name));
     let out = async {
         let now = my_def(&mut c, d, schema, name).await.map_err(|_| format!("Not undone: the view {name} is gone."))?;
         if now.body != u.left {
@@ -447,31 +419,27 @@ async fn undo_pg(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: boo
 }
 
 async fn undo_pg_with(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool, force_drop: bool) -> Res<()> {
-    let (owned, u, scope, name) = (db.clone(), u.clone(), schema.to_string(), name.to_string());
-    let run = run_locked(db, &scope.clone(), read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
-        let (db, u, schema, name) = (&owned, &u, scope.as_str(), name.as_str());
-        set_path(tx, db, schema).await.map_err(|x| Fail::Run(se(x)))?;
-        let now = pg_def_in(tx, schema, name).await.map_err(Fail::Run)?.filter(|n| !n.materialized).ok_or_else(|| Fail::Run(format!("Not undone: the view {name} is gone.")))?;
+    in_tx(db, schema, read_only, async |tx| {
+        set_path(tx, db, schema).await.map_err(se)?;
+        let now = pg_def_in(tx, schema, name).await?.filter(|n| !n.materialized).ok_or_else(|| format!("Not undone: the view {name} is gone."))?;
         if now.body != u.left {
-            return Err(Fail::Run(format!("Not undone: {name} was changed after this, so undoing now would overwrite that.")));
+            return Err(format!("Not undone: {name} was changed after this, so undoing now would overwrite that."));
         }
         let drop = u.created || u.dropped || force_drop;
         if drop {
-            pg_exec(tx, db, schema, &drop_view_sql(D, schema, name)).await.map_err(|x| Fail::Run(lock_error(&x, name).unwrap_or_else(|| format!("Not undone: {}", se(x)))))?;
+            let sql = format!("DROP VIEW {}", D.qualified(schema, name));
+            pg_exec(tx, db, schema, &sql).await.map_err(|x| lock_error(&x, name).unwrap_or_else(|| format!("Not undone: {}", se(x))))?;
         }
         if !u.created {
-            let sql = u.restore.as_deref().ok_or_else(|| Fail::Run("Not undone: the old definition was not kept.".into()))?;
+            let sql = u.restore.as_deref().ok_or("Not undone: the old definition was not kept.")?;
             if let Err(x) = pg_exec(tx, db, schema, sql).await {
                 let columns = !drop && sql_state(&x).as_deref() == Some("42P16");
-                return Err(Fail::Run(if columns { NEEDS_DROP.into() } else { lock_error(&x, name).unwrap_or_else(|| se(x)) }));
+                return Err(if columns { NEEDS_DROP.into() } else { lock_error(&x, name).unwrap_or_else(|| se(x)) });
             }
         }
         Ok(())
     })
-    .await;
-    run.map_err(|f| match f {
-        Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
-    })
+    .await
 }
 
 impl Worker {
@@ -486,14 +454,14 @@ impl Worker {
     /// Creates a view, or replaces one when `spec.replace` is set.
     pub fn sql_save_view(&self, conn: u64, db: Db, spec: ViewSpec, read_only: bool) {
         self.spawn_sql(db.conn, &spec.def.schema.clone(), async move {
-            let (res, seen) = if db.dialect == Dialect::Postgres { (pg_apply(&db, &spec, read_only).await, None) } else { my_apply(&db, &spec, read_only).await };
+            let (res, seen) = if db.dialect == Dialect::Postgres { (pg_apply(&db, &spec, read_only).await, None) } else { my_apply(&db, spec.clone(), read_only).await };
             let need_drop = matches!(&res, Err(e) if e == NEEDS_DROP);
             let (schema, database) = (spec.def.schema.clone(), db.pg_database());
             let (name, undo, res) = match res {
                 Ok(a) => {
                     let u = (!spec.replace || a.restore.is_some()).then(|| ViewUndo { created: !spec.replace, restore: a.restore.clone(), left: a.left.clone(), dropped: spec.drop_first, label: if spec.replace { format!("changed view {}", a.name) } else { format!("created view {}", a.name) } });
                     let said = format!("{} view {}", if spec.replace { "Saved" } else { "Created" }, a.name);
-                    (a.name.clone(), u.map(|u| entry(&db, conn, &schema, &a.name, u)), Ok(said))
+                    (a.name.clone(), u.map(|u| entry(&db, conn, &schema, &a.name, SqlUndo::View(Box::new(u)))), Ok(said))
                 }
                 Err(_) if need_drop => (spec.def.name.clone(), None, Err("CREATE OR REPLACE refuses to change the columns of a view.".to_string())),
                 Err(e) => (spec.def.name.clone(), None, Err(e)),
