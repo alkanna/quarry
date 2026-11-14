@@ -305,6 +305,8 @@ impl App {
         let mut refresh = None;
         let mut sql_users = None;
         let mut manage = false;
+        // The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
+        let mongo_active = self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql());
         // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
@@ -340,7 +342,7 @@ impl App {
                 new = true;
                 ui.close();
             }
-            if ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
+            if !mongo_active && ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
                 cloud = true;
                 ui.close();
             }

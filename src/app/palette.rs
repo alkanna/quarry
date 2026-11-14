@@ -172,8 +172,8 @@ impl App {
             if !t.sel.coll.is_empty() {
                 let views: &[(View, &str)] = if sql { &SQL_VIEWS } else { &MONGO_VIEWS };
                 for (i, (v, label)) in views.iter().enumerate().filter(|(_, (v, _))| *v != t.view) {
-                    // Cmd+Alt+digit picks the Mongo views only; SQL tabs have no such shortcut.
-                    add(&g, Row::cmd(&format!("Show {label}"), Glyph::Prompt, if sql { String::new() } else { keys(false, true, &(i + 1).to_string()) }, Cmd::View(*v)));
+                    // Cmd+Alt+digit picks the view by its place in the list, which differs per engine.
+                    add(&g, Row::cmd(&format!("Show {label}"), Glyph::Prompt, keys(false, true, &(i + 1).to_string()), Cmd::View(*v)));
                 }
             }
             if sql {
@@ -214,7 +214,9 @@ impl App {
         }
         let g = "Quarry";
         add(g, Row::cmd("New connection\u{2026}", Glyph::Prompt, keys(false, false, "N"), Cmd::NewConn));
-        add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
+        if !self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql()) {
+            add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
+        }
         if !self.closed.is_empty() {
             add(g, Row::cmd("Reopen closed tab", Glyph::Tab, keys(true, false, "T"), Cmd::Reopen));
         }

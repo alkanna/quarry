@@ -6,11 +6,11 @@ use crate::app::*;
 use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
+use db::sql::Maint;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
-const LATER: &str = "Comes with writes";
 
 /// What the four views keep per tab.
 #[derive(Default)]
@@ -60,6 +60,9 @@ pub(in crate::app) enum Act {
     Copy(String),
     Open { db: String, table: String },
     Refresh,
+    /// Opens the Query view with this maintenance statement for the table, to read the result there.
+    Maintain(Maint),
+    Truncate,
     NewColumn,
     EditColumn(usize),
     DuplicateColumn(usize),
@@ -167,6 +170,11 @@ impl App {
                 }
                 self.request_structure();
             }
+            Act::Maintain(what) => self.sql_maintain(what),
+            Act::Truncate => {
+                let sel = self.tabs[self.cur].sel.clone();
+                self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
+            }
             Act::NewColumn => self.open_col_form(None),
             Act::EditColumn(i) => self.open_col_form(Some(i)),
             Act::DuplicateColumn(i) => self.duplicate_column(i),
@@ -184,6 +192,30 @@ impl App {
             Act::Discard => self.discard_staged(),
             Act::Apply => self.request_alter_apply(),
         }
+    }
+
+    /// Runs a maintenance statement of the Info page. All of them count as writes: ANALYZE and CHECK are refused by a read-only session
+    /// on some servers, and the Query view's read-only gate would turn them away anyway. The heavy ones ask first.
+    pub(in crate::app) fn sql_maintain(&mut self, what: Maint) {
+        let sel = self.tabs[self.cur].sel.clone();
+        if !self.conn_writable(sel.conn) {
+            return self.warn_ro();
+        }
+        let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) else { return };
+        if what.heavy() {
+            self.modal = Some(Modal::SqlMaintain { what, stmt });
+        } else {
+            self.sql_maintain_run(stmt);
+        }
+    }
+
+    /// The Query view runs each statement on its own outside any transaction, so VACUUM works, and it logs the statement and shows the server's rows.
+    pub(in crate::app) fn sql_maintain_run(&mut self, stmt: String) {
+        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+            s.query = format!("{stmt};");
+        }
+        self.tabs[self.cur].view = View::Sql;
+        self.sql_run(true, false);
     }
 
     /// The count shown beside a view's tab once the structure is known.
@@ -586,6 +618,8 @@ impl App {
             ("Comment", s.comment.clone()),
             ]
         };
+        let (is_view, writable) = (self.sel_is_view(), self.sel_writable());
+        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&self.tabs[self.cur].sel.db.as_str());
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -601,13 +635,24 @@ impl App {
                         });
                     }
                 });
-                if !pg {
+                {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        for name in ["Analyze", "Optimize", "Check"] {
-                            ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
+                        let tools: &[(&str, Maint)] = if pg { &[("Vacuum", Maint::Vacuum), ("Analyze", Maint::Analyze), ("Reindex", Maint::Reindex)] } else { &[("Analyze", Maint::Analyze), ("Optimize", Maint::Optimize), ("Check", Maint::Check)] };
+                        for (name, what) in tools {
+                            let note = if is_view { "A view has no table to maintain" } else { "Read-only: unlock writes to run this" };
+                            if ui.add_enabled(!is_view && writable, egui::Button::new(*name)).on_hover_text(format!("Run {} on this table and show the result in the Query view", name.to_uppercase())).on_disabled_hover_text(note).clicked() {
+                                acts.push(Act::Maintain(*what));
+                            }
                         }
-                        ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
+                        // PostgreSQL gets its TRUNCATE from the sidebar flow, so only MySQL and MariaDB offer it here.
+                        if !pg {
+                        let can_empty = !is_view && writable && !system;
+                        let note = if system { "Belongs to the server" } else if is_view { "A view has no rows to empty" } else { "Read-only: unlock writes to empty this table" };
+                        if ui.add_enabled_ui(can_empty, |ui| danger(ui, "Truncate...")).inner.on_hover_text("Deletes every row and keeps the table").on_disabled_hover_text(note).clicked() {
+                            acts.push(Act::Truncate);
+                        }
+                        }
                     });
                 }
             });
