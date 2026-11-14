@@ -311,9 +311,12 @@ async fn read_def(db: &Db, schema: &str, name: &str) -> Res<ViewDef> {
 }
 
 async fn my_def(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, name: &str) -> Res<ViewDef> {
-    let rows = sqlx::raw_sql(&d.create_stmt(true, schema, name)).fetch_all(&mut *c).await.map_err(se)?;
-    let create = rows.first().and_then(|r| text_at(r, 1)).ok_or_else(|| format!("{name} is not a view in {schema}."))?;
-    parse_create_view(&create).map(|v| ViewDef { schema: schema.into(), name: name.into(), ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
+    let sql = d.create_stmt(true, schema, name);
+    let rows = sqlx::raw_sql(&sql).fetch_all(&mut *c).await.map_err(se)?;
+    let create = rows.first().and_then(|r| text_at(r, 1));
+    let (schema, name) = (schema.to_string(), name.to_string());
+    let create = create.ok_or_else(|| format!("{name} is not a view in {schema}."))?;
+    parse_create_view(&create).map(|v| ViewDef { schema, name, ..v }).ok_or_else(|| "The server's definition of this view is in a form this app cannot read.".to_string())
 }
 
 async fn pg_def_in(tx: &mut Tx<'_>, schema: &str, name: &str) -> Res<Option<ViewDef>> {
@@ -356,15 +359,17 @@ async fn my_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> (Res<Applied>, O
         Ok(x) => x,
         Err(e) => return (Err(e), None),
     };
-    let v = &spec.def;
+    let (spec, d) = (spec.clone(), d);
     let out = async {
-        let sql = create_view_sql(d, spec)?;
-        let old = if spec.replace { Some(my_def(&mut c, d, &v.schema, &v.name).await.map_err(|e| format!("Could not read the current definition of {}: {e}", v.name))?) } else { None };
-        ddl::exec(&mut c, &sql).await.map_err(|e| definer_note(e, &v.definer))?;
+        let (schema, typed, definer) = (spec.def.schema.clone(), spec.def.name.clone(), spec.def.definer.clone());
+        let sql = create_view_sql(d, &spec)?;
+        let old = if spec.replace { Some(my_def(&mut c, d, &schema, &typed).await.map_err(|e| format!("Could not read the current definition of {typed}: {e}"))?) } else { None };
+        ddl::exec(&mut c, &sql).await.map_err(|e| definer_note(e, &definer))?;
         // A server that folds names stores the view under another spelling than the one typed.
-        let row = sqlx::query("SELECT CAST(TABLE_NAME AS CHAR) AS n FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)").bind(&v.schema).bind(&v.name).fetch_all(&mut c).await.map_err(se)?;
-        let name = row.iter().filter_map(|r| text(r, "n")).find(|n| *n == v.name).or_else(|| row.first().and_then(|r| text(r, "n"))).unwrap_or_else(|| v.name.clone());
-        let now = my_def(&mut c, d, &v.schema, &name).await?;
+        let find = "SELECT CAST(TABLE_NAME AS CHAR) AS n FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)";
+        let row = sqlx::query(find).bind(schema.clone()).bind(typed.clone()).fetch_all(&mut c).await.map_err(se)?;
+        let name = row.iter().filter_map(|r| text(r, "n")).find(|n| *n == typed).or_else(|| row.first().and_then(|r| text(r, "n"))).unwrap_or(typed);
+        let now = my_def(&mut c, d, &schema, &name).await?;
         Ok(Applied { restore: old.as_ref().and_then(|o| restore_sql(d, o)), name, left: now.body })
     }
     .await;
@@ -373,10 +378,12 @@ async fn my_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> (Res<Applied>, O
 }
 
 async fn pg_apply(db: &Db, spec: &ViewSpec, read_only: bool) -> Res<Applied> {
-    let v = &spec.def;
     let sql = create_view_sql(D, spec)?;
-    let drop = drop_view_sql(D, &v.schema, &v.name);
-    let run = run_locked(db, &v.schema, read_only, &[], "Refresh the lists and check before running it again.", async |tx| {
+    let (spec, owned) = (spec.clone(), db.clone());
+    let drop = drop_view_sql(D, &spec.def.schema, &spec.def.name);
+    let scope = spec.def.schema.clone();
+    let run = run_locked(db, &scope, read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
+        let (db, v) = (&owned, &spec.def);
         set_path(tx, db, &v.schema).await.map_err(|x| Fail::Run(se(x)))?;
         let old = if spec.replace {
             match pg_def_in(tx, &v.schema, &v.name).await.map_err(Fail::Run)? {
@@ -412,13 +419,14 @@ fn entry(db: &Db, conn: u64, schema: &str, name: &str, u: ViewUndo) -> UndoActio
 async fn undo_my(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool) -> Res<()> {
     let d = db.dialect;
     let (mut c, _) = mode_session(db, read_only).await?;
+    let drop = drop_view_sql(d, schema, name);
     let out = async {
         let now = my_def(&mut c, d, schema, name).await.map_err(|_| format!("Not undone: the view {name} is gone."))?;
         if now.body != u.left {
             return Err(format!("Not undone: {name} was changed after this, so undoing now would overwrite that."));
         }
         match (&u.restore, u.created) {
-            (_, true) => ddl::exec(&mut c, &drop_view_sql(d, schema, name)).await,
+            (_, true) => ddl::exec(&mut c, &drop).await,
             (Some(sql), false) => ddl::exec(&mut c, sql).await,
             (None, false) => Err("Not undone: the old definition was not kept.".into()),
         }
@@ -439,7 +447,9 @@ async fn undo_pg(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: boo
 }
 
 async fn undo_pg_with(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool, force_drop: bool) -> Res<()> {
-    let run = run_locked(db, schema, read_only, &[], "Refresh the lists and check before running it again.", async |tx| {
+    let (owned, u, schema, name) = (db.clone(), u.clone(), schema.to_string(), name.to_string());
+    let run = run_locked(db, &schema, read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
+        let (db, u, schema, name) = (&owned, &u, schema.as_str(), name.as_str());
         set_path(tx, db, schema).await.map_err(|x| Fail::Run(se(x)))?;
         let now = pg_def_in(tx, schema, name).await.map_err(Fail::Run)?.filter(|n| !n.materialized).ok_or_else(|| Fail::Run(format!("Not undone: the view {name} is gone.")))?;
         if now.body != u.left {
