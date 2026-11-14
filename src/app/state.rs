@@ -932,6 +932,8 @@ pub(super) enum Modal {
     AggWrite(Vec<Document>),
     ShellWrite(Vec<String>),
     ImportInsert(usize),
+    /// A table maintenance statement of the Info page that locks or rebuilds the table, waiting for a yes.
+    SqlMaintain { what: db::sql::Maint, stmt: String },
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
     DuplicateColl { conn: u64, db: String, coll: String, name: String },

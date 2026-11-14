@@ -193,6 +193,25 @@ impl App {
                         }
                     });
                 }
+                Modal::SqlMaintain { what, stmt } => {
+                    ui.set_width(480.0);
+                    dialog_head(ui, &Head::new("Run this statement?").sub("Table maintenance").glyph(glyphs::warn).tone(ALERT()));
+                    dialog_body(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(what.warning()).color(TEXT())).wrap());
+                        ui.add_space(10.0);
+                        code_card(ui, "", |ui| ui.add(egui::Label::new(RichText::new(stmt.as_str()).monospace().color(BRIGHT())).wrap()));
+                    });
+                    dialog_foot(ui, |ui| {
+                        if danger_solid(ui, true, "Run").clicked() {
+                            let stmt = std::mem::take(stmt);
+                            keep = false;
+                            self.sql_maintain_run(stmt);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
                 Modal::ShellWrite(ops) => {
                     ui.set_width(480.0);
                     dialog_head(ui, &Head::new("Execute this command?").sub("Shell").glyph(glyphs::warn).tone(ALERT()));

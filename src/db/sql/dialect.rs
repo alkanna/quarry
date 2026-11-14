@@ -12,7 +12,48 @@ pub enum Dialect {
     Postgres,
 }
 
+/// Table maintenance statements of the Info page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Maint {
+    Analyze,
+    Optimize,
+    Check,
+    Vacuum,
+    Reindex,
+}
+
+impl Maint {
+    /// Whether the statement rebuilds the table or holds a lock on it for a while, so it asks first.
+    pub fn heavy(self) -> bool {
+        matches!(self, Maint::Optimize | Maint::Vacuum | Maint::Reindex)
+    }
+
+    /// What the confirmation tells about the cost.
+    pub fn warning(self) -> &'static str {
+        match self {
+            Maint::Optimize => "OPTIMIZE TABLE rebuilds the table and locks it while it runs on most storage engines. Large tables can take a long time.",
+            Maint::Vacuum => "VACUUM reclaims dead rows and can take a long time on a large table. It runs outside a transaction and cannot be undone.",
+            Maint::Reindex => "REINDEX TABLE rebuilds every index of the table and blocks writes to it while it runs.",
+            Maint::Analyze | Maint::Check => "",
+        }
+    }
+}
+
 impl Dialect {
+    /// The statement for `what` on a table, or None where the engine has no such command.
+    pub fn maintenance(self, what: Maint, space: &str, table: &str) -> Option<String> {
+        let t = self.qualified(space, table);
+        Some(match (self.is_mysql_family(), what) {
+            (true, Maint::Analyze) => format!("ANALYZE TABLE {t}"),
+            (true, Maint::Optimize) => format!("OPTIMIZE TABLE {t}"),
+            (true, Maint::Check) => format!("CHECK TABLE {t}"),
+            (false, Maint::Analyze) => format!("ANALYZE {t}"),
+            (false, Maint::Vacuum) => format!("VACUUM {t}"),
+            (false, Maint::Reindex) => format!("REINDEX TABLE {t}"),
+            _ => return None,
+        })
+    }
+
     /// Users, server variables, sql_mode and charsets exist only on these two. Anything gated on it
     /// takes the not supported path for PostgreSQL.
     pub fn is_mysql_family(self) -> bool {
@@ -383,6 +424,19 @@ impl super::Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_text_per_dialect() {
+        assert_eq!(Dialect::MySql.maintenance(Maint::Analyze, "shop", "orders").as_deref(), Some("ANALYZE TABLE `shop`.`orders`"));
+        assert_eq!(Dialect::MariaDb.maintenance(Maint::Optimize, "shop", "a`b").as_deref(), Some("OPTIMIZE TABLE `shop`.`a``b`"));
+        assert_eq!(Dialect::MySql.maintenance(Maint::Check, "shop", "orders").as_deref(), Some("CHECK TABLE `shop`.`orders`"));
+        assert_eq!(Dialect::MySql.maintenance(Maint::Vacuum, "shop", "orders"), None);
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Vacuum, "public", "orders").as_deref(), Some("VACUUM \"public\".\"orders\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Analyze, "public", "orders").as_deref(), Some("ANALYZE \"public\".\"orders\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Reindex, "public", "o\"x").as_deref(), Some("REINDEX TABLE \"public\".\"o\"\"x\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Optimize, "public", "orders"), None);
+        assert!(Maint::Vacuum.heavy() && Maint::Optimize.heavy() && !Maint::Analyze.heavy() && !Maint::Check.heavy());
+    }
 
     #[test]
     fn version_string_tells_the_engine() {
