@@ -30,6 +30,10 @@ pub(in crate::app) struct SqlExplain {
     analyze: Result<Analyze, String>,
     /// What the request in flight asked for.
     asked: Option<Analyze>,
+    /// The handle Stop and closing the dialog use to end the run on the server.
+    run: db::sql::RunHandle,
+    /// Stop was pressed, so the answer that follows is no error to show.
+    stopped: bool,
 }
 
 impl App {
@@ -56,16 +60,25 @@ impl App {
             (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
             _ => Ok(a),
         });
-        let mut x = SqlExplain { req: 0, busy: false, stmt: text, conn, tab_db, dialect: d, db, schema, plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None };
+        let mut x = SqlExplain { req: 0, busy: false, stmt: text, conn, tab_db, dialect: d, db, schema, plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false };
         self.sql_explain_send(&mut x, None);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
 
     fn sql_explain_send(&mut self, x: &mut SqlExplain, analyze: Option<Analyze>) {
         self.req += 1;
-        (x.req, x.busy, x.asked) = (self.req, true, analyze);
+        // A fresh handle per run, so a Stop for an old run never reaches this one.
+        (x.req, x.busy, x.asked, x.run, x.stopped) = (self.req, true, analyze, Default::default(), false);
         let script = plan::explain_script(x.dialect, &x.stmt, analyze);
-        self.worker.sql_explain(self.req, x.db.clone(), x.schema.clone(), script, !self.conn_writable(x.conn));
+        self.worker.sql_explain(self.req, x.db.clone(), x.schema.clone(), script, !self.conn_writable(x.conn), x.run.clone());
+    }
+
+    /// Ends the run in flight on the server, which also rolls back an ANALYZE of a write and frees its locks.
+    pub(in crate::app) fn sql_explain_stop(&mut self, x: &mut SqlExplain) {
+        if x.busy {
+            x.stopped = true;
+            self.worker.sql_kill(x.db.clone(), x.run.conn.load(std::sync::atomic::Ordering::SeqCst), x.run.cancel.clone());
+        }
     }
 
     /// The answer of a request of the open dialog.
@@ -78,6 +91,12 @@ impl App {
         let text = match plan::plan_text(&sets) {
             Ok(t) => t,
             Err(e) => {
+                if x.stopped {
+                    if x.plan.is_none() && x.unread.is_none() {
+                        self.modal = None;
+                    }
+                    return;
+                }
                 // A failed first read leaves nothing to show; a failed ANALYZE keeps the plan it already had.
                 if x.plan.is_none() && x.unread.is_none() {
                     self.modal = None;
@@ -150,6 +169,7 @@ impl App {
         let ui = outer;
         let mut rows = false;
         let mut again = None;
+        let mut stop = false;
         dialog_foot(ui, |ui| {
             if ui.button("Close").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -158,6 +178,9 @@ impl App {
                 ui.ctx().copy_text(x.raw.clone());
             }
             rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
+            if x.busy {
+                stop = ui.button("Stop").on_hover_text("End the statement on the server").clicked();
+            }
             match &x.analyze {
                 Ok(a) => {
                     let r = ui.add_enabled(!x.busy && !x.analyzed, egui::Button::new("Run with ANALYZE"));
@@ -171,11 +194,15 @@ impl App {
                 }
             }
         });
+        if stop {
+            self.sql_explain_stop(x);
+        }
         if let Some(a) = again {
             self.sql_explain_send(x, Some(a));
         }
         if rows {
             *keep = false;
+            self.sql_explain_stop(x);
             self.sql_explain_rows(x);
         }
     }
