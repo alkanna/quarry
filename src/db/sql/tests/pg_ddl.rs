@@ -667,6 +667,13 @@ fn check_constraints_are_added_dropped_edited_and_undone() {
         assert!(find("t_name_ck").is_none(), "{var}");
         let (res, _) = t.undo(undo);
         res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // The server parses the saved text again, so it may print the condition with other casts than the first time. The
+        // constraint is back with its flags and its strings, and a second round trip leaves the text exactly as it is.
+        let old = find("t_name_ck").unwrap_or_else(|| panic!("{var}: not back"));
+        assert!(old.not_valid && old.no_inherit && old.expr.contains("it''s)") && old.expr.contains("'a'") && old.expr.contains("'c'"), "{var}: {old:?}");
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into())]);
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(find("t_name_ck"), Some(old.clone()), "{var}");
         // an edit is a drop and an add, and its undo puts the old condition back
         let undo = t.apply(&[Change::DropCheck("t_name_ck".into()), Change::AddCheck(chk("t_name_ck", "length(name) < 40"))]);

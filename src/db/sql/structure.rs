@@ -605,6 +605,72 @@ pub(super) fn pg_checks(cons: &[Constraint]) -> Vec<CheckConstraint> {
     cons.iter().filter_map(CheckConstraint::from_pg).collect()
 }
 
+/// The `CONSTRAINT `name` CHECK (expr)` clauses of a MySQL or MariaDB CREATE TABLE text, as (name, expr). MySQL's information_schema
+/// spells the string literals of a condition with their quotes escaped once more (`_utf8mb4\'a\'`), which is not text that can be
+/// written back, where SHOW CREATE TABLE gives the condition as the server would read it.
+fn create_checks(create: &str) -> Vec<(String, String)> {
+    let b: Vec<char> = create.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let quoted = |from: usize, q: char| -> usize {
+        // The index just past the quoted text that opens at `from`: a quote doubles itself, and a backslash escapes in a string.
+        let mut j = from + 1;
+        while j < b.len() {
+            if q == '\'' && b[j] == '\\' {
+                j += 2;
+            } else if b[j] == q {
+                if b.get(j + 1) == Some(&q) {
+                    j += 2;
+                } else {
+                    return j + 1;
+                }
+            } else {
+                j += 1;
+            }
+        }
+        b.len()
+    };
+    let head: Vec<char> = "CONSTRAINT `".chars().collect();
+    while i + head.len() < b.len() {
+        // A table constraint starts its own line, which a default or comment holding the same words does not.
+        if b[i..i + head.len()] != head[..] || i < 3 || b[i - 3..i] != ['\n', ' ', ' '] {
+            i += 1;
+            continue;
+        }
+        let end = quoted(i + head.len() - 1, '`');
+        let name: String = b[i + head.len()..end.saturating_sub(1).max(i + head.len())].iter().collect::<String>().replace("``", "`");
+        let rest: String = b[end..(end + 8).min(b.len())].iter().collect();
+        i = end;
+        if rest != " CHECK (" {
+            continue;
+        }
+        let start = end + 8;
+        let (mut j, mut depth) = (start, 1);
+        while j < b.len() {
+            match b[j] {
+                q @ ('\'' | '"' | '`') => {
+                    j = quoted(j, q);
+                    continue;
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if depth == 0 {
+            out.push((name, b[start..j].iter().collect()));
+            i = j;
+        }
+    }
+    out
+}
+
 /// MySQL 8.0.16 and later list every CHECK of the table here, one written on a column included. MariaDB names a column CHECK
 /// after its column and reports it in `Column::check`, so only its table level ones are read here. A server without the view
 /// (MySQL before 8.0.16 parses a CHECK and drops it) has none to list.
@@ -659,6 +725,14 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
     };
     let (idx, cols, checks) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table), table_checks(db, schema, table));
     st.checks = checks;
+    if d == Dialect::MySql {
+        let written = create_checks(&st.create);
+        for k in &mut st.checks {
+            if let Some((_, e)) = written.iter().find(|(n, _)| *n == k.name) {
+                k.expr = e.clone();
+            }
+        }
+    }
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
@@ -913,6 +987,14 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn check_conditions_are_read_from_the_create_text() {
+        let create = "CREATE TABLE `t` (\n  `a` int,\n  `we``ird` varchar(9) DEFAULT 'CONSTRAINT `x` CHECK (1)',\n  CONSTRAINT `c1` CHECK ((`a` > 0)),\n  CONSTRAINT `c``2` CHECK ((`we``ird` <> _utf8mb4'it\\'s)' and `a` in (1,2))) /*!80016 NOT ENFORCED */,\n  CONSTRAINT `fk` FOREIGN KEY (`a`) REFERENCES `u` (`id`)\n) ENGINE=InnoDB";
+        let got = create_checks(create);
+        assert_eq!(got, [("c1".to_string(), "(`a` > 0)".to_string()), ("c`2".to_string(), "(`we``ird` <> _utf8mb4'it\\'s)' and `a` in (1,2))".to_string())]);
+        assert!(create_checks("CREATE TABLE `t` (`a` int)").is_empty());
+    }
+
     #[test]
     fn mariadb_json_alias_is_a_longtext_with_its_own_json_valid_check() {
         assert_eq!(json_check_col("json_valid(`doc`)").as_deref(), Some("doc"));
