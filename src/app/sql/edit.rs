@@ -743,6 +743,29 @@ impl App {
         let n = self.t().map_or(0, |t| t.checked.len());
         let why = self.sql_edit_block();
         let none = if n == 0 { "Check rows first" } else { "" };
+        // Every row the page's WHERE matches, beyond the page on screen. Drawn first, so it sits rightmost.
+        let mut bulk = None;
+        dots_menu(ui, |ui| {
+            menu_look(ui);
+            if ui.add_enabled(why.is_none(), egui::Button::new("Update matching…")).on_hover_text("Set columns on every row the WHERE matches").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
+                bulk = Some(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(why.is_none(), egui::Button::new(RichText::new("Delete all matching rows…").color(ALERT()))).on_disabled_hover_text(why.unwrap_or_default()).clicked() {
+                bulk = Some(false);
+                ui.close();
+            }
+        })
+        .on_hover_text("More actions");
+        if let Some(update) = bulk {
+            self.open_bulk(update);
+        }
+        // Checked rows start the dialog on them; otherwise it starts on every row the WHERE matches.
+        if quiet(ui, "Export…").on_hover_text("Write the checked rows, this page or every matching row to a file").clicked() {
+            let rows = self.checked_sql_rows();
+            self.open_export(rows, n == 0);
+        }
         if quiet_enabled(ui, n > 0 && why.is_none(), "Delete").on_hover_text(why.unwrap_or(if n == 0 { none } else { "Delete the checked rows" })).on_disabled_hover_text(why.unwrap_or(none)).clicked() {
             let rows = self.checked_sql_rows();
             self.docs_act(&ui.ctx().clone(), DocsAct::Delete, rows);

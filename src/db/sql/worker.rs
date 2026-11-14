@@ -331,7 +331,7 @@ pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row>
 }
 
 /// Text the user typed is spliced into a SELECT, so it must stay one read-only statement.
-fn one_read(sql: &str, d: Dialect) -> Res<()> {
+pub(super) fn one_read(sql: &str, d: Dialect) -> Res<()> {
     if lex::split_statements(sql, d).len() != 1 {
         return Err("The filter and sort must not contain another statement".into());
     }
@@ -423,7 +423,7 @@ pub(super) async fn json_alias_cols(db: &Db, schema: &str, table: Option<&str>) 
 }
 
 /// Column types and the primary key, from information_schema.
-async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
+pub(super) async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
     let cols = async { if d == Dialect::Postgres { pg_columns(db, schema, table).await } else { db.meta(schema, d.columns(), [schema, table]).await } };
     let (cols, idx, json) = tokio::try_join!(cols, db.meta(schema, d.indexes(), [schema, table]), async { Ok::<_, String>(json_alias_cols(db, schema, Some(table)).await) })?;

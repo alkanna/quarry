@@ -29,7 +29,7 @@ pub(in crate::app) fn view_of_kind(kind: &str) -> Option<View> {
     Some(match kind {
         "sql" => View::Sql,
         "shell" => View::Shell,
-        "filter" => View::Documents,
+        "filter" | "where" => View::Documents,
         "pipeline" => View::Aggregate,
         _ => return None,
     })
@@ -56,6 +56,7 @@ fn kind_label(kind: &str) -> &'static str {
     match kind {
         "sql" => "SQL script",
         "filter" => "query",
+        "where" => "table filter",
         "pipeline" => "pipeline",
         _ => "Shell script",
     }
@@ -98,8 +99,8 @@ pub(in crate::app) struct OpenOnForm {
 }
 
 impl App {
-    /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a table's
-    /// Content grid and the like).
+    /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a SQL
+    /// table's Structure and the like). A SQL table's Content view holds its WHERE and ORDER BY as a table filter.
     pub(in crate::app) fn tab_text(&self) -> Option<TabText> {
         Self::text_of(self.t()?)
     }
@@ -107,7 +108,7 @@ impl App {
     /// Whether the current tab's view holds a script, as `tab_text` would find, without copying its text: the keys ask
     /// every frame.
     pub(in crate::app) fn tab_has_text(&self) -> bool {
-        self.t().is_some_and(|t| matches!((t.view, t.sql.is_some()), (View::Sql, true) | (View::Shell, _) | (View::Documents | View::Aggregate, false)))
+        self.t().is_some_and(|t| matches!((t.view, t.sql.is_some()), (View::Sql, true) | (View::Shell, _) | (View::Documents | View::Aggregate, false)) || (t.view == View::Documents && t.sql.is_some() && !t.sel.coll.is_empty()))
     }
 
     fn text_of(t: &Tab) -> Option<TabText> {
@@ -118,6 +119,8 @@ impl App {
                 TabText { kind: "sql", body: s.query.clone(), sort: String::new(), project: String::new(), view: View::Sql, db: run_db, schema: s.run_schema.trim().to_string(), coll: String::new() }
             }
             (View::Shell, _) => TabText { kind: "shell", body: t.shell.code.clone(), sort: String::new(), project: String::new(), view: View::Shell, db, schema: String::new(), coll: String::new() },
+            // A SQL table's Content view: its WHERE and ORDER BY.
+            (View::Documents, Some(_)) if !coll.is_empty() => TabText { kind: "where", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: String::new(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
             (View::Documents, None) => TabText { kind: "filter", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
             (View::Aggregate, None) => TabText { kind: "pipeline", body: t.agg_txt.clone(), sort: String::new(), project: String::new(), view: View::Aggregate, db, schema: t.sel.schema.clone(), coll },
             _ => return None,
@@ -319,7 +322,7 @@ impl App {
             let what = if engine.is_sql() { "SQL" } else { "MongoDB" };
             return self.warn(format!("Not opened: \"{}\" is a {}, and {cname} is a {what} connection.", s.name, kind_label(&s.kind)));
         }
-        if matches!(s.kind.as_str(), "filter" | "pipeline") && (s.coll.is_empty() || s.db.is_empty()) {
+        if matches!(s.kind.as_str(), "filter" | "pipeline" | "where") && (s.coll.is_empty() || s.db.is_empty()) {
             return self.warn(format!("\"{}\" names no collection. Save it again from the collection it belongs to.", s.name));
         }
         if !status_ready && !self.demo {
@@ -386,6 +389,17 @@ impl App {
                 // A filter only reads, so it runs on open, as a click on a collection does.
                 self.run_query();
             }
+            "where" => {
+                let sel = Sel { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
+                self.open_tab(sel, if new_tab { Open::NewTab } else { Open::Link });
+                if let Some(t) = self.tm() {
+                    (t.filter_txt, t.sort_txt, t.page) = (s.body.clone(), s.sort.clone(), 0);
+                    t.view = View::Documents;
+                }
+                self.bind_script(r.clone(), View::Documents, s.body);
+                // A filter only reads, so it runs on open, as a click on the table does.
+                self.reload();
+            }
             "pipeline" => {
                 let sel = Sel { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
                 self.open_tab(sel, if new_tab { Open::NewTab } else { Open::Link });
@@ -427,7 +441,7 @@ impl App {
     /// library dialog when there is none. Page handlers consume Cmd+S first (staged grid edits, document drafts), so this
     /// only runs when the person means the script.
     pub(in crate::app) fn save_script(&mut self) {
-        let Some(tt) = self.tab_text() else { return self.warn("There is no script to save in this view. Open a Query, Documents, Aggregate or Shell view.") };
+        let Some(tt) = self.tab_text() else { return self.warn("There is no script to save in this view. Open a Query, Documents, Content, Aggregate or Shell view.") };
         if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
             return self.warn("Nothing to save: the script is empty.");
         }

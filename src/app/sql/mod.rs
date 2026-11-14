@@ -4,6 +4,7 @@ pub(super) mod ac;
 pub(super) mod alter;
 pub(super) mod bar;
 pub(super) mod checks;
+pub(super) mod bulk;
 pub(super) mod create;
 pub(super) mod create_pg;
 pub(super) mod dump;

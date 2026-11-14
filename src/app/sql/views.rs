@@ -21,6 +21,22 @@ impl App {
         self.worker.sql_page(req, db, space, t.sel.coll.clone(), q, size, t.page * size);
     }
 
+    /// Puts the WHERE and ORDER BY of tab `i`'s page in the table's history once the page loaded, so a filter the server
+    /// refused is not kept. They are saved in ui.json and listed in the menu, so a password in them is masked.
+    pub(in crate::app) fn sql_remember_filter(&mut self, i: usize) {
+        let Some(t) = self.tabs.get(i).filter(|t| !t.sel.coll.is_empty()) else { return };
+        let Some(s) = t.sql.as_ref() else { return };
+        let (key, filter, order) = (t.coll_key(), db::redact_sql(&s.ran.filter).0, db::redact_sql(&s.ran.order).0);
+        let h = self.prefs.history.entry(key).or_default();
+        let before = (h.selector.first().cloned(), h.sort.first().cloned());
+        push_history(&mut h.selector, &filter);
+        push_history(&mut h.sort, &order);
+        // Paging and reloads repeat the same texts, which leave the lists as they were and need no write.
+        if (h.selector.first().cloned(), h.sort.first().cloned()) != before {
+            self.save_prefs();
+        }
+    }
+
     /// How the connection's last reported sql_mode reads quotes and backslashes. A connection without a server, as in
     /// the offline demo, reads like a stock one.
     pub(in crate::app) fn sql_mode(&self, conn: u64) -> db::sql::ddl::Mode {
@@ -73,10 +89,23 @@ impl App {
         let schema = self.sel_schema(&self.tabs[self.cur].sel);
         let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, &schema, None);
         let none = Fields::new();
+        let hist = self.prefs.history.get(&self.tabs[self.cur].coll_key()).cloned().unwrap_or_default();
+        let pick = self.pick_data(ui.ctx(), PickKind::Where);
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new() };
         let t = &mut self.tabs[self.cur];
-        let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none));
+        let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        // Picking from the history fills the box, as in the Documents view; Run or Enter applies it.
+        for a in std::mem::take(&mut side.qacts) {
+            match a {
+                QAct::Filter(v) => t.filter_txt = v,
+                QAct::Sort(v) => t.sort_txt = v,
+                QAct::Project(_) => {}
+            }
+        }
+        let pick_acts = std::mem::take(&mut side.pick_acts);
         self.sql_serve(conn, &db, &schema, wants);
+        self.pick_acts(pick_acts);
         if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.explain)) {
             return self.explain();
         }

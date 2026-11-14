@@ -47,6 +47,7 @@ impl App {
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlExplained { req, sets } => self.sql_explained(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
+                Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
                 Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
@@ -630,6 +631,7 @@ impl App {
                 t.related.clear();
                 let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
                 t.stats_asked = true;
+                self.sql_remember_filter(i);
                 self.load_related(req);
                 if let Some(s) = ask && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone()) {
                     let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);

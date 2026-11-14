@@ -31,6 +31,7 @@ mod pg_server;
 mod rail;
 mod sidebar;
 mod sidebar_resize;
+mod sql_bulk;
 mod sql_create;
 mod sql_dump;
 mod sql_edit;

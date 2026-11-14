@@ -73,8 +73,8 @@ impl App {
         let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
         // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
         // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
-        // would also open the Save dialog. A view that holds no script (a table's Content grid, Indexes and the like) leaves
-        // the key alone, so a press there while the grid's cell editor is open does not warn about a missing script.
+        // would also open the Save dialog. A view that holds no script (a table's Structure, Indexes and the like) leaves
+        // the key alone. The cell editor of a SQL grid owns the key while it is open.
         // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
         if self.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
             self.save_script_as();

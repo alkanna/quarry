@@ -520,12 +520,17 @@ impl TableInfo {
     /// Whether rows written inside a transaction go away on a rollback. MyISAM, Aria, MEMORY, CSV and ARCHIVE
     /// keep every row the moment it is written. An unknown engine counts as transactional, like InnoDB, the default.
     pub fn transactional(&self) -> bool {
-        self.engine.is_empty() || ["InnoDB", "XtraDB", "NDB", "NDBCLUSTER", "TokuDB", "RocksDB"].iter().any(|e| e.eq_ignore_ascii_case(&self.engine))
+        engine_rolls_back(&self.engine)
     }
 
     pub fn col(&self, name: &str) -> Option<&TCol> {
         self.cols.iter().find(|c| c.name == name)
     }
+}
+
+/// `TableInfo::transactional` for a bare engine name. Empty, as on PostgreSQL, rolls back.
+pub fn engine_rolls_back(engine: &str) -> bool {
+    engine.is_empty() || ["InnoDB", "XtraDB", "NDB", "NDBCLUSTER", "TokuDB", "RocksDB"].iter().any(|e| e.eq_ignore_ascii_case(engine))
 }
 
 fn norm(s: &str) -> String {

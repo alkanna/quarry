@@ -201,11 +201,12 @@ pub fn engine_of_key(key: &str) -> Engine {
     }
 }
 
-/// Whether a script of `kind` runs on `engine`: SQL on SQL connections, a filter or pipeline on MongoDB and a Shell
-/// script on any. None for a kind this build does not know, which a saved script refuses and a file allows.
+/// Whether a script of `kind` runs on `engine`: SQL and a SQL Content filter ("where") on SQL connections, a filter or
+/// pipeline on MongoDB and a Shell script on any. None for a kind this build does not know, which a saved script refuses
+/// and a file allows. A "where" is only ever saved in the library, never as a file of a linked folder.
 pub fn kind_runs_on(kind: &str, engine: Engine) -> Option<bool> {
     match kind {
-        "sql" => Some(engine.is_sql()),
+        "sql" | "where" => Some(engine.is_sql()),
         "filter" | "pipeline" => Some(engine == Engine::Mongo),
         "shell" => Some(true),
         _ => None,
@@ -329,6 +330,13 @@ mod tests {
         let my = link("engine", "mysql", &[]);
         assert!(fits(&my, "sql", 1, Engine::MySql) && !fits(&my, "sql", 1, Engine::Postgres) && fits(&my, "shell", 1, Engine::MySql));
         assert!(fits(&link("all", "", &[]), "sql", 1, Engine::Postgres) && !fits(&link("all", "", &[]), "sql", 1, Engine::Mongo));
+    }
+
+    #[test]
+    fn a_sql_content_filter_runs_only_on_sql_connections() {
+        assert_eq!(kind_runs_on("where", Engine::MySql), Some(true));
+        assert_eq!(kind_runs_on("where", Engine::Postgres), Some(true));
+        assert_eq!(kind_runs_on("where", Engine::Mongo), Some(false));
     }
 
     #[test]

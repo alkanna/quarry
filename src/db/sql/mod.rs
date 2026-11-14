@@ -34,6 +34,7 @@ pub mod json;
 pub mod sort;
 pub mod source;
 pub mod import;
+pub mod bulk;
 pub mod dump;
 pub mod server;
 pub mod routines;

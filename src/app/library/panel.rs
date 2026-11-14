@@ -164,7 +164,7 @@ fn badge_of(plan: &Plan, item: &Node) -> Option<&'static str> {
 fn kind_glyph(kind: &str) -> (glyphs::Glyph, egui::Color32) {
     match kind {
         "shell" => (glyphs::file_braces, WARNING()),
-        "filter" => (glyphs::funnel, C_LINK()),
+        "filter" | "where" => (glyphs::funnel, C_LINK()),
         "pipeline" => (glyphs::stack, C_OID()),
         "sql" => (glyphs::file_sql, C_KEYWORD()),
         _ => (glyphs::doc, MUTED()),
@@ -307,7 +307,7 @@ impl RowCx<'_> {
                 } else {
                     match s.kind.as_str() {
                         "shell" => "shell".to_string(),
-                        "filter" | "pipeline" => [s.db.as_str(), s.coll.as_str()].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join("/"),
+                        "filter" | "pipeline" | "where" => [s.db.as_str(), s.coll.as_str()].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join("/"),
                         _ => s.db.clone(),
                     }
                 };
@@ -415,7 +415,8 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
         menu_act(ui, acts, Act::Unlink(*link), |ui| danger_item(ui, "Unlink folder"));
         return;
     }
-    let run = kind != "filter";
+    // A filter only reads and runs on open, so it has no Run.
+    let run = !matches!(kind, "filter" | "where");
     let path_of = |link: u64, rel: &Path| links.iter().find(|l| l.id == link).map(|l| if rel.as_os_str().is_empty() { l.path.clone() } else { l.path.join(rel) }).unwrap_or_default();
     match node {
         Node::Script(_) | Node::File { .. } => {
@@ -821,7 +822,7 @@ impl App {
         };
         // The longer combinations go first: egui lets a plain key match one with extra modifiers.
         if let Some(n) = st.sel.clone() {
-            if k(egui::Modifiers::COMMAND, Key::Enter) && n.script_ref().is_some() && kind(&n) != "filter" {
+            if k(egui::Modifiers::COMMAND, Key::Enter) && n.script_ref().is_some() && !matches!(kind(&n).as_str(), "filter" | "where") {
                 acts.push(Act::Open(n.clone(), How::Run));
             } else if k(egui::Modifiers::ALT, Key::Enter) && n.script_ref().is_some() {
                 acts.push(Act::Open(n.clone(), How::NewTab));
@@ -924,7 +925,7 @@ impl App {
                 if primary(ui, "Open", PRIMARY()).clicked() {
                     acts.push(Act::Open(node.clone(), How::Here));
                 }
-                if kind != "filter" && run_chip(ui).on_hover_text(&runs_on).clicked() {
+                if !matches!(kind.as_str(), "filter" | "where") && run_chip(ui).on_hover_text(&runs_on).clicked() {
                     acts.push(Act::Open(node.clone(), How::Run));
                 }
                 if quiet(ui, "New tab").clicked() {
@@ -1340,7 +1341,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let at = |k: f32| egui::Rect::from_center_size(egui::pos2(rect.right() - 18.0 - 24.0 * k, rect.center().y), egui::vec2(20.0, 20.0));
         let dots = row_tool(ui, dots_id, at(0.0), paint_dots, &format!("More for {}", look.name), "More");
         if matches!(row.node, Node::Script(_) | Node::File { .. }) {
-            if look.kind != "filter" && row_tool(ui, dots_id.with("run"), at(1.0), glyphs::play, &format!("Run all {}", look.name), &format!("Run all ({})", super::keys_text(true, false, false, "Enter"))).clicked() {
+            if !matches!(look.kind.as_str(), "filter" | "where") && row_tool(ui, dots_id.with("run"), at(1.0), glyphs::play, &format!("Run all {}", look.name), &format!("Run all ({})", super::keys_text(true, false, false, "Enter"))).clicked() {
                 acts.push(Act::Open(row.node.clone(), How::Run));
             }
         } else if let Node::Folder(id) = row.node {

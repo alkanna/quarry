@@ -902,8 +902,17 @@ fn write_rules(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dial
     }
 }
 
+/// What the bar shows beside Run: the table's filter history and its saved filters, and what was picked in them.
+pub(in crate::app) struct Side<'a> {
+    pub(in crate::app) hist: &'a QueryHist,
+    pub(in crate::app) pick: &'a crate::app::library::picker::PickData,
+    pub(in crate::app) qacts: Vec<QAct>,
+    pub(in crate::app) pick_acts: Vec<crate::app::library::picker::PickAct>,
+}
+
 /// Draws the bar and the clause chips. Returns true when the query should run.
-pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let memo = match s.bar.memo.take() {
@@ -934,7 +943,8 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         ui.set_width(size - 18.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-            let run_w = 112.0;
+            // Run, the history and library icons, and the chip of a bound script when there is one.
+            let run_w = if side.pick.bound.is_some() { 440.0 } else { 172.0 };
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
@@ -1016,9 +1026,13 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 }
             });
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
                     run = true;
                 }
+                vsep(ui, 6.0);
+                picker_button(ui, side.pick, true, &mut side.pick_acts);
+                history_menu(ui, side.hist, &[], Some(d), &mut side.qacts);
             });
         });
     });

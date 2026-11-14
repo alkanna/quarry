@@ -916,6 +916,8 @@ pub(super) enum Modal {
     Delete(Sel, Vec<Document>),
     SqlSet(Box<SetForm>),
     SqlRow(Box<RowForm>),
+    /// Update or delete every row the WHERE of the SQL Content page matches.
+    SqlBulk(Box<super::sql::bulk::BulkForm>),
     /// Add or edit a column of the open SQL table, with its ALTER preview.
     ColEdit(Box<ColForm>),
     IdxEdit(Box<IdxForm>),
