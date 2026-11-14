@@ -213,3 +213,17 @@ fn a_short_dialog_after_a_tall_one_shrinks_to_its_content() {
     assert!(area.width() <= 463.0, "the unlock dialog grew past its 460 px: {}", area.width());
     assert!(button.right() <= area.right() - crate::ui::theme::DIALOG_PAD + 1.0, "the primary button overhangs the footer padding: {} against {}", button.right(), area.right());
 }
+
+#[test]
+fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
+    let Some(ui) = demo_ui(|a| {
+        a.load_demo();
+        if let Some(c) = a.conns.iter_mut().find(|c| c.meta.id == 1) {
+            c.writable = false;
+        }
+        a.mongo_new_coll(1, "shop".into());
+    }) else {
+        return;
+    };
+    assert!(matches!(ui.app().modal, Some(Modal::Unlock(1, Some(_)))), "the form opened on a locked connection");
+}

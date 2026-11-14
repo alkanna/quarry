@@ -22,6 +22,9 @@ impl App {
     }
 
     pub(super) fn mongo_new_coll(&mut self, conn: u64, db: String) {
+        if !self.conn_writable(conn) {
+            return self.ask_unlock_on(conn, move |a| a.mongo_new_coll(conn, db));
+        }
         self.modal = Some(Modal::MongoNewColl(Box::new(MongoNewColl { conn, db, new_db: false, name: String::new(), form: CollForm::default() })));
     }
 
@@ -86,22 +89,24 @@ impl App {
     }
 
     fn mongo_new_coll_run(&mut self, f: &MongoNewColl, ver: collopts::Ver, keep: &mut bool) {
-        let (db, name) = (f.db.trim().to_string(), f.name.trim().to_string());
-        let cmd = match collopts::create_command(&name, &f.form, ver) {
+        *keep = false;
+        self.mongo_create_send(f.conn, f.db.trim().to_string(), f.name.trim().to_string(), f.form.clone(), ver);
+    }
+
+    /// Runs the create. Writes can be locked again while the dialog is open: the unlock dialog then runs the same create once it is accepted, so the typed form is not lost.
+    fn mongo_create_send(&mut self, conn: u64, db: String, name: String, form: CollForm, ver: collopts::Ver) {
+        let cmd = match collopts::create_command(&name, &form, ver) {
             Ok(c) => c,
             Err(e) => return self.err(e),
         };
-        let Some(client) = self.conn(f.conn).and_then(|c| c.client.clone()) else {
+        if !self.conn_writable(conn) {
+            return self.ask_unlock_on(conn, move |a| a.mongo_create_send(conn, db, name, form, ver));
+        }
+        let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.warn_offline();
         };
-        // Writes can be locked again while the dialog is open.
-        if !self.conn_writable(f.conn) {
-            *keep = false;
-            return self.ask_unlock_on(f.conn, |_| {});
-        }
-        self.open_after = Some((f.conn, db.clone(), name.clone()));
-        self.worker.db_change(f.conn, client, db.clone(), cmd, format!("Created {db}.{name}"));
-        *keep = false;
+        self.open_after = Some((conn, db.clone(), name.clone()));
+        self.worker.db_change(conn, client, db.clone(), cmd, format!("Created {db}.{name}"));
     }
 }
 
