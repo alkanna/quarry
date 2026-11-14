@@ -143,6 +143,22 @@ impl Db {
     }
 }
 
+/// Adds the client certificate and key. Both files are read once here so a missing file or a wrong kind of file is
+/// named at once instead of surfacing as a handshake error. sqlx reads unencrypted PEM keys only and MySQL has no
+/// passphrase field, so an encrypted key is refused with the way out. The server sees no certificate when TLS is off.
+pub(super) fn with_client_cert(o: MySqlConnectOptions, a: &Addr) -> Res<MySqlConnectOptions> {
+    use super::pg::cert::{expand, load, KEY_LOCKED, KEY_OLD_CIPHER};
+    if a.ssl_mode == SslMode::Disabled {
+        return Ok(o);
+    }
+    match load(&a.ssl_cert, &a.ssl_key, None) {
+        Ok(None) => Ok(o),
+        Ok(Some(_)) => Ok(o.ssl_client_cert(expand(a.ssl_cert.trim())).ssl_client_key(expand(a.ssl_key.trim()))),
+        Err(m) if m == KEY_LOCKED || m == KEY_OLD_CIPHER => Err("The client key is encrypted, and MySQL connections cannot use a passphrase. Save an unencrypted copy of it (openssl pkey -in key.pem -out key-plain.pem) and choose that file".into()),
+        Err(m) => Err(m),
+    }
+}
+
 async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::db::Way>)> {
     open_full(uri, timeout, net, adv, false).await.map(|(db, dbs, t, _)| (db, dbs, t))
 }
@@ -184,6 +200,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     if !a.ssl_ca.is_empty() {
         o = o.ssl_ca(&a.ssl_ca);
     }
+    o = with_client_cert(o, &a)?;
     // The pool retries a connection whose setup failed until its timeout, so one plain connection runs the setup
     // first and a failing setting or init command is reported at once, with its statement.
     let first = async {

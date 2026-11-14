@@ -64,9 +64,9 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
                 ui.end_row();
             };
             file_row(ui, "CA file", &mut f.addr.ssl_ca);
+            file_row(ui, "Client cert", &mut f.addr.ssl_cert);
+            file_row(ui, "Client key", &mut f.addr.ssl_key);
             if pg {
-                file_row(ui, "Client cert", &mut f.addr.ssl_cert);
-                file_row(ui, "Client key", &mut f.addr.ssl_key);
                 form_label(ui, "Passphrase");
                 ui.add(egui::TextEdit::singleline(&mut f.pg_key_pass).password(true).hint_text("only for an encrypted key").desired_width(280.0));
                 ui.end_row();
@@ -79,6 +79,8 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
             ui.add(egui::Label::new(RichText::new("Certificate and key are PEM files. The passphrase is only for an encrypted key.").size(TXT_SMALL).color(FAINT())).wrap());
         } else {
             ui.add(egui::Label::new(RichText::new("Verify CA also checks the host name, a limit of Quarry's MySQL driver, and the public CAs are trusted beside the CA file. Through an SSH tunnel the name checked is the host typed above, except on Windows, where it is the tunnel's 127.0.0.1.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new("Client certificate and key are PEM files, for accounts that REQUIRE X509 or SUBJECT. Set both. The key must not be encrypted: the MySQL driver cannot take a passphrase.").size(TXT_SMALL).color(FAINT())).wrap());
         }
     });
 }
@@ -236,6 +238,12 @@ const PASTE_PASSWORD: usize = 3;
 const PASTE_DATABASE: usize = 4;
 const PASTE_TLS: usize = 5;
 
+/// The mode as its engine's form names it.
+fn ssl_name(engine: db::sql::Engine, m: db::sql::SslMode) -> &'static str {
+    let all = if engine == db::sql::Engine::Postgres { &db::sql::SslMode::PG_ALL } else { &db::sql::SslMode::ALL };
+    all.iter().find(|(k, _)| *k == m).map_or("", |(_, n)| n)
+}
+
 fn paste_id(f: &ConnForm) -> egui::Id {
     egui::Id::NULL.with(("pg-paste", f.id))
 }
@@ -257,7 +265,7 @@ fn filled_border(ui: &egui::Ui, r: &egui::Response, mark: &mut bool) {
 
 /// Fills the form from the pasted text and records what it did. Shared with the offline demo, which seeds the same state.
 fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
-    match db::sql::Addr::from_paste(&st.text) {
+    match db::sql::Addr::from_paste_for(&st.text, f.engine) {
         Ok(a) => {
             let had_password = !a.password.is_empty();
             let cert = !a.ssl_cert.is_empty() || !a.ssl_key.is_empty();
@@ -270,7 +278,7 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
             }
             let mut note = format!("Filled {}", parts.join(", "));
             if st.filled[PASTE_TLS] {
-                note += &format!(" and TLS {}", a.ssl_mode.pg_name());
+                note += &format!(" and TLS {}", ssl_name(f.engine, a.ssl_mode));
                 if cert {
                     note += " with a client certificate";
                 }
@@ -336,7 +344,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
             ui.label(RichText::new("Fills the fields below").size(TXT_SMALL).color(FAINT()));
         });
     });
-    let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text("postgresql://user@host:5432/database?sslmode=verify-full").desired_width(field_w + FORM_LABEL_W + FORM_GAP).margin(FIELD_MARGIN_TALL));
+    let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text(if f.engine == db::sql::Engine::Postgres { "postgresql://user@host:5432/database?sslmode=verify-full" } else { "mysql://user@host:3306/database?ssl-mode=VERIFY_CA" }).desired_width(field_w + FORM_LABEL_W + FORM_GAP).margin(FIELD_MARGIN_TALL));
     if r.changed() && !st.text.trim().is_empty() {
         paste_apply(&mut st, f);
     } else if r.changed() {
@@ -452,7 +460,7 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::C
     let cloud_on = f.cloud_on().is_some();
     let mut change = false;
     let mut paste = Paste::default();
-    if pg && !cloud_on {
+    if !cloud_on {
         let w = ui.available_width() - FORM_LABEL_W - FORM_GAP - 2.0 * ui.spacing().item_spacing.x;
         paste = paste_field(ui, f, w);
         ui.add_space(6.0);
@@ -535,12 +543,12 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::C
             ui.add_space(4.0);
             note_row(ui, C_LINK(), true, "Filled from Cloud SQL. The proxy starts on a free local port when you connect.");
         }
-        if pg && paste.filled.iter().any(|b| *b) {
+        if paste.filled.iter().any(|b| *b) {
             ui.add_space(4.0);
-            ui.label(RichText::new(if paste.filled[PASTE_TLS] { format!("Blue borders came from the string. The TLS tab now reads {}.", f.addr.ssl_mode.pg_name()) } else { "Blue borders came from the string.".to_string() }).size(TXT_SMALL).color(FAINT()));
+            ui.label(RichText::new(if paste.filled[PASTE_TLS] { format!("Blue borders came from the string. The TLS tab now reads {}.", ssl_name(f.engine, f.addr.ssl_mode)) } else { "Blue borders came from the string.".to_string() }).size(TXT_SMALL).color(FAINT()));
         }
     });
-    if pg && !cloud_on {
+    if !cloud_on {
         ui.data_mut(|d| d.insert_temp(paste_id(f), paste));
     }
     change
