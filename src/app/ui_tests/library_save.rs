@@ -125,9 +125,14 @@ fn cmd_s_with_staged_grid_edits_saves_only_the_edits() {
 
 #[test]
 fn cmd_s_in_a_view_without_a_script_does_nothing() {
-    // A table's Content grid holds no script. Its own Cmd+S stands aside while the cell editor is open, and the library
-    // must not answer the key there with a warning about a missing script.
-    let Some(mut ui) = demo_ui(|a| a.load_sql_demo()) else { return };
+    // A table's Structure view holds no script, and the library must not answer the key there with a warning about a
+    // missing script.
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        if let Some(t) = a.tm() {
+            t.view = View::Structure;
+        }
+    }) else { return };
     assert!(ui.app().tab_text().is_none() && ui.app().drafts.is_empty());
     ui.key(CMD, egui::Key::S);
     assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))));
@@ -321,6 +326,8 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     assert!(t.view == View::Documents && t.sql.is_some() && t.sel.coll == "orders", "the demo opens on the orders Content view");
     ui.h.state_mut().save_script();
     assert!(matches!(&ui.app().modal, Some(Modal::SaveScript(f)) if f.kind == "where"), "the Content view saves a table filter");
+    // The name field takes the focus when the dialog first draws.
+    ui.settle();
     ui.type_text("Paid over 50");
     ui.click("Save");
     let s = ui.app().library.scripts.iter().find(|s| s.kind == "where").cloned().expect("a saved filter");

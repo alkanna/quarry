@@ -99,8 +99,8 @@ pub(in crate::app) struct OpenOnForm {
 }
 
 impl App {
-    /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a table's
-    /// Content grid and the like).
+    /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a SQL
+    /// table's Structure and the like). A SQL table's Content view holds its WHERE and ORDER BY as a table filter.
     pub(in crate::app) fn tab_text(&self) -> Option<TabText> {
         Self::text_of(self.t()?)
     }
@@ -441,7 +441,7 @@ impl App {
     /// library dialog when there is none. Page handlers consume Cmd+S first (staged grid edits, document drafts), so this
     /// only runs when the person means the script.
     pub(in crate::app) fn save_script(&mut self) {
-        let Some(tt) = self.tab_text() else { return self.warn("There is no script to save in this view. Open a Query, Documents, Aggregate or Shell view.") };
+        let Some(tt) = self.tab_text() else { return self.warn("There is no script to save in this view. Open a Query, Documents, Content, Aggregate or Shell view.") };
         if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
             return self.warn("Nothing to save: the script is empty.");
         }

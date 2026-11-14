@@ -163,7 +163,7 @@ async fn prep(db: &Db, schema: &str, table: &str, filter: &str) -> Res<BulkPrep>
 /// Runs the plan in one transaction. Returns what to say, the undo when one was kept, and the columns the undo reads.
 async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) -> Res<Ran> {
     let d = db.dialect;
-    let stmt = statement(d, schema, table, p)?;
+    let mut stmt = statement(d, schema, table, p)?;
     check(d, schema, table, &p.filter, &stmt)?;
     if p.expected == 0 {
         return Err("No rows match, so nothing was changed.".into());
@@ -175,6 +175,18 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
     }
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write(db).await.map_err(se)?;
+    // The literals were spelled for the sql_mode read when the connection opened. This session may read backslashes the
+    // other way, and then the same values are spelled for it, so what is stored is what the dialog showed.
+    if d != Dialect::Postgres && matches!(p.op, BulkOp::Update(_)) {
+        let r = tx.fetch_text("SELECT @@SESSION.sql_mode").await.map_err(se)?;
+        if let Some(mode) = r.first().and_then(|r| super::worker::text_at(r, 0)) {
+            let bs = !mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES");
+            if bs != p.bs {
+                stmt = statement(d, schema, table, &BulkPlan { bs, ..p.clone() })?;
+                check(d, schema, table, &p.filter, &stmt)?;
+            }
+        }
+    }
     let mut old: Vec<Document> = Vec::new();
     let mut cols = p.cols.clone();
     if p.undo {
