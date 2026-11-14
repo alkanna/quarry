@@ -821,8 +821,11 @@ impl App {
                             if sql {
                                 if !is_view {
                                     ui.separator();
-                                    if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
+                                    if ui.button("Import file…").on_hover_text("Adds the rows of a CSV, JSON or JSON Lines file to this table").clicked() {
                                         side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
+                                    }
+                                    if ui.button("Import from clipboard…").on_hover_text("Adds the rows of CSV or JSON text on the clipboard to this table").clicked() {
+                                        side.push(SideAct::SqlImportPaste(db_name.clone(), coll.clone()));
                                     }
                                 }
                                 if ui.button("Export as SQL dump…").clicked() {
@@ -997,6 +1000,10 @@ impl App {
                 let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });
                 return self.open_sql_import(conn, db, schema, table);
             }
+            SideAct::SqlImportPaste(db, table) => {
+                let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });
+                return self.open_sql_import_paste(conn, db, schema, table);
+            }
             SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
             SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
             a => a,
@@ -1055,7 +1062,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlImportPaste(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

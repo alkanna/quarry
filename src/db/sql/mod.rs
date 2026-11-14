@@ -29,6 +29,9 @@ pub struct KeyTable {
     pub big: bool,
 }
 pub mod csv;
+pub mod json;
+pub mod sort;
+pub mod source;
 pub mod import;
 pub mod dump;
 pub mod server;
@@ -311,13 +314,17 @@ pub struct ResultSet {
     pub refused: bool,
     /// The longest cell per column among the first rows, in characters, read once by the grid for its column widths.
     pub widest: std::cell::OnceCell<Vec<usize>>,
+    /// The columns the rows were sorted by on the client (name and whether descending), empty while they are in the order the server sent.
+    pub sort: Vec<(String, bool)>,
+    /// Each row's place in the server's order, kept once the rows were sorted so that removing the sort restores it.
+    pub seq: Vec<usize>,
 }
 
 impl ResultSet {
     /// An empty outcome of `stmt`.
     pub fn new(stmt: &str) -> ResultSet {
         let kind = lex::tokens(stmt, Dialect::MySql).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default();
-        ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false, widest: Default::default() }
+        ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false, widest: Default::default(), sort: Vec::new(), seq: Vec::new() }
     }
 }
 

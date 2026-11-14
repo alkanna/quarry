@@ -1,6 +1,8 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
 use crate::app::*;
+use crate::app::column_menu::{query_col_popover, HeadAct};
+use crate::app::sql::edit::CellAct;
 use crate::ui::dnd;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
@@ -146,6 +148,16 @@ fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Resp
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// The key each column of a result goes by in its column choices. A join can return two columns of one name, so the
+/// second and later ones carry their position after a separator the SQL names cannot hold.
+pub(in crate::app) fn result_keys(cols: &[Col]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(cols.len());
+    for (i, c) in cols.iter().enumerate() {
+        out.push(if out.contains(&c.name) { format!("{}\u{1}{i}", c.name) } else { c.name.clone() });
+    }
+    out
+}
+
 /// What the grid asks for: a row-menu action with its row, a check click (row and whether Shift extends a
 /// range) and the header's select all.
 #[derive(Default)]
@@ -157,29 +169,34 @@ struct GridOut {
     select: Option<usize>,
     /// A value to open in full, from a double click on its cell or the eye shown over it.
     view: Option<(String, Bson)>,
+    /// Column menu picks, by column name. They change the page sort or this tab's column setup, never the query.
+    head: Vec<(String, HeadAct)>,
+    /// A cell menu pick: the row, the column name and the action.
+    cell: Option<(usize, String, CellAct)>,
 }
 
 /// The rows of one result set as a grid with a checkbox column. Checked rows are tinted, and the menu of a
 /// checked row acts on every checked row. `record` draws the selected row's record under it.
-fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
+/// `prefs` are the column choices of this result, and `filter` whether the result came from one table, which
+/// turns a cell into a filter on it.
+fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, filter: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
     let mono = FontId::monospace(TXT_SMALL);
     let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     // Widths from the headers and the first rows, so a wide cell further down is cut with an ellipsis.
     let wide = set.widest.get_or_init(|| {
         set.cols.iter().map(|c| set.rows.iter().take(60).filter_map(|r| r.value(&c.name)).map(|v| if let mongodb::bson::raw::RawBsonRef::String(s) = v { s.chars().count() + 2 } else { 10 }).max().unwrap_or(0)).collect()
     });
-    let widths: Vec<f32> = set.cols.iter().zip(wide).map(|(c, &longest)| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0)).collect();
+    let names = result_keys(&set.cols);
+    // A chosen width wins over the measured one.
+    let widths: Vec<f32> = set.cols.iter().zip(wide).enumerate().map(|(ci, (c, &longest))| prefs.widths.get(&names[ci]).copied().unwrap_or_else(|| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0))).collect();
+    // The order the columns show in, as indexes into `set.cols`: pinned first, hidden ones left out. Headers drag to
+    // reorder, and the choices live in `prefs`, kept for results with the same columns so the next page keeps them.
+    let shown = table::visible_cols(Some(prefs), &names, usize::MAX);
+    let order: Vec<usize> = shown.iter().filter_map(|n| names.iter().position(|c| c == n)).collect();
     let lead = CHECK_W + NUM_W;
-    let total = lead + widths.iter().sum::<f32>();
-    // The order the columns show in, as indexes into `set.cols`. Headers drag to reorder; the order is kept in memory for
-    // results with the same columns, so the next page or a run again keeps it.
-    let names: Vec<&str> = set.cols.iter().map(|c| c.name.as_str()).collect();
-    let oid = egui::Id::unique(("sql-query-order", &names));
-    // Kept as indexes, since a join can return two columns of one name; one that is not a whole permutation is dropped.
-    let kept: Vec<usize> = ui.ctx().data(|d| d.get_temp(oid)).unwrap_or_default();
-    let mut sorted = kept.clone();
-    sorted.sort_unstable();
-    let order: Vec<usize> = if sorted.iter().copied().eq(0..names.len()) { kept } else { (0..names.len()).collect() };
+    let total = lead + order.iter().map(|&ci| widths[ci]).sum::<f32>();
+    let aligns: Vec<u8> = set.cols.iter().enumerate().map(|(ci, c)| prefs.align.get(&names[ci]).copied().unwrap_or(if is_numeric(c.kind) { 2 } else { 0 })).collect();
+    let pins = shown.iter().filter(|c| prefs.pinned.contains(*c)).count();
     let mut out = GridOut::default();
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
@@ -187,7 +204,6 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
         let area = ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             egui::ScrollArea::both().id_salt("sql-grid").auto_shrink(false).show(ui, |ui| {
-                let rows = Rows::Raw(&set.rows);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let row_w = total.max(view_w - 2.0);
                 for i in 0..set.rows.len() {
@@ -212,7 +228,11 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                             if !ui.is_rect_visible(cell) {
                                 continue;
                             }
-                            let v = rows.value(i, &c.name);
+                            // Read by the whole name: a column name can hold a dot, which a path would split.
+                            let v = set.rows[i].raw().get(&c.name).ok().flatten().map(Val::R);
+                            if prefs.highlight.contains(&db::strip_indices(&names[ci])) {
+                                ui.painter().rect_filled(cell, 0, HIGHLIGHT());
+                            }
                             // The row takes the clicks, so a double click finds its cell by where it landed.
                             if resp.double_clicked() && resp.interact_pointer_pos().is_some_and(|p| cell.x_range().contains(p.x)) {
                                 out.view = Some((c.name.clone(), Val::owned(v)));
@@ -223,7 +243,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                             };
                             job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
                             let g = ui.fonts_mut(|f| f.layout_job(job));
-                            let gx = if is_numeric(c.kind) { cell.right() - 8.0 - g.size().x } else { cell.left() + 8.0 }.max(cell.left() + 8.0);
+                            let gx = table::align_x(aligns[ci], cell.left(), *w, g.size().x);
                             ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
                             if let Some(v) = table::view_button(ui, cell, 0.0, v, ("eye", i, ci), || format!("View {} row {}", c.name, i + 1)) {
                                 out.view = Some((c.name.clone(), v));
@@ -237,8 +257,35 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                                 out.select = Some(i);
                             }
                         }
+                        // The menu knows its cell only from where the right click landed, so that is kept for it.
+                        let cell_id = ui.scope_id().with("menu-cell");
+                        if resp.secondary_clicked() && let Some(p) = resp.interact_pointer_pos() {
+                            let mut x = rr.left() + lead;
+                            let hit = order.iter().find(|&&ci| {
+                                x += widths[ci];
+                                p.x < x
+                            });
+                            ui.ctx().data_mut(|d| d.insert_temp(cell_id, hit.copied().unwrap_or(usize::MAX)));
+                        }
                         resp.context_menu(|ui| {
                             menu_look(ui);
+                            let at: usize = ui.ctx().data(|d| d.get_temp(cell_id)).unwrap_or(usize::MAX);
+                            if let Some(c) = set.cols.get(at) {
+                                if ui.button("Copy value").clicked() {
+                                    out.cell = Some((i, c.name.clone(), CellAct::CopyValue));
+                                    ui.close();
+                                }
+                                if ui.button("View value…").clicked() {
+                                    out.cell = Some((i, c.name.clone(), CellAct::View));
+                                    ui.close();
+                                }
+                                // Only a result read from one table has a table to filter.
+                                if filter && ui.button("Filter to this value").on_hover_text("Open the table with this value as its filter").clicked() {
+                                    out.cell = Some((i, c.name.clone(), CellAct::FilterValue));
+                                    ui.close();
+                                }
+                                ui.separator();
+                            }
                             if let Some(a) = results_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, true) {
                                 out.act = Some((i, a));
                                 ui.close();
@@ -261,15 +308,18 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
         }
         p.text(egui::pos2(head.left() + CHECK_W + 18.0 - off, head.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
         p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, LINE()));
-        // Headers drag sideways to reorder the columns, or Alt+Left and Alt+Right on the focused one.
+        // Headers drag sideways to reorder the columns, or Alt+Left and Alt+Right on the focused one. A click opens the
+        // column menu and Shift-click adds a sort key, as in Content. Sorting only reorders this page of rows.
         let ow: Vec<f32> = order.iter().map(|&ci| widths[ci]).collect();
         let keys: Vec<egui::Id> = order.iter().map(|&ci| egui::Id::unique(("sql-query-col", ci))).collect();
+        let blocks = [pins];
         let strip = egui::Rect::from_min_size(egui::pos2(head.left() + lead - off, head.top()), egui::vec2(ow.iter().sum(), TABLE_HEAD_H));
         let room = egui::Rect::from_min_max(egui::pos2(head.left() + lead, head.top()), head.max);
         let mv = put_at(ui, strip, |ui| {
             ui.set_clip_rect(room.intersect(ui.clip_rect()));
-            dnd::reorder(ui, egui::Id::unique(("sql-query-head", &names)), dnd::Items::horizontal(&ow, TABLE_HEAD_H).keys(&keys), |ui, k, st| {
-                let c = &set.cols[order[k]];
+            dnd::reorder(ui, egui::Id::unique(("sql-query-head", &names)), dnd::Items::horizontal(&ow, TABLE_HEAD_H).keys(&keys).blocks(&blocks), |ui, k, st| {
+                let ci = order[k];
+                let c = &set.cols[ci];
                 let cell = ui.max_rect();
                 let r = ui.interact(cell, ui.scope_id().with("head"), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ColumnHeader, true, format!("Result column {}", c.name)));
@@ -277,17 +327,35 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                 if state > 0 {
                     ui.painter().rect_filled(cell, 0, hover_fill(state));
                 }
-                let color = if st.lifted || state > 0 { BRIGHT() } else { MUTED() };
-                let g = ui.painter().layout_no_wrap(c.name.clone(), FontId::proportional(TXT_SMALL), color);
-                ui.painter().with_clip_rect(cell.shrink2(egui::vec2(4.0, 0.0)).intersect(ui.clip_rect())).galley(egui::pos2(cell.left() + 8.0, cell.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
+                let dir = set.sort.iter().find(|(n, _)| *n == c.name).map(|(_, desc)| *desc);
+                let pinned = prefs.pinned.contains(&names[ci]);
+                let color = if dir.is_some() { PRIMARY() } else if pinned { WARNING() } else if st.lifted || state > 0 { BRIGHT() } else { MUTED() };
+                let label = match dir {
+                    Some(false) => format!("{} ↑", c.name),
+                    Some(true) => format!("{} ↓", c.name),
+                    None => c.name.clone(),
+                };
+                let g = ui.painter().layout_no_wrap(label, FontId::proportional(TXT_SMALL), color);
+                let gx = table::align_x(aligns[ci], cell.left(), widths[ci], g.size().x);
+                ui.painter().with_clip_rect(cell.shrink2(egui::vec2(4.0, 0.0)).intersect(ui.clip_rect())).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
+                if st.lifted || st.busy {
+                    return r;
+                }
+                let r = r.on_hover_text("Click for column options. Shift-click adds a sort key. Sorting only orders the rows on this page.");
+                let shift_sort = r.clicked() && ui.input(|i| i.modifiers.shift);
+                if shift_sort {
+                    out.head.push((names[ci].clone(), HeadAct::AddSort));
+                }
+                let open = if r.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if r.clicked() && !shift_sort { Some(egui::SetOpenCommand::Toggle) } else { None };
+                let mut acts = Vec::new();
+                // Clicks inside, such as the Data submenu, keep it open; each action closes it itself.
+                egui::Popup::menu(&r).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| query_col_popover(ui, &names[ci], dir, prefs, &mut acts));
+                out.head.extend(acts.into_iter().map(|a| (names[ci].clone(), a)));
                 r
             })
         });
         if let Some(m) = mv {
-            let mut now = order.clone();
-            m.apply(&mut now);
-            ui.ctx().data_mut(|d| d.insert_temp(oid, now));
-            ui.ctx().request_repaint();
+            out.head.push((shown[m.from].clone(), HeadAct::Col(ColAct::MoveTo(shown[m.from].clone(), m.before()))));
         }
     });
     out
@@ -463,6 +531,72 @@ impl App {
         if let (Some(p), Ok(n)) = (p, res) {
             p.total = Some(n);
         }
+    }
+
+    /// Sorts the shown result by `keys` (column and whether descending) on the client, which only orders the rows
+    /// already fetched. No keys restores the server's order. Checks and the selected row follow their rows.
+    pub(in crate::app) fn sql_sort_page(&mut self, keys: Vec<(String, bool)>) {
+        let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) else { return };
+        let i = s.set_sel.min(s.sets.len().saturating_sub(1));
+        let Some(set) = s.sets.get_mut(i) else { return };
+        let moved = db::sql::sort::sort_rows(set, &keys);
+        s.qchecked = s.qchecked.iter().filter_map(|&r| moved.get(r).copied()).collect();
+        s.qanchor = s.qanchor.and_then(|r| moved.get(r).copied());
+        s.qsel = s.qsel.and_then(|r| moved.get(r).copied());
+        s.text_cache = None;
+    }
+
+    /// A cell menu pick in the shown result.
+    pub(in crate::app) fn sql_query_cell_act(&mut self, ctx: &egui::Context, row: usize, col: &str, act: CellAct) {
+        let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
+        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let v = Rows::Raw(&set.rows).key(row, col).unwrap_or(Bson::Null);
+        match act {
+            CellAct::CopyValue => {
+                ctx.copy_text(super::view::plain_text(&v));
+                self.ok("Copied the value");
+            }
+            CellAct::View => self.sql_view_value(col, &v),
+            CellAct::FilterValue => self.sql_query_filter(col, v),
+            // Results are never edited.
+            CellAct::SetNull => {}
+        }
+    }
+
+    /// Opens the table a one-table result was read from, filtered to `v` in column `col`.
+    fn sql_query_filter(&mut self, col: &str, v: Bson) {
+        let Some(t) = self.t() else { return };
+        let Some(s) = t.sql.as_ref() else { return };
+        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let d = self.sql_dialect();
+        let Some((ns, table)) = db::sql::source::single_table(&set.stmt, d) else { return self.warn("This result did not come from a single table.") };
+        // The namespace the run used, which the person may have changed since.
+        let (rd, rs) = s.ran_in.clone().unwrap_or_else(|| (s.run_db.clone(), s.run_schema.clone()));
+        let db_name = if rd.is_empty() { t.sel.db.clone() } else { rd.clone() };
+        let ns = ns.unwrap_or_else(|| {
+            if d != db::sql::Dialect::Postgres {
+                return db_name.clone();
+            }
+            let schema = run_schema_choice(&rs, &rd, &t.sel.db, &t.sel.schema);
+            if schema.is_empty() { PG_PUBLIC.to_string() } else { schema }
+        });
+        let found = set.cols.iter().find(|c| c.name == col);
+        let numeric = found.is_some_and(|c| is_numeric(c.kind));
+        // The server's own column name, which a statement must use.
+        let q = d.quote_ident(found.map_or(col, |c| c.src.as_str()));
+        let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", db::copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
+        // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
+        if self.sql_cell.is_some() {
+            return self.warn("Finish or cancel the cell edit first.");
+        }
+        let base = Sel { conn: t.sel.conn, db: db_name, schema: String::new(), coll: String::new() };
+        let sel = super::ns::with_ns(d, &base, &ns, table);
+        self.open_tab(sel, Open::Link);
+        let Some(t) = self.tm() else { return };
+        t.view = View::Documents;
+        t.filter_txt = text;
+        t.page = 0;
+        self.reload();
     }
 
     /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.
@@ -746,6 +880,7 @@ impl App {
     fn sql_result_pane(&mut self, ui: &mut egui::Ui, running: bool) {
         let cur = self.cur;
         let hidden = self.modal.is_some() || self.insert.is_some();
+        let dialect = self.sql_dialect();
         let record_open = self.tabs.get(cur).is_some_and(|t| t.record);
         let Some(s) = self.tabs.get_mut(cur).and_then(|t| t.sql.as_mut()) else { return };
         if s.sets.is_empty() {
@@ -761,6 +896,8 @@ impl App {
         // What the frame asked for, done after `s` is let go: rows to copy (None is the whole page), rows to
         // export with whether the dialog starts on every page, copying every page, and a page to read.
         let mut view = None;
+        // Column menu and cell menu picks, an unsort and a show-all-columns, done once `s` is let go.
+        let (mut head_acts, mut cell_act, mut unsort, mut show_cols): (Vec<(String, HeadAct)>, Option<(usize, String, CellAct)>, bool, Option<Vec<String>>) = (Vec::new(), None, false, None);
         let (mut copy, mut export, mut copy_all, mut goto): (Option<(Fmt, Option<Vec<usize>>)>, Option<(Vec<usize>, bool)>, Option<Fmt>, Option<(usize, usize)>) = (None, None, None, None);
         let sel = s.set_sel.min(s.sets.len() - 1);
         let paged = s.sets[sel].page.filter(|p| p.next || p.n > 0);
@@ -866,6 +1003,26 @@ impl App {
                 ui.add_space(4.0);
             }
             let checked_n = s.qchecked.len();
+            let colnames = result_keys(&s.sets[sel].cols);
+            let nshown = table::visible_cols(s.qprefs.get(&colnames), &colnames, usize::MAX).len();
+            let sorted_by = s.sets[sel].sort.clone();
+            if !s.sets[sel].rows.is_empty() && !text_mode && (!sorted_by.is_empty() || nshown < colnames.len()) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if !sorted_by.is_empty() {
+                        let keys = sorted_by.iter().map(|(c, desc)| format!("{c} {}", if *desc { "descending" } else { "ascending" })).collect::<Vec<_>>().join(", ");
+                        ui.label(RichText::new(format!("Sorted on this page by {keys}. The query did not run again.")).font(FontId::monospace(TXT_SMALL)).color(WARNING()));
+                        unsort = quiet(ui, "Unsort").on_hover_text("Back to the order the server sent").clicked();
+                    }
+                    if nshown < colnames.len() {
+                        ui.label(RichText::new(format!("{} hidden", group(&(colnames.len() - nshown).to_string()))).font(FontId::monospace(TXT_SMALL)).color(MUTED()));
+                        if quiet(ui, "Show all columns").clicked() {
+                            show_cols = Some(colnames.clone());
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
             if s.sets[sel].rows.is_empty() {
                 ui.label(RichText::new("No rows").color(MUTED()));
             } else if text_mode {
@@ -895,14 +1052,19 @@ impl App {
                 // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
                 let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
-                let names: Vec<String> = if record_open { sets[sel].cols.iter().map(|c| c.name.clone()).collect() } else { Vec::new() };
+                let names: Vec<String> = if record_open { colnames.clone() } else { Vec::new() };
+                let prefs = s.qprefs.get(&colnames).cloned().unwrap_or_default();
+                // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
+                let filter = sets[sel].kind == "SELECT" && sets[sel].stmt.len() < 20_000 && db::sql::source::single_table(&sets[sel].stmt, dialect).is_some();
                 let scroll = std::mem::take(&mut self.scroll_sel);
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
-                let out = grid(ui, &sets[sel], &checked, qsel, scroll, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
+                let out = grid(ui, &sets[sel], &prefs, &checked, qsel, scroll, filter, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
                 let Some(s) = self.tabs[cur].sql.as_mut() else { return };
                 (s.sets, s.qchecked) = (sets, checked);
                 view = out.view.or(rec.view);
+                head_acts = out.head;
+                cell_act = out.cell;
                 if let Some(i) = out.select {
                     s.qsel = Some(i);
                 }
@@ -938,6 +1100,21 @@ impl App {
         };
         if let Some((c, v)) = view {
             self.sql_view_value(&c, &v);
+        }
+        if unsort {
+            self.sql_sort_page(Vec::new());
+        }
+        if let Some(names) = show_cols && let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+            let p = s.qprefs.entry(names.clone()).or_default();
+            let mut all = table::visible_cols(Some(p), &names, usize::MAX);
+            all.extend(names.iter().filter(|n| !all.contains(n)).cloned().collect::<Vec<_>>());
+            p.shown = Some(all);
+        }
+        for (c, a) in head_acts {
+            self.query_head_act(ui, &c, a);
+        }
+        if let Some((i, col, a)) = cell_act {
+            self.sql_query_cell_act(ui.ctx(), i, &col, a);
         }
         if let Some((fmt, idx)) = copy {
             let rows = set_rows(self, &idx);

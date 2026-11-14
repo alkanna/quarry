@@ -36,6 +36,7 @@ mod sql_dump;
 mod sql_edit;
 mod sql_format;
 mod sql_import;
+mod sql_query_sort;
 mod sql_record;
 mod sql_relations;
 mod sql_structure;

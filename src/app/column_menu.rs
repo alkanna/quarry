@@ -226,6 +226,48 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
     }
 }
 
+/// The popover of a Query result column. A result has no table, so there is nothing to rename, cast or write back,
+/// and sorting only orders the rows already fetched. `desc` is the column's direction in the page sort, if it is a key.
+pub(in crate::app) fn query_col_popover(ui: &mut egui::Ui, c: &str, desc: Option<bool>, prefs: &ColPrefs, acts: &mut Vec<HeadAct>) {
+    menu_look(ui);
+    ui.add_space(4.0);
+    ui.vertical_centered(|ui| caption(ui, "COLUMN"));
+    ui.add_space(4.0);
+    let align = prefs.align.get(c).copied().unwrap_or(0);
+    let width = prefs.widths.get(c).copied();
+    icon_row(ui, [
+        (Icon::SortAsc, desc == Some(false), true, "Sort ascending on this page", HeadAct::Sort(Some(1))),
+        (Icon::SortDesc, desc == Some(true), true, "Sort descending on this page", HeadAct::Sort(Some(-1))),
+        (Icon::Unsort, false, desc.is_some(), "Back to the order the server sent", HeadAct::Sort(None)),
+    ], acts);
+    icon_row(ui, [
+        (Icon::AlignL, align == 0, true, "Align left", HeadAct::Col(ColAct::Align(c.into(), 0))),
+        (Icon::AlignC, align == 1, true, "Align center", HeadAct::Col(ColAct::Align(c.into(), 1))),
+        (Icon::AlignR, align == 2, true, "Align right", HeadAct::Col(ColAct::Align(c.into(), 2))),
+    ], acts);
+    icon_row(ui, [
+        (Icon::WMin, width == Some(COL_MIN_W), true, "Minimum width", HeadAct::Width(WidthPreset::Min)),
+        (Icon::WOpt, width.is_none(), true, "Optimal width", HeadAct::Width(WidthPreset::Optimal)),
+        (Icon::WMax, false, true, "Maximum width: the widest value", HeadAct::Width(WidthPreset::Max)),
+    ], acts);
+    ui.separator();
+    ui.menu_button("Data", |ui| {
+        menu_look(ui);
+        for op in ColOp::ALL {
+            item(ui, op.label(), HeadAct::Data(op), acts);
+        }
+    });
+    ui.separator();
+    let pinned = prefs.pinned.iter().any(|p| p == c);
+    for (label, act) in [(if pinned { "Unpin" } else { "Pin to the left" }, ColAct::Pin(c.into())), ("Hide column", ColAct::Hide(c.into()))] {
+        item(ui, label, HeadAct::Col(act), acts);
+    }
+    if ui.checkbox(&mut prefs.highlight.contains(&db::strip_indices(c)), "Highlight column").clicked() {
+        acts.push(HeadAct::Col(ColAct::Highlight(c.into())));
+        ui.close();
+    }
+}
+
 /// A popover entry that records its action and closes the popover.
 fn item(ui: &mut egui::Ui, label: &str, act: HeadAct, acts: &mut Vec<HeadAct>) {
     if ui.button(label).clicked() {
@@ -304,6 +346,53 @@ impl App {
                 let label = if label == c { String::new() } else { label };
                 self.modal = Some(Modal::ColumnCustomize { key, agg, col: c.into(), label, path: c.into() });
             }
+        }
+    }
+
+    /// Applies one popover action of a Query result column. Sorting orders the rows already fetched and never runs the
+    /// query again; everything else sets up this tab's view of the result.
+    pub(in crate::app) fn query_head_act(&mut self, ui: &egui::Ui, c: &str, act: HeadAct) {
+        let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
+        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let names = super::sql::query::result_keys(&set.cols);
+        // The name the column has in the result, for the actions that read or sort by it.
+        let key = c;
+        let c = c.split('\u{1}').next().unwrap_or(c);
+        let sort = set.sort.clone();
+        // Only the actions that read the values need them, and the read goes through `self`.
+        let rows: Vec<db::Row> = if matches!(act, HeadAct::Data(_) | HeadAct::Width(WidthPreset::Max)) { set.rows.clone() } else { Vec::new() };
+        match act {
+            HeadAct::Sort(next) => self.sql_sort_page(next.map(|d| vec![(c.to_string(), d < 0)]).unwrap_or_default()),
+            HeadAct::AddSort => {
+                let mut keys = sort;
+                match keys.iter_mut().find(|(n, _)| n == c) {
+                    Some(k) => k.1 = !k.1,
+                    None => keys.push((c.to_string(), false)),
+                }
+                self.sql_sort_page(keys);
+            }
+            HeadAct::Col(a) => {
+                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+                    super::table::col_acts_on(s.qprefs.entry(names.clone()).or_default(), usize::MAX, &names, vec![a]);
+                }
+            }
+            HeadAct::Width(wp) => {
+                let w = match wp {
+                    WidthPreset::Min => Some(COL_MIN_W),
+                    WidthPreset::Optimal => None,
+                    WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
+                };
+                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+                    let widths = &mut s.qprefs.entry(names).or_default().widths;
+                    match w {
+                        Some(w) => widths.insert(key.into(), w),
+                        None => widths.remove(key),
+                    };
+                }
+            }
+            HeadAct::Data(op) => self.col_data(ui.ctx(), true, Rows::Raw(&rows), c, op),
+            // The popover of a result never offers the rest.
+            _ => {}
         }
     }
 
