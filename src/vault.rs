@@ -12,9 +12,33 @@ use fake::Entry;
 const SERVICE: &str = "quarry";
 
 #[cfg(any(target_os = "macos", test))]
-pub use mac::{get, migrate, set};
+pub use mac::migrate;
+#[cfg(any(target_os = "macos", test))]
+use mac::{get as stored, set as store};
 #[cfg(not(any(target_os = "macos", test)))]
-pub use plain::{get, migrate, set};
+pub use plain::migrate;
+#[cfg(not(any(target_os = "macos", test)))]
+use plain::{get as stored, set as store};
+
+/// Set for the demo and fixture modes, whose connection ids overlap real ones: every read then finds nothing and every
+/// write is dropped, so no code path there can reach the user's real secrets or servers.
+static OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn go_offline() {
+    OFFLINE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn offline() -> bool {
+    OFFLINE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn get(name: &str) -> keyring::Result<String> {
+    if offline() { Err(Error::NoEntry) } else { stored(name) }
+}
+
+pub fn set(name: &str, value: &str) -> keyring::Result<()> {
+    if offline() { Ok(()) } else { store(name, value) }
+}
 
 /// A random 32-byte key saved as `name`, created on first use. None when the Keychain refuses.
 pub fn key(name: &str) -> Option<[u8; 32]> {

@@ -12,7 +12,7 @@
 //! walked; the policy refuses them where Hide rules reach.
 
 use super::scrub::{NsRules, Rules};
-use super::tools::{Call, Target, Update, each_stage, stage_target};
+use super::tools::{Call, Target, Update, command_pipeline, each_stage, pipeline_targets, stage_target};
 #[cfg(test)]
 use crate::db::sql::Dialect;
 #[cfg(test)]
@@ -63,6 +63,11 @@ fn masked_msg(path: &str) -> String {
 
 fn join(prefix: &str, k: &str) -> String {
     if prefix.is_empty() { k.to_string() } else { format!("{prefix}.{k}") }
+}
+
+/// `db.coll` of a target, for messages.
+fn ns_of(t: &Target) -> String {
+    format!("{}.{}", t.db, t.coll.as_deref().unwrap_or(""))
 }
 
 /// The rules of one namespace, with the whole rule set and database to check what its pipelines join.
@@ -278,6 +283,26 @@ impl<'a> G<'a> {
         }
     }
 
+    /// A pipeline that ends in $out or $merge: neither this collection nor the target may have data rules, since the
+    /// copy would carry their fields unscrubbed.
+    fn into_pipeline(&self, p: &[Document]) -> Res {
+        if self.any {
+            return refuse("Data rules apply to this collection, and $out or $merge would copy its fields unscrubbed".into());
+        }
+        self.out_target(p)?;
+        self.pipeline(p, true)
+    }
+
+    /// $merge's whenMatched pipeline reads the target's own fields and $out replaces them, so a target with data
+    /// rules could get hidden values copied under keys no rule knows.
+    fn out_target(&self, p: &[Document]) -> Res {
+        let last = p.last().and_then(|s| s.iter().find(|(k, _)| *k == "$out" || *k == "$merge"));
+        match last.and_then(|(k, v)| stage_target(&self.db, k, v)) {
+            Some(t) if self.other(&t).any => refuse(format!("Data rules apply to {}, which $out or $merge would write into", ns_of(&t))),
+            _ => Ok(()),
+        }
+    }
+
     /// Every stage of a pipeline, then the stage checks. $out and $merge are allowed only as the last stage of
     /// aggregate_into; server stages never.
     fn pipeline(&self, p: &[Document], into: bool) -> Res {
@@ -477,12 +502,24 @@ impl<'a> G<'a> {
                 c.get_document("projection").map_or(Ok(()), |p| g.projection(p))
             }
             "aggregate" => {
-                let p: Vec<Document> = c.get_array("pipeline").map(|a| a.iter().filter_map(|s| s.as_document().cloned()).collect()).unwrap_or_default();
-                let into = p.last().is_some_and(|s| s.contains_key("$out") || s.contains_key("$merge"));
-                if into && g.any {
-                    return refuse("Data rules apply to this collection, and $out or $merge would copy its fields unscrubbed".into());
+                let p = command_pipeline(c);
+                if p.last().is_some_and(|s| s.contains_key("$out") || s.contains_key("$merge")) { g.into_pipeline(&p) } else { g.pipeline(&p, false) }
+            }
+            // A view reads its source under its own name, where the source's rules no longer match.
+            n if (n.eq_ignore_ascii_case("create") || n.eq_ignore_ascii_case("collMod")) && c.contains_key("viewOn") => {
+                let on = c.get_str("viewOn").unwrap_or("");
+                let src = G::new(self.rules, &self.db, on);
+                if src.any {
+                    return refuse(format!("Data rules apply to {}.{on}, so agents cannot make a view of it", self.db));
                 }
-                g.pipeline(&p, into)
+                let p = command_pipeline(c);
+                // What the pipeline joins is read under the view's name too, where no rule of the joined namespace applies.
+                let mut joined = Vec::new();
+                pipeline_targets(&self.db, &p, &mut joined);
+                if let Some(t) = joined.iter().find(|t| self.other(t).any) {
+                    return refuse(format!("Data rules apply to {}, so agents cannot make a view that reads it", ns_of(&t)));
+                }
+                src.pipeline(&p, false)
             }
             "count" => c.get_document("query").map_or(Ok(()), |q| g.filter(q, "")),
             "distinct" => {
@@ -532,12 +569,7 @@ pub fn check(call: &Call, rules: &Rules) -> Res {
             pipeline.as_ref().map_or(Ok(()), |p| g.pipeline(p, false))
         }
         Call::Aggregate { pipeline, .. } => g.pipeline(pipeline, false),
-        Call::AggregateInto { pipeline, .. } => {
-            if g.any {
-                return refuse("Data rules apply to this collection, and $out or $merge would copy its fields unscrubbed".into());
-            }
-            g.pipeline(pipeline, true)
-        }
+        Call::AggregateInto { pipeline, .. } => g.into_pipeline(pipeline),
         Call::Update { filter, update, .. } => {
             g.filter(filter, "")?;
             match update {
@@ -675,6 +707,28 @@ mod tests {
         refused(up(json!({ "$rename": { "email": "contact" } })));
         let distinct = check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: doc! { "distinct": "users", "key": "email" } }, &rules());
         refused(distinct);
+    }
+
+    #[test]
+    fn out_and_merge_refuse_a_target_with_data_rules() {
+        let into = |p: Value| check(&call("aggregate_into", "orders", json!({ "pipeline": p })), &rules());
+        refused(into(json!([{ "$merge": { "into": "users", "on": "_id", "whenMatched": [{ "$set": { "leaked": "$ssn" } }], "whenNotMatched": "discard" } }])));
+        refused(into(json!([{ "$out": "users" }])));
+        refused(into(json!([{ "$merge": "users" }])));
+        allowed(into(json!([{ "$out": "orders_copy" }])));
+    }
+
+    #[test]
+    fn views_of_a_namespace_with_data_rules_are_refused() {
+        let cmd = |c: mongodb::bson::Document| check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: c }, &rules());
+        refused(cmd(doc! { "create": "v", "viewOn": "users", "pipeline": [] }));
+        refused(cmd(doc! { "collMod": "v", "viewOn": "users", "pipeline": [] }));
+        refused(cmd(doc! { "aggregate": "orders", "pipeline": [{ "$merge": { "into": "users" } }], "cursor": {} }));
+        allowed(cmd(doc! { "create": "v", "viewOn": "orders", "pipeline": [] }));
+        // Name rules alone still match under a lookup's `as`, but not once the join is read under a view's name.
+        let names = Rules::compile(&crate::agents::scrub::tests_support::no_presets(), &PresetOverride::default(), &[spec(Matcher::FieldName("^pin$".into()), &["shop.staff"], PresetMode::Hide)], &[], &[1; 32]).unwrap();
+        let view = doc! { "create": "v", "viewOn": "orders", "pipeline": [{ "$lookup": { "from": "staff", "localField": "u", "foreignField": "_id", "as": "u" } }] };
+        refused(check(&Call::RunCommand { conn: crate::agents::tools::ConnRef::Id(1), db: "shop".into(), command: view }, &names));
     }
 
     #[test]

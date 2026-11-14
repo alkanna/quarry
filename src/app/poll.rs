@@ -85,7 +85,7 @@ impl App {
                     }
                 },
                 Msg::Command { tag, res } => self.on_command(tag, res),
-                Msg::DbChanged { conn, db, copied, res } => self.on_db_changed(conn, db, copied, res),
+                Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
                 Msg::WatchEvent { req, doc } => self.watch_event(req, doc),
                 Msg::WatchDone { req, res } => self.watch_done(req, res),
                 Msg::IndexInfo { key, res } => match res {
@@ -508,6 +508,7 @@ impl App {
                         _ => 2,
                     };
                     s.vwarn = opts.get_str("validationAction") == Ok("warn");
+                    s.vaction = opts.get_str("validationAction").ok().filter(|a| !matches!(*a, "warn" | "error")).map(str::to_string);
                 }
             }
             (tag, r) if tag.starts_with("server:") => self.server_reply(tag, r),
@@ -516,7 +517,7 @@ impl App {
         }
     }
 
-    fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, res: db::Res<String>) {
+    fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: db::Res<String>) {
         if let Some(to) = copied {
             // Listed now so the row does not blink out before the reload below answers.
             if res.is_ok() && let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
@@ -525,12 +526,17 @@ impl App {
             }
             self.copying.remove(&(conn, db.clone(), to));
         }
-        let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
         match res {
-            Ok(m) => self.ok(m),
+            Ok(m) => {
+                // Only a drop the server confirmed forgets its undo entries; a refused one keeps them.
+                if let Some(coll) = dropped {
+                    self.purge_mongo_undo(conn, &db, &coll);
+                }
+                self.ok(m)
+            }
             Err(e) => {
                 self.err(e);
-                if dropped.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                if dropped.is_some_and(|c| c.is_empty()) && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.dbs.push((db.clone(), None));
                     c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
                 }
@@ -563,6 +569,12 @@ impl App {
         t.loading = false;
         match res {
             Ok((docs, count, ms)) => {
+                // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
+                let last = count.saturating_sub(1) / self.page_size();
+                if docs.is_empty() && self.tabs[i].page > last {
+                    self.tabs[i].page = last;
+                    return self.reload_of(i);
+                }
                 let Self { tabs, values, .. } = self;
                 let t = &mut tabs[i];
                 // A query that works again clears an earlier error.
@@ -607,8 +619,12 @@ impl App {
                 }
             }
             Err(e) => {
-                // Old rows under the new query would read as its results.
+                // Old rows under the new query would read as its results. Selection and checks are indexes
+                // into those rows, so they go too, or the next read would open whatever lands at that index.
                 t.docs.clear();
+                t.selected = t.selected.filter(|s| s.0);
+                t.checked.clear();
+                t.expanded.retain(|e| e.0);
                 let what = if t.sql.is_some() { "load the rows" } else { "load the documents" };
                 self.fail_view(i, View::Documents, e, what);
             }
@@ -689,9 +705,10 @@ impl App {
                 self.ok(s);
             }
             Err(e) => {
-                // Keep the edits so nothing typed is lost; the person can reload and redo.
+                // Keep the edits so nothing typed is lost; the person can reload and redo. An edit staged on the
+                // same row while this save was in flight is newer, so it wins over the failed one.
                 if let Some(dr) = dr {
-                    self.drafts.insert(tag, dr);
+                    self.drafts.entry(tag).or_insert(dr);
                 }
                 self.err(e);
             }

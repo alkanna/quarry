@@ -711,7 +711,8 @@ impl App {
                 });
             });
         });
-        let free = self.modal.is_none() && self.insert.is_none() && self.json_edit.is_none() && self.sql_cell.is_none();
+        // Any window over the page owns Cmd+S, as do the value and cell editors.
+        let free = !self.window_open() && self.json_edit.is_none() && self.sql_cell.is_none();
         save |= free && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S));
         if show {
             let mut body = Vec::new();

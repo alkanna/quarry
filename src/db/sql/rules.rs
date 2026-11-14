@@ -141,7 +141,9 @@ pub fn ops_for(kind: Kind) -> &'static [Op] {
         Group::Text => &[Eq, Ne, Contains, NotContains, StartsWith, NotStartsWith, EndsWith, NotEndsWith, Like, NotLike, Regexp, NotRegexp, In, NotInOrNull, Empty, NotEmpty, IsNull, NotNull, LenEq, LenGt, LenLt],
         Group::Date => &[Eq, Ne, Lt, Gt, Between, Today, Last, ThisWeek, ThisMonth, AfterCol, IsNull, NotNull],
         Group::Choice => &[Eq, Ne, In, NotIn, SetContains, IsNull, NotNull],
-        Group::Other => &[Eq, Ne, LenEq, JsonPathEq, JsonContains, JsonHasPath, IsNull, NotNull],
+        Group::Other if kind == Kind::Json => &[Eq, Ne, LenEq, JsonPathEq, JsonContains, JsonHasPath, IsNull, NotNull],
+        // Binary, bit and geometry values are not JSON documents, so the JSON operators would only fail.
+        Group::Other => &[Eq, Ne, LenEq, IsNull, NotNull],
     }
 }
 
@@ -224,8 +226,19 @@ fn hex(s: &str, bs: bool) -> String {
 }
 
 /// LIKE patterns treat % and _ as wildcards, so a search for them literally needs backslashes.
-pub(super) fn like_escape(s: &str) -> String {
+fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// `like_escape` for a pattern written with `ESCAPE '!'`, which every server and sql_mode reads the same way.
+pub(super) fn like_bang(s: &str) -> String {
+    s.replace('!', "!!").replace('%', "!%").replace('_', "!_")
+}
+
+/// A pattern from `like_escape` as a literal. Under NO_BACKSLASH_ESCAPES MySQL's LIKE has no escape character at
+/// all, so one that holds a backslash names it. Plain patterns stay bare so the bar can read them back.
+fn like_lit(pat: &str, d: Dialect, bs: bool) -> String {
+    if !bs && d != Dialect::Postgres && pat.contains('\\') { format!("{} ESCAPE '\\'", lit(pat, bs)) } else { lit(pat, bs) }
 }
 
 fn unlike(s: &str) -> String {
@@ -255,12 +268,20 @@ fn unit_sql(u: &str) -> &'static str {
 /// The SQL of one rule.
 pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
     use Op::*;
-    let c = d.quote_ident(&r.col);
+    let mut c = d.quote_ident(&r.col);
+    // PostgreSQL's uuid, inet, range, interval and array types take no LIKE or text length, so they are read as text.
+    if d == Dialect::Postgres && group_of(r.kind) == Group::Text && r.kind != Kind::Text {
+        c = format!("{c}::text");
+    }
     let v = |i: usize| r.values.get(i).map(|s| s.as_str()).unwrap_or("");
     let list = || r.values.iter().filter(|s| !s.trim().is_empty()).map(|s| val(r.kind, s, bs)).collect::<Vec<_>>().join(", ");
     let other = group_of(r.kind) == Group::Other;
     let len = if group_of(r.kind) == Group::Text { "CHAR_LENGTH" } else { "LENGTH" };
     let n = || if is_number(v(0)) { v(0).trim().to_string() } else { "0".into() };
+    let like = |pre: &str, suf: &str| like_lit(&format!("{pre}{}{suf}", like_escape(v(0))), d, bs);
+    if d == Dialect::Postgres && let Some(sql) = pg_rule_sql(r, &c, n) {
+        return sql;
+    }
     match r.op {
         Eq if other => format!("{c} = {}", hex(v(0), bs)),
         Ne if other => format!("{c} <> {}", hex(v(0), bs)),
@@ -276,12 +297,12 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
         Between => format!("{c} BETWEEN {} AND {}", val(r.kind, v(0), bs), val(r.kind, v(1), bs)),
         IsNull => format!("{c} IS NULL"),
         NotNull => format!("{c} IS NOT NULL"),
-        Contains => format!("{c} LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
-        NotContains => format!("{c} NOT LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
-        StartsWith => format!("{c} LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
-        NotStartsWith => format!("{c} NOT LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
-        EndsWith => format!("{c} LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
-        NotEndsWith => format!("{c} NOT LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
+        Contains => format!("{c} LIKE {}", like("%", "%")),
+        NotContains => format!("{c} NOT LIKE {}", like("%", "%")),
+        StartsWith => format!("{c} LIKE {}", like("", "%")),
+        NotStartsWith => format!("{c} NOT LIKE {}", like("", "%")),
+        EndsWith => format!("{c} LIKE {}", like("%", "")),
+        NotEndsWith => format!("{c} NOT LIKE {}", like("%", "")),
         Like => format!("{c} LIKE {}", lit(v(0), bs)),
         NotLike => format!("{c} NOT LIKE {}", lit(v(0), bs)),
         Regexp => format!("{c} REGEXP {}", lit(v(0), bs)),
@@ -301,6 +322,39 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
         JsonContains => format!("JSON_CONTAINS({c}, {})", lit(v(0), bs)),
         JsonHasPath => format!("JSON_CONTAINS_PATH({c}, 'one', {})", lit(v(0), bs)),
     }
+}
+
+/// PostgreSQL's spelling of the operators whose MySQL form it does not have. Its jsonpath reads the same `$.a.b`.
+fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
+    use Op::*;
+    let v = |i: usize| super::value::pg_lit(r.values.get(i).map(|s| s.as_str()).unwrap_or(""));
+    // MySQL's 0x literal and LENGTH of a JSON value are not PostgreSQL; bytea takes '\x..' and the rest compare as text.
+    let typed = || match r.values.first().map(|s| s.trim()) {
+        Some(x) if r.kind == Kind::Binary && is_hex(x) => super::value::pg_lit(&format!("\\x{}", x.trim_start_matches("0x").trim_start_matches("0X"))),
+        _ => v(0),
+    };
+    let side = || if r.kind == Kind::Binary { c.to_string() } else { format!("{c}::text") };
+    let other = group_of(r.kind) == Group::Other;
+    Some(match r.op {
+        Eq if r.kind == Kind::Json => format!("{c} = {}::jsonb", v(0)),
+        Ne if r.kind == Kind::Json => format!("{c} <> {}::jsonb", v(0)),
+        Eq if other => format!("{} = {}", side(), typed()),
+        Ne if other => format!("{} <> {}", side(), typed()),
+        LenEq if other => format!("octet_length({}) = {}", side(), n()),
+        LenGt if other => format!("octet_length({}) > {}", side(), n()),
+        LenLt if other => format!("octet_length({}) < {}", side(), n()),
+        Regexp => format!("{c}::text ~ {}", v(0)),
+        NotRegexp => format!("{c}::text !~ {}", v(0)),
+        Today => format!("{c}::date = CURRENT_DATE"),
+        Last => format!("{c} >= NOW() - INTERVAL '{} {}'", n(), unit_sql(r.values.get(1).map_or("", |s| s.as_str()))),
+        ThisWeek => format!("date_trunc('week', {c}) = date_trunc('week', CURRENT_DATE)"),
+        ThisMonth => format!("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)"),
+        SetContains => format!("{} = ANY(string_to_array({c}::text, ','))", v(0)),
+        JsonPathEq => format!("jsonb_path_query_first({c}::jsonb, {}) #>> '{{}}' = {}", v(0), v(1)),
+        JsonContains => format!("{c}::jsonb @> {}::jsonb", v(0)),
+        JsonHasPath => format!("jsonb_path_exists({c}::jsonb, {})", v(0)),
+        _ => return None,
+    })
 }
 
 /// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`).
@@ -687,6 +741,28 @@ mod tests {
                 assert_eq!(back, vec![r], "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn postgres_rules_use_postgres_operators() {
+        let sql = |col: &str, kind: Kind, op: Op, values: &[&str]| rule_sql(&Rule { col: col.into(), kind, op, values: values.iter().map(|s| s.to_string()).collect() }, Dialect::Postgres, false);
+        assert_eq!(sql("name", Kind::Text, Op::Regexp, &["^a"]), "\"name\"::text ~ '^a'");
+        assert_eq!(sql("created_at", Kind::DateTime, Op::Today, &[]), "\"created_at\"::date = CURRENT_DATE");
+        assert_eq!(sql("created_at", Kind::DateTime, Op::Last, &["3", "weeks"]), "\"created_at\" >= NOW() - INTERVAL '3 WEEK'");
+        assert_eq!(sql("data", Kind::Json, Op::JsonHasPath, &["$.a.b"]), "jsonb_path_exists(\"data\"::jsonb, '$.a.b')");
+        for op in [Op::Regexp, Op::Today, Op::ThisWeek, Op::ThisMonth, Op::JsonContains] {
+            let s = sql("c", Kind::Text, op, &["x"]);
+            assert!(!s.contains("REGEXP") && !s.contains("CURDATE") && !s.contains("YEARWEEK") && !s.contains("JSON_"), "{s}");
+        }
+    }
+
+    #[test]
+    fn like_names_its_escape_without_backslash_escapes() {
+        let r = Rule { col: "name".into(), kind: Kind::Text, op: Op::Contains, values: vec!["50%".into()] };
+        assert_eq!(rule_sql(&r, Dialect::MySql, false), "`name` LIKE '%50\\%%' ESCAPE '\\'");
+        assert_eq!(rule_sql(&r, Dialect::MySql, true), "`name` LIKE '%50\\\\%%'");
+        let plain = Rule { values: vec!["ann".into()], ..r };
+        assert_eq!(rule_sql(&plain, Dialect::MySql, false), "`name` LIKE '%ann%'");
     }
 
     #[test]

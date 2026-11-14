@@ -163,11 +163,17 @@ fn ns_hit(g: &NsGlob, db: &str, coll: &str) -> bool {
     wild(&g.db, db) && g.coll.as_deref().is_none_or(|c| wild(c, coll))
 }
 
+/// An all-digit level is an array index or a numeric key. Either may be skipped, so `items.ssn` covers `items.0.ssn`,
+/// and either may be matched, so `metrics.*.salary` and `metrics.2024.salary` cover a key named 2024.
+fn number(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn full(g: &[Seg], p: &[&str]) -> bool {
     match g.split_first() {
-        None => p.is_empty(),
+        None => p.iter().all(|s| number(s)),
         Some((Seg::Deep, rest)) => (0..=p.len()).any(|i| full(rest, &p[i..])),
-        Some((Seg::Pat(s), rest)) => p.split_first().is_some_and(|(h, t)| wild(s, h) && full(rest, t)),
+        Some((Seg::Pat(s), rest)) => p.split_first().is_some_and(|(h, t)| (wild(s, h) && full(rest, t)) || (number(h) && full(g, t))),
     }
 }
 
@@ -178,14 +184,15 @@ fn below(g: &[Seg], p: &[&str]) -> bool {
         Some((Seg::Deep, rest)) => p.is_empty() || (0..=p.len()).any(|i| below(rest, &p[i..])),
         Some((Seg::Pat(s), rest)) => match p.split_first() {
             None => true,
-            Some((h, t)) => wild(s, h) && below(rest, t),
+            Some((h, t)) => (wild(s, h) && below(rest, t)) || (number(h) && below(g, t)),
         },
     }
 }
 
-/// Array indexes and update positionals (`$`, `$[]`, `$[i]`) name no field, so `items.0.ssn` is `items.ssn`.
+/// Update positionals (`$`, `$[]`, `$[i]`) name no field and are dropped. Number levels stay, and `full` and
+/// `below` let them be skipped or matched (see `number`).
 pub(crate) fn levels(path: &str) -> Vec<&str> {
-    path.split('.').filter(|s| !s.is_empty() && !s.starts_with('$') && !s.bytes().all(|b| b.is_ascii_digit())).collect()
+    path.split('.').filter(|s| !s.is_empty() && !s.starts_with('$')).collect()
 }
 
 impl Rules {
@@ -764,6 +771,10 @@ mod tests {
         assert_eq!(scrubbed(&r, doc! { "card_no": 1, "cardholder": 2, "x": 3 }), doc! { "x": 3 });
         let r = one(path("a.**", Action::Remove));
         assert_eq!(scrubbed(&r, doc! { "a": { "b": 1 }, "c": 2 }), doc! { "c": 2 });
+        for rule in ["metrics.2024.salary", "metrics.*.salary", "metrics.salary"] {
+            let r = one(path(rule, Action::Remove));
+            assert_eq!(scrubbed(&r, doc! { "metrics": { "2024": { "salary": 1, "n": 2 } } }), doc! { "metrics": { "2024": { "n": 2 } } }, "{rule}");
+        }
     }
 
     #[test]

@@ -503,7 +503,8 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let mut q = sqlx::query(&sql);
         if let Some(p) = prefix {
-            q = q.bind(format!("{}%", super::rules::like_escape(p)));
+            // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
+            q = q.bind(format!("{}%", super::rules::like_bang(p)));
         }
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
@@ -541,7 +542,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
             }
         }
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
-        let pattern = prefix.map(|p| format!("{}%", super::rules::like_escape(p)));
+        let pattern = prefix.map(|p| format!("{}%", super::rules::like_bang(p)));
         let t = Instant::now();
         let rows = super::pg::read::in_read_only(pc, db, &short, async |c| {
             let mut q = sqlx::query(&sql).persistent(false);
@@ -589,7 +590,7 @@ async fn key_search(db: &Db, schema: &str, table: &str, key: &str, q: &str, know
     let as_text = |c: &str| if pg { format!("{}::text", d.quote_ident(c)) } else { format!("CAST({} AS CHAR)", d.quote_ident(c)) };
     let lit = |s: &str| if pg { value::pg_lit(s) } else { value::lit(s, db.backslash_escapes()) };
     // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
-    let pat = q.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+    let pat = super::rules::like_bang(q);
     let shown = kt.label.as_deref().map_or_else(|| "''".to_string(), as_text);
     let mut sql = format!("SELECT {} AS k, {shown} AS l FROM {}", as_text(key), d.qualified(schema, table));
     if !q.is_empty() && kt.big {
@@ -1720,10 +1721,11 @@ mod tests {
         let Some((w, rx, db, _p)) = live("", "") else { return };
         exec(&w, &_p, "DROP PROCEDURE IF EXISTS quarry_test.p_big");
         exec(&w, &_p, "CREATE PROCEDURE quarry_test.p_big() BEGIN SELECT 1 AS n FROM information_schema.columns a, information_schema.columns b LIMIT 1500; END");
+        // A CALL may write after it selects, so it is read to its end: the grid keeps the cap and the script goes on.
         let sets = run_all(&w, &rx, &db, "CALL p_big(); SELECT 2", false);
-        assert_eq!(sets.len(), 2);
-        assert_eq!((sets[0].rows.len(), sets[0].capped), (RUN_ROWS_MAX, true));
-        assert!(sets[1].error.as_deref().is_some_and(|m| m.contains("row limit")), "{:?}", sets[1].error);
+        assert_eq!(sets[0].rows.len(), RUN_ROWS_MAX);
+        let last = sets.last().unwrap();
+        assert!(last.error.is_none() && last.rows.len() == 1, "{:?}", last.error);
     }
 
     #[test]

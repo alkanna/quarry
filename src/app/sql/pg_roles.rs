@@ -213,6 +213,20 @@ impl PgRolesWin {
     }
 }
 
+/// What the + Default privilege form stages for the row `k`: the privileges a staged change of that row leaves, else the
+/// server's, plus the ones ticked. Starting from the server's would cancel a staged revoke of the row, since stage keeps
+/// the earlier `from` with this `to`.
+fn def_form_to(staged: &[Change], k: &str, server: &Privs, add: &BTreeSet<String>) -> Privs {
+    let mut to = match staged.iter().find(|s| key(s) == k) {
+        Some(Change::Default { to, .. }) => to.clone(),
+        _ => server.clone(),
+    };
+    for p in add {
+        to.entry(p.clone()).or_insert(false);
+    }
+    to
+}
+
 fn key(c: &Change) -> String {
     match c {
         Change::Acl { target, grantee, .. } => format!("acl|{:?}|{}|{grantee}", target.kind, target.oid),
@@ -1859,10 +1873,8 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!f.privs.is_empty() && !f.owner.is_empty(), egui::Button::new("Stage")).clicked() {
                         let server = defs.rows.iter().find(|d| d.owner == f.owner && d.schema == f.schema && d.kind == f.kind).map(|d| d.granted(&role.name)).unwrap_or_default();
-                        let mut to = server.clone();
-                        for p in &f.privs {
-                            to.entry(p.clone()).or_insert(false);
-                        }
+                        let k = format!("def|{}|{}|{:?}|{}", f.owner, f.schema, f.kind, role.name);
+                        let to = def_form_to(&w.staged, &k, &server, &f.privs);
                         acts.push(Act::Stage(Change::Default { owner: f.owner.clone(), schema: f.schema.clone(), kind: f.kind, grantee: role.name.clone(), from: server, to }));
                         close = true;
                     }
@@ -1950,5 +1962,22 @@ mod tests {
         assert_eq!(col_range(300.0, 600.0, 170.0, 112.0, 50), 1..4);
         assert_eq!(col_range(0.0, 2000.0, 170.0, 112.0, 5), 0..5);
         assert_eq!(col_range(9000.0, 9500.0, 170.0, 112.0, 5), 5..5);
+    }
+
+    /// Review finding: staging a row from the + Default privilege form cancelled a staged revoke of the same row.
+    #[test]
+    fn the_default_form_builds_on_a_staged_change_of_its_row() {
+        let privs = |ps: &[&str]| -> Privs { ps.iter().map(|p| (p.to_string(), false)).collect() };
+        let server = privs(&["SELECT", "INSERT"]);
+        let revoke = Change::Default { owner: "app".into(), schema: String::new(), kind: DefKind::Tables, grantee: "reader".into(), from: server.clone(), to: Privs::new() };
+        // the form builds its key this way
+        let k = format!("def|{}|{}|{:?}|{}", "app", "", DefKind::Tables, "reader");
+        assert_eq!(key(&revoke), k);
+        let ticked: BTreeSet<String> = ["UPDATE".to_string()].into();
+        assert_eq!(def_form_to(std::slice::from_ref(&revoke), &k, &server, &ticked), privs(&["UPDATE"]));
+        assert_eq!(def_form_to(&[], &k, &server, &ticked), privs(&["SELECT", "INSERT", "UPDATE"]));
+        // a ticked privilege the row already grants keeps its grant option
+        let with_grant: Privs = [("SELECT".to_string(), true)].into();
+        assert_eq!(def_form_to(&[], &k, &with_grant, &["SELECT".to_string()].into()), with_grant);
     }
 }

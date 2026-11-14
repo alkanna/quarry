@@ -515,6 +515,8 @@ impl App {
     }
 
     pub(super) fn shell_view(&mut self, ui: &mut egui::Ui) {
+        // The page draws before the windows over it, so a Cmd+Enter meant for a dialog reaches it first.
+        let covered = self.window_open();
         let writable = self.sel_writable();
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
@@ -554,7 +556,7 @@ impl App {
                 run = run_button(ui, "Run", "⌘↵").on_hover_text("Cmd+Enter").clicked();
             });
             // With the library picker open, Cmd+Enter runs the script picked there, not this one.
-            run |= running.is_none() && !egui::Popup::is_any_open(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+            run |= running.is_none() && !covered && !egui::Popup::is_any_open(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
             stop = quiet_enabled(ui, running.is_some(), "Stop").on_hover_text("End the script and interrupt its running statement").clicked();
             if let Some(at) = running {
                 spin(ui);

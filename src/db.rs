@@ -288,7 +288,8 @@ pub enum Msg {
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
     /// `copied` names the collection a duplicate wrote, to end its spinner.
-    DbChanged { conn: u64, db: String, copied: Option<String>, res: Res<String> },
+    /// `dropped` names what a drop removed: the collection, or empty for the whole database.
+    DbChanged { conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: Res<String> },
     Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
@@ -435,6 +436,19 @@ pub fn parse_pipeline(text: &str) -> Res<Vec<Document>> {
     }
 }
 
+/// Extended JSON for the argument of `ISODate()` or `new Date()`. The shell accepts no argument (now), milliseconds,
+/// a date alone and a time without a zone (UTC), which Extended JSON's `$date` string does not.
+fn shell_date(arg: &str) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    if arg.is_empty() {
+        return dates::moment("now", now).unwrap_or_default();
+    }
+    if let Ok(ms) = arg.parse::<i64>() {
+        return dates::date_json(ms);
+    }
+    dates::moment(arg, now).unwrap_or_else(|| format!("{{\"$date\":\"{arg}\"}}"))
+}
+
 fn shell_to_ejson(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let chars: Vec<char> = src.chars().collect();
@@ -497,7 +511,8 @@ fn shell_to_ejson(src: &str) -> String {
         }
         if c.is_ascii_alphabetic() && (i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '$' || chars[i - 1] == '_')) {
             let start = i;
-            while i < chars.len() && chars[i].is_ascii_alphanumeric() {
+            // Whole identifiers, so a key like new_user or Date_x is never cut at the underscore.
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
@@ -505,7 +520,8 @@ fn shell_to_ejson(src: &str) -> String {
             while j < chars.len() && chars[j].is_whitespace() {
                 j += 1;
             }
-            if word == "new" {
+            // Only the keyword before a constructor, never a key or value spelled new.
+            if word == "new" && j > i && chars.get(j).is_some_and(|c| c.is_ascii_alphabetic()) {
                 continue; // `new Date(...)` is treated like `Date(...)`
             }
             if j < chars.len() && chars[j] == '(' && let Some(close) = chars[j..].iter().position(|&ch| ch == ')') {
@@ -513,7 +529,7 @@ fn shell_to_ejson(src: &str) -> String {
                 let arg = arg.trim().trim_matches(|ch| ch == '"' || ch == '\'').to_string();
                 let rep = match word.as_str() {
                     "ObjectId" => Some(format!("{{\"$oid\":\"{arg}\"}}")),
-                    "ISODate" | "Date" => Some(format!("{{\"$date\":\"{arg}\"}}")),
+                    "ISODate" | "Date" => Some(shell_date(&arg)),
                     "NumberLong" => Some(format!("{{\"$numberLong\":\"{arg}\"}}")),
                     "NumberDecimal" => Some(format!("{{\"$numberDecimal\":\"{arg}\"}}")),
                     "NumberInt" => Some(arg.clone()),
@@ -974,6 +990,14 @@ mod tests {
         assert_eq!(d.get_str("booker.username").unwrap(), "a.b: c");
         assert_eq!(d.get_array("$or").unwrap()[0].as_document().unwrap().get("x.y"), Some(&Bson::Int32(1)));
         assert!(parse_doc("{a: new Date('2024-01-02T03:04:05Z')}").unwrap().get_datetime("a").is_ok());
+        // A key that starts with new is a key, and the shell's date forms all give a date.
+        let d = parse_doc("{new_user: 1, new: true, renew: 2}").unwrap();
+        assert_eq!((d.get("new_user"), d.get("new"), d.get("renew")), (Some(&Bson::Int32(1)), Some(&Bson::Boolean(true)), Some(&Bson::Int32(2))));
+        let ms = |s: &str| parse_doc(s).unwrap().get_datetime("a").unwrap().timestamp_millis();
+        assert_eq!(ms("{a: ISODate('2024-01-02')}"), 1_704_153_600_000);
+        assert_eq!(ms("{a: ISODate('2024-01-02T00:00:00')}"), 1_704_153_600_000);
+        assert_eq!(ms("{a: new Date(1704153600000)}"), 1_704_153_600_000);
+        assert!(ms("{a: new Date()}") > 1_704_153_600_000);
         assert!(parse_doc("[1]").is_err());
         let d = parse_doc(r#"{a: ~"1.5 (x)", b: ~abc, c: { $not: ~'it\'s' }, d: "~x"}"#).unwrap();
         assert_eq!(d.get_document("a").unwrap(), &doc! { "$regex": r"1\.5 \(x\)", "$options": "i" });
@@ -1043,6 +1067,12 @@ mod tests {
         assert_eq!(d[1].get("age"), Some(&Bson::Double(3.5)));
         assert_eq!(d[1].get_str("note").unwrap(), "say \"hi\"");
         assert_eq!(csv_value("007"), Bson::String("007".into()));
+        assert_eq!(csv_value("-007"), Bson::String("-007".into()));
+        assert_eq!(csv_value("+15551234567"), Bson::String("+15551234567".into()));
+        assert_eq!(csv_value("-7"), Bson::Int32(-7));
+        assert_eq!(csv_value("1e+3"), Bson::Double(1000.0));
+        let bom = parse_import("\u{feff}name,n\nann,1", ImportKind::Csv, &csv).unwrap();
+        assert_eq!(bom[0].get_str("name").unwrap(), "ann");
         let j = parse_import("{a: 1}\n\n{a: 2, b: ObjectId('6650f1c2a1b2c3d4e5f60700')}", ImportKind::JsonLines, &csv).unwrap();
         assert_eq!(j.len(), 2);
         assert!(parse_import("[1]", ImportKind::Json, &csv).is_err());

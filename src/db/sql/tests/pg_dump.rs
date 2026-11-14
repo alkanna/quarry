@@ -1154,3 +1154,152 @@ fn live_partitions_row_security_and_grants_work_through_a_transaction_pooler() {
     sql(&l, &pool, &format!("DROP SCHEMA {schema} CASCADE"));
     let _ = std::fs::remove_file(path);
 }
+
+/// A schema is made only when the target lacks it: CREATE SCHEMA IF NOT EXISTS is refused before the name is looked up to a
+/// login without CREATE on the database, even for public, and to anyone for pg_catalog, where the procedural languages
+/// other than PL/pgSQL put their extension.
+#[test]
+fn live_schemas_are_made_only_when_missing_so_a_login_without_create_on_the_database_restores() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let role = format!("qdump_nocreate_{t}");
+        let _roles = Roles::new(l, &[&role]);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_schema_src_{t}"));
+        sql(l, &src_pool, "CREATE TABLE public.pt (id int PRIMARY KEY, v text); INSERT INTO public.pt VALUES (1, 'a'), (2, 'b')");
+        let path = file(&format!("schema_pub_{t}"));
+        dump(l, &src, &plan("public", false, vec![table("pt", false, true, true, false)]), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("CREATE SCHEMA IF NOT EXISTS") && text.contains("nspname = 'public'"), "{var}: {text}");
+        // The target's owner is the superuser, so the login has CREATE on public only.
+        let name = format!("qdump_schema_dst_{t}");
+        let (_, dst_pool) = dbs.make(&name);
+        sql(l, &dst_pool, &format!("GRANT CREATE ON SCHEMA public TO {role}"));
+        let uri = l.uri.replacen("postgres:quarry@", &format!("{role}:pw@"), 1).rsplit_once('/').map(|(a, _)| format!("{a}/{name}")).unwrap();
+        let lim = live_pg_at(uri);
+        run(&lim, &lim.db.at(&name), "", &path).unwrap_or_else(|x| panic!("{var}: a login without CREATE on the database: {x}"));
+        drop(lim);
+        assert_eq!(one(l, &dst_pool, "SELECT count(*) FROM public.pt"), "2", "{var}");
+
+        // A language extension lives in pg_catalog, which the file must never try to make. The test images may not have one.
+        let lang = one(l, &src_pool, "SELECT COALESCE(min(name), '') FROM pg_available_extensions WHERE name IN ('plperl', 'plpython3u', 'pltcl')");
+        if !lang.is_empty() {
+            sql(l, &src_pool, &format!("CREATE EXTENSION {lang}"));
+            let wp = file(&format!("schema_lang_{t}"));
+            dump(l, &src, &plan("", true, Vec::new()), &wp).unwrap_or_else(|x| panic!("{var}: {x}"));
+            let text = std::fs::read_to_string(&wp).unwrap();
+            assert!(text.contains(&format!("CREATE EXTENSION IF NOT EXISTS \"{lang}\" WITH SCHEMA \"pg_catalog\"")), "{var}: {text}");
+            assert!(!text.contains("CREATE SCHEMA \"pg_catalog\"") && !text.contains("nspname = 'pg_catalog'"), "{var}: {text}");
+            let (dst, w_pool) = dbs.make(&format!("qdump_schema_lang_{t}"));
+            run(l, &dst, "", &wp).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(one(l, &w_pool, &format!("SELECT count(*) FROM pg_extension WHERE extname = '{lang}'")), "1", "{var}");
+            let _ = std::fs::remove_file(wp);
+        }
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// A child of plain INHERITS is written as a table of its own, so the checks it has from its parent are written on it too,
+/// with their comments.
+#[test]
+fn live_a_child_of_inherits_keeps_the_checks_of_its_parent() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_inh_src_{t}"));
+        let (dst, dst_pool) = dbs.make(&format!("qdump_inh_dst_{t}"));
+        sql(l, &src_pool, "CREATE TABLE public.inh_parent (id int, v int, CONSTRAINT v_pos CHECK (v > 0));
+CREATE TABLE public.inh_child (extra text, CONSTRAINT own_chk CHECK (extra <> 'x')) INHERITS (public.inh_parent);
+INSERT INTO public.inh_parent VALUES (1, 1);
+INSERT INTO public.inh_child VALUES (2, 5, 'a');
+COMMENT ON CONSTRAINT v_pos ON public.inh_child IS 'from the parent';");
+        let path = file(&format!("inh_{t}"));
+        dump(l, &src, &plan("public", false, vec![table("inh_parent", false, true, true, false), table("inh_child", false, true, true, false)]), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("ALTER TABLE ONLY \"public\".\"inh_child\" ADD CONSTRAINT \"v_pos\""), "{var}: {text}");
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        // The child is a table of its own now, so its inherits line differs by design: only its checks and comments are compared.
+        let of_child = |v: Vec<String>| v.into_iter().filter(|x| (x.starts_with("constraint: public.inh_child ") && x.contains(" c CHECK ")) || (x.starts_with("comment: ") && x.contains("inh_child"))).collect::<Vec<_>>();
+        let a = of_child(shape(l, &src_pool));
+        assert_eq!(a.len(), 3, "{var}: {a:?}");
+        same(var, &a, &of_child(shape(l, &dst_pool)));
+        assert_eq!(one(l, &dst_pool, "SELECT count(*) FROM public.inh_child"), "1", "{var}");
+        let bad = l.w.rt.block_on(async { sqlx::raw_sql("INSERT INTO public.inh_child VALUES (3, -1, 'b')").execute(&dst_pool).await });
+        assert!(bad.is_err(), "{var}: the parent's check is gone from the restored child");
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// CREATE DOMAIN resolves the functions of its DEFAULT at once, so the default is set after the functions.
+#[test]
+fn live_a_domain_whose_default_calls_a_function_round_trips() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_dom_src_{t}"));
+        let (dst, dst_pool) = dbs.make(&format!("qdump_dom_dst_{t}"));
+        sql(l, &src_pool, "CREATE FUNCTION public.dflt() RETURNS int LANGUAGE sql IMMUTABLE AS 'select 7';
+CREATE DOMAIN public.dd AS int DEFAULT public.dflt() CHECK (VALUE > 0);
+CREATE TABLE public.dt (id int, x public.dd);
+INSERT INTO public.dt VALUES (1, 3);");
+        let before = shape(l, &src_pool);
+        assert!(before.iter().any(|x| x.starts_with("type: public.dd ") && x.contains("def=public.dflt()")), "{var}: {before:?}");
+        let path = file(&format!("dom_{t}"));
+        dump(l, &src, &plan("", true, Vec::new()), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{var}: {s} is not in the dump"));
+        assert!(at("CREATE DOMAIN \"public\".\"dd\"") < at("FUNCTION public.dflt()") && at("FUNCTION public.dflt()") < at("ALTER DOMAIN \"public\".\"dd\" SET DEFAULT"), "{var}: {text}");
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(var, &before, &shape(l, &dst_pool));
+        sql(l, &dst_pool, "INSERT INTO public.dt (id) VALUES (2)");
+        assert_eq!(one(l, &dst_pool, "SELECT x FROM public.dt WHERE id = 2"), "7", "{var}");
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// A comment on a constraint the dump left out (a foreign key to a table not in it) is left out with it, so the file runs.
+/// Comments on a range type left out for its canonical function are filtered the same way, but making one takes a C
+/// function, so that half has no live test.
+#[test]
+fn live_a_comment_on_a_constraint_left_out_is_not_written() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_ccom_src_{t}"));
+        let (dst, dst_pool) = dbs.make(&format!("qdump_ccom_dst_{t}"));
+        sql(l, &src_pool, "CREATE TABLE public.fk_target (id int PRIMARY KEY);
+CREATE TABLE public.fk_src (id int PRIMARY KEY, t int CONSTRAINT to_target REFERENCES public.fk_target);
+COMMENT ON CONSTRAINT to_target ON public.fk_src IS 'points away';
+COMMENT ON CONSTRAINT fk_src_pkey ON public.fk_src IS 'the key';");
+        let path = file(&format!("ccom_{t}"));
+        dump(l, &src, &plan("public", false, vec![table("fk_src", false, true, true, false)]), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("Foreign key to_target of public.fk_src was left out"), "{var}: {text}");
+        assert!(!text.contains("COMMENT ON CONSTRAINT \"to_target\"") && text.contains("COMMENT ON CONSTRAINT \"fk_src_pkey\""), "{var}: {text}");
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(one(l, &dst_pool, "SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'fk_src_pkey'"), "the key", "{var}");
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// A SQL_ASCII database stores bytes unchecked: a value that is not UTF-8 stops the dump with its table and column instead
+/// of being written with replacement characters.
+#[test]
+fn live_a_value_that_is_not_utf8_stops_the_dump_and_names_its_table() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let name = format!("qdump_ascii_{t}");
+        Dbs::drop_one(l, &name);
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\" TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'")).execute(&l.pool).await }).unwrap_or_else(|x| panic!("{var}: create {name}: {x}"));
+        dbs.names.push(name.clone());
+        let pool = pool_of(l, &name);
+        sql(l, &pool, r"CREATE TABLE public.raw (id int, s text); INSERT INTO public.raw VALUES (1, 'plain'), (2, convert_from('\x61ff62'::bytea, 'SQL_ASCII'))");
+        let path = file(&format!("ascii_{t}"));
+        let _ = std::fs::remove_file(&path);
+        let e = dump(l, &l.db.at(&name), &plan("public", false, vec![table("raw", false, true, true, false)]), &path).unwrap_err();
+        // Recent servers refuse to send the bytes to a UTF-8 client themselves (22021); either way nothing is written.
+        assert!((e.contains("not valid UTF-8") && e.contains("\"s\"") && e.contains("public.raw")) || e.contains("22021"), "{var}: {e}");
+        assert!(!path.exists(), "{var}: a failed dump leaves no file");
+    });
+}

@@ -174,6 +174,8 @@ impl Vim {
         self.mode = Mode::Normal;
         self.pending.clear();
         self.typing = None;
+        // The caret moved by a click or an undo, so `j` and `k` aim for its new column.
+        self.want_col = None;
     }
 
     /// The selection to show as (fixed end, moving end), end-exclusive like egui's ranges: Visual
@@ -619,6 +621,7 @@ impl Vim {
 
     fn enter_insert(&mut self, b: &[char], c: usize) {
         self.mode = Mode::Insert;
+        self.want_col = None;
         (self.ins_at, self.ins_len) = (c, b.len());
     }
 

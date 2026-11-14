@@ -276,7 +276,14 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
                 }
             }
             note += if had_password { "." } else { ". No password in the URL, type it below." };
+            // A string that says nothing about TLS keeps the form's TLS settings, or pasting only to change the host
+            // would quietly drop verify-full and the certificate files. Not across engines, whose modes differ.
+            let same_engine = db::sql::Addr::default_port(&f.addr.scheme) == db::sql::Addr::default_port(&a.scheme);
+            let old = std::mem::take(&mut f.addr);
             f.addr = db::sql::Addr { ssl_mode: a.ssl_mode, ..a };
+            if !st.filled[PASTE_TLS] && same_engine {
+                (f.addr.ssl_mode, f.addr.ssl_ca, f.addr.ssl_cert, f.addr.ssl_key) = (old.ssl_mode, old.ssl_ca, old.ssl_cert, old.ssl_key);
+            }
             // A password in the box would stay readable on screen, so it moves to the masked field.
             if had_password {
                 st.text.clear();
@@ -647,7 +654,9 @@ impl App {
         let p = &self.prefs;
         let keyed = p.history.keys().chain(p.shell_histories.keys()).chain(p.cols.keys()).chain(p.schema_maps.keys()).chain(p.relations.keys());
         let history = keyed.filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
-        self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).max().unwrap_or(0) + 1
+        // An agent policy names its connection by id too, and a new connection must never inherit another's access.
+        let agents = self.agents.cfg.conns.keys().copied();
+        self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).chain(agents).max().unwrap_or(0) + 1
     }
 
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {

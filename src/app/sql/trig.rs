@@ -333,6 +333,7 @@ impl App {
             s.st.applying = true;
             // The draft of a trigger that is being made is cleared once the structure lists it under this name.
             s.st.trig_made = if let TrigJob::Create(c) = &job { Some(c.def.name.clone()) } else { None };
+            s.st.trig_saving = if let TrigJob::Edit { was, .. } = &job { Some(was.name.clone()) } else { None };
         }
         self.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
     }

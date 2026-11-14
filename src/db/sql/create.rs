@@ -526,7 +526,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
         let _ = c.close().await;
     } else {
         let sql = format!("SELECT COUNT(*) AS n FROM {}", d.qualified(schema, table));
-        (info.rows, info.rows_estimated) = match bounded_count(c, pool, &sql).await {
+        (info.rows, info.rows_estimated) = match bounded_count(c, pool, d, &sql).await {
             Some(n) => (Some(n), false),
             None => (super::structure::num(&st, "est"), true),
         };
@@ -557,10 +557,11 @@ async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
     }
 }
 
-/// The exact count, or None after COUNT_WAIT. A count cut short is ended on the server before this returns,
-/// so no COUNT keeps a table lock wait, the disk or a connection busy once the dialog has its answer.
-async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, sql: &str) -> Option<u64> {
-    let id = sqlx::query("SELECT CONNECTION_ID() AS n").fetch_one(&mut c).await.ok().and_then(|r| super::structure::num(&r, "n"));
+/// The exact count, or None after COUNT_WAIT. A count cut short is stopped on the server before this returns when
+/// the server can be told apart from others behind the same address, so no COUNT keeps a table lock wait, the disk
+/// or a connection busy once the dialog has its answer.
+async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, d: Dialect, sql: &str) -> Option<u64> {
+    let me = whoami(&mut c, d).await;
     let got = tokio::time::timeout(COUNT_WAIT, sqlx::query(sql).persistent(false).fetch_one(&mut c)).await;
     match got {
         Ok(r) => {
@@ -568,22 +569,51 @@ async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, sql
             r.ok().and_then(|r| super::structure::num(&r, "n"))
         }
         Err(_) => {
-            // Left in the middle of a statement, so it cannot be used again; the KILL ends it on the server.
+            // Left in the middle of a statement, so it cannot be used again. When the server cannot be told apart
+            // nothing is stopped, and the count runs on until the server finds the socket closed.
             drop(c);
-            if let Some(id) = id {
-                kill(pool, id).await;
+            if let Some(me) = me {
+                stop_count(pool, d, &me, sql).await;
             }
             None
         }
     }
 }
 
-/// Ends connection `id` and its statement, then waits for the server to let it go, since KILL only flags the
-/// thread and it stops at its next check.
-async fn kill(pool: &sqlx::MySqlPool, id: u64) {
-    let _ = sqlx::raw_sql(&format!("KILL {id}")).execute(pool).await;
+/// The connection id and what tells this server from another one behind the same address (a proxy or a load
+/// balancer may hand each pool connection to a different backend, where the same id is someone else). The same
+/// columns as the Server window's Kill check, with the port added. None when they cannot be read.
+fn whoami_sql(d: Dialect) -> &'static str {
+    if d == Dialect::MariaDb { "SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@hostname, @@port, @@server_id) AS who" } else { "SELECT CONNECTION_ID() AS n, CONCAT_WS('/', @@server_uuid, @@port) AS who" }
+}
+
+async fn whoami(c: &mut sqlx::MySqlConnection, d: Dialect) -> Option<(u64, String)> {
+    let r = sqlx::query(whoami_sql(d)).fetch_one(&mut *c).await.ok()?;
+    let who = text(&r, "who").filter(|w| !w.trim_matches('/').is_empty())?;
+    Some((super::structure::num(&r, "n")?, who))
+}
+
+/// Stops the count of connection `me` with KILL QUERY, which ends only a statement, never a whole connection, and
+/// only after the connection sending it shows the same server and that thread still runs `sql`, so an id from
+/// another backend, or one a multiplexing proxy gave another client, is never touched. Then waits for the
+/// statement to go, since KILL only flags the thread and it stops at its next check.
+async fn stop_count(pool: &sqlx::MySqlPool, d: Dialect, me: &(u64, String), sql: &str) {
+    let Ok(mut k) = pool.acquire().await else { return };
+    let Some(here) = whoami(&mut k, d).await else { return };
+    if here.1 != me.1 {
+        return;
+    }
+    let id = me.0;
+    let info = sqlx::query("SELECT INFO FROM information_schema.PROCESSLIST WHERE ID = ?").bind(id).fetch_optional(&mut *k).await.ok().flatten().and_then(|r| text(&r, "INFO"));
+    if info.is_none_or(|i| i.trim() != sql.trim()) {
+        return;
+    }
+    // A plain query, not raw_sql: a raw statement on a borrowed connection makes the spawned future not Send.
+    if sqlx::query(&d.cancel(id)).persistent(false).execute(&mut *k).await.is_err() {
+        return;
+    }
     for _ in 0..30 {
-        let left = sqlx::query("SELECT COUNT(*) AS n FROM information_schema.PROCESSLIST WHERE ID = ?").bind(id).fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n"));
+        let left = sqlx::query("SELECT COUNT(*) AS n FROM information_schema.PROCESSLIST WHERE ID = ? AND INFO IS NOT NULL").bind(id).fetch_one(&mut *k).await.ok().and_then(|r| super::structure::num(&r, "n"));
         if left.unwrap_or(0) == 0 {
             break;
         }
@@ -607,7 +637,7 @@ pub fn stored_name(listed: &[String], name: &str) -> String {
 }
 
 /// Whether the server compares database and table names without case (lower_case_table_names 1 or 2).
-async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
+pub(super) async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
     let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(se)?;
     Ok(super::structure::num(&r, "n").unwrap_or(0) != 0)
 }
@@ -907,6 +937,18 @@ mod tests {
             assert!(drop_table_sql(Dialect::MySql, name, "t", false, false).is_err(), "{name:?}");
         }
         assert!(create_db_sql(Dialect::MySql, &"x".repeat(64), "utf8mb4", "utf8mb4_bin", &m).is_ok());
+    }
+
+    /// Review finding: a count cut short sent KILL, which ends a whole connection, through any pool connection. Behind
+    /// a load balancer that could end another client's connection on another backend, just by opening the Drop
+    /// dialog. Now it is KILL QUERY, sent only after the server and the id are read together and match.
+    #[test]
+    fn a_count_cut_short_is_stopped_with_kill_query_on_the_same_server_only() {
+        for d in [Dialect::MySql, Dialect::MariaDb] {
+            assert_eq!(d.cancel(7), "KILL QUERY 7");
+            assert!(whoami_sql(d).contains("CONNECTION_ID()") && whoami_sql(d).contains("@@port"), "{d:?}");
+            one_statement(whoami_sql(d));
+        }
     }
 
     /// Review finding 4: tables and databases another client named `a.b`, ` lead` or `x.y` could not be dropped

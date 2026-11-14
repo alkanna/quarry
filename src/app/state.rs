@@ -479,6 +479,9 @@ pub(super) struct SqlTab {
     pub(super) run_db: String,
     /// PostgreSQL only: the schema the Query view puts first in search_path. Empty keeps the server's own.
     pub(super) run_schema: String,
+    /// `run_db` and `run_schema` as they were when the shown results ran. Paging and export read them, so a
+    /// picker changed afterwards does not send the statement to another database.
+    pub(super) ran_in: Option<(String, String)>,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
@@ -607,6 +610,8 @@ pub(super) struct SchemaTab {
     pub(super) vtext: String,
     pub(super) vlevel: u8,
     pub(super) vwarn: bool,
+    /// An error action the switch has no place for, like MongoDB 8.1's errorAndLog, kept so Apply does not drop it.
+    pub(super) vaction: Option<String>,
     pub(super) vreq: u64,
     pub(super) vloaded: bool,
     /// Field paths whose children are folded away.
@@ -615,7 +620,7 @@ pub(super) struct SchemaTab {
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false, closed: HashSet::new() }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vaction: None, vreq: 0, vloaded: false, closed: HashSet::new() }
     }
 }
 

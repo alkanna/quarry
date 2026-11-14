@@ -463,9 +463,27 @@ impl App {
         // database of the connection can hold a table of the same name.
         let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sql.is_some() && answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(d, ns)| (d.pg_database(), ns)), (conn, &database, &schema, &table))).collect();
         let at = if database.is_empty() { (schema.clone(), String::new()) } else { (database.clone(), schema.clone()) };
+        if tabs.is_empty() {
+            // No tab resolves to the answer's table after a reconnect dropped the connection's pool, or when a PostgreSQL
+            // tab's schema follows a sidebar pick that changed meanwhile. The tab that sent it still needs Apply back.
+            for t in self.tabs.iter_mut().filter(|t| may_answer_tab(&t.sel, (conn, &database, &schema, &table))) {
+                if let Some(s) = t.sql.as_mut() {
+                    s.st.applying = false;
+                }
+            }
+        }
         for i in tabs {
             if let Some(s) = self.tabs[i].sql.as_mut() {
                 s.st.applying = false;
+                if !alter {
+                    let saving = s.st.trig_saving.take();
+                    if !ok {
+                        // A refused create keeps its draft: an existing trigger of that name is not the one it would make.
+                        s.st.trig_made = None;
+                    } else if let Some(k) = saving {
+                        s.st.trig.remove(&k);
+                    }
+                }
                 if clear {
                     s.st.staged.clear();
                 }
@@ -746,7 +764,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            self.set_staged(all);
+            self.set_staged(restage(self.staged(), f.from.as_deref(), all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }
@@ -913,7 +931,7 @@ impl App {
         if stage || now {
             *keep = false;
             let all = f.view.take().map(|v| v.all).unwrap_or_default();
-            self.set_staged(all);
+            self.set_staged(restage(self.staged(), None, all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }
@@ -950,6 +968,27 @@ impl App {
 pub(in crate::app) fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
     let (conn, database, schema, table) = answer;
     sel.conn == conn && sel.coll == table && target.is_some_and(|(d, ns)| ns == schema && d == database)
+}
+
+/// Whether `sel` could be the tab that sent an answer no tab resolves to: its connection and table, and a database and schema
+/// that do not contradict the answer. An empty `sel.db` is the PostgreSQL connection's own database, an empty `sel.schema`
+/// the sidebar's pick. Only used to turn Apply back on when no tab matched; a near miss can only enable Apply early on a tab of
+/// a same-named table with its own change running, which is rare.
+fn may_answer_tab(sel: &Sel, answer: (u64, &str, &str, &str)) -> bool {
+    let (conn, database, schema, table) = answer;
+    // MySQL answers name the database as the namespace and leave the PostgreSQL database empty.
+    let db = if database.is_empty() { schema } else { database };
+    sel.conn == conn && sel.coll == table && (sel.db.is_empty() || sel.db == db) && (database.is_empty() || sel.schema.is_empty() || sel.schema == schema)
+}
+
+/// The staged list once a structure dialog stages `all`, its snapshot of the list (`rest_len` changes long) followed by its
+/// own changes. It starts from the list as it is now, not the snapshot: an Apply that finished meanwhile emptied the list,
+/// and the snapshot would stage those changes again. `replaces` is the column whose earlier staged edit the dialog took over.
+pub(in crate::app) fn restage(now: &[Change], replaces: Option<&str>, mut all: Vec<Change>, rest_len: usize) -> Vec<Change> {
+    let new = all.split_off(rest_len.min(all.len()));
+    let mut staged: Vec<Change> = now.iter().filter(|c| !matches!(c, Change::Modify { from, .. } if Some(from.as_str()) == replaces)).cloned().collect();
+    staged.extend(new);
+    staged
 }
 
 /// What an answer does to the open tabs of its table: (clear the staged changes, reload the structure). An answer that does
@@ -993,5 +1032,36 @@ mod tests {
         assert_eq!(answer_effects(true, false, false), (false, true));
         assert_eq!(answer_effects(false, false, false), (false, true), "a failed trigger change still reloads");
         assert_eq!(answer_effects(false, true, true), (true, true), "a commit that may have run reloads the table");
+    }
+
+    /// Review finding: an answer no tab resolved to left Apply disabled for good.
+    #[test]
+    fn an_unmatched_answer_finds_the_tab_that_may_have_sent_it() {
+        let sel = |db: &str, schema: &str| Sel { conn: 1, db: db.into(), schema: schema.into(), coll: "t".into() };
+        let ans = (1, "shop", "public", "t");
+        assert!(may_answer_tab(&sel("shop", ""), ans), "a schema left to the sidebar's pick");
+        assert!(may_answer_tab(&sel("", "public"), ans), "the connection's own database");
+        assert!(may_answer_tab(&sel("shop", "public"), ans));
+        assert!(!may_answer_tab(&sel("other", "public"), ans));
+        assert!(!may_answer_tab(&sel("shop", "audit"), ans));
+        assert!(!may_answer_tab(&Sel { coll: "u".into(), ..sel("shop", "") }, ans));
+        assert!(!may_answer_tab(&Sel { conn: 2, ..sel("shop", "") }, ans));
+        // MySQL names the database as the namespace
+        assert!(may_answer_tab(&sel("shop", ""), (1, "", "shop", "t")));
+        assert!(!may_answer_tab(&sel("other", ""), (1, "", "shop", "t")));
+    }
+
+    /// Review finding: an Apply that finished while a column or index dialog was open came back staged on Stage.
+    #[test]
+    fn a_dialog_stages_onto_the_list_as_it_is_now() {
+        let add = |n: &str| Change::Add { def: ColDef::new(n, "INT"), pos: Pos::Keep };
+        let modify = |from: &str, n: &str| Change::Modify { from: from.into(), def: ColDef::new(n, "INT"), pos: Pos::Keep };
+        // the snapshot held add(a), which an Apply has since run: only the dialog's own change is staged
+        assert_eq!(restage(&[], None, vec![add("b")], 0), vec![add("b")]);
+        assert_eq!(restage(&[], None, vec![add("a"), add("b")], 1), vec![add("b")], "the snapshot part is not staged again");
+        assert_eq!(restage(&[add("c")], None, vec![add("b")], 0), vec![add("c"), add("b")]);
+        // editing a column whose edit was staged replaces that edit
+        assert_eq!(restage(&[modify("x", "y"), add("c")], Some("x"), vec![modify("x", "z")], 0), vec![add("c"), modify("x", "z")]);
+        assert_eq!(restage(&[Change::DropIndex("i".into())], None, vec![Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())], 0), vec![Change::DropIndex("i".into()), Change::DropIndex("j".into()), Change::AddIndex(IndexDef::default())]);
     }
 }

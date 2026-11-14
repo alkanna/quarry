@@ -632,7 +632,7 @@ fn command_class(command: &Document) -> OpClass {
         return OpClass::ChangeStructure;
     }
     if name.eq_ignore_ascii_case("aggregate") {
-        let stages: Vec<Document> = command.get_array("pipeline").map(|a| a.iter().filter_map(|s| s.as_document().cloned()).collect()).unwrap_or_default();
+        let stages = command_pipeline(command);
         let mut writes = false;
         each_stage(&stages, &mut |n, _| writes |= matches!(n, "$out" | "$merge"));
         if writes {
@@ -694,6 +694,11 @@ impl Call {
                 if let Some(Bson::String(c)) = command.iter().next().map(|(_, v)| v) {
                     out.push(Target { db: db.clone(), coll: Some(c.clone()) });
                 }
+                // A view's source and what its pipeline joins are read through it, so scope covers them too.
+                if let Ok(src) = command.get_str("viewOn") {
+                    out.push(Target { db: db.clone(), coll: Some(src.to_string()) });
+                }
+                pipeline_targets(db, &command_pipeline(command), &mut out);
             }
             Call::Aggregate { ns, pipeline, .. } | Call::AggregateInto { ns, pipeline } | Call::Explain { ns, pipeline: Some(pipeline), .. } => pipeline_targets(&ns.db, pipeline, &mut out),
             Call::Update { ns, update: Update::Pipeline(p), .. } => pipeline_targets(&ns.db, p, &mut out),
@@ -723,6 +728,11 @@ pub fn each_stage(p: &[Document], f: &mut dyn FnMut(&str, &Bson)) {
     }
 }
 
+/// The stages of a command's `pipeline` (aggregate, or a view's create or collMod).
+pub fn command_pipeline(c: &Document) -> Vec<Document> {
+    c.get_array("pipeline").map(|a| a.iter().filter_map(|s| s.as_document().cloned()).collect()).unwrap_or_default()
+}
+
 /// The namespace a $lookup, $graphLookup, $unionWith, $out or $merge stage names, in `db` unless it says otherwise.
 pub fn stage_target(db: &str, name: &str, body: &Bson) -> Option<Target> {
     let named = |v: Option<&Bson>| -> Option<Target> {
@@ -742,7 +752,7 @@ pub fn stage_target(db: &str, name: &str, body: &Bson) -> Option<Target> {
     }
 }
 
-fn pipeline_targets(db: &str, p: &[Document], out: &mut Vec<Target>) {
+pub(crate) fn pipeline_targets(db: &str, p: &[Document], out: &mut Vec<Target>) {
     each_stage(p, &mut |name, body| {
         if let Some(t) = stage_target(db, name, body)
             && !out.contains(&t)

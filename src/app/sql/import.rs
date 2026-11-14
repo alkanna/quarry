@@ -40,6 +40,8 @@ pub(in crate::app) struct ImportForm {
     info: Option<Result<TableInfo, String>>,
     file: FileState,
     dup: Dup,
+    /// The mapping chosen before an unlock reopened the form, put back once the table's columns are read again.
+    restore: Option<csv::Mapping>,
 }
 
 fn hash_of(v: &impl std::hash::Hash) -> u64 {
@@ -165,7 +167,7 @@ impl App {
         };
         self.req += 1;
         self.worker.sql_table_info(self.req, sql, ns, table.clone());
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.req, info: None, file, dup: Dup::Stop })));
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.req, info: None, file, dup: Dup::Stop, restore: None })));
     }
 
     /// The columns of the table arrived.
@@ -177,6 +179,9 @@ impl App {
         f.info = Some(match res {
             Ok(info) => {
                 f.file.remap(&info);
+                if let Some(m) = f.restore.take().filter(|m| m.map.len() == f.file.map.map.len()) {
+                    f.file.map = m;
+                }
                 Ok(info)
             }
             Err(e) => Err(e),
@@ -448,7 +453,14 @@ impl App {
         } else if unlock {
             *keep = false;
             let (conn, db, schema, table, src) = (f.conn, f.db.clone(), f.schema.clone(), f.table.clone(), f.file.src.clone());
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.open_sql_import_with(conn, db, schema, table, Some(src))))));
+            // The form is built again after the unlock, with the choices made in this one.
+            let (opts, header, map, dup) = (f.file.opts, f.file.header, f.file.map.clone(), f.dup);
+            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| {
+                a.open_sql_import_with(conn, db, schema, table, Some(src));
+                if let Some(Modal::SqlImport(nf)) = &mut a.modal {
+                    (nf.file.opts, nf.file.header, nf.dup, nf.restore) = (opts, header, dup, Some(map));
+                }
+            }))));
         }
     }
 
@@ -481,7 +493,7 @@ impl App {
         file.map.map = vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), None];
         file.refmt(5, &info);
         let conn = self.t().map_or(0, |t| t.sel.conn);
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db: "shop".into(), schema: String::new(), table: "orders".into(), req: 0, info: Some(Ok(info)), file, dup: Dup::Stop })));
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db: "shop".into(), schema: String::new(), table: "orders".into(), req: 0, info: Some(Ok(info)), file, dup: Dup::Stop, restore: None })));
     }
 }
 

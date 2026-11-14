@@ -422,6 +422,8 @@ pub(super) fn quoted_list(args: &str) -> Vec<String> {
                 open = false;
                 out.push(std::mem::take(&mut cur));
             }
+            // COLUMN_TYPE writes a backslash in a member escaped.
+            ('\\', true) => cur.extend(it.next()),
             (_, true) => cur.push(c),
             _ => {}
         }
@@ -594,6 +596,11 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
         Kind::Date | Kind::DateTime => value::parse_edit(Dialect::MySql, col.kind, &to_iso(raw, fmt))?,
         k => value::parse_edit(Dialect::MySql, k, raw)?,
     };
+    // parse_edit reads the word NULL as a NULL for numbers and dates, which a NOT NULL column refuses or, outside
+    // strict mode, stores as 0.
+    if parsed == Bson::Null && !col.nullable && !col.auto_increment {
+        return Err("NULL, but the column does not allow NULL. Skip it or fill it in the file.".into());
+    }
     if let (Some(max), Bson::String(s)) = (col.max_chars, &parsed) {
         let n = s.chars().count();
         if n > max {
@@ -855,6 +862,13 @@ mod tests {
         assert_eq!(rows("\"\"\nx"), [vec![""], vec!["x"]]);
         // A quote inside an unquoted value is text, and backslashes are never escapes.
         assert_eq!(rows("5\" pipe,C:\\dir\\,\\N"), [vec!["5\" pipe", "C:\\dir\\", "\\N"]]);
+    }
+
+    #[test]
+    fn mysql_null_word_in_a_not_null_number_and_escaped_enum_members() {
+        assert!(convert(&col("qty", "int", false), "NULL", true, DateFmt::DayFirst).is_err());
+        assert_eq!(convert(&col("qty", "int", true), "NULL", true, DateFmt::DayFirst), Ok(Param::Null));
+        assert_eq!(quoted_list("'C:\\\\dir','it''s'"), ["C:\\dir", "it's"]);
     }
 
     #[test]

@@ -174,7 +174,8 @@ fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql
             return Err(format!("{c} is a floating point column, whose value cannot be matched exactly. Filter {} by hand.", fk.ref_table));
         }
         let key = col.map_or(c.as_str(), |k| k.name.as_str());
-        match db::get_path(row, key) {
+        // A SQL column name may hold a dot, so the row is read by the whole name, never as a path.
+        match row.get(key) {
             Some(Bson::Null) | None => return Err(format!("{c} is NULL in this row, so it points to nothing.")),
             v => lits.push(db::copy::sql_literal(v, col.is_some_and(|k| is_numeric(k.kind)), bs)),
         }
@@ -548,7 +549,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            self.set_staged(all);
+            self.set_staged(super::alter::restage(self.staged(), None, all, f.rest.len()));
             if now {
                 self.request_alter_apply();
             }

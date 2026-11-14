@@ -529,7 +529,8 @@ pub struct Obj {
     pub oid: String,
     pub schema: String,
     pub name: String,
-    /// A function's arguments as `pg_get_function_identity_arguments` writes them.
+    /// A function's arguments as `pg_get_function_identity_arguments` writes them, with an ordered-set aggregate's
+    /// ORDER BY written as a comma: GRANT names a routine by its plain argument list and refuses ORDER BY there.
     pub sig: String,
     /// "view", "procedure" and so on, empty for a plain table or function.
     pub detail: String,
@@ -1315,7 +1316,7 @@ fn objects_sql(kind: Kind) -> String {
             )
         }
         Kind::Functions => format!(
-            "SELECT p.oid::text AS oid, p.proname::text AS name, pg_get_function_identity_arguments(p.oid) AS sig, CASE p.prokind WHEN 'p' THEN 'procedure' WHEN 'a' THEN 'aggregate' WHEN 'w' THEN 'window' ELSE '' END AS detail, \
+            "SELECT p.oid::text AS oid, p.proname::text AS name, replace(pg_get_function_identity_arguments(p.oid), ' ORDER BY ', ', ') AS sig, CASE p.prokind WHEN 'p' THEN 'procedure' WHEN 'a' THEN 'aggregate' WHEN 'w' THEN 'window' ELSE '' END AS detail, \
              pg_get_userbyid(p.proowner)::text AS owner, {} AS acl FROM pg_proc p WHERE p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1) ORDER BY 2, 3 LIMIT {lim}",
             acl_json("p.proacl", ch, "p.proowner")
         ),
@@ -1386,7 +1387,7 @@ async fn target_ok(tx: &mut Tx<'_>, db: &Db, tg: &Target) -> Res<bool> {
     let (sql, args): (&str, Vec<Param>) = match tg.kind {
         Kind::Tables | Kind::Sequences => ("SELECT count(*)::text AS n FROM pg_class WHERE oid = $1::oid AND relname = $2 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $3)", vec![Param::Text(tg.oid.clone()), Param::Text(tg.name.clone()), Param::Text(tg.schema.clone())]),
         Kind::Functions => (
-            "SELECT count(*)::text AS n FROM pg_proc WHERE oid = $1::oid AND proname = $2 AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $3) AND pg_get_function_identity_arguments(oid) = $4",
+            "SELECT count(*)::text AS n FROM pg_proc WHERE oid = $1::oid AND proname = $2 AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $3) AND replace(pg_get_function_identity_arguments(oid), ' ORDER BY ', ', ') = $4",
             vec![Param::Text(tg.oid.clone()), Param::Text(tg.name.clone()), Param::Text(tg.schema.clone()), Param::Text(tg.sig.clone())],
         ),
         Kind::Schemas => ("SELECT count(*)::text AS n FROM pg_namespace WHERE oid = $1::oid AND nspname = $2", vec![Param::Text(tg.oid.clone()), Param::Text(tg.name.clone())]),

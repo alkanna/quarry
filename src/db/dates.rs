@@ -124,6 +124,11 @@ pub(crate) fn period(s: &str) -> Option<(i64, i64)> {
     Some((a * DAY_MS, b * DAY_MS))
 }
 
+/// Extended JSON for the date `ms` milliseconds after the epoch.
+pub(crate) fn date_json(ms: i64) -> String {
+    format!("{{\"$date\":{{\"$numberLong\":\"{ms}\"}}}}")
+}
+
 /// Extended JSON for a `#` shortcut (the text after `#`), relative to `now` in epoch ms, with the
 /// original's rules (dehumanizeSelector, renderer line 2129): calendar words become `$gte`/`$lt`
 /// ranges, `lastN<unit>` is `$gte` N units ago, `nextN<unit>` is between now and N units ahead,
@@ -131,7 +136,7 @@ pub(crate) fn period(s: &str) -> Option<(i64, i64)> {
 /// `since`, `until`, `before`, `after` take a day. Case is ignored.
 // ponytail: days and months are UTC where the original uses local time; add the local offset if people expect local midnight
 pub fn date_shortcut(word: &str, now: i64) -> Option<String> {
-    let date = |ms: i64| format!("{{\"$date\":{{\"$numberLong\":\"{ms}\"}}}}");
+    let date = date_json;
     let range = |a: i64, b: i64| format!("{{\"$gte\":{},\"$lt\":{}}}", date(a), date(b));
     // The original ends periods with endOf(), the last millisecond, and $lte.
     let whole = |a: i64, b: i64| format!("{{\"$gte\":{},\"$lte\":{}}}", date(a), date(b - 1));
@@ -198,7 +203,7 @@ pub fn date_shortcut(word: &str, now: i64) -> Option<String> {
 /// Extended JSON for an `@` moment (the text after `@`): `now`, a date or ISO date-time (UTC
 /// unless it names a zone), or a time today as `HH:MM` or `HH:MM:SS` (original: renderer line 2242).
 pub fn moment(word: &str, now: i64) -> Option<String> {
-    let date = |ms: i64| format!("{{\"$date\":{{\"$numberLong\":\"{ms}\"}}}}");
+    let date = date_json;
     if word.eq_ignore_ascii_case("now") {
         return Some(date(now));
     }

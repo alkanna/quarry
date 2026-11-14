@@ -361,7 +361,8 @@ pub fn session_state(stmt: &str, d: Dialect) -> bool {
         "RESET" | "DISCARD" | "LISTEN" | "UNLISTEN" | "PREPARE" | "DEALLOCATE" | "LOAD" => true,
         "DECLARE" => words.windows(2).any(|w| w[0] == "WITH" && w[1] == "HOLD"),
         // A DO block is code the lexer cannot read: it can take an advisory lock or make a temporary table.
-        "DO" => !quarry_guard_block(stmt),
+        // The dump's own blocks: types and domains, and schemas made only when missing.
+        "DO" => !quarry_guard_block(stmt) && !crate::db::sql::pg::dump::is_schema_block(stmt.trim()),
         "CREATE" => matches!(at(1), "TEMP" | "TEMPORARY") || (matches!(at(1), "LOCAL" | "GLOBAL") && matches!(at(2), "TEMP" | "TEMPORARY")),
         _ => false,
     };

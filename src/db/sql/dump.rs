@@ -296,9 +296,16 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
         views.push((t.name.clone(), s));
     }
     let order = view_order(d, &views);
-    // Tables first, then views, which need them; data before triggers, which would otherwise fire on every row.
+    // Tables first, then routines, then views, which need both (a view may call a stored function, which the server
+    // looks up when the view is created); data before triggers, which would otherwise fire on every row.
     let tables: Vec<&DumpTable> = plan.tables.iter().filter(|t| !t.view).chain(order.iter().map(|&i| view_rows[i])).collect();
-    for t in &tables {
+    let mut routines_done = !plan.extras;
+    for t in tables.iter().map(Some).chain(std::iter::once(None)) {
+        if !routines_done && t.is_none_or(|t| t.view) {
+            routines_done = true;
+            dump_routines(c, d, plan, out, cancel).await?;
+        }
+        let Some(t) = t else { break };
         stopped(cancel)?;
         if !t.structure && !t.content {
             continue;
@@ -331,20 +338,26 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
                 put(out, &format!("--\n-- Trigger {}\n--\n\nDROP TRIGGER IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
             }
         }
-        let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
-        for (n, kind) in routines {
-            stopped(cancel)?;
-            let kind = if kind == "FUNCTION" { "FUNCTION" } else { "PROCEDURE" };
-            let (mode, stmt) = show_create(c, format!("SHOW CREATE {kind} {}", d.qualified(&plan.schema, &n)), 2).await?;
-            if stmt.is_empty() {
-                put(out, &format!("-- {kind} {} was left out: the account may not read its definition.\n\n", note(&n)))?;
-                continue;
-            }
-            put(out, &format!("--\n-- {kind} {}\n--\n\nDROP {kind} IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
-        }
     }
     put(out, "SET TIME_ZONE=@OLD_TIME_ZONE;\nSET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;\nSET SQL_MODE=@OLD_SQL_MODE;\n-- Dump complete\n")?;
     Ok(rows)
+}
+
+/// Every stored function and procedure of the schema, each with its own DELIMITER block and sql_mode.
+async fn dump_routines(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, out: &mut (dyn Write + Send), cancel: &AtomicBool) -> Res<()> {
+    let q = |n: &str| d.quote_ident(n);
+    let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
+    for (n, kind) in routines {
+        stopped(cancel)?;
+        let kind = if kind == "FUNCTION" { "FUNCTION" } else { "PROCEDURE" };
+        let (mode, stmt) = show_create(c, format!("SHOW CREATE {kind} {}", d.qualified(&plan.schema, &n)), 2).await?;
+        if stmt.is_empty() {
+            put(out, &format!("-- {kind} {} was left out: the account may not read its definition.\n\n", note(&n)))?;
+            continue;
+        }
+        put(out, &format!("--\n-- {kind} {}\n--\n\nDROP {kind} IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
+    }
+    Ok(())
 }
 
 fn part_of(path: &Path) -> PathBuf {
@@ -655,10 +668,11 @@ mod tests {
             l.sql(&format!("INSERT INTO {db}.parent (name) VALUES ('nulls')"));
             l.sql(&format!("INSERT INTO {db}.child (parent_id, note) SELECT id, CONCAT('t:', id) FROM {db}.parent WHERE id <= 1200"));
             l.sql(&format!("INSERT INTO {db}.small VALUES (1, 'a'), (2, 'b'), (3, NULL)"));
-            l.sql(&format!("CREATE VIEW {db}.v_sum AS SELECT parent_id, COUNT(*) AS n FROM {db}.child GROUP BY parent_id"));
+            // The view calls a stored function, which must exist when the file creates the view.
+            l.sql(&format!("CREATE FUNCTION {db}.f_dbl(a INT) RETURNS INT DETERMINISTIC RETURN a * 2"));
+            l.sql(&format!("CREATE VIEW {db}.v_sum AS SELECT parent_id, {db}.f_dbl(COUNT(*)) AS n FROM {db}.child GROUP BY parent_id"));
             l.sql(&format!("CREATE TRIGGER {db}.trg_bi BEFORE INSERT ON {db}.child FOR EACH ROW SET NEW.note = CONCAT('t:', NEW.parent_id)"));
             l.sql(&format!("CREATE PROCEDURE {db}.p_inc(IN a INT, OUT b INT) BEGIN DECLARE x INT; SET x = a + 1; SET b = x; END"));
-            l.sql(&format!("CREATE FUNCTION {db}.f_dbl(a INT) RETURNS INT DETERMINISTIC RETURN a * 2"));
             let tables = ["parent", "child", "small", "empty_t"];
             let before: Vec<(String, String, String)> = tables.iter().map(|t| (shape(l, &format!("SHOW CREATE TABLE {db}.{t}")), l.cell(&format!("CHECKSUM TABLE {db}.{t}"), 1), l.count(&format!("{db}.{t}")).to_string())).collect();
             let plan = |per| DumpPlan { schema: db.into(), tables: tables.iter().map(|t| DumpTable { name: t.to_string(), view: false, structure: true, content: true, drop: true }).chain([DumpTable { name: "v_sum".into(), view: true, structure: true, content: false, drop: true }]).collect(), create_db: true, extras: true, rows_per_insert: per, snapshot: true, filter: None, grants: false, owners: false };

@@ -14,6 +14,12 @@ impl App {
         self.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
     }
 
+    /// The MongoDB side of `purge_undo`: undoing a delete after a drop would quietly make the collection again.
+    /// An empty `coll` means the whole database.
+    pub(super) fn purge_mongo_undo(&mut self, conn: u64, db: &str, coll: &str) {
+        self.undo.retain(|a| !mongo_undo_is_under(a, conn, db, coll));
+    }
+
     pub(super) fn apply_undo(&mut self, i: usize) {
         self.apply_undo_as(i, false);
     }
@@ -76,6 +82,11 @@ pub(super) fn undo_is_under(a: &UndoAction, conn: u64, database: &str, schema: &
     d == database && a.db == schema && (table.is_empty() || a.coll == table)
 }
 
+/// Whether a MongoDB undo entry acts on the dropped database, or on collection `coll` of it when one is named.
+pub(super) fn mongo_undo_is_under(a: &UndoAction, conn: u64, db: &str, coll: &str) -> bool {
+    !matches!(a.kind, UndoKind::Sql { .. }) && a.conn == conn && a.db == db && (coll.is_empty() || a.coll == coll)
+}
+
 /// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
 pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
     undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
@@ -89,6 +100,14 @@ mod tests {
 
     fn action(at: Instant) -> UndoAction {
         UndoAction { agent: None, at, conn: 1, db: "shop".into(), coll: "c".into(), kind: UndoKind::Insert { id: Bson::Int32(1) } }
+    }
+
+    #[test]
+    fn a_mongo_drop_takes_only_its_own_undo_entries() {
+        let a = action(Instant::now());
+        assert!(mongo_undo_is_under(&a, 1, "shop", "c") && mongo_undo_is_under(&a, 1, "shop", ""));
+        assert!(!mongo_undo_is_under(&a, 1, "shop", "d") && !mongo_undo_is_under(&a, 2, "shop", "c") && !mongo_undo_is_under(&a, 1, "hr", ""));
+        assert!(!mongo_undo_is_under(&sql_action(1, "", "shop", "c"), 1, "shop", "c"), "SQL entries are purged by their own drops");
     }
 
     #[test]

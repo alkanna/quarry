@@ -257,6 +257,10 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     };
     tokio::select! {
         r = read => {
+            // A read that failed leaves the runner blocked on a pipe nobody reads, so waiting would never end.
+            if r.is_err() {
+                let _ = child.kill().await;
+            }
             let _ = child.wait().await;
             match r? {
                 Some(res) => res,

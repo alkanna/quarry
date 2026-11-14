@@ -119,23 +119,42 @@ pub(in crate::app) fn split_top(text: &str) -> Vec<String> {
     out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
-/// A plain column name from `col` or a bare word, or None for an expression.
-fn plain_ident(s: &str) -> Option<String> {
+/// A plain column name from a name quoted the way `quote_ident` writes it or a bare word, or None for an expression.
+/// `d` picks the quote: on MySQL "a" is a string, and a caller that rewrites the text must not turn it into a column.
+/// None reads either quote, for the callers that only look and have no dialect at hand.
+fn plain_ident(s: &str, d: Option<Dialect>) -> Option<String> {
     let s = s.trim();
-    if let Some(inner) = s.strip_prefix('`').and_then(|x| x.strip_suffix('`')) {
-        return (!inner.contains('`')).then(|| inner.to_string());
+    let quotes: &[char] = match d {
+        Some(Dialect::Postgres) => &['"'],
+        Some(_) => &['`'],
+        None => &['`', '"'],
+    };
+    for &q in quotes {
+        if let Some(inner) = s.strip_prefix(q).and_then(|x| x.strip_suffix(q)) {
+            // A lone quote inside means several names or an expression, such as "a" || "b".
+            let mut out = String::with_capacity(inner.len());
+            let mut it = inner.chars();
+            while let Some(c) = it.next() {
+                if c == q && it.next() != Some(q) {
+                    return None;
+                }
+                out.push(c);
+            }
+            return (!out.is_empty()).then_some(out);
+        }
     }
-    (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')).then(|| s.to_string())
+    // PostgreSQL folds an unquoted name to lower case, and that is the column it reads.
+    (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')).then(|| if d == Some(Dialect::Postgres) { s.to_ascii_lowercase() } else { s.to_string() })
 }
 
 /// ORDER BY text as (column, descending) keys, or None when it holds anything but plain columns.
-fn parse_order(text: &str) -> Option<Vec<(String, bool)>> {
+fn parse_order(text: &str, d: Option<Dialect>) -> Option<Vec<(String, bool)>> {
     split_top(text)
         .iter()
         .map(|k| {
             let up = k.to_ascii_uppercase();
             let (col, desc) = if up.ends_with(" DESC") { (&k[..k.len() - 5], true) } else if up.ends_with(" ASC") { (&k[..k.len() - 4], false) } else { (k.as_str(), false) };
-            Some((plain_ident(col)?, desc))
+            Some((plain_ident(col, d)?, desc))
         })
         .collect()
 }
@@ -143,7 +162,7 @@ fn parse_order(text: &str) -> Option<Vec<(String, bool)>> {
 /// Shift-click on a header: the column becomes the last sort key, or flips direction when it already
 /// is one. Text that is not plain keys (expressions) is left as it is.
 pub(in crate::app) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String {
-    let Some(mut keys) = parse_order(text) else { return text.to_string() };
+    let Some(mut keys) = parse_order(text, Some(d)) else { return text.to_string() };
     match keys.iter_mut().find(|(c, _)| c == col) {
         Some(k) => k.1 = !k.1,
         None => keys.push((col.to_string(), false)),
@@ -151,9 +170,10 @@ pub(in crate::app) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String 
     order_text(&keys, d)
 }
 
-/// The names of the GROUP BY columns of a grouped result, as they head its columns.
+/// The names of the GROUP BY columns of a grouped result, as they head its columns. It only marks
+/// headers, so it reads either quote: the tab does not know its dialect here.
 pub(in crate::app) fn group_names(s: &SqlTab) -> Vec<String> {
-    split_top(&s.bar.c.group).iter().filter_map(|g| plain_ident(g)).collect()
+    split_top(&s.bar.c.group).iter().filter_map(|g| plain_ident(g, None)).collect()
 }
 
 fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
@@ -563,7 +583,7 @@ fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect,
     ui.add_space(4.0);
     caption(ui, "ORDER BY");
     ui.add_space(4.0);
-    let Some(mut keys) = parse_order(text) else {
+    let Some(mut keys) = parse_order(text, Some(d)) else {
         // Free text (expressions) cannot be shown as keys.
         let r = ui.add(mono_edit(text, 300.0, "created_at DESC").layouter(&mut sql_layout));
         return r.changed();
@@ -612,13 +632,13 @@ fn columns_popover(ui: &mut egui::Ui, select: &mut String, cols: &[Col], d: Dial
     ui.add_space(4.0);
     let items = split_top(select);
     let all = items.is_empty() || items.iter().any(|i| i == "*");
-    let on = |c: &Col| all || items.iter().any(|i| plain_ident(i).is_some_and(|n| n == c.name));
+    let on = |c: &Col| all || items.iter().any(|i| plain_ident(i, Some(d)).is_some_and(|n| n == c.name));
     let mut checked: Vec<bool> = cols.iter().map(on).collect();
     // The expression fields keep their own buffers, since text typed before Enter is not in `select` yet.
     let ex_id = ui.scope_id().with("exprs");
     let (mut exprs, seen) = ui.data(|d| d.get_temp::<(Vec<String>, String)>(ex_id)).unwrap_or_default();
     if seen != *select {
-        exprs = if all { Vec::new() } else { items.iter().filter(|i| plain_ident(i).is_none_or(|n| !cols.iter().any(|c| c.name == n))).cloned().collect() };
+        exprs = if all { Vec::new() } else { items.iter().filter(|i| plain_ident(i, Some(d)).is_none_or(|n| !cols.iter().any(|c| c.name == n))).cloned().collect() };
     }
     let (mut changed, mut enter) = (false, false);
     let filter_id = ui.scope_id().with("col-filter");
@@ -844,6 +864,42 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
     (sel.join(", "), grp.join(", "))
 }
 
+/// Reads the WHERE text back into rules when it changed from elsewhere (Filter to these, a restored tab, a
+/// foreign key row), or always with `force`. Text that is not rules switches the bar to SQL. Without columns
+/// nothing can be read, so `src` stays behind and the read happens once they arrive.
+fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d: Dialect, bs: bool, force: bool) {
+    if !b.c.sql && (force || text != b.src) && (!pairs.is_empty() || text.trim().is_empty()) {
+        match rules::parse(text, pairs, d, bs) {
+            Some((mut r, any)) => {
+                b.draft = r.pop();
+                b.rules = r;
+                b.any = any;
+            }
+            None => b.c.sql = true,
+        }
+        b.src = text.to_string();
+    }
+    if !b.c.sql && b.draft.is_none() && let Some(c) = cols.first() {
+        b.draft = Some(Rule::new(&c.name, c.kind));
+    }
+}
+
+/// Writes the rules out as the WHERE text, so Run, Copy as SQL and the fold line see them. Only rules read
+/// from the current text are written: others are stale or empty and would replace a text not read yet.
+fn write_rules(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dialect, bs: bool) {
+    if pairs.is_empty() || b.src != *text {
+        return;
+    }
+    let mut all = b.rules.clone();
+    all.extend(b.draft.clone());
+    let out = rules::to_sql(&all, b.any, d, bs);
+    // `src` already equals the text when nothing changed, so it is only copied on a change.
+    if out != *text {
+        *text = out;
+        b.src = text.clone();
+    }
+}
+
 /// Draws the bar and the clause chips. Returns true when the query should run.
 pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
@@ -865,21 +921,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     b.memo = Some(memo);
     let mut run = false;
     b.gdlg.bs = bs;
-    // The WHERE text changed from elsewhere (Filter to these, a restored tab): read it back into rules.
-    if !b.c.sql && t.filter_txt != b.src && (!pairs.is_empty() || t.filter_txt.trim().is_empty()) {
-        match rules::parse(&t.filter_txt, &pairs, d, bs) {
-            Some((mut r, any)) => {
-                b.draft = r.pop();
-                b.rules = r;
-                b.any = any;
-            }
-            None => b.c.sql = true,
-        }
-        b.src = t.filter_txt.clone();
-    }
-    if !b.c.sql && b.draft.is_none() && let Some(c) = cols.first() {
-        b.draft = Some(Rule::new(&c.name, c.kind));
-    }
+    read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, false);
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
     let fid = query_id("SQL-WHERE");
@@ -913,7 +955,9 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 if sql != b.c.sql && (sql || can_rules) {
                     b.c.sql = sql;
                     if !sql {
+                        // The rules are from before SQL mode, so they are read again now, before this frame writes them out.
                         b.src.clear();
+                        read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, true);
                     }
                 }
                 ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
@@ -966,14 +1010,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                             b.draft = Some(dr);
                         }
                     }
-                    // Write the rules out as the WHERE text, so Run, Copy as SQL and the fold line see them.
-                    let mut all = b.rules.clone();
-                    all.extend(b.draft.clone());
-                    let text = rules::to_sql(&all, b.any, d, bs);
-                    if text != t.filter_txt {
-                        t.filter_txt = text;
-                    }
-                    b.src = t.filter_txt.clone();
+                    write_rules(b, &mut t.filter_txt, &pairs, d, bs);
                 }
             });
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1024,7 +1061,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                     sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "status, currency", tw)
                 });
             } else {
-                let keys = parse_order(&t.sort_txt);
+                let keys = parse_order(&t.sort_txt, Some(d));
                 let summary = match &keys {
                     Some(k) => k.iter().map(|(c, d)| format!("{c} {}", if *d { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", "),
                     None => t.sort_txt.clone(),
@@ -1201,9 +1238,10 @@ fn tcols(s: &SqlTab) -> &[Col] {
     if s.bar.table_cols.is_empty() { &s.cols } else { &s.bar.table_cols }
 }
 
-/// The table's own sort can name an aggregate, which an ungrouped query does not have.
+/// The table's own sort can name an aggregate, which an ungrouped query does not have. It only decides
+/// whether the sort stays, so it reads either quote: `ungroup` has no dialect at hand.
 fn keep_sort(sort: &str, cols: &[Col]) -> bool {
-    parse_order(sort).is_some_and(|k| k.iter().all(|(c, _)| cols.iter().any(|x| x.name == *c)))
+    parse_order(sort, None).is_some_and(|k| k.iter().all(|(c, _)| cols.iter().any(|x| x.name == *c)))
 }
 
 fn bson_text(v: &Bson) -> Option<String> {
@@ -1214,6 +1252,23 @@ fn bson_text(v: &Bson) -> Option<String> {
         Bson::Double(n) => Some(n.to_string()),
         Bson::Boolean(b) => Some((*b as i32).to_string()),
         _ => None,
+    }
+}
+
+/// Bytes as a literal of the dialect. On MySQL `rule` picks 0x, the form the rules write for a binary column;
+/// otherwise X'..', which the bar does not read as a rule, so a text column never gets it back as a quoted string.
+fn bytes_lit(b: &[u8], d: Dialect, bs: bool, rule: bool) -> String {
+    let pg = d == Dialect::Postgres;
+    let hex = db::sql::value::hex_digits(b, !pg);
+    if pg {
+        db::sql::value::pg_lit(&format!("\\x{hex}"))
+    } else if b.is_empty() {
+        // 0x without digits is not a literal; an empty string equals empty bytes.
+        db::sql::value::lit("", bs)
+    } else if rule {
+        format!("0x{hex}")
+    } else {
+        format!("X'{hex}'")
     }
 }
 
@@ -1236,25 +1291,34 @@ pub(in crate::app) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
     let (select, group_list) = (split_top(&s.bar.c.select), split_top(&s.bar.c.group));
     let mut conds: Vec<String> = Vec::new();
     for g in &group_list {
-        let Some(name) = plain_ident(g) else { continue };
+        let Some(name) = plain_ident(g, Some(d)) else { continue };
         let Some(v) = doc.get(&name) else { continue };
         // A group named after a select alias is an expression such as DATE(col).
         let expr = select.iter().find_map(|i| {
             let up = i.to_ascii_uppercase();
             let at = up.rfind(" AS ")?;
-            (plain_ident(&i[at + 4..])? == name).then(|| i[..at].trim().to_string())
+            (plain_ident(&i[at + 4..], Some(d))? == name).then(|| i[..at].trim().to_string())
         });
         let lhs = match (&expr, tcols(s).iter().find(|c| c.name == name)) {
             (Some(e), _) => e.clone(),
             (None, Some(_)) => d.quote_ident(&name),
             _ => continue,
         };
-        conds.push(match bson_text(v) {
-            Some(text) => match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
-                Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
-                None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
-            },
-            None => format!("{lhs} IS NULL"),
+        conds.push(match v {
+            Bson::Null => format!("{lhs} IS NULL"),
+            // Not through rule_sql by column kind: a MySQL text column with bytes that are not UTF-8 arrives as binary too.
+            Bson::Binary(bin) => {
+                let binary_col = expr.is_none() && tcols(s).iter().any(|c| c.name == name && rules::group_of(c.kind) == rules::Group::Other);
+                format!("{lhs} = {}", bytes_lit(&bin.bytes, d, bs, binary_col))
+            }
+            v => {
+                // The row reader makes no other value; a guessed condition would show the wrong rows, so the drill stops.
+                let Some(text) = bson_text(v) else { return };
+                match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
+                    Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
+                    None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
+                }
+            }
         });
     }
     let existing = t.filter_txt.trim().to_string();
@@ -1288,5 +1352,77 @@ mod tests {
         assert_eq!(add_sort_key("a, b DESC", "b", d), "`a` ASC, `b` ASC");
         // Expressions are not rewritten.
         assert_eq!(add_sort_key("LOWER(a)", "b", d), "LOWER(a)");
+        let pg = Dialect::Postgres;
+        assert_eq!(add_sort_key("\"a\" ASC", "b", pg), "\"a\" ASC, \"b\" ASC");
+        assert_eq!(add_sort_key("\"a\" ASC, \"b\" DESC", "a", pg), "\"a\" DESC, \"b\" DESC");
+        // An unquoted name is the folded one on PostgreSQL.
+        assert_eq!(add_sort_key("Total DESC", "total", pg), "\"total\" ASC");
+    }
+
+    #[test]
+    fn plain_ident_reads_back_what_quote_ident_writes() {
+        for d in [Dialect::MySql, Dialect::MariaDb, Dialect::Postgres] {
+            for name in ["status", "Order Date", "a`b", "say \"hi\"", "a.b"] {
+                assert_eq!(plain_ident(&d.quote_ident(name), Some(d)).as_deref(), Some(name), "{d:?} {name}");
+                assert_eq!(plain_ident(&d.quote_ident(name), None).as_deref(), Some(name), "{d:?} {name}");
+            }
+        }
+        // On MySQL a double-quoted word is a string, and on PostgreSQL a backtick is not a quote.
+        assert_eq!(plain_ident("\"a\"", Some(Dialect::MySql)), None);
+        assert_eq!(plain_ident("`a`", Some(Dialect::Postgres)), None);
+        // Several names or an expression between the outer quotes.
+        assert_eq!(plain_ident("\"a\" || \"b\"", Some(Dialect::Postgres)), None);
+        assert_eq!(plain_ident("`a`.`b`", Some(Dialect::MySql)), None);
+        assert_eq!(plain_ident("\"\"", Some(Dialect::Postgres)), None);
+        assert_eq!(plain_ident("Status", Some(Dialect::Postgres)).as_deref(), Some("status"));
+        assert_eq!(plain_ident("Status", Some(Dialect::MySql)).as_deref(), Some("Status"));
+        assert_eq!(plain_ident("COUNT(*)", None), None);
+    }
+
+    #[test]
+    fn rules_never_overwrite_a_where_text_they_were_not_read_from() {
+        let d = Dialect::MySql;
+        let cols = [Col::plain("id", "INT", Kind::Int, false)];
+        let pairs = [("id".to_string(), Kind::Int)];
+        // A tab opened before its columns: the text stays until they arrive, then reads as a rule.
+        let mut b = Bar::default();
+        let mut text = "id = 5".to_string();
+        read_rules(&mut b, &text, &[], &[], d, true, false);
+        write_rules(&mut b, &mut text, &[], d, true);
+        assert_eq!(text, "id = 5");
+        read_rules(&mut b, &text, &pairs, &cols, d, true, false);
+        write_rules(&mut b, &mut text, &pairs, d, true);
+        assert_eq!(text, "`id` = 5");
+        // Edited in SQL mode, then back to Rules in the same frame: the new text is read, not the old rules written.
+        b.c.sql = true;
+        text = "`id` = 7".into();
+        b.c.sql = false;
+        b.src.clear();
+        read_rules(&mut b, &text, &pairs, &cols, d, true, true);
+        write_rules(&mut b, &mut text, &pairs, d, true);
+        assert_eq!(text, "`id` = 7");
+        // Emptied in SQL mode: the empty text equals the cleared src, and is still read.
+        b.c.sql = true;
+        text.clear();
+        b.c.sql = false;
+        b.src.clear();
+        read_rules(&mut b, &text, &pairs, &cols, d, true, true);
+        write_rules(&mut b, &mut text, &pairs, d, true);
+        assert_eq!(text, "");
+        assert!(b.rules.is_empty() && b.draft.as_ref().is_some_and(|r| !r.complete()));
+    }
+
+    #[test]
+    fn binary_groups_drill_with_a_hex_literal() {
+        assert_eq!(bytes_lit(&[0x0a, 0xff], Dialect::MySql, true, true), "0x0AFF");
+        assert_eq!(bytes_lit(&[0x0a, 0xff], Dialect::MySql, true, false), "X'0AFF'");
+        assert_eq!(bytes_lit(&[], Dialect::MySql, true, true), "''");
+        assert_eq!(bytes_lit(&[0x0a, 0xff], Dialect::Postgres, false, true), "E'\\\\x0aff'");
+        assert_eq!(bytes_lit(&[], Dialect::Postgres, false, true), "E'\\\\x'");
+        // The 0x form reads back as a rule on a binary column and writes out the same.
+        let pairs = [("blob".to_string(), Kind::Binary)];
+        let text = format!("`blob` = {}", bytes_lit(&[0x0a, 0xff], Dialect::MySql, true, true));
+        let (r, _) = rules::parse(&text, &pairs, Dialect::MySql, true).unwrap();
+        assert_eq!(rules::to_sql(&r, false, Dialect::MySql, true), text);
     }
 }

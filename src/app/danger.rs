@@ -24,6 +24,11 @@ impl App {
             if self.groups.prune(&alive) {
                 self.save_groups();
             }
+            // Its agent access goes with it. Settings that failed their signature are left for the user to review,
+            // since saving here would sign them.
+            if self.agents.cfg.conns.remove(&id).is_some() && self.agents.distrust.is_none() {
+                self.save_agents();
+            }
             return self.ok("Connection removed");
         }
         if let Danger::DeleteRows(sel, rows) = action {
@@ -63,7 +68,6 @@ impl App {
                     if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
                     }
-                    self.dropping_db = Some((conn, db));
                 }
                 Danger::DropCollAt { db, coll, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);

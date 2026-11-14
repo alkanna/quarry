@@ -182,8 +182,9 @@ impl Worker {
         self.spawn(async move {
             // renameCollection only runs on the admin database.
             let on = if cmd.contains_key("renameCollection") { "admin".to_string() } else { db.clone() };
+            let dropped = cmd.get_str("drop").ok().map(str::to_string).or_else(|| cmd.contains_key("dropDatabase").then(String::new));
             let res = client.database(&on).run_command(cmd).await.map(|_| done).map_err(e);
-            Msg::DbChanged { conn, db, copied: None, res }
+            Msg::DbChanged { conn, db, copied: None, dropped, res }
         });
     }
 
@@ -232,7 +233,7 @@ impl Worker {
                 Ok(format!("Duplicated {from} to {to}"))
             }
             .await;
-            Msg::DbChanged { conn, db, copied: Some(to), res }
+            Msg::DbChanged { conn, db, copied: Some(to), dropped: None, res }
         });
     }
 
@@ -933,7 +934,8 @@ impl Worker {
                 Some(key) => {
                     let (mut matched, mut upserted) = (0u64, 0u64);
                     for d in docs {
-                        let Some(v) = d.get(&key).cloned() else {
+                        // A CSV header like address.zip is a top-level key; a dotted path into nested fields is the fallback.
+                        let Some(v) = d.get(&key).or_else(|| crate::db::get_path(&d, &key)).cloned() else {
                             return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
                         };
                         match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {

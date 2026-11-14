@@ -31,6 +31,9 @@ pub(in crate::app) struct StructState {
     pub(in crate::app) trig_new: bool,
     /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
     pub(in crate::app) trig_made: Option<String>,
+    /// The draft key of a trigger edit on its way, dropped once the server took it: the draft is the live trigger then,
+    /// and left behind it would show an Undo or someone else's later change as a pending edit of ours.
+    pub(in crate::app) trig_saving: Option<String>,
     /// What the trigger editor shows for the draft, kept between frames.
     pub(in crate::app) trig_memo: Option<sql::trig::TrigMemo>,
 }

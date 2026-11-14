@@ -177,7 +177,6 @@ pub struct App {
     tree_x: egui::Rangef,
     insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
-    dropping_db: Option<(u64, String)>,
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
@@ -332,6 +331,10 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 impl App {
     /// The empty state both `new` and the test constructor start from, so a new field is added in one place.
     fn blank(cc: &eframe::CreationContext<'_>, demo: bool, menu: bool, shot: Option<PathBuf>) -> Self {
+        // The demo and fixture modes start here; tests keep their fake vault, which one test going offline would empty for all.
+        if demo && !cfg!(test) {
+            crate::vault::go_offline();
+        }
         // Only macOS has a native menu bar.
         #[cfg(not(target_os = "macos"))]
         let _ = menu;
@@ -363,7 +366,6 @@ impl App {
             char_w: 0.0,
             tree_x: egui::Rangef::NOTHING,
             insert: None,
-            dropping_db: None,
             copying: Default::default(),
             export_job: None,
             sql_job: None,

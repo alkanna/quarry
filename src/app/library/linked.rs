@@ -680,7 +680,7 @@ impl App {
                 return None;
             }
             let to = from.with_file_name(name);
-            if to != from && std::fs::symlink_metadata(&to).is_ok() {
+            if to != from && std::fs::symlink_metadata(&to).is_ok() && !disk::same_file_other_case(&from, &to) {
                 self.warn(format!("{name} already exists here."));
                 return None;
             }
