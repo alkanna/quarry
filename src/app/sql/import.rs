@@ -21,6 +21,11 @@ pub(in crate::app) struct FileState {
     shown_size: u64,
     /// Set for JSON and JSON Lines.
     json: Option<JsonFile>,
+    /// A JSON file is read and flattened in a thread of its own, which sends the finished state here. Until then this
+    /// one holds only the name, and the dialog shows that it is reading.
+    load: Option<mpsc::Receiver<Result<FileState, String>>>,
+    /// Why reading the JSON failed.
+    failed: Option<String>,
     opts: Opts,
     header: bool,
     /// What the encoding looked like when the file was opened, shown beside the choice.
@@ -60,6 +65,10 @@ fn hash_of(v: &impl std::hash::Hash) -> u64 {
     h.finish()
 }
 
+fn json_opts() -> Opts {
+    Opts { delim: ',', quote: Some('"'), enc: Enc::Utf8 }
+}
+
 /// What a JSON file said about itself when it was flattened.
 struct JsonFile {
     /// One object per line rather than one array.
@@ -69,23 +78,49 @@ struct JsonFile {
 }
 
 impl FileState {
-    /// `name` is the file's name; None for pasted text, which is named by what it turned out to be.
+    fn blank(origin: &Source, src: Source, name: String, opts: Opts, header: bool, json: Option<JsonFile>) -> FileState {
+        FileState { size: src.len(), shown_size: origin.len(), origin: origin.clone(), src, json, load: None, failed: None, name, opts, header, detected: opts.enc, names: Vec::new(), sample: Vec::new(), map: Mapping { map: Vec::new(), fmts: Vec::new(), empty_null: true }, read_key: u64::MAX, check_key: u64::MAX, report: None, rx: None, cancel: Arc::new(AtomicBool::new(false)), epoch: 0 }
+    }
+
+    /// `name` is the file's name; None for pasted text, which is named by what it turned out to be. CSV is sniffed on
+    /// the first 64 KB, which is quick. JSON has to be read whole, so it comes back still loading, with its thread running.
     fn open(origin: Source, name: Option<String>) -> Result<FileState, String> {
         let head = origin.head(64 << 10).map_err(|e| format!("Could not read the file: {e}"))?;
         let is_json = json::looks_like_json(name.as_deref().unwrap_or(""), &head);
         let name = name.unwrap_or_else(|| if is_json { "Pasted JSON" } else { "Pasted CSV" }.into());
-        let blank = |src: Source, opts: Opts, header: bool, json: Option<JsonFile>| FileState { size: src.len(), shown_size: origin.len(), origin: origin.clone(), src, json, name: name.clone(), opts, header, detected: opts.enc, names: Vec::new(), sample: Vec::new(), map: Mapping { map: Vec::new(), fmts: Vec::new(), empty_null: true }, read_key: u64::MAX, check_key: u64::MAX, report: None, rx: None, cancel: Arc::new(AtomicBool::new(false)), epoch: 0 };
-        let mut f = if is_json {
-            let flat = json::flatten(&json::read_text(&origin)?)?;
-            // The flattened text is plain UTF-8 CSV, so the reading options are fixed and the dialog does not offer them.
-            let opts = Opts { delim: ',', quote: Some('"'), enc: Enc::Utf8 };
-            blank(Source::Mem(Arc::new(flat.csv)), opts, true, Some(JsonFile { lines: flat.lines, nested: flat.nested }))
-        } else {
-            let (opts, header) = csv::sniff(&origin)?;
-            blank(origin.clone(), opts, header, None)
-        };
+        if is_json {
+            let (tx, rx) = mpsc::channel();
+            let mut pending = FileState::blank(&origin, origin.clone(), name.clone(), json_opts(), true, None);
+            pending.load = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(FileState::load_json(origin, name));
+            });
+            return Ok(pending);
+        }
+        let (opts, header) = csv::sniff(&origin)?;
+        let mut f = FileState::blank(&origin, origin.clone(), name, opts, header, None);
         f.resample()?;
         Ok(f)
+    }
+
+    /// Reads and flattens a JSON file, the slow part of opening one.
+    fn load_json(origin: Source, name: String) -> Result<FileState, String> {
+        let flat = json::flatten(&json::read_text(&origin)?)?;
+        // The flattened text is plain UTF-8 CSV, so the reading options are fixed and the dialog does not offer them.
+        let mut f = FileState::blank(&origin, Source::Mem(Arc::new(flat.csv)), name, json_opts(), true, Some(JsonFile { lines: flat.lines, nested: flat.nested }));
+        f.resample()?;
+        Ok(f)
+    }
+
+    /// The finished state of a JSON file once its thread is done, or None while it still reads.
+    fn poll_load(&mut self) -> Option<Result<FileState, String>> {
+        let got = match self.load.as_ref()?.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => Err("Reading the file stopped before it finished.".to_string()),
+        };
+        self.load = None;
+        Some(got)
     }
 
     /// Reads the first records again with the options as they are now.
@@ -233,7 +268,8 @@ impl App {
         f.info = Some(match res {
             Ok(info) => {
                 f.file.remap(&info);
-                if let Some(m) = f.restore.take().filter(|m| m.map.len() == f.file.map.map.len()) {
+                // A JSON file still reading has no columns to put the choices back on; the dialog does it when it is done.
+                if f.file.load.is_none() && let Some(m) = f.restore.take().filter(|m| m.map.len() == f.file.map.map.len()) {
                     f.file.map = m;
                 }
                 Ok(info)
@@ -251,6 +287,41 @@ impl App {
         let writable = self.conn_writable(f.conn);
         f.file.poll();
         let ctx = ui.ctx().clone();
+        // A JSON file is still being read, or could not be: nothing below has a file to show yet.
+        if let Some(done) = f.file.poll_load() {
+            match done {
+                Ok(mut file) => {
+                    if let Some(Ok(info)) = &f.info {
+                        file.remap(info);
+                        if let Some(m) = f.restore.take().filter(|m| m.map.len() == file.map.map.len()) {
+                            file.map = m;
+                        }
+                    }
+                    f.file = file;
+                }
+                Err(e) => f.file.failed = Some(e),
+            }
+        }
+        if f.file.load.is_some() || f.file.failed.is_some() {
+            match &f.file.failed {
+                None => {
+                    ui.horizontal(|ui| {
+                        spin(ui);
+                        ui.label(RichText::new(format!("Reading {} ({})", f.file.name, human_bytes(f.file.shown_size as usize))).color(MUTED()));
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                Some(e) => {
+                    ui.label(RichText::new(e.as_str()).color(ALERT()));
+                }
+            }
+            let failed = f.file.failed.is_some();
+            b.end(outer);
+            if dialog_foot(outer, |ui| ui.button(if failed { "Close" } else { "Cancel" }).clicked()) {
+                *keep = false;
+            }
+            return;
+        }
         // A changed separator, quote, encoding or header row reads the first records again.
         if hash_of(&(f.file.opts, f.file.header)) != f.file.read_key {
             if let Err(e) = f.file.resample() {
@@ -582,9 +653,31 @@ mod tests {
         rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
     }
 
+    /// `FileState::open`, waiting for a JSON file's thread the way the dialog's frames do.
+    fn open_now(src: Source, name: Option<String>) -> Result<FileState, String> {
+        let mut f = FileState::open(src, name)?;
+        while f.load.is_some() {
+            if let Some(done) = f.poll_load() {
+                f = done?;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        Ok(f)
+    }
+
+    #[test]
+    fn opening_json_does_not_read_it_on_the_calling_thread() {
+        let f = FileState::open(mem(r#"[{"a":1}]"#), None).unwrap();
+        // The state comes back at once with its thread running, and has no columns until that thread is polled.
+        assert!(f.load.is_some() && f.names.is_empty() && f.json.is_none());
+        let bad = open_now(mem("[{\"a\":"), None);
+        assert!(bad.err().is_some_and(|e| e.starts_with("Not valid JSON")));
+    }
+
     #[test]
     fn json_text_opens_as_columns_named_by_its_keys() {
-        let f = FileState::open(mem(r#"[{"id":1,"tags":["a"],"name":"x"},{"id":2,"name":"y"}]"#), None).unwrap();
+        let f = open_now(mem(r#"[{"id":1,"tags":["a"],"name":"x"},{"id":2,"name":"y"}]"#), None).unwrap();
         assert_eq!(f.names, ["id", "tags", "name"]);
         assert_eq!(f.sample, strings(&[&["1", r#"["a"]"#, "x"], &["2", "", "y"]]));
         assert_eq!(f.name, "Pasted JSON");
@@ -596,9 +689,9 @@ mod tests {
 
     #[test]
     fn json_lines_and_csv_text_are_told_apart_without_a_file_name() {
-        let lines = FileState::open(mem("{\"a\":1}\n{\"a\":2}\n"), None).unwrap();
+        let lines = open_now(mem("{\"a\":1}\n{\"a\":2}\n"), None).unwrap();
         assert!(lines.json.as_ref().is_some_and(|j| j.lines));
-        let csv = FileState::open(mem("a,b\n1,2\n"), None).unwrap();
+        let csv = open_now(mem("a,b\n1,2\n"), None).unwrap();
         assert!(csv.json.is_none());
         assert_eq!((csv.names.clone(), csv.name.as_str()), (vec!["a".to_string(), "b".to_string()], "Pasted CSV"));
     }
@@ -607,12 +700,12 @@ mod tests {
     fn flattened_json_is_checked_with_missing_keys_null_and_nested_values_as_text() {
         let col = |name: &str, ty: &str, nullable: bool| csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, ..Default::default() }, false);
         let cols = vec![col("id", "int", false), col("name", "varchar(10)", true), col("doc", "json", true)];
-        let f = FileState::open(mem(r#"[{"id":1,"name":"a","doc":{"k":[1]}},{"id":2,"doc":null},{"id":3,"name":null}]"#), None).unwrap();
+        let f = open_now(mem(r#"[{"id":1,"name":"a","doc":{"k":[1]}},{"id":2,"doc":null},{"id":3,"name":null}]"#), None).unwrap();
         let map = Mapping { map: csv::auto_map(&f.names, &cols), fmts: vec![DateFmt::DayFirst; f.names.len()], empty_null: true };
         let rep = csv::analyze(&f.src, f.opts, f.header, &cols, &map, f.names.len(), &AtomicBool::new(false));
         assert_eq!((rep.rows, rep.bad_rows, rep.error), (3, 0, None));
         // A key the first object lacks, for a NOT NULL column, is a problem the check reports as an empty CSV value is.
-        let f = FileState::open(mem(r#"[{"name":"a"},{"id":2,"name":"b"}]"#), None).unwrap();
+        let f = open_now(mem(r#"[{"name":"a"},{"id":2,"name":"b"}]"#), None).unwrap();
         let map = Mapping { map: csv::auto_map(&f.names, &cols), fmts: vec![DateFmt::DayFirst; f.names.len()], empty_null: true };
         let rep = csv::analyze(&f.src, f.opts, f.header, &cols, &map, f.names.len(), &AtomicBool::new(false));
         assert_eq!(rep.bad_rows, 1);
