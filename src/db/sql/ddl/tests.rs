@@ -247,9 +247,18 @@ fn column_and_index_attributes_are_kept_or_refused() {
     let jd = ColDef::from_column(&j).unwrap();
     assert_eq!(definition(Dialect::MariaDb, B, &jd).unwrap(), "JSON NULL DEFAULT NULL");
     let k = Column { name: "k".into(), full_type: "int(11)".into(), check: Some("`k` > 0".into()), ..Default::default() };
-    assert!(ColDef::from_column(&k).unwrap_err().contains("CHECK"));
-    // A JSON check that names another column is not the JSON alias.
-    assert!(ColDef::from_column(&Column { check: Some("json_valid(`x`)".into()), ..j.clone() }).is_err());
+    // A column CHECK is carried, since a MODIFY that did not repeat it would drop it.
+    let kd = ColDef::from_column(&k).unwrap();
+    assert_eq!(kd.check.as_deref(), Some("`k` > 0"));
+    assert_eq!(definition(Dialect::MariaDb, B, &kd).unwrap(), "INT(11) NOT NULL CHECK (`k` > 0)");
+    assert_eq!(definition(M, B, &kd).unwrap(), "INT(11) NOT NULL");
+    // A rename writes the new name into the CHECK, which names its own column.
+    let c = Change::Modify { from: "k".into(), def: ColDef { name: "kk".into(), ..kd.clone() }, pos: Pos::Keep };
+    assert_eq!(alter(Dialect::MariaDb, "11.4.0-MariaDB", B, "t", &[c]).unwrap(), "ALTER TABLE `t`\n  CHANGE COLUMN `k` `kk` INT(11) NOT NULL CHECK (`kk` > 0)");
+    assert!(definition(Dialect::MariaDb, B, &ColDef { check: Some("a; DROP TABLE t".into()), ..kd.clone() }).is_err());
+    // A JSON check that names another column is not the JSON alias, so it stays a CHECK on a LONGTEXT.
+    let other = ColDef::from_column(&Column { check: Some("json_valid(`x`)".into()), ..j.clone() }).unwrap();
+    assert_eq!((other.ty.as_str(), other.check.as_deref()), ("LONGTEXT", Some("json_valid(`x`)")));
     let z = Column { name: "z".into(), full_type: "blob /*M!100301 COMPRESSED*/".into(), ..Default::default() };
     assert!(ColDef::from_column(&z).unwrap_err().contains("COMPRESSED"));
     let mut ix = IndexDef { name: "i".into(), cols: vec![IdxCol { name: "a".into(), prefix: None, desc: false }], invisible: true, ..Default::default() };
@@ -416,17 +425,17 @@ fn plan_names_what_undo_loses_or_why_there_is_none() {
 fn snapshots_differ_when_a_touched_column_changed() {
     let t = table();
     let names = (vec!["note".to_string(), "gone".to_string()], vec!["uq_note".to_string()]);
-    let a = snapshot(&t, &names.0, &names.1, &[]);
+    let a = snapshot(&t, &names.0, &names.1, &[], &[]);
     assert_eq!(a.len(), 3);
     assert!(a[1].1.is_none());
     let mut t2 = t.clone();
     t2.columns[2].comment = "other".into();
-    assert_eq!(snapshot(&t2, &names.0, &names.1, &[]), a, "an untouched column does not count");
+    assert_eq!(snapshot(&t2, &names.0, &names.1, &[], &[]), a, "an untouched column does not count");
     t2.columns[3].full_type = "varchar(60)".into();
-    assert_ne!(snapshot(&t2, &names.0, &names.1, &[]), a);
+    assert_ne!(snapshot(&t2, &names.0, &names.1, &[], &[]), a);
     let mut t3 = t.clone();
     t3.indexes[2].invisible = true;
-    assert_ne!(snapshot(&t3, &names.0, &names.1, &[]), a);
+    assert_ne!(snapshot(&t3, &names.0, &names.1, &[], &[]), a);
 }
 
 /// Review finding 7: a functional key part has no column name, so its drop has no undo.
@@ -900,11 +909,95 @@ fn a_batch_with_a_foreign_key_has_one_checked_undo() {
 fn a_foreign_key_snapshot_sees_every_part_of_the_key() {
     let st = fk_table();
     let names = vec!["fk_cust".to_string()];
-    let a = snapshot(&st, &[], &[], &names);
+    let a = snapshot(&st, &[], &[], &names, &[]);
     assert!(a[0].1.is_some());
     let mut b = st.clone();
     b.foreign_keys[0].on_delete = "CASCADE".into();
-    assert_ne!(snapshot(&b, &[], &[], &names), a);
+    assert_ne!(snapshot(&b, &[], &[], &names, &[]), a);
     b.foreign_keys.clear();
-    assert!(snapshot(&b, &[], &[], &names)[0].1.is_none());
+    assert!(snapshot(&b, &[], &[], &names, &[])[0].1.is_none());
+}
+
+fn chk(name: &str, expr: &str) -> CheckConstraint {
+    CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() }
+}
+
+#[test]
+fn check_constraints_are_written_for_each_engine() {
+    let add = [Change::AddCheck(chk("chk_total", "total >= 0"))];
+    assert_eq!(alt(&add), "ALTER TABLE `orders`\n  ADD CONSTRAINT `chk_total` CHECK (total >= 0)");
+    assert_eq!(alt(&[Change::DropCheck("chk_total".into())]), "ALTER TABLE `orders`\n  DROP CHECK `chk_total`");
+    let maria = |c: &[Change]| alter(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", c);
+    assert_eq!(maria(&add).unwrap(), "ALTER TABLE `orders`\n  ADD CONSTRAINT `chk_total` CHECK (total >= 0)");
+    assert_eq!(maria(&[Change::DropCheck("chk_total".into())]).unwrap(), "ALTER TABLE `orders`\n  DROP CONSTRAINT `chk_total`");
+    // a drop and an add of the same name is one ALTER, in order, with the other clauses
+    let edit = [Change::DropCheck("chk_total".into()), Change::AddCheck(chk("chk_total", "total > 0")), Change::Drop("note".into())];
+    assert_eq!(alt(&edit), "ALTER TABLE `orders`\n  DROP CHECK `chk_total`,\n  ADD CONSTRAINT `chk_total` CHECK (total > 0),\n  DROP COLUMN `note`");
+    // names are quoted, and the condition keeps its own quotes
+    assert_eq!(alt(&[Change::AddCheck(chk("we`ird", "note <> 'a;b'"))]), "ALTER TABLE `orders`\n  ADD CONSTRAINT `we``ird` CHECK (note <> 'a;b')");
+    // NOT ENFORCED is MySQL's; NOT VALID and NO INHERIT are PostgreSQL's
+    let off = CheckConstraint { not_enforced: true, ..chk("chk_off", "total > 0") };
+    assert!(alt(&[Change::AddCheck(off.clone())]).ends_with("CHECK (total > 0) NOT ENFORCED"));
+    assert!(maria(&[Change::AddCheck(off)]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(CheckConstraint { not_valid: true, ..chk("c", "a > 0") })]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(CheckConstraint { no_inherit: true, ..chk("c", "a > 0") })]).is_err());
+    // a condition must stay one expression
+    for bad in ["", "  ", "a > 0); DROP TABLE t; --", "a > 0 -- x", "a > 0 # x", "a > 0 /* x */", "(a > 0", "note = 'open"] {
+        assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk("c", bad))]).is_err(), "{bad:?}");
+    }
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk("", "a > 0"))]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::AddCheck(chk(&"n".repeat(65), "a > 0"))]).is_err());
+    assert_eq!(Change::AddCheck(chk("c", "a > 0")).describe(), "Add check c");
+    assert_eq!(Change::DropCheck("c".into()).describe(), "Drop check c");
+}
+
+#[test]
+fn a_check_is_refused_where_the_server_would_ignore_it() {
+    let add = [Change::AddCheck(chk("chk_total", "total >= 0"))];
+    for old in ["5.7.44-log", "8.0.15", "5.6.51"] {
+        let why = alter(M, old, B, "orders", &add).unwrap_err();
+        assert!(why.contains("ignores it") && why.contains(old), "{why}");
+        assert!(plan(M, old, B, "orders", &table(), &add).is_err(), "{old}");
+    }
+    for ok in ["8.0.16", "8.0.40", "8.4.0", "9.1.0"] {
+        assert!(alter(M, ok, B, "orders", &add).is_ok(), "{ok}");
+    }
+    assert!(alter(Dialect::MariaDb, "10.1.48-MariaDB", B, "orders", &add).is_err());
+    assert!(alter(Dialect::MariaDb, "10.6.18-MariaDB", B, "orders", &add).is_ok());
+    assert!(alter(Dialect::MariaDb, "5.5.5-10.11.6-MariaDB", B, "orders", &add).is_ok());
+    // NOT ENFORCED exists from the same version, on MySQL only
+    assert!(Dialect::MySql.can_not_enforce("8.4.0") && !Dialect::MySql.can_not_enforce("5.7.44") && !Dialect::MariaDb.can_not_enforce("11.4.0-MariaDB"));
+    // a drop is never refused: a server that ignores CHECKs lists none to drop
+    assert!(alter(M, "5.7.44", B, "orders", &[Change::DropCheck("c".into())]).is_ok());
+}
+
+#[test]
+fn the_undo_of_a_check_change_puts_the_check_back_as_it_was() {
+    let mut t = table();
+    t.checks = vec![chk("chk_total", "`total` >= 0"), CheckConstraint { not_enforced: true, ..chk("chk_note", "length(`note`) < 40") }];
+    // dropping one is undone by adding it back with its saved condition and its state
+    let back = inverse(M, "8.4.0", B, "orders", &t, &[Change::DropCheck("chk_note".into())]).unwrap();
+    assert_eq!(back, ["ALTER TABLE `orders`\n  ADD CONSTRAINT `chk_note` CHECK (length(`note`) < 40) NOT ENFORCED"]);
+    // names compare without case here, as the server does
+    assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::DropCheck("CHK_TOTAL".into())]).is_ok());
+    // adding one is undone by dropping it, and for MariaDB by DROP CONSTRAINT
+    let add = [Change::AddCheck(chk("chk_new", "total < 1000"))];
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &add).unwrap(), ["ALTER TABLE `orders`\n  DROP CHECK `chk_new`"]);
+    assert_eq!(inverse(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", &t, &add).unwrap(), ["ALTER TABLE `orders`\n  DROP CONSTRAINT `chk_new`"]);
+    // an edit is a drop and an add: undone by dropping the new one, then adding the old one back, one ALTER each
+    let edit = [Change::DropCheck("chk_total".into()), Change::AddCheck(chk("chk_total", "`total` > 0"))];
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &edit).unwrap(), ["ALTER TABLE `orders`\n  DROP CHECK `chk_total`", "ALTER TABLE `orders`\n  ADD CONSTRAINT `chk_total` CHECK (`total` >= 0)"]);
+    // a check that is not there, or already is, has no undo, and the plan says why
+    assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::DropCheck("nope".into())]).unwrap_err().contains("not on the table"));
+    assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::AddCheck(chk("chk_total", "1 = 1"))]).unwrap_err().contains("already has"));
+    // the undo records the names it touches, so it can refuse when another session changed them
+    let u = plan(M, "8.4.0", B, "orders", &t, &edit).unwrap().undo.unwrap();
+    assert_eq!(u.checks, ["chk_total"]);
+    let a = snapshot(&t, &[], &[], &[], &u.checks);
+    let mut t2 = t.clone();
+    t2.checks[0].expr = "`total` > 5".into();
+    assert_ne!(snapshot(&t2, &[], &[], &[], &u.checks), a);
+    t2.checks.remove(0);
+    assert!(snapshot(&t2, &[], &[], &[], &u.checks)[0].1.is_none());
+    assert_eq!(checks_after(&t, &edit), ["chk_note", "chk_total"]);
 }

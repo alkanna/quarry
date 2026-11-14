@@ -292,13 +292,18 @@ fn finding_5_attributes(r: &mut R, db: &Db, maria: bool) {
         });
         r.trip(db, t, &create, "drop json", |_| vec![Change::Drop("j".into())], |_, after| assert!(!has_col(after, "j")));
         let st = r.st(db, t);
-        assert!(ColDef::in_table(&st, &col(&st, "k")).unwrap_err().contains("CHECK"));
+        assert!(ColDef::in_table(&st, &col(&st, "k")).unwrap().check.is_some());
         assert!(ColDef::in_table(&st, &col(&st, "z")).unwrap_err().contains("COMPRESSED"));
-        // Dropping either has no undo, and the plan says so before anything runs.
-        for c in ["k", "z"] {
-            let p = plan(db.dialect, &db.version, Mode::of(&db.sql_mode), t, &st, &[Change::Drop(c.into())]).unwrap();
-            assert!(p.undo.is_err(), "{c}");
-        }
+        // Dropping a compressed column has no undo, and the plan says so before anything runs.
+        let p = plan(db.dialect, &db.version, Mode::of(&db.sql_mode), t, &st, &[Change::Drop("z".into())]).unwrap();
+        assert!(p.undo.is_err());
+        // A column that has its own CHECK keeps it through a move and through a rename, and comes back with it after a drop.
+        r.trip(db, t, &create, "move a column with a CHECK", |st| vec![moved(st, "k")], |_, after| {
+            assert_eq!(after.columns[0].name, "k");
+            assert!(col(after, "k").check.is_some());
+        });
+        r.trip(db, t, &create, "rename a column with a CHECK", |st| vec![renamed(st, "k", "kk")], |_, after| assert!(col(after, "kk").check.as_deref().is_some_and(|c| c.contains("kk"))));
+        r.trip(db, t, &create, "drop a column with a CHECK", |_| vec![Change::Drop("k".into())], |_, after| assert!(!has_col(after, "k")));
     } else {
         let t = "sf_geo";
         let create = format!("CREATE TABLE {S}.{t} (id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, n INT)");

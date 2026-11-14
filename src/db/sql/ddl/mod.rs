@@ -5,7 +5,7 @@
 //! default) are checked. Every statement runs as a prepared statement, which holds exactly one.
 
 use super::se;
-use super::structure::{load, split_type, Column, ForeignKey, Index, Structure, Trigger};
+use super::structure::{load, split_type, CheckConstraint, Column, ForeignKey, Index, Structure, Trigger};
 use super::{Db, Dialect};
 #[cfg(test)]
 use my::definition;
@@ -103,16 +103,18 @@ pub struct ColDef {
     /// PostgreSQL: the auto increment is a serial, an integer whose default is the `nextval` of a sequence the column owns, as
     /// the catalog read it. A typed `nextval(...)` default is not one: it names a sequence the column does not own.
     pub serial: bool,
+    /// MariaDB: the CHECK written on the column itself, as the server reports it. A MODIFY without it drops the CHECK, so
+    /// it is written again each time the column is.
+    pub check: Option<String>,
 }
 
 impl ColDef {
     pub fn new(name: &str, ty: &str) -> ColDef {
-        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false, serial: false }
+        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false, serial: false, check: None }
     }
 
-    /// What the structure read holds about a column. Generated, invisible and compressed columns and MariaDB
-    /// column CHECKs carry attributes this definition does not write, so redefining them would lose them:
-    /// those are refused.
+    /// What the structure read holds about a column. Generated, invisible and compressed columns
+    /// carry attributes this definition does not write, so redefining them would lose them: those are refused.
     pub fn from_column(c: &Column) -> Result<ColDef, String> {
         // Only a PostgreSQL column has a catalog kind.
         if c.kind.is_some() {
@@ -127,12 +129,14 @@ impl ColDef {
         }
         let (mut ty, mut args, unsigned) = split_type(&c.full_type);
         let mut collation = c.collation.clone();
+        let mut check = None;
         if let Some(chk) = &c.check {
             // MariaDB's JSON is a LONGTEXT with this CHECK, and declaring JSON again brings both back.
             if ty == "LONGTEXT" && *chk == format!("json_valid({})", Dialect::MariaDb.quote_ident(&c.name)) {
                 (ty, args, collation) = ("JSON".into(), String::new(), None);
             } else {
-                return Err(format!("Column {} has its own CHECK ({chk}), which this editor would drop. Edit it with a query.", c.name));
+                // MODIFY drops a column CHECK it does not repeat, so it is carried and written again.
+                check = Some(chk.clone());
             }
         }
         let tail = match c.full_type.rfind(')') {
@@ -151,7 +155,7 @@ impl ColDef {
             (None, _) if c.nullable => Dv::Null,
             (None, _) => Dv::None,
         };
-        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false, serial: false })
+        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false, serial: false, check })
     }
 
     /// `from_column` for a column of `st`. A collation that is the table's default is left out, so an edit or an
@@ -250,6 +254,9 @@ pub enum Change {
     /// PostgreSQL only: ALTER CONSTRAINT, which changes whether a key is deferrable and starts deferred without dropping it
     /// and so without the lock a drop takes.
     SetFkDeferral { name: String, deferrable: bool, deferred: bool },
+    /// A table CHECK. Editing one is a drop and an add, staged together.
+    AddCheck(CheckConstraint),
+    DropCheck(String),
 }
 
 impl Change {
@@ -268,6 +275,8 @@ impl Change {
             Change::DropFk(n) => format!("Drop foreign key {n}"),
             Change::RenameFk { from, to } => format!("Rename foreign key {from} to {to}"),
             Change::SetFkDeferral { name, .. } => format!("Change when foreign key {name} is checked"),
+            Change::AddCheck(k) => format!("Add check {}", k.name),
+            Change::DropCheck(n) => format!("Drop check {n}"),
         }
     }
 }
@@ -298,9 +307,14 @@ pub fn check_ident(name: &str, what: &str) -> Result<(), String> {
 /// session's sql_mode ends them: under ANSI_QUOTES a double quote is an identifier, where a backslash
 /// escapes nothing.
 pub fn check_expr(s: &str, m: Mode) -> Result<(), String> {
+    check_expr_of("default expression", s, m)
+}
+
+/// `check_expr` for an expression called `what` in the messages, such as a CHECK's.
+pub fn check_expr_of(what: &str, s: &str, m: Mode) -> Result<(), String> {
     let t = s.trim();
     if t.is_empty() {
-        return Err("The default expression is empty.".into());
+        return Err(format!("The {what} is empty."));
     }
     let b: Vec<char> = t.chars().collect();
     let (mut i, mut depth) = (0, 0i32);
@@ -312,7 +326,7 @@ pub fn check_expr(s: &str, m: Mode) -> Result<(), String> {
                 i += 1;
                 loop {
                     match b.get(i) {
-                        None => return Err("The default expression has an unclosed quote.".into()),
+                        None => return Err(format!("The {what} has an unclosed quote.")),
                         Some('\\') if m.bs && !ident => i += 2,
                         Some(&q) if q == c => {
                             if b.get(i + 1) == Some(&c) {
@@ -329,18 +343,18 @@ pub fn check_expr(s: &str, m: Mode) -> Result<(), String> {
             ')' => {
                 depth -= 1;
                 if depth < 0 {
-                    return Err("The default expression closes a bracket it never opened.".into());
+                    return Err(format!("The {what} closes a bracket it never opened."));
                 }
             }
-            ';' | '#' => return Err("The default expression must be one expression, without ; or comments.".into()),
-            '-' if b.get(i + 1) == Some(&'-') => return Err("The default expression must be one expression, without ; or comments.".into()),
-            '/' if b.get(i + 1) == Some(&'*') => return Err("The default expression must be one expression, without ; or comments.".into()),
+            ';' | '#' => return Err(format!("The {what} must be one expression, without ; or comments.")),
+            '-' if b.get(i + 1) == Some(&'-') => return Err(format!("The {what} must be one expression, without ; or comments.")),
+            '/' if b.get(i + 1) == Some(&'*') => return Err(format!("The {what} must be one expression, without ; or comments.")),
             _ => {}
         }
         i += 1;
     }
     if depth != 0 {
-        return Err("The default expression has an unclosed bracket.".into());
+        return Err(format!("The {what} has an unclosed bracket."));
     }
     Ok(())
 }

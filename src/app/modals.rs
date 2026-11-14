@@ -114,6 +114,7 @@ impl App {
                 Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
                 Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),
                 Modal::IdxEdit(f) => self.idx_dialog(ui, f, &mut keep),
+                Modal::CheckEdit(f) => self.check_dialog(ui, f, &mut keep),
                 Modal::SqlNewDb(f) => self.sql_new_db_dialog(ui, f, &mut keep),
                 Modal::SqlNewTable(f) => self.sql_new_table_dialog(ui, f, &mut keep),
                 Modal::SqlDrop(f) => self.sql_drop_dialog(ui, f, &mut keep),

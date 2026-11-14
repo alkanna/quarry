@@ -3,7 +3,7 @@
 //! database, so tests of one server run side by side.
 
 use crate::db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Pos};
-use crate::db::sql::structure::{Column, Structure};
+use crate::db::sql::structure::{CheckConstraint, Column, Structure};
 use crate::db::sql::testing::{every_pg, live_pgbouncer, LivePg, PgFixture};
 use crate::db::sql::{Db, Dialect};
 use crate::db::{Msg, Res, UndoAction};
@@ -609,6 +609,49 @@ fn an_undo_does_not_reach_a_table_dropped_and_made_again_with_the_same_structure
         let why = res.unwrap_err();
         assert!(why.contains("dropped and made again") && kept.is_none(), "{var}: {why}");
         assert!(t.col("price").is_some(), "{var}: the column of the new table is still there");
+    });
+}
+
+#[test]
+fn check_constraints_are_added_dropped_edited_and_undone() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "chk", TABLE_DDL);
+        let chk = |name: &str, expr: &str| CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() };
+        let find = |n: &str| t.structure().checks.into_iter().find(|k| k.name == n);
+        // an add is read back from the catalog and undone by a drop
+        let undo = t.apply(&[Change::AddCheck(chk("t_qty_ck", "qty >= 0"))]);
+        let k = find("t_qty_ck").unwrap_or_else(|| panic!("{var}: not read back"));
+        assert!(k.expr.contains("qty >= 0") && !k.not_valid && !k.no_inherit, "{var}: {k:?}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(find("t_qty_ck").is_none(), "{var}");
+        // a string with a quote and a bracket survives the read and an edit, and the flags are kept through drop and undo
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_name_ck CHECK (name <> 'it''s)' AND name IN ('a', 'b', 'c')) NO INHERIT NOT VALID");
+        let old = find("t_name_ck").unwrap();
+        assert!(old.not_valid && old.no_inherit && old.expr.contains("it''s)"), "{var}: {old:?}");
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into())]);
+        assert!(find("t_name_ck").is_none(), "{var}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(find("t_name_ck"), Some(old.clone()), "{var}");
+        // an edit is a drop and an add, and its undo puts the old condition back
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into()), Change::AddCheck(chk("t_name_ck", "length(name) < 40"))]);
+        assert!(find("t_name_ck").is_some_and(|k| k.expr.contains("length") && !k.not_valid), "{var}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(find("t_name_ck"), Some(old), "{var}");
+        // NOT VALID skips the rows already there; without it a row that breaks the check refuses the add and nothing changes
+        t.apply(&[Change::AddCheck(CheckConstraint { not_valid: true, ..chk("t_big_ck", "qty > 100") })]);
+        assert!(find("t_big_ck").is_some_and(|k| k.not_valid), "{var}");
+        let p = t.plan(&[Change::AddCheck(chk("t_never_ck", "qty > 100"))]).unwrap();
+        let (res, _) = t.run(p);
+        assert!(res.is_err() && find("t_never_ck").is_none(), "{var}");
+        // a duplicate is refused by the plan's undo, and a CHECK that reaches a stable function is refused when it runs
+        assert!(t.plan(&[Change::AddCheck(chk("t_big_ck", "qty > 1"))]).unwrap().undo.is_err(), "{var}");
+        t.sql("CREATE FUNCTION t_stable(integer) RETURNS integer LANGUAGE sql STABLE AS 'SELECT $1'");
+        let p = t.plan(&[Change::AddCheck(chk("t_fn_ck", "t_stable(qty) >= 0"))]).unwrap();
+        let (res, _) = t.run(p);
+        assert!(res.unwrap_err().contains("IMMUTABLE") && find("t_fn_ck").is_none(), "{var}");
     });
 }
 

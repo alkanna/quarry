@@ -16,7 +16,7 @@
 use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
 use crate::db::sql::exec::{sql_state, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
-use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
+use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
 use crate::db::sql::value::{lit, pg_lit, Param};
 use crate::db::sql::write::PgIds;
 use crate::db::sql::pg::LOCK_WAIT_SECS;
@@ -518,6 +518,11 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
             let k = sim.fk_at(from).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {from} is not on the table."))?;
             vec![format!("{alter} RENAME CONSTRAINT {} TO {}", q(&k.name), q(to))]
         }
+        Change::AddCheck(k) => vec![add_check(schema, table, k)?],
+        Change::DropCheck(n) => {
+            let k = sim.check_at(n).map(|i| &sim.checks[i]).ok_or_else(|| format!("Check constraint {n} is not on the table."))?;
+            vec![format!("{alter} DROP CONSTRAINT {}", q(&k.name))]
+        }
         Change::SetFkDeferral { name, deferrable, deferred } => {
             let k = sim.fk_at(name).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
             if *deferred && !*deferrable {
@@ -531,6 +536,45 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
             vec![format!("{alter} ALTER CONSTRAINT {} {when}", q(&k.name))]
         }
     })
+}
+
+/// The start of the statement that adds the CHECK `name`, which the run uses to tell which steps add one.
+fn add_check_head(schema: &str, table: &str, name: &str) -> String {
+    format!("ALTER TABLE {} ADD CONSTRAINT {} CHECK ", D.qualified(schema, table), q(name))
+}
+
+/// ADD CONSTRAINT .. CHECK. NOT VALID skips the rows already there, and NOT ENFORCED (PostgreSQL 18) is how a constraint that
+/// was read that way is written back; the server takes only one of the two.
+fn add_check(schema: &str, table: &str, k: &CheckConstraint) -> Result<String, String> {
+    name_ok(&k.name, "A check constraint")?;
+    check_constraint_pg(&k.expr)?;
+    let mut text = format!("{}({})", add_check_head(schema, table, &k.name), k.expr.trim());
+    if k.no_inherit {
+        text.push_str(" NO INHERIT");
+    }
+    if k.not_enforced {
+        text.push_str(" NOT ENFORCED");
+    } else if k.not_valid {
+        text.push_str(" NOT VALID");
+    }
+    Ok(text)
+}
+
+/// PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so one that reaches a volatile or stable function (which
+/// could write, call out or read other tables) is refused. The create dialog does the same for the checks of a new table.
+async fn added_checks_immutable(tx: &mut Tx<'_>, schema: &str, table: &str, added: &[String]) -> Result<(), Fail> {
+    let Some(oid) = super::create::relation_oid(tx, &D.qualified(schema, table)).await.map_err(Fail::Run)? else { return Ok(()) };
+    let rows = tx.fetch_bound(super::create::CHECK_VOLATILE, &[Param::Text(oid)]).await.map_err(|e| Fail::Run(se(e)))?;
+    for r in &rows {
+        let con = crate::db::sql::worker::text(r, "con").unwrap_or_default();
+        if !added.contains(&con) {
+            continue;
+        }
+        let f = crate::db::sql::worker::text(r, "fn").unwrap_or_default();
+        let vol = if crate::db::sql::worker::text(r, "vol").as_deref() == Some("s") { "STABLE" } else { "VOLATILE" };
+        return Err(Fail::Run(format!("The CHECK {con} calls {f}, which is {vol}. PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so only IMMUTABLE functions are allowed there. Nothing was changed.")));
+    }
+    Ok(())
 }
 
 /// The actions PostgreSQL has for a key. The dialog offers the four MySQL has; SET DEFAULT is here so a key that already has
@@ -719,12 +763,12 @@ pub(in crate::db::sql) fn plan(table: &str, st: &Structure, changes: &[Change]) 
         steps.extend(statements(&sim, schema, table, c)?);
         let _ = sim.apply(c);
     }
-    let (cols, idx, fks) = touched(std::slice::from_ref(&changes.to_vec()));
+    let (cols, idx, fks, checks) = touched(std::slice::from_ref(&changes.to_vec()));
     // A dropped column takes whatever depends on it, and the undo only knows the ones read now, so the whole set of
     // indexes, constraints and dependents has to be the same under the lock.
     let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
     let (refs, orphans) = others(&Sim::of(st), schema, changes);
-    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types, refs, orphans, own_share: shares_only(changes) };
+    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks, &checks), cols, idx, fks, checks, all, types, refs, orphans, own_share: shares_only(changes) };
     Ok(Plan { steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
 }
 
@@ -756,7 +800,7 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
     }
     groups.reverse();
     let loss = undo_loss(&sim, &groups);
-    let (cols, idx, fks) = touched(&groups);
+    let (cols, idx, fks, checks) = touched(&groups);
     let mut run = sim.clone();
     let mut steps = Vec::new();
     for c in groups.iter().flatten() {
@@ -764,7 +808,7 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
         run.apply(c)?;
     }
     let (refs, orphans) = others(&sim, schema, &groups.iter().flatten().cloned().collect::<Vec<_>>());
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, expect: Vec::new(), refs, orphans, groups })
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, checks, expect: Vec::new(), refs, orphans, groups })
 }
 
 /// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), a statement failed (the transaction
@@ -784,7 +828,8 @@ pub(in crate::db::sql) async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &s
     let fks = tx.fetch_bound(D.foreign_keys(), &args).await.map_err(se)?;
     let cons = tx.fetch_bound(crate::db::sql::pg::catalog::CONSTRAINTS, &args).await.map_err(se)?;
     let deps = tx.fetch_bound(crate::db::sql::pg::catalog::COLUMN_DEPS, &args).await.map_err(se)?;
-    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
+    let constraints = constraints(&cons);
+    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), checks: pg_checks(&constraints), constraints, pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
 pub(in crate::db::sql) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
@@ -998,7 +1043,7 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
     // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
     set_path(tx, db, schema).await.map_err(|e| Fail::Run(se(e)))?;
     let st = read_in(tx, schema, table).await.map_err(Fail::Run)?;
-    let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks);
+    let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks, &expect.checks);
     if now.len() != expect.snap.len() {
         return Err(Fail::Changed("the table".into()));
     }
@@ -1049,6 +1094,10 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
         }
         exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())))?;
     }
+    let added: Vec<String> = expect.checks.iter().filter(|n| steps.iter().any(|s| s.starts_with(&add_check_head(schema, table, n)))).cloned().collect();
+    if !added.is_empty() && !undo {
+        added_checks_immutable(tx, schema, table, &added).await?;
+    }
     Ok(())
 }
 
@@ -1081,7 +1130,7 @@ pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_
         _ => PgIds::default(),
     };
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
+    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), checks: u.checks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
     let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only, true).await }).await;
     let unsure = matches!(out, Err(Fail::Unknown(_)));
     let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| plan_failed(f, true));
@@ -1115,7 +1164,7 @@ impl Worker {
                     let (st, loads) = futures_util::future::join(load(&db, &schema, &table), futures_util::future::join_all(want.iter().map(|&i| load(&db, &u.refs[i].schema, &u.refs[i].table)))).await;
                     match st {
                         Ok(st) => {
-                            u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
+                            u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
                             // The undo of a dropped key puts it back and leans on the parent as it is now.
                             let mut unread = None;
                             for (&i, loaded) in want.iter().zip(loads) {
@@ -1148,7 +1197,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sql::structure::{ColDep, Index, IndexCol};
+    use crate::db::sql::structure::{ColDep, Constraint, Index, IndexCol};
 
     #[test]
     fn expressions_stay_one_expression() {
@@ -1423,6 +1472,65 @@ mod tests {
         assert!(plan("t", &st, &[Change::DropFk("missing".into())]).is_err());
     }
 
+    fn chk(name: &str, expr: &str) -> CheckConstraint {
+        CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_check_is_added_and_dropped_as_a_constraint() {
+        let t = "\"public\".\"t\"";
+        assert_eq!(steps(&[Change::AddCheck(chk("t_name_check", "length(name) > 0"))]), [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_name_check\" CHECK (length(name) > 0)")]);
+        let both = CheckConstraint { not_valid: true, no_inherit: true, ..chk("Odd \"name\"", " price > 0 ") };
+        assert_eq!(steps(&[Change::AddCheck(both)]), [format!("ALTER TABLE {t} ADD CONSTRAINT \"Odd \"\"name\"\"\" CHECK (price > 0) NO INHERIT NOT VALID")]);
+        assert!(steps(&[Change::AddCheck(CheckConstraint { not_enforced: true, not_valid: true, ..chk("c", "a > 0") })])[0].ends_with("CHECK (a > 0) NOT ENFORCED"));
+        // a condition that is not one expression, one that acts outside the row, an empty one and a long name are refused
+        for bad in [chk("c", "a > 0); DROP TABLE t; --"), chk("c", "a > 0 -- x"), chk("c", "pg_advisory_lock(1) IS NOT NULL"), chk("c", ""), chk(&"n".repeat(64), "a > 0"), chk("", "a > 0")] {
+            assert!(plan("t", &table(), &[Change::AddCheck(bad.clone())]).is_err(), "{bad:?}");
+        }
+        let mut st = table();
+        st.checks = vec![chk("T_chk", "a > 0")];
+        assert_eq!(plan("t", &st, &[Change::DropCheck("T_chk".into())]).unwrap().steps, [format!("ALTER TABLE {t} DROP CONSTRAINT \"T_chk\"")]);
+        // PostgreSQL tells two names apart that differ only in case
+        assert!(plan("t", &st, &[Change::DropCheck("t_chk".into())]).is_err());
+        assert!(plan("t", &st, &[Change::AddCheck(chk("t_chk", "a > 1"))]).is_ok());
+        assert!(plan("t", &st, &[Change::AddCheck(chk("T_chk", "a > 1"))]).unwrap().undo.is_err());
+    }
+
+    #[test]
+    fn the_undo_of_a_check_change_is_the_check_as_it_was() {
+        let mut st = table();
+        let old = CheckConstraint { not_valid: true, ..chk("t_chk", "a > 0") };
+        st.checks = vec![old.clone()];
+        let undo = plan("t", &st, &[Change::DropCheck("t_chk".into())]).unwrap().undo.unwrap();
+        assert_eq!(undo.groups, [vec![Change::AddCheck(old.clone())]]);
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_chk\" CHECK (a > 0) NOT VALID"]);
+        let undo = plan("t", &table(), &[Change::AddCheck(old.clone())]).unwrap().undo.unwrap();
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_chk\""]);
+        // an edit is a drop and an add of the same name: undone by dropping the new one and adding the old one back
+        let new = chk("t_chk", "a > 5");
+        let p = plan("t", &st, &[Change::DropCheck("t_chk".into()), Change::AddCheck(new)]).unwrap();
+        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.undo.unwrap().steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_chk\"", "ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_chk\" CHECK (a > 0) NOT VALID"]);
+        // the plan checks the constraint again under the lock, and adding one takes the exclusive lock
+        let e = plan("t", &table(), &[Change::AddCheck(chk("c", "a > 0"))]).unwrap().expect.unwrap();
+        assert_eq!(e.checks, ["c"]);
+        assert!(!e.own_share);
+    }
+
+    #[test]
+    fn a_check_is_read_from_the_catalog_text() {
+        let con = |def: &str| Constraint { name: "c".into(), kind: 'c', def: def.into() };
+        let k = CheckConstraint::from_pg(&con("CHECK ((total >= (0)::numeric))")).unwrap();
+        assert_eq!((k.expr.as_str(), k.not_valid, k.no_inherit, k.not_enforced), ("(total >= (0)::numeric)", false, false, false));
+        let k = CheckConstraint::from_pg(&con("CHECK (status = ANY (ARRAY['a'::text, 'b)'::text])) NO INHERIT NOT VALID")).unwrap();
+        assert_eq!((k.expr.as_str(), k.not_valid, k.no_inherit), ("status = ANY (ARRAY['a'::text, 'b)'::text])", true, true));
+        // a quote that is escaped in an E string does not end the string
+        let k = CheckConstraint::from_pg(&con("CHECK (note <> E'it\\'s)')")).unwrap();
+        assert_eq!(k.expr, "note <> E'it\\'s)'");
+        assert!(CheckConstraint::from_pg(&con("CHECK ((a > 0)) NOT ENFORCED")).unwrap().not_enforced);
+        assert!(CheckConstraint::from_pg(&Constraint { kind: 'u', ..con("UNIQUE (a)") }).is_none());
+    }
+
     #[test]
     fn the_undo_of_a_key_change_is_the_key_as_it_was() {
         let mut st = table();
@@ -1518,7 +1626,7 @@ mod tests {
         // a name that is not there is not matched by another case
         assert!(plan("t", &st, &[Change::DropFk("T_FK".into())]).is_err());
         // the snapshot the transaction compares reads the right key for each
-        let snap = snapshot(&st, &[], &[], &["t_fk".to_string(), "T_fk".to_string()]);
+        let snap = snapshot(&st, &[], &[], &["t_fk".to_string(), "T_fk".to_string()], &[]);
         assert!(snap[0].1.as_deref().unwrap().contains("|name|") && snap[1].1.as_deref().unwrap().contains("|note|"), "{snap:?}");
         // a key of one case can be added beside one of another
         let two = plan("t", &st, &[Change::AddFk(fk("T_FK", &["id"], "", "p", &["id"]))]).unwrap();

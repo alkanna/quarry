@@ -231,7 +231,7 @@ impl App {
         t.selected = None;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(orders_structure());
-            s.st.sel = [Some(3), None, Some(0), None, Some(0)];
+            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
     }
 
@@ -453,6 +453,7 @@ fn orders_structure() -> Structure {
             ix("idx_orders_customer_created", false, &[("customer_id", false), ("created_at", true)], false, "CREATE INDEX idx_orders_customer_created ON public.orders USING btree (customer_id, created_at DESC)"),
         ],
         constraints: vec![constraint("orders_pkey", 'p', "PRIMARY KEY (id)"), constraint("orders_public_id_key", 'u', "UNIQUE (public_id)"), constraint("orders_total_check", 'c', "CHECK ((total >= (0)::numeric))")],
+        checks: vec![db::sql::structure::CheckConstraint { name: "orders_total_check".into(), expr: "total >= (0)::numeric".into(), ..Default::default() }],
         foreign_keys: vec![fk("orders_customer_id_fkey", "orders", "customer_id", "customers", "id", "RESTRICT")],
         referenced_by: vec![fk("order_items_order_id_fkey", "order_items", "order_id", "orders", "id", "CASCADE"), fk("events_order_id_fkey", "events", "order_id", "orders", "id", "SET NULL")],
         triggers: vec![Trigger {
