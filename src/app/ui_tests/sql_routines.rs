@@ -52,6 +52,8 @@ fn query(a: &App) -> String {
 #[test]
 fn the_sidebar_lists_routines_and_the_caption_folds_them() {
     let Some(mut ui) = demo_ui(|a| mysql_open(a, "")) else { return };
+    // The window is a modal, so a click on the sidebar would only close it.
+    ui.click("Close");
     ui.show("order_total");
     ui.show("archive_orders");
     ui.click("Routines");
@@ -136,6 +138,8 @@ fn cancel_leaves_the_drop_pane_for_the_definition() {
 #[test]
 fn the_row_menu_opens_the_drop_pane_of_that_routine() {
     let Some(mut ui) = demo_ui(|a| mysql_open(a, "")) else { return };
+    // The window is a modal, so a click on the sidebar would only close it.
+    ui.click("Close");
     ui.show("order_total");
     let at = ui.h.get_by_label("order_total").rect().center();
     ui.press_at(at, egui::PointerButton::Secondary, 1);
