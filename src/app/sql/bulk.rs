@@ -61,7 +61,7 @@ fn plan_of(f: &BulkForm, d: db::sql::Dialect, bs: bool) -> Result<BulkPlan, Stri
     } else {
         BulkOp::Delete
     };
-    Ok(BulkPlan { op, filter: f.filter.clone(), cols: p.cols.clone(), pk: p.pk.clone(), bs, expected: p.count, undo: bulk::undo_fits(p.count) })
+    Ok(BulkPlan { op, filter: f.filter.clone(), cols: p.cols.clone(), pk: p.pk.clone(), bs, expected: p.count, undo: bulk::undo_fits(p.count), engine: p.engine.clone() })
 }
 
 impl App {
@@ -125,6 +125,9 @@ impl App {
         }
         if f.capped {
             banner(ui, Notice::Warn, "", "LIMIT and OFFSET only cap what the grid shows. Every row the WHERE matches is changed.", None);
+        }
+        if let Some(p) = f.prep.as_ref().filter(|p| !p.rolls_back()) {
+            banner(ui, Notice::Warn, "No rollback.", &format!("The {} engine of {table} has no transactions: if the rows change before the write, what it changed stays.", p.engine), None);
         }
         let count = f.prep.as_ref().map(|p| p.count);
         ui.horizontal(|ui| match count {

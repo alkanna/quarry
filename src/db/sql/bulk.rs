@@ -32,6 +32,8 @@ pub struct BulkPlan {
     pub expected: u64,
     /// Keep the old rows so the change can be undone. The dialog only asks for it at or under `UNDO_MAX_ROWS`.
     pub undo: bool,
+    /// The MySQL storage engine the count read, empty on PostgreSQL. One without transactions keeps what a write did.
+    pub engine: String,
 }
 
 /// What the dialog learns before it can be confirmed: the exact count, and the table's columns and key read fresh, since the
@@ -41,6 +43,24 @@ pub struct BulkPrep {
     pub count: u64,
     pub cols: Vec<Col>,
     pub pk: Vec<String>,
+    /// The table's storage engine on MySQL and MariaDB, empty on PostgreSQL.
+    pub engine: String,
+}
+
+impl BulkPrep {
+    /// Whether a write that matches another count than this one can still be taken back.
+    pub fn rolls_back(&self) -> bool {
+        super::csv::engine_rolls_back(&self.engine)
+    }
+}
+
+/// How a run ended. `kept` is set when a write that should have been refused stayed, on an engine without transactions:
+/// the message then says what happened, and is reported as a failure with its undo.
+struct Ran {
+    msg: String,
+    undo: Option<(SqlUndo, PgIds)>,
+    cols: Vec<Col>,
+    kept: bool,
 }
 
 /// Whether undo can be kept for `count` rows.
@@ -127,20 +147,21 @@ async fn prep(db: &Db, schema: &str, table: &str, filter: &str) -> Res<BulkPrep>
     one_read(&sql, d)?;
     let count = async { db.read_text(schema, &sql, true).await.map(|r| r.first().and_then(|r| num_at(r, 0)).unwrap_or(0)) };
     let shape = async {
+        let engine = if d == Dialect::Postgres { String::new() } else { db.meta(schema, d.table_status(), [schema, table]).await?.first().and_then(|r| super::worker::text(r, "engine")).unwrap_or_default() };
         let (meta, kinds, mut pk) = table_meta(db, schema, table).await?;
         let rcols = db.describe_text(&format!("SELECT * FROM {}", d.qualified(schema, table))).await?;
         // An invisible key column is not in SELECT *, so the rows could not be told apart.
         if !pk.iter().all(|p| rcols.iter().any(|c| c.name == *p)) {
             pk.clear();
         }
-        Ok::<_, String>((make_cols_kinds(&rcols, &meta, &kinds, !pk.is_empty()), pk))
+        Ok::<_, String>((make_cols_kinds(&rcols, &meta, &kinds, !pk.is_empty()), pk, engine))
     };
-    let (count, (cols, pk)) = tokio::try_join!(count, shape)?;
-    Ok(BulkPrep { count, cols, pk })
+    let (count, (cols, pk, engine)) = tokio::try_join!(count, shape)?;
+    Ok(BulkPrep { count, cols, pk, engine })
 }
 
 /// Runs the plan in one transaction. Returns what to say, the undo when one was kept, and the columns the undo reads.
-async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) -> Res<(String, Option<(SqlUndo, PgIds)>, Vec<Col>)> {
+async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) -> Res<Ran> {
     let d = db.dialect;
     let stmt = statement(d, schema, table, p)?;
     check(d, schema, table, &p.filter, &stmt)?;
@@ -184,7 +205,9 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
     let r = tx.exec_bound(&stmt, &[]).await;
     db.note(schema, &stmt, t, &r);
     let n = r.map_err(|x| super::se_at(&x, &stmt, 0))?.rows_affected();
-    if n != p.expected {
+    // Without transactions the rows changed the moment the statement ran, so a rollback would only hide that.
+    let kept = n != p.expected && !super::csv::engine_rolls_back(&p.engine);
+    if n != p.expected && !kept {
         let _ = tx.rollback().await;
         return Err(moved(&plural(n, "row", "rows"), p.expected));
     }
@@ -198,8 +221,14 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         BulkOp::Update(_) => format!("Updated {} in {table}", plural(n, "row", "rows")),
         BulkOp::Delete => format!("Deleted {} from {table}", plural(n, "row", "rows")),
     };
-    let msg = if p.undo { what } else { format!("{what}. No undo was kept for a change this large.") };
-    Ok((msg, undo.map(|u| (u, ids)), cols))
+    let msg = if kept {
+        format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", plural(p.expected, "row", "rows"), p.engine, if p.undo { " Undo puts back the rows read before it." } else { "" })
+    } else if p.undo {
+        what
+    } else {
+        format!("{what}. No undo was kept for a change this large.")
+    };
+    Ok(Ran { msg, undo: undo.map(|u| (u, ids)), cols, kept })
 }
 
 impl Worker {
@@ -216,7 +245,7 @@ impl Worker {
         self.spawn(async move {
             let at = (schema.clone(), table.clone());
             let (res, undo) = match run(&db, &schema, &table, &plan, read_only).await {
-                Ok((msg, undo, cols)) => (Ok(msg), undo.map(|(u, ids)| action(db.pg_database(), ids, conn, &schema, &table, &cols, u))),
+                Ok(r) => (if r.kept { Err(r.msg) } else { Ok(r.msg) }, r.undo.map(|(u, ids)| action(db.pg_database(), ids, conn, &schema, &table, &r.cols, u))),
                 Err(err) => (Err(err), None),
             };
             Msg::Written { at, res, undo, reload: true, retry: None }
@@ -234,7 +263,7 @@ mod tests {
     }
 
     fn plan(op: BulkOp, filter: &str) -> BulkPlan {
-        BulkPlan { op, filter: filter.into(), cols: cols(), pk: vec!["id".into()], bs: true, expected: 2, undo: true }
+        BulkPlan { op, filter: filter.into(), cols: cols(), pk: vec!["id".into()], bs: true, expected: 2, undo: true, engine: String::new() }
     }
 
     #[test]
@@ -315,18 +344,22 @@ mod tests {
             // A count of 2 stands for rows that changed between the count and the confirm: with or without the capture, the
             // write is rolled back.
             for undo in [true, false] {
-                let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 2, undo };
+                let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 2, undo, engine: p.engine.clone() };
                 let err = l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, false)).err().unwrap_or_else(|| panic!("{var}: the write ran"));
                 assert!(err.starts_with("Nothing was changed"), "{var}: {err}");
                 assert_eq!(l.count("quarry_bulk.moved"), 3, "{var}, undo {undo}");
             }
             // A locked connection writes nothing either.
-            let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 3, undo: true };
+            // A filter that carries a second statement is refused before anything is sent.
+            let sneaky = BulkPlan { op: BulkOp::Delete, filter: "1 = 1); DELETE FROM quarry_bulk.moved; --".into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 3, undo: false, engine: p.engine.clone() };
+            assert!(l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &sneaky, false)).is_err(), "{var}");
+            assert_eq!(l.count("quarry_bulk.moved"), 3, "{var}");
+            let plan = BulkPlan { op: BulkOp::Delete, filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: 3, undo: true, engine: p.engine.clone() };
             assert!(l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, true)).is_err(), "{var}");
             assert_eq!(l.count("quarry_bulk.moved"), 3, "{var}");
-            let (msg, undo, _) = l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, false)).unwrap_or_else(|x| panic!("{var}: {x}"));
-            assert_eq!(msg, "Deleted 3 rows from moved", "{var}");
-            assert!(matches!(undo, Some((SqlUndo::Delete(ref rows), _)) if rows.len() == 3), "{var}");
+            let r = l.w.rt.block_on(run(&l.db, "quarry_bulk", "moved", &plan, false)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!((r.msg.as_str(), r.kept), ("Deleted 3 rows from moved", false), "{var}");
+            assert!(matches!(r.undo, Some((SqlUndo::Delete(ref rows), _)) if rows.len() == 3), "{var}");
             assert_eq!(l.count("quarry_bulk.moved"), 0, "{var}");
             l.sql("DROP TABLE quarry_bulk.moved");
         });

@@ -67,6 +67,7 @@ fn a_filter_with_a_second_statement_writes_nothing() {
         let q = fx.qualified(&t);
         filter_to(ui, &format!("1 = 1); DELETE FROM {q}; --"));
         ui.h.state_mut().open_bulk(false);
+        assert!(matches!(ui.app().modal, Some(Modal::SqlBulk(_))), "the dialog did not open: {}", ui.app().last_problem());
         ui.wait("the dialog to refuse the filter", |a| a.modal.is_none());
         fx.expect_unchanged(ui, &t, ORIGINAL);
     });

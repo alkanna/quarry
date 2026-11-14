@@ -313,3 +313,27 @@ fn the_picker_lists_are_built_only_while_it_is_open() {
     let open = ui.app().pick_data(&ctx, PickKind::Sql);
     assert!(open.full && open.rows.len() == 5);
 }
+
+#[test]
+fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let t = ui.app().t().unwrap();
+    assert!(t.view == View::Documents && t.sql.is_some() && t.sel.coll == "orders", "the demo opens on the orders Content view");
+    ui.h.state_mut().save_script();
+    assert!(matches!(&ui.app().modal, Some(Modal::SaveScript(f)) if f.kind == "where"), "the Content view saves a table filter");
+    ui.type_text("Paid over 50");
+    ui.click("Save");
+    let s = ui.app().library.scripts.iter().find(|s| s.kind == "where").cloned().expect("a saved filter");
+    assert_eq!((s.name.as_str(), s.body.as_str(), s.sort.as_str(), s.db.as_str(), s.coll.as_str()), ("Paid over 50", "status = 'paid' AND total > 50", "created_at DESC", "shop", "orders"));
+    let ctx = ui.h.ctx.clone();
+    assert_eq!(ui.app().pick_data(&ctx, PickKind::Where).count, 1);
+    // Another kind's picker does not list it, nor does a Mongo view.
+    assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
+    let a = ui.h.state_mut();
+    let c = a.cur;
+    (a.tabs[c].filter_txt, a.tabs[c].sort_txt) = (String::new(), String::new());
+    a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
+    ui.settle();
+    let t = ui.app().t().unwrap();
+    assert_eq!((t.sel.coll.as_str(), t.filter_txt.as_str(), t.sort_txt.as_str()), ("orders", "status = 'paid' AND total > 50", "created_at DESC"));
+}

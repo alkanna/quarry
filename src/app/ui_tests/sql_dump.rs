@@ -8,12 +8,13 @@ use super::*;
 use db::sql::csv::Source;
 
 /// Clicks the enabled button whose accessible name starts with `starts`, once it is on screen. The dialog's title shares the
-/// start of the Export button's name, so a label query would find two.
+/// start of the Export button's name, so a label query would find two. A name ending in an ellipsis opens a dialog, like the
+/// Content view's Export… under the one being tested, so it is not the button pressed.
 fn press(ui: &mut UiApp, starts: &str) {
     let t = std::time::Instant::now();
     loop {
         ui.h.step();
-        let hit = ui.h.query_all_by_role(egui::accesskit::Role::Button).find(|n| n.accesskit_node().label().is_some_and(|l| l.starts_with(starts)) && !n.accesskit_node().is_disabled());
+        let hit = ui.h.query_all_by_role(egui::accesskit::Role::Button).find(|n| n.accesskit_node().label().is_some_and(|l| l.starts_with(starts) && !l.ends_with('…')) && !n.accesskit_node().is_disabled());
         if let Some(n) = hit {
             n.click();
             break;

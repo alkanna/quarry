@@ -744,15 +744,9 @@ impl App {
         let why = self.sql_edit_block();
         let none = if n == 0 { "Check rows first" } else { "" };
         // Every row the page's WHERE matches, beyond the page on screen. Drawn first, so it sits rightmost.
-        let (mut bulk, mut export) = (None, false);
+        let mut bulk = None;
         dots_menu(ui, |ui| {
             menu_look(ui);
-            // In this menu rather than a toolbar button: a dialog drawn over the page has its own Export button.
-            if ui.button("Export all matching rows…").on_hover_text("Every row the WHERE matches, to a file in any Copy as format").clicked() {
-                export = true;
-                ui.close();
-            }
-            ui.separator();
             if ui.add_enabled(why.is_none(), egui::Button::new("Update matching…")).on_hover_text("Set columns on every row the WHERE matches").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
                 bulk = Some(true);
                 ui.close();
@@ -767,9 +761,10 @@ impl App {
         if let Some(update) = bulk {
             self.open_bulk(update);
         }
-        if export {
+        // Checked rows start the dialog on them; otherwise it starts on every row the WHERE matches.
+        if quiet(ui, "Export…").on_hover_text("Write the checked rows, this page or every matching row to a file").clicked() {
             let rows = self.checked_sql_rows();
-            self.open_export(rows, true);
+            self.open_export(rows, n == 0);
         }
         if quiet_enabled(ui, n > 0 && why.is_none(), "Delete").on_hover_text(why.unwrap_or(if n == 0 { none } else { "Delete the checked rows" })).on_disabled_hover_text(why.unwrap_or(none)).clicked() {
             let rows = self.checked_sql_rows();
