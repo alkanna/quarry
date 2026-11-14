@@ -601,7 +601,7 @@ impl App {
             ]
         };
         let (is_view, writable) = (self.sel_is_view(), self.sel_writable());
-        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&sel.db.as_str());
+        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&self.tabs[self.cur].sel.db.as_str());
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
