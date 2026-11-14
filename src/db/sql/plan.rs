@@ -6,8 +6,8 @@ use serde_json::Value;
 
 /// A scan that reads at least this many rows is worth a warning. Below it a full scan is often the cheapest plan.
 pub const BIG_SCAN: f64 = 1000.0;
-/// PostgreSQL does not say how many rows a sequential scan reads, only what it returns, so its cost stands in for the size.
-const PG_BIG_COST: f64 = 1000.0;
+const FILESORT_WARNING: &str = "Sorts rows outside an index (filesort). An index that matches the ORDER BY would avoid it.";
+const TEMP_TABLE_WARNING: &str = "Builds a temporary table, which costs memory and may spill to disk.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Access {
@@ -255,9 +255,10 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         node.detail.push(format!("Buffers: {} hit, {} read", count(hit.unwrap_or(0.0)), count(read.unwrap_or(0.0))));
     }
     let what = if node.target.is_empty() { ty.to_string() } else { format!("{ty} on {}", node.target) };
+    // PostgreSQL does not say how many rows a sequential scan reads, only what it returns, so its cost stands in for the size.
     let filtered = n.get("Filter").is_some();
     let removed_many = removed.is_some_and(|r| r >= BIG_SCAN && r >= 10.0 * node.actual_rows.unwrap_or(0.0));
-    if ty == "Seq Scan" && filtered && (node.cost.unwrap_or(0.0) >= PG_BIG_COST || removed.unwrap_or(0.0) >= BIG_SCAN || node.rows.unwrap_or(0.0) >= BIG_SCAN) {
+    if ty == "Seq Scan" && filtered && (node.cost.unwrap_or(0.0) >= BIG_SCAN || removed.unwrap_or(0.0) >= BIG_SCAN || node.rows.unwrap_or(0.0) >= BIG_SCAN) {
         node.warnings.push(format!("{what} reads every row and filters afterwards. An index on the filtered columns could avoid the scan."));
     } else if removed_many {
         node.warnings.push(format!("{what} discards {} rows to keep {}.", count(removed.unwrap_or(0.0)), count(node.actual_rows.unwrap_or(0.0))));
@@ -311,8 +312,8 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             "windowing" | "window_functions_computation" => my_op("Window functions", "", v, depth, out, &[]),
             "union_result" => my_op("Union", text(v, "table_name"), v, depth, out, &[]),
             // MariaDB names the operation and always means it.
-            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, &["Sorts rows outside an index (filesort). An index that matches the ORDER BY would avoid it."]),
-            "temporary_table" => my_op("Temporary table", "", v, depth, out, &["Builds a temporary table, which costs memory and may spill to disk."]),
+            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, &[FILESORT_WARNING]),
+            "temporary_table" => my_op("Temporary table", "", v, depth, out, &[TEMP_TABLE_WARNING]),
             "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, &["Joins through a join buffer because no index serves the join condition."]),
             "query_specifications" => v.as_array().into_iter().flatten().for_each(|s| my_walk(s, depth, out)),
             "attached_subqueries" | "optimized_away_subqueries" | "subqueries" => {
@@ -335,10 +336,10 @@ fn my_op(label: &str, target: &str, v: &Value, depth: usize, out: &mut Vec<PlanN
     let mut node = PlanNode { depth, label: label.into(), target: target.into(), ..Default::default() };
     node.warnings.extend(always.iter().map(|w| w.to_string()));
     if flag(v, "using_filesort") {
-        node.warnings.push("Sorts rows outside an index (filesort). An index that matches the ORDER BY would avoid it.".into());
+        node.warnings.push(FILESORT_WARNING.into());
     }
     if flag(v, "using_temporary_table") {
-        node.warnings.push("Builds a temporary table, which costs memory and may spill to disk.".into());
+        node.warnings.push(TEMP_TABLE_WARNING.into());
     }
     out.push(node);
     my_walk(v, depth + 1, out);
@@ -353,8 +354,8 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         "ALL" => Access::Scan,
         // A full index scan reads every entry, but of a narrower structure; it keeps the neutral color.
         "index" | "" => Access::Other,
-        _ if !key.is_empty() => Access::Index,
-        _ => Access::Other,
+        _ if key.is_empty() => Access::Other,
+        _ => Access::Index,
     };
     node.rows = num(t, "rows_examined_per_scan").or_else(|| num(t, "rows"));
     node.cost = t.get("cost_info").and_then(|c| num(c, "prefix_cost"));
@@ -427,10 +428,10 @@ fn parse_tree(text: &str) -> Plan {
             node.warnings.push(format!("{}: about {} rows are read.", node.label, count(node.rows.unwrap_or(0.0))));
         }
         if l.starts_with("Sort") {
-            node.warnings.push("Sorts rows outside an index (filesort). An index that matches the ORDER BY would avoid it.".into());
+            node.warnings.push(FILESORT_WARNING.into());
         }
         if l.contains("temporary table") || l.contains("Temporary table") {
-            node.warnings.push("Builds a temporary table, which costs memory and may spill to disk.".into());
+            node.warnings.push(TEMP_TABLE_WARNING.into());
         }
         if plan.cost.is_none() {
             plan.cost = node.cost;

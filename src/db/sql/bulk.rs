@@ -56,7 +56,7 @@ impl BulkPrep {
     /// Whether the old rows can be kept for undo. They are found again by their key, so a table without one, or whose key
     /// is not in SELECT *, changes without undo; the page's own key may have been read before the table lost it.
     pub fn keeps_undo(&self) -> bool {
-        !self.pk.is_empty() && undo_fits(self.count)
+        !self.pk.is_empty() && self.count <= UNDO_MAX_ROWS
     }
 }
 
@@ -67,11 +67,6 @@ struct Ran {
     undo: Option<(SqlUndo, PgIds)>,
     cols: Vec<Col>,
     kept: bool,
-}
-
-/// Whether undo can be kept for `count` rows.
-pub fn undo_fits(count: u64) -> bool {
-    count <= UNDO_MAX_ROWS
 }
 
 /// The WHERE as a page read splices it: on lines of its own inside parentheses, so an OR in it cannot escape whatever
@@ -138,13 +133,13 @@ pub fn check(d: Dialect, schema: &str, table: &str, filter: &str, stmt: &str) ->
     Ok(())
 }
 
-fn plural(n: u64, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+fn row_count(n: u64) -> String {
+    format!("{n} {}", if n == 1 { "row" } else { "rows" })
 }
 
 /// Why nothing was written when the rows no longer match the count.
 fn moved(now: &str, expected: u64) -> String {
-    format!("Nothing was changed: {now} match now, not {} as counted. Review the new count and confirm again.", plural(expected, "row", "rows"))
+    format!("Nothing was changed: {now} match now, not {} as counted. Review the new count and confirm again.", row_count(expected))
 }
 
 async fn prep(db: &Db, schema: &str, table: &str, filter: &str) -> Res<BulkPrep> {
@@ -204,7 +199,7 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         let n = rows.len() as u64;
         if n != p.expected {
             let _ = tx.rollback().await;
-            return Err(moved(&if n > p.expected { format!("more than {}", plural(p.expected, "row", "rows")) } else { plural(n, "row", "rows") }, p.expected));
+            return Err(moved(&if n > p.expected { format!("more than {}", row_count(p.expected)) } else { row_count(n) }, p.expected));
         }
         if let Some(first) = rows.first() {
             cols = make_cols_kinds(&first.cols(), &meta, &kinds, true);
@@ -227,7 +222,7 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
     let kept = n != p.expected && !super::csv::engine_rolls_back(&p.engine);
     if n != p.expected && !kept {
         let _ = tx.rollback().await;
-        return Err(moved(&plural(n, "row", "rows"), p.expected));
+        return Err(moved(&row_count(n), p.expected));
     }
     let ids = if p.undo { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
@@ -236,11 +231,11 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         BulkOp::Update(sets) => SqlUndo::Update(old.iter().map(|r| RowEdit { pk: pk_of(r), changes: sets.iter().map(|(name, new)| (name.clone(), r.get(name).cloned().unwrap_or(Bson::Null), new.clone())).collect() }).collect()),
     });
     let what = match p.op {
-        BulkOp::Update(_) => format!("Updated {} in {table}", plural(n, "row", "rows")),
-        BulkOp::Delete => format!("Deleted {} from {table}", plural(n, "row", "rows")),
+        BulkOp::Update(_) => format!("Updated {} in {table}", row_count(n)),
+        BulkOp::Delete => format!("Deleted {} from {table}", row_count(n)),
     };
     let msg = if kept {
-        format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", plural(p.expected, "row", "rows"), p.engine, if p.undo { " Undo puts back the rows read before it." } else { "" })
+        format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", row_count(p.expected), p.engine, if p.undo { " Undo puts back the rows read before it." } else { "" })
     } else if p.undo {
         what
     } else if p.pk.is_empty() {
@@ -348,7 +343,6 @@ mod tests {
 
     #[test]
     fn undo_is_kept_up_to_the_import_cap() {
-        assert!(undo_fits(UNDO_MAX_ROWS) && !undo_fits(UNDO_MAX_ROWS + 1));
         let prep = |count, pk: &[&str]| BulkPrep { count, cols: cols(), pk: pk.iter().map(|p| p.to_string()).collect(), engine: String::new() };
         assert!(prep(3, &["id"]).keeps_undo());
         assert!(!prep(UNDO_MAX_ROWS + 1, &["id"]).keeps_undo());
