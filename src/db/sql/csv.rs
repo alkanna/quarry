@@ -632,13 +632,28 @@ pub(super) fn to_iso(s: &str, fmt: DateFmt) -> String {
     format!("{date} {hms}")
 }
 
+/// Lead of a cell that came from JSON, which has a NULL of its own and strings that CSV's `\N` would swallow.
+/// `MARK` then `N` is a NULL, `MARK` then `S` and the text is that text as it is, never read as `\N`. A JSON string that
+/// itself starts with `MARK` is written the second way too, so no text can pass for a NULL.
+pub const MARK: char = '\u{1}';
+
+/// The cell without its lead, whether it is a NULL, and whether it is text to take as it is.
+fn unmark(raw: &str) -> (&str, bool, bool) {
+    match raw.strip_prefix(MARK) {
+        Some("N") => (raw, true, false),
+        Some(rest) if rest.starts_with('S') => (&rest[1..], false, true),
+        _ => (raw, false, false),
+    }
+}
+
 /// What a cell becomes for its column: a value to bind, or why it cannot be one.
 pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
     if col.pg {
         return convert_pg(col, raw, empty_null, fmt);
     }
     let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
-    let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
+    let (raw, marked_null, literal) = unmark(raw);
+    let null = marked_null || (!literal && raw == "\\N") || (raw.is_empty() && (empty_null || !text_like));
     if null {
         return if col.nullable || col.auto_increment { Ok(Param::Null) } else { Err("Empty, but the column does not allow NULL. Skip it or fill it in the file.".into()) };
     }
@@ -680,7 +695,8 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
 /// UUID, JSON, hex. Dates and times are left to the cast, which reads more spellings than MySQL does.
 fn convert_pg(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
     let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
-    let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
+    let (raw, marked_null, literal) = unmark(raw);
+    let null = marked_null || (!literal && raw == "\\N") || (raw.is_empty() && (empty_null || !text_like));
     if null {
         return if col.nullable || col.auto_increment { Ok(Param::Null) } else { Err("Empty, but the column does not allow NULL. Skip it or fill it in the file.".into()) };
     }
