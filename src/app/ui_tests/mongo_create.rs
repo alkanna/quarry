@@ -19,22 +19,22 @@ fn the_plus_button_opens_new_database_and_names_are_checked_before_create() {
     ui.show("Collection name");
     assert!(ui.disabled("Create"), "Create is on with no name");
     // An empty form says nothing yet: a message on a form just opened is noise.
-    assert!(!ui.said("Name the database"));
+    assert!(!ui.shows("Name the database"));
 
     replace(&mut ui, "Database name", "my shop");
     replace(&mut ui, "Collection name", "daily");
-    assert!(ui.disabled("Create") && ui.said("cannot contain a space"), "a database name with a space was accepted");
+    assert!(ui.disabled("Create") && ui.shows("cannot contain a space"), "a database name with a space was accepted");
     replace(&mut ui, "Database name", "admin");
-    assert!(ui.disabled("Create") && ui.said("reserved database"));
+    assert!(ui.disabled("Create") && ui.shows("reserved database"));
     // Names that differ only by case collide on disk, so the existing shop database blocks SHOP.
     replace(&mut ui, "Database name", "SHOP");
-    assert!(ui.disabled("Create") && ui.said("differs only by case"));
+    assert!(ui.disabled("Create") && ui.shows("differs only by case"));
     replace(&mut ui, "Database name", "reports");
     assert!(!ui.disabled("Create"), "a valid database and collection still leave Create off");
-    assert!(!ui.said("cannot contain"));
+    assert!(!ui.shows("cannot contain"));
 
     replace(&mut ui, "Collection name", "system.daily");
-    assert!(ui.disabled("Create") && ui.said("reserved"), "a system. collection name was accepted");
+    assert!(ui.disabled("Create") && ui.shows("reserved"), "a system. collection name was accepted");
     assert_eq!(form(&ui).db, "reports");
     ui.click("Cancel");
     assert!(ui.app().modal.is_none(), "Cancel left the dialog open");
@@ -98,5 +98,5 @@ fn new_collection_checks_the_name_against_the_database_it_was_opened_on() {
     ui.settle();
     assert!(matches!(&ui.app().modal, Some(Modal::MongoNewColl(f)) if !f.new_db && f.db == "shop"), "the form is not New collection for shop");
     replace(&mut ui, "Collection name", "carts");
-    assert!(ui.disabled("Create") && ui.said("already exists in shop"), "a collection that exists was accepted");
+    assert!(ui.disabled("Create") && ui.shows("already exists in shop"), "a collection that exists was accepted");
 }
