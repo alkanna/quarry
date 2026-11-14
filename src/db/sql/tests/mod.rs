@@ -13,6 +13,7 @@ mod routines;
 mod pg_write;
 mod table_ops;
 mod tls;
+mod views;
 
 use super::*;
 

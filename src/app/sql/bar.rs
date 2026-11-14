@@ -1038,7 +1038,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     // The statement is built only where it is shown (SQL mode) or copied.
     let select = |t: &Tab| page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
     let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
-    let mut copy = false;
+    let (mut copy, mut save_view) = (false, false);
     let Some(s) = t.sql.as_mut() else { return false };
     let b = &mut s.bar;
     let mut run = false;
@@ -1046,7 +1046,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     let mono = FontId::monospace(TXT_SMALL);
     let grouped = !b.c.group.trim().is_empty();
     ui.horizontal_top(|ui| {
-        let w = ui.available_width() - 190.0;
+        let w = ui.available_width() - 320.0;
         // The option chips are framed and so 2 px taller than the others; a row sized for them centers every chip.
         ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
@@ -1178,6 +1178,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             copy = quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked();
+            save_view = quiet(ui, "Save as view…").on_hover_text("Create a view from the SELECT of the rows shown").clicked();
             b.explain = quiet(ui, "Explain").on_hover_text("Explain the SELECT in a new Query tab (Cmd+E)").clicked();
         });
     });
@@ -1214,6 +1215,9 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     }
     if copy {
         ui.ctx().copy_text(format!("{};", stmt.unwrap_or_else(|| select(t))));
+    }
+    if save_view && let Some(s) = t.sql.as_mut() {
+        s.save_view = true;
     }
     run
 }

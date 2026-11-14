@@ -124,6 +124,7 @@ impl App {
                 Modal::PgNewDb(f) => self.pg_new_db_dialog(ui, f, &mut keep),
                 Modal::PgNewSchema(f) => self.pg_new_schema_dialog(ui, f, &mut keep),
                 Modal::PgNewTable(f) => self.pg_new_table_dialog(ui, f, &mut keep),
+                Modal::SqlView(f) => self.sql_view_dialog(ui, f, &mut keep),
                 Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
                 Modal::SqlPassword(f) => self.sql_password_dialog(ui, f, &mut keep),
                 Modal::PgNewRole(f) => self.pg_new_role_dialog(ui, f, &mut keep),

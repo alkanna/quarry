@@ -543,7 +543,7 @@ impl App {
         if free {
             self.script_banners(ui);
         }
-        let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick) = (false, false, false, false, false, None);
+        let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view) = (false, false, false, false, false, None, false);
         let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
         let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
         let status = caret.map(|CaretInfo { line_col: (l, c), stmt, .. }| {
@@ -567,6 +567,7 @@ impl App {
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
             format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+            save_view = quiet_enabled(ui, !running, "Save as view…").on_hover_text("Create a view from the statement under the caret").clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(s) = &status {
                     ui.label(RichText::new(s).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
@@ -606,6 +607,9 @@ impl App {
         }
         if run || run_all || explain {
             self.sql_run(run_all, explain);
+        }
+        if save_view {
+            self.save_query_as_view();
         }
         // Last, since opening a script may change the tab this frame was drawn for.
         self.pick_acts(pick_acts);
