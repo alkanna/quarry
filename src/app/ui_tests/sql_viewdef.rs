@@ -30,7 +30,10 @@ fn save_as_view_on_the_content_bar_opens_a_new_view_named_after_the_table() {
     assert!(shows(&ui, "VIEW `shop`.`orders_view` AS"), "the preview does not hold the statement");
     assert!(!disabled(&ui, "Create view"), "a named view with a SELECT did not arm Create view");
     // The name is a field of its own, and an empty one leaves nothing to create.
-    replace(&mut ui, "View name", "");
+    ui.h.get_by_label("View name").focus();
+    ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    ui.h.key_press(egui::Key::Backspace);
+    ui.settle();
     assert!(disabled(&ui, "Create view"), "an empty name armed Create view");
     replace(&mut ui, "View name", "recent_orders");
     assert!(shows(&ui, "VIEW `shop`.`recent_orders` AS"), "the preview did not follow the name");

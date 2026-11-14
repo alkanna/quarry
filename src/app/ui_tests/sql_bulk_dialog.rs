@@ -118,9 +118,10 @@ fn cancel_closes_the_dialog_without_acting() {
 #[test]
 fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     let Some(mut ui) = demo() else { return };
+    ui.h.state_mut().status = "idle".into();
     ui.h.state_mut().open_bulk(false);
     assert!(!matches!(ui.app().modal, Some(Modal::SqlBulk(_))), "the offline demo has no server to count on");
-    assert!(ui.app().last_problem().contains("Offline demo"), "no notice says why nothing opened: {}", ui.app().last_problem());
+    assert!(ui.app().status.contains("Offline demo"), "nothing says why nothing opened: {}", ui.app().status);
     for c in &mut ui.h.state_mut().conns {
         c.writable = false;
     }

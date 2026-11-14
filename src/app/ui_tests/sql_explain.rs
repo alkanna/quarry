@@ -87,27 +87,36 @@ fn query_with(script: &str) -> Option<UiApp> {
     Some(ui)
 }
 
+/// Whether the status line now says the demo has no server, which is the answer of the call that would have asked for the plan.
+fn reached_server_call(ui: &UiApp) -> bool {
+    ui.app().status.contains("Offline demo")
+}
+
 #[test]
 fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     // The Content view: the bar's button and the shortcut explain the SELECT of the last page.
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.h.state_mut().status = "idle".into();
     ui.click("Explain");
-    assert!(ui.app().last_problem().contains("Offline demo"), "the Explain button did not reach the server call: {}", ui.app().last_problem());
+    assert!(reached_server_call(&ui), "the Explain button did not reach the server call: {}");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.h.state_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
-    assert!(ui.app().last_problem().contains("Offline demo"), "Cmd+E did not reach the server call on the Content view: {}", ui.app().last_problem());
+    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Content view: {}");
     // The Query view: the button and the shortcut explain the statement under the caret.
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
+    ui.h.state_mut().status = "idle".into();
     ui.click("Explain");
-    assert!(ui.app().last_problem().contains("Offline demo"), "the Explain button did not reach the server call: {}", ui.app().last_problem());
+    assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
+    ui.h.state_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
-    assert!(ui.app().last_problem().contains("Offline demo"), "Cmd+E did not reach the server call on the Query view: {}", ui.app().last_problem());
+    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Query view: {}");
 }
 
 #[test]
 fn a_statement_with_no_plan_is_refused_before_the_server_is_asked() {
-    for (script, why) in [("SHOW TABLES;", "SHOW has no plan"), ("EXPLAIN SELECT 1;", "already an explain"), ("   ", "Nothing to run.")] {
+    for (script, why) in [("SHOW TABLES;", "SHOW has no plan"), ("EXPLAIN SELECT 1;", "already an explain"), ("   ", "Nothing to run")] {
         let Some(mut ui) = query_with(script) else { return };
         ui.key(egui::Modifiers::COMMAND, egui::Key::E);
         assert!(ui.app().modal.is_none(), "{script:?} opened the dialog");
