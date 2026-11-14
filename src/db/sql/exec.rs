@@ -437,6 +437,15 @@ impl Tx<'_> {
         }
     }
 
+    /// Runs one statement through the text protocol, so its rows read like a page's. The server would run a second statement
+    /// here, so it is only for text the caller has checked is one.
+    pub async fn fetch_text(&mut self, sql: &str) -> Result<Vec<SqlRow>, sqlx::Error> {
+        match self {
+            Tx::My(t) => raw_sql(sql).fetch_all(&mut **t).await.map(SqlRow::wrap),
+            Tx::Pg(t) => raw_sql(sql).fetch_all(&mut **t).await.map(SqlRow::wrap_pg),
+        }
+    }
+
     pub async fn commit(self) -> Result<(), sqlx::Error> {
         match self {
             Tx::My(t) => t.commit().await,

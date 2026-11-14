@@ -20,6 +20,8 @@ pub(in crate::app) enum PickKind {
     Pipeline,
     /// The Shell view: the connection's Shell scripts.
     Shell,
+    /// The SQL Content view: the WHERE filters of this table.
+    Where,
 }
 
 impl PickKind {
@@ -29,6 +31,7 @@ impl PickKind {
             PickKind::Query => "filter",
             PickKind::Pipeline => "pipeline",
             PickKind::Shell => "shell",
+            PickKind::Where => "where",
         }
     }
 }
@@ -112,8 +115,9 @@ impl App {
     /// out, since the views ask for this every frame and the lists cost an allocation per script.
     pub(in crate::app) fn pick_data(&self, ctx: &egui::Context, kind: PickKind) -> PickData {
         let lib = &self.library;
-        let (conn, db, coll) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())).unwrap_or_default();
-        let fits = |s: &crate::library::Script| s.kind == kind.kind() && s.conn == conn && (matches!(kind, PickKind::Sql | PickKind::Shell) || (s.db == db && s.coll == coll));
+        let (conn, db, schema, coll) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.schema.clone(), t.sel.coll.clone())).unwrap_or_default();
+        // A SQL filter belongs to one table, which on PostgreSQL its schema names too.
+        let fits = |s: &crate::library::Script| s.kind == kind.kind() && s.conn == conn && (matches!(kind, PickKind::Sql | PickKind::Shell) || (s.db == db && s.coll == coll && (kind != PickKind::Where || s.schema == schema)));
         // Files of the linked folders used on this connection, of this view's kind; a filter or pipeline file that names a
         // collection shows only on that collection.
         let engine = self.conn(conn).map(|c| c.meta.engine);
@@ -263,7 +267,7 @@ fn script_row(ui: &mut egui::Ui, d: &PickData, row: &PickRow, selected: bool) ->
     name.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 8.0);
     galley_at(&p, rect.left(), name_y, p.layout_job(name), BRIGHT());
     let mut job = match d.kind {
-        PickKind::Sql => sql_job_in(&row.first, TXT_BODY, d.dialect),
+        PickKind::Sql | PickKind::Where => sql_job_in(&row.first, TXT_BODY, d.dialect),
         PickKind::Shell => js_job(&row.first),
         PickKind::Query | PickKind::Pipeline => json_job(&row.first),
     };

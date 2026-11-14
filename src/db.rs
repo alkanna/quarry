@@ -223,6 +223,8 @@ pub enum Msg {
     SqlRan { req: u64, sets: Vec<sql::ResultSet> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
+    /// The count, columns and key the bulk UPDATE or DELETE dialog of request `req` waits for; see `sql::bulk`.
+    SqlBulkPrep { req: u64, res: Res<sql::bulk::BulkPrep> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.
     SqlExport { req: u64, res: Res<sql::export::Done> },
     /// A CSV import or a script file run finished; see `sql::import` and `sql::dump`.

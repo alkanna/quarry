@@ -290,6 +290,7 @@ impl App {
                 "sql" => ("Statement", format!("the whole script  ·  {} lines", f.body.lines().count().max(1))),
                 "shell" => ("Script", format!("{} lines", f.body.lines().count().max(1))),
                 "pipeline" => ("Pipeline", format!("{} lines", f.body.lines().count().max(1))),
+                "where" => ("WHERE", "ORDER BY is saved with it".to_string()),
                 _ => ("Query", "sort and project are saved with it".to_string()),
             };
             card_caption(ui, caption, &note);
@@ -297,7 +298,7 @@ impl App {
                 ui.set_width(ui.available_width());
                 egui::ScrollArea::vertical().id_salt("save-preview").max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
                     let job = match f.kind.as_str() {
-                        "sql" => sql_job_in(&f.body, TXT_SMALL, f.dialect),
+                        "sql" | "where" => sql_job_in(&f.body, TXT_SMALL, f.dialect),
                         "shell" => js_job(&f.body),
                         _ => json_job(&f.body),
                     };
@@ -357,7 +358,8 @@ impl App {
             .library
             .links
             .iter()
-            .filter(|l| engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.link_missing(l.id))
+            // A SQL Content filter has no file form, so it is only kept in Quarry.
+            .filter(|l| f.kind != "where" && engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.link_missing(l.id))
             .map(|l| (l.id, link_name(l.id), self.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
             .collect();
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {

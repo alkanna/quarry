@@ -1,0 +1,305 @@
+//! Changing every row the Content bar matches: one UPDATE or DELETE built from the WHERE of the page the grid shows.
+//! The rows are counted first, the write must match exactly that count inside its transaction, and the old rows are kept
+//! for undo when there are no more than the import keeps.
+
+use super::exec::Cells;
+use super::import::UNDO_MAX_ROWS;
+use super::value::Param;
+use super::worker::{make_cols_kinds, num_at, one_read, table_meta, to_row};
+use super::write::{action, pk_of, writer_conn, PgIds, RowEdit, SqlUndo};
+use super::{lex, se, Col, Db, Dialect, PageQuery};
+use crate::db::{Msg, Res, Worker};
+use mongodb::bson::{Bson, Document};
+use std::time::Instant;
+
+/// What happens to the matching rows. Update holds each column by its `Col::name` with the value it takes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BulkOp {
+    Update(Vec<(String, Bson)>),
+    Delete,
+}
+
+/// A confirmed change, with everything the statement is built from, so the worker sends the text the dialog showed.
+#[derive(Clone)]
+pub struct BulkPlan {
+    pub op: BulkOp,
+    pub filter: String,
+    /// The table's columns and key as the count read them, which name the SET columns and type their literals.
+    pub cols: Vec<Col>,
+    pub pk: Vec<String>,
+    /// Whether the server reads backslash escapes, for MySQL string literals.
+    pub bs: bool,
+    /// The rows the count found. A write that matches another number is rolled back.
+    pub expected: u64,
+    /// Keep the old rows so the change can be undone. The dialog only asks for it at or under `UNDO_MAX_ROWS`.
+    pub undo: bool,
+}
+
+/// What the dialog learns before it can be confirmed: the exact count, and the table's columns and key read fresh, since the
+/// grid's own columns may be a select list or aliases.
+#[derive(Clone, Debug)]
+pub struct BulkPrep {
+    pub count: u64,
+    pub cols: Vec<Col>,
+    pub pk: Vec<String>,
+}
+
+/// Whether undo can be kept for `count` rows.
+pub fn undo_fits(count: u64) -> bool {
+    count <= UNDO_MAX_ROWS
+}
+
+/// The WHERE as a page read splices it: on lines of its own inside parentheses, so an OR in it cannot escape whatever
+/// follows and a trailing `-- comment` cannot swallow it. An empty filter is no WHERE at all, which is every row.
+pub fn where_clause(filter: &str) -> String {
+    let f = filter.trim();
+    if f.is_empty() { String::new() } else { format!("\nWHERE (\n{f}\n)") }
+}
+
+/// The literal a column takes. MySQL reuses the Preview SQL spelling of a bound value; PostgreSQL wraps the literal in a
+/// cast to the column's type, the same shape the row editor binds its values with.
+fn literal(d: Dialect, col: &Col, v: &Bson, bs: bool) -> Res<String> {
+    if d != Dialect::Postgres {
+        return Ok(super::write::preview(d, "?", &[Param::for_kind(col.kind, v)], bs));
+    }
+    let p = Param::for_pg(v);
+    let lit = super::relay::literal_pg(&p)?;
+    if matches!(p, Param::Null) || col.ty.trim().is_empty() {
+        return Ok(lit);
+    }
+    Ok(format!("CAST({lit} AS {})", col.ty))
+}
+
+/// `a = 1, b = 'x'` for the pairs, each column by its server name.
+pub fn set_list(d: Dialect, cols: &[Col], sets: &[(String, Bson)], bs: bool) -> Res<String> {
+    if sets.is_empty() {
+        return Err("Pick at least one column to set.".into());
+    }
+    let mut out = Vec::new();
+    for (name, v) in sets {
+        let col = cols.iter().find(|c| c.name == *name).ok_or_else(|| format!("{name} is not a column of this table"))?;
+        out.push(format!("{} = {}", d.quote_ident(&col.src), literal(d, col, v, bs)?));
+    }
+    Ok(out.join(",\n    "))
+}
+
+/// The statement the plan runs, as the dialog shows it.
+pub fn statement(d: Dialect, schema: &str, table: &str, p: &BulkPlan) -> Res<String> {
+    let t = d.qualified(schema, table);
+    let w = where_clause(&p.filter);
+    Ok(match &p.op {
+        BulkOp::Update(sets) => format!("UPDATE {t}\nSET {}{w}", set_list(d, &p.cols, sets, p.bs)?),
+        BulkOp::Delete => format!("DELETE FROM {t}{w}"),
+    })
+}
+
+/// The exact count of the rows the WHERE matches. Never the table estimate a plain page shows.
+pub fn count_sql(d: Dialect, schema: &str, table: &str, filter: &str) -> String {
+    PageQuery { filter: filter.to_string(), ..Default::default() }.count_sql(d, schema, table)
+}
+
+/// The rows about to change, locked for the rest of the transaction. One more than counted is asked for, so a table that
+/// grew since the count is seen without reading all of it.
+fn capture_sql(d: Dialect, schema: &str, table: &str, filter: &str, limit: u64) -> String {
+    format!("SELECT *\nFROM {}{}\nLIMIT {limit}\nFOR UPDATE", d.qualified(schema, table), where_clause(filter))
+}
+
+/// The filter must read like a page's WHERE, and the statement built around it must be one statement.
+pub fn check(d: Dialect, schema: &str, table: &str, filter: &str, stmt: &str) -> Res<()> {
+    one_read(&count_sql(d, schema, table, filter), d)?;
+    if lex::split_statements(stmt, d).len() != 1 {
+        return Err("The filter must not contain another statement".into());
+    }
+    Ok(())
+}
+
+fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Why nothing was written when the rows no longer match the count.
+fn moved(now: &str, expected: u64) -> String {
+    format!("Nothing was changed: {now} match now, not {} as counted. Review the new count and confirm again.", plural(expected, "row", "rows"))
+}
+
+async fn prep(db: &Db, schema: &str, table: &str, filter: &str) -> Res<BulkPrep> {
+    let d = db.dialect;
+    let sql = count_sql(d, schema, table, filter);
+    one_read(&sql, d)?;
+    let count = async { db.read_text(schema, &sql, true).await.map(|r| r.first().and_then(|r| num_at(r, 0)).unwrap_or(0)) };
+    let shape = async {
+        let (meta, kinds, mut pk) = table_meta(db, schema, table).await?;
+        let rcols = db.describe_text(&format!("SELECT * FROM {}", d.qualified(schema, table))).await?;
+        // An invisible key column is not in SELECT *, so the rows could not be told apart.
+        if !pk.iter().all(|p| rcols.iter().any(|c| c.name == *p)) {
+            pk.clear();
+        }
+        Ok::<_, String>((make_cols_kinds(&rcols, &meta, &kinds, !pk.is_empty()), pk))
+    };
+    let (count, (cols, pk)) = tokio::try_join!(count, shape)?;
+    Ok(BulkPrep { count, cols, pk })
+}
+
+/// Runs the plan in one transaction. Returns what to say, the undo when one was kept, and the columns the undo reads.
+async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) -> Res<(String, Option<(SqlUndo, PgIds)>, Vec<Col>)> {
+    let d = db.dialect;
+    let stmt = statement(d, schema, table, p)?;
+    check(d, schema, table, &p.filter, &stmt)?;
+    if p.expected == 0 {
+        return Err("No rows match, so nothing was changed.".into());
+    }
+    let (meta, kinds, pk) = table_meta(db, schema, table).await?;
+    // The undo finds its rows again by the key the dialog was built with; another key could match rows it never touched.
+    if p.undo && (pk.is_empty() || pk != p.pk) {
+        return Err(format!("Nothing was changed: the primary key of {table} is not the one the count read. Count again."));
+    }
+    let mut c = writer_conn(db, schema, read_only).await?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
+    let mut old: Vec<Document> = Vec::new();
+    let mut cols = p.cols.clone();
+    if p.undo {
+        let sql = capture_sql(d, schema, table, &p.filter, p.expected + 1);
+        let t = Instant::now();
+        let r = tx.fetch_text(&sql).await;
+        db.note(schema, &sql, t, &r);
+        let rows = r.map_err(se)?;
+        let n = rows.len() as u64;
+        if n != p.expected {
+            let _ = tx.rollback().await;
+            return Err(moved(&if n > p.expected { format!("more than {}", plural(p.expected, "row", "rows")) } else { plural(n, "row", "rows") }, p.expected));
+        }
+        if let Some(first) = rows.first() {
+            cols = make_cols_kinds(&first.cols(), &meta, &kinds, true);
+        }
+        for r in &rows {
+            let doc = to_row(&cols, r, &pk)?.owned();
+            if pk_of(&doc).len() != pk.len() {
+                let _ = tx.rollback().await;
+                return Err("Nothing was changed: a row could not be read with its whole key, so undo could not be kept.".into());
+            }
+            old.push(doc);
+        }
+    }
+    // Bound with no values: a prepared statement is one statement to the server, whatever the lexer read.
+    let t = Instant::now();
+    let r = tx.exec_bound(&stmt, &[]).await;
+    db.note(schema, &stmt, t, &r);
+    let n = r.map_err(|x| super::se_at(&x, &stmt, 0))?.rows_affected();
+    if n != p.expected {
+        let _ = tx.rollback().await;
+        return Err(moved(&plural(n, "row", "rows"), p.expected));
+    }
+    let ids = if p.undo { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
+    tx.commit().await.map_err(se)?;
+    let undo = p.undo.then(|| match &p.op {
+        BulkOp::Delete => SqlUndo::Delete(old),
+        BulkOp::Update(sets) => SqlUndo::Update(old.iter().map(|r| RowEdit { pk: pk_of(r), changes: sets.iter().map(|(name, new)| (name.clone(), r.get(name).cloned().unwrap_or(Bson::Null), new.clone())).collect() }).collect()),
+    });
+    let what = match p.op {
+        BulkOp::Update(_) => format!("Updated {} in {table}", plural(n, "row", "rows")),
+        BulkOp::Delete => format!("Deleted {} from {table}", plural(n, "row", "rows")),
+    };
+    let msg = if p.undo { what } else { format!("{what}. No undo was kept for a change this large.") };
+    Ok((msg, undo.map(|u| (u, ids)), cols))
+}
+
+impl Worker {
+    /// Counts the rows the filter matches and reads the table's columns and key, for the bulk dialog. Answers `SqlBulkPrep`.
+    pub fn sql_bulk_prep(&self, req: u64, db: Db, schema: String, table: String, filter: String) {
+        self.spawn(async move {
+            let res = prep(&db, &schema, &table, &filter).await;
+            Msg::SqlBulkPrep { req, res }
+        });
+    }
+
+    /// Runs a confirmed bulk UPDATE or DELETE. Answers `Written`, with the undo when one was kept.
+    pub fn sql_bulk(&self, conn: u64, db: Db, schema: String, table: String, plan: BulkPlan, read_only: bool) {
+        self.spawn(async move {
+            let at = (schema.clone(), table.clone());
+            let (res, undo) = match run(&db, &schema, &table, &plan, read_only).await {
+                Ok((msg, undo, cols)) => (Ok(msg), undo.map(|(u, ids)| action(db.pg_database(), ids, conn, &schema, &table, &cols, u))),
+                Err(err) => (Err(err), None),
+            };
+            Msg::Written { at, res, undo, reload: true, retry: None }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::value::Kind;
+
+    fn cols() -> Vec<Col> {
+        vec![Col::plain("id", "int", Kind::Int, false), Col::plain("name", "varchar(50)", Kind::Text, true), Col::plain("qty", "int", Kind::Int, true)]
+    }
+
+    fn plan(op: BulkOp, filter: &str) -> BulkPlan {
+        BulkPlan { op, filter: filter.into(), cols: cols(), pk: vec!["id".into()], bs: true, expected: 2, undo: true }
+    }
+
+    #[test]
+    fn an_or_filter_stays_inside_its_parentheses() {
+        let p = plan(BulkOp::Delete, "qty > 15 OR name = 'alpha'");
+        assert_eq!(statement(Dialect::MySql, "shop", "t", &p).unwrap(), "DELETE FROM `shop`.`t`\nWHERE (\nqty > 15 OR name = 'alpha'\n)");
+        assert_eq!(statement(Dialect::MariaDb, "shop", "t", &p).unwrap(), "DELETE FROM `shop`.`t`\nWHERE (\nqty > 15 OR name = 'alpha'\n)");
+        assert_eq!(statement(Dialect::Postgres, "public", "t", &p).unwrap(), "DELETE FROM \"public\".\"t\"\nWHERE (\nqty > 15 OR name = 'alpha'\n)");
+        // The capture that undo reads locks the same rows and nothing past the OR.
+        assert_eq!(capture_sql(Dialect::Postgres, "public", "t", &p.filter, 3), "SELECT *\nFROM \"public\".\"t\"\nWHERE (\nqty > 15 OR name = 'alpha'\n)\nLIMIT 3\nFOR UPDATE");
+        assert_eq!(count_sql(Dialect::MySql, "shop", "t", &p.filter), "SELECT COUNT(*) FROM `shop`.`t`\nWHERE (\nqty > 15 OR name = 'alpha'\n)");
+    }
+
+    #[test]
+    fn a_trailing_comment_cannot_swallow_the_closing_parenthesis() {
+        let p = plan(BulkOp::Delete, "qty > 15 -- big ones");
+        let s = statement(Dialect::MySql, "shop", "t", &p).unwrap();
+        assert_eq!(s, "DELETE FROM `shop`.`t`\nWHERE (\nqty > 15 -- big ones\n)");
+        assert!(check(Dialect::MySql, "shop", "t", &p.filter, &s).is_ok());
+    }
+
+    #[test]
+    fn an_empty_filter_means_every_row() {
+        for f in ["", "  \n "] {
+            let p = plan(BulkOp::Delete, f);
+            assert_eq!(statement(Dialect::MySql, "shop", "t", &p).unwrap(), "DELETE FROM `shop`.`t`");
+            assert_eq!(statement(Dialect::Postgres, "public", "t", &p).unwrap(), "DELETE FROM \"public\".\"t\"");
+            assert_eq!(count_sql(Dialect::Postgres, "public", "t", f), "SELECT COUNT(*) FROM \"public\".\"t\"");
+        }
+    }
+
+    #[test]
+    fn update_values_are_literals_of_each_dialect() {
+        let sets = vec![("name".to_string(), Bson::String("o'brien \\ x".into())), ("qty".to_string(), Bson::Int64(7))];
+        let p = plan(BulkOp::Update(sets.clone()), "a = 1 OR b = 2");
+        assert_eq!(statement(Dialect::MySql, "shop", "t", &p).unwrap(), "UPDATE `shop`.`t`\nSET `name` = 'o''brien \\\\ x',\n    `qty` = 7\nWHERE (\na = 1 OR b = 2\n)");
+        // Under NO_BACKSLASH_ESCAPES a backslash is a plain character and a quote is doubled.
+        let plain = BulkPlan { bs: false, ..p.clone() };
+        assert!(statement(Dialect::MySql, "shop", "t", &plain).unwrap().contains("`name` = 'o''brien \\ x'"));
+        let pg = statement(Dialect::Postgres, "public", "t", &p).unwrap();
+        assert_eq!(pg, "UPDATE \"public\".\"t\"\nSET \"name\" = CAST(E'o''brien \\\\ x' AS varchar(50)),\n    \"qty\" = CAST('7' AS int)\nWHERE (\na = 1 OR b = 2\n)");
+        // NULL needs no cast, and a column is named by its server name.
+        let null = plan(BulkOp::Update(vec![("name".into(), Bson::Null)]), "");
+        assert_eq!(statement(Dialect::Postgres, "public", "t", &null).unwrap(), "UPDATE \"public\".\"t\"\nSET \"name\" = NULL");
+        assert_eq!(statement(Dialect::MySql, "shop", "t", &null).unwrap(), "UPDATE `shop`.`t`\nSET `name` = NULL");
+        assert!(statement(Dialect::MySql, "shop", "t", &plan(BulkOp::Update(Vec::new()), "")).is_err());
+        assert!(statement(Dialect::MySql, "shop", "t", &plan(BulkOp::Update(vec![("nope".into(), Bson::Null)]), "")).is_err());
+    }
+
+    #[test]
+    fn a_filter_that_writes_or_holds_a_second_statement_is_refused() {
+        for (d, schema) in [(Dialect::MySql, "shop"), (Dialect::Postgres, "public")] {
+            for f in ["1 = 1); DROP TABLE t; --", "id IN (SELECT 1); DELETE FROM u"] {
+                let p = plan(BulkOp::Delete, f);
+                let s = statement(d, schema, "t", &p).unwrap();
+                assert!(check(d, schema, "t", f, &s).is_err(), "{d:?}: {f}");
+            }
+            let ok = plan(BulkOp::Delete, "name LIKE '%;%'");
+            assert!(check(d, schema, "t", &ok.filter, &statement(d, schema, "t", &ok).unwrap()).is_ok(), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn undo_is_kept_up_to_the_import_cap() {
+        assert!(undo_fits(UNDO_MAX_ROWS) && !undo_fits(UNDO_MAX_ROWS + 1));
+    }
+}

@@ -112,6 +112,7 @@ impl App {
                 Modal::SqlRunFile(f) => self.sql_run_file_dialog(ui, f, &mut keep),
                 Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
                 Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
+                Modal::SqlBulk(f) => self.sql_bulk_dialog(ui, f, &mut keep),
                 Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),
                 Modal::IdxEdit(f) => self.idx_dialog(ui, f, &mut keep),
                 Modal::SqlNewDb(f) => self.sql_new_db_dialog(ui, f, &mut keep),

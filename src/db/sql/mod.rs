@@ -28,6 +28,7 @@ pub struct KeyTable {
 }
 pub mod csv;
 pub mod import;
+pub mod bulk;
 pub mod dump;
 pub mod server;
 #[cfg(test)]

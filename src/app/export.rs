@@ -189,6 +189,7 @@ impl App {
             let (db, schema) = super::sql::query::ran_target(t, db);
             Some(AllRows { db, schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
+        let all = if src == Src::Content { self.content_all(t) } else { all };
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
             let (db, schema) = super::sql::query::run_target(t, db);
@@ -198,6 +199,19 @@ impl App {
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
         self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged })));
+    }
+
+    /// Every row of a SQL Content grid: the SELECT of the last page asked for, never the bar text being typed, with its WHERE,
+    /// ORDER BY, columns and grouping and without the paging. The LIMIT and OFFSET chips still apply, so it is the count the
+    /// grid shows.
+    fn content_all(&self, t: &Tab) -> Option<AllRows> {
+        let s = t.sql.as_ref().filter(|_| !t.sel.coll.is_empty())?;
+        let (db, schema) = self.sql_target(&t.sel)?;
+        let pk: &[String] = if s.ran.grouped() { &[] } else { &s.pk };
+        let stmt = s.ran.select_sql(db.dialect, &schema, &t.sel.coll, pk, None);
+        let refused = db::sql::lex::read_only_check(&stmt, db.dialect).err();
+        let total = (!s.estimated).then_some(t.count);
+        Some(AllRows { db, schema, stmt, total, paged: true, refused })
     }
 
     /// Demo only: gives the open dialog the editor script as a source with a pool that never connects, so the scope can be drawn offline.
@@ -229,8 +243,8 @@ impl App {
         let ui = &mut b.content_ui;
         let formats: Vec<Format> = if f.sql {
             let mut v = vec![Format::T(Fmt::SqlInsert)];
-            // A Query result or a Shell result has no key to write an UPDATE by.
-            if f.src == Src::Content {
+            // A Query result or a Shell result has no key to write an UPDATE by, and neither has a streamed result.
+            if f.src == Src::Content && f.scope != Scope::All {
                 v.push(Format::T(Fmt::SqlUpdate));
             }
             v.extend([Fmt::Csv, Fmt::Tsv, Fmt::Json, Fmt::JsonLines, Fmt::Markdown, Fmt::Html, Fmt::Values].map(Format::T));
@@ -253,12 +267,15 @@ impl App {
         let shown = if f.paged { "This page" } else { "Shown" };
         radio(ui, f, f.scope == Scope::Shown, Scope::Shown, &format!("{shown} {noun}"), &format!("{} as they are on screen", group(&f.shown.to_string())));
         if let Some((paged, total, refused)) = f.all.as_ref().map(|a| (a.paged, a.total, a.refused.clone())) {
-            let what = match (paged, total) {
-                (true, Some(n)) => format!("All pages, {} rows", group(&n.to_string())),
-                (true, None) => "All pages".to_string(),
+            let what = match (f.src, paged, total) {
+                (Src::Content, _, Some(n)) => format!("All matching rows, {}", group(&n.to_string())),
+                (Src::Content, _, None) => "All matching rows".to_string(),
+                (_, true, Some(n)) => format!("All pages, {} rows", group(&n.to_string())),
+                (_, true, None) => "All pages".to_string(),
                 _ => "All rows".to_string(),
             };
-            let why = refused.clone().map_or_else(|| "Runs the statement again and streams to the file".to_string(), |w| format!("Not available: {w}"));
+            let again = if f.src == Src::Content { "Runs the SELECT again without paging and streams to the file" } else { "Runs the statement again and streams to the file" };
+            let why = refused.clone().map_or_else(|| again.to_string(), |w| format!("Not available: {w}"));
             ui.add_enabled_ui(refused.is_none() && table, |ui| radio(ui, f, f.scope == Scope::All, Scope::All, &what, &why));
         }
         if let Some(sc) = &f.script {
@@ -298,6 +315,9 @@ impl App {
         // A format only the Shell and Documents know cannot come from a statement.
         if matches!(f.scope, Scope::All | Scope::Script) && !matches!(f.fmt, Format::T(_)) {
             f.scope = Scope::Shown;
+        }
+        if f.scope == Scope::All && f.fmt == Format::T(Fmt::SqlUpdate) {
+            f.fmt = Format::T(Fmt::SqlInsert);
         }
         let ready = match f.scope {
             Scope::Selected => !f.selected.is_empty(),
@@ -499,6 +519,25 @@ mod tests {
         }
         for r in ["SELECT * FROM t", "WITH c AS (SELECT 1) SELECT * FROM c", "SHOW TABLES"] {
             assert!(lex_check_msg(r, db::sql::Dialect::MySql).is_ok(), "{r}");
+        }
+    }
+
+    #[test]
+    fn all_matching_rows_repeat_the_page_select_without_its_paging() {
+        use db::sql::{Dialect, PageQuery};
+        let pk = ["id".to_string()];
+        let q = PageQuery { filter: "a = 1 OR b = 2".into(), order: "a DESC".into(), select: vec!["a".into(), "b".into()], ..Default::default() };
+        assert_eq!(q.select_sql(Dialect::MySql, "shop", "t", &pk, None), "SELECT a,\n  b\nFROM `shop`.`t`\nWHERE (\na = 1 OR b = 2\n)\nORDER BY a DESC\n, `id`");
+        assert_eq!(q.select_sql(Dialect::MariaDb, "shop", "t", &pk, None), "SELECT a,\n  b\nFROM `shop`.`t`\nWHERE (\na = 1 OR b = 2\n)\nORDER BY a DESC\n, `id`");
+        assert_eq!(q.select_sql(Dialect::Postgres, "public", "t", &pk, None), "SELECT a,\n  b\nFROM \"public\".\"t\"\nWHERE (\na = 1 OR b = 2\n)\nORDER BY a DESC\n, \"id\"");
+        // No WHERE reads every row; the LIMIT chip still caps the export as it caps the grid's count.
+        assert_eq!(PageQuery::default().select_sql(Dialect::MySql, "shop", "t", &pk, None), "SELECT *\nFROM `shop`.`t`\nORDER BY `id`");
+        assert_eq!(PageQuery { limit: Some(5), ..Default::default() }.select_sql(Dialect::Postgres, "public", "t", &pk, None), "SELECT *\nFROM \"public\".\"t\"\nORDER BY \"id\"\nLIMIT 5");
+        // A grouped page exports its groups.
+        let g = PageQuery { select: vec!["status".into(), "COUNT(*) AS n".into()], group: vec!["status".into()], ..Default::default() };
+        assert_eq!(g.select_sql(Dialect::MySql, "shop", "t", &[], None), "SELECT status,\n  COUNT(*) AS n\nFROM `shop`.`t`\nGROUP BY status\nORDER BY status");
+        for d in [Dialect::MySql, Dialect::Postgres] {
+            assert!(db::sql::lex::read_only_check(&q.select_sql(d, "s", "t", &pk, None), d).is_ok());
         }
     }
 
