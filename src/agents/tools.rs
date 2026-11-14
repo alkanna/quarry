@@ -720,10 +720,13 @@ pub(crate) fn never_for_agents(sql: &str, d: Dialect) -> Option<String> {
         if opaque {
             return Some(format!("{first} runs SQL that Quarry cannot read, so it is not allowed for agents."));
         }
-        let server = matches!(first, "KILL" | "SHUTDOWN" | "RESTART" | "INSTALL" | "UNINSTALL" | "CLONE" | "PURGE" | "BINLOG" | "FLUSH" | "RESET" | "CHANGE" | "LOAD" | "COPY" | "CACHE" | "DISCARD" | "SECURITY")
-            || (matches!(first, "START" | "STOP") && matches!(second, "REPLICA" | "SLAVE" | "GROUP_REPLICATION"))
-            || (first == "ALTER" && matches!(second, "SYSTEM" | "INSTANCE"))
-            || (first == "LOCK" && second == "INSTANCE");
+        // Each engine refuses its own server-level statements; RESET, LOAD and ALTER SYSTEM or INSTANCE stay shared.
+        let engine = if d == Dialect::Postgres { matches!(first, "COPY" | "DISCARD" | "SECURITY") } else {
+            matches!(first, "KILL" | "SHUTDOWN" | "RESTART" | "INSTALL" | "UNINSTALL" | "CLONE" | "PURGE" | "BINLOG" | "FLUSH" | "CHANGE" | "CACHE")
+                || (matches!(first, "START" | "STOP") && matches!(second, "REPLICA" | "SLAVE" | "GROUP_REPLICATION"))
+                || (first == "LOCK" && second == "INSTANCE")
+        };
+        let server = engine || matches!(first, "RESET" | "LOAD") || (first == "ALTER" && matches!(second, "SYSTEM" | "INSTANCE"));
         if server {
             let what = w.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
             return Some(format!("{what} acts on the server, not on data, and is not allowed for agents."));

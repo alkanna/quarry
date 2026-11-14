@@ -456,6 +456,12 @@ pub(super) fn pg_kind<R: Cells>(r: &R) -> Kind {
     Kind::from_pg(&text(r, "pg_type").unwrap_or_default(), &text(r, "pg_cat").unwrap_or_default(), &text(r, "pg_typtype").unwrap_or_default())
 }
 
+/// The kind of a catalog column on either engine. MariaDB keeps JSON in a longtext column, so a longtext that
+/// has a JSON_VALID check reads as JSON.
+pub(super) fn column_kind<R: Cells>(d: Dialect, r: &R, table: &str, name: &str, full: &str, json: &HashSet<(String, String)>) -> Kind {
+    if d == Dialect::Postgres { pg_kind(r) } else if full.eq_ignore_ascii_case("longtext") && json.contains(&(table.to_string(), name.to_string())) { Kind::Json } else { kind_of_full(full) }
+}
+
 /// One page: columns, primary key, rows, the count of what the pages come from (groups when
 /// grouped), whether that is an estimate, the time, and the rows before grouping when grouped.
 type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
@@ -518,7 +524,7 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
         let (Some(t), Some(name), Some(ty)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
         let Some(table) = out.iter_mut().find(|x| x.name == t) else { continue };
         let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
-        let kind = if d == Dialect::Postgres { pg_kind(r) } else if ty.eq_ignore_ascii_case("longtext") && json.contains(&(t.clone(), name.clone())) { Kind::Json } else { kind_of_full(&ty) };
+        let kind = column_kind(d, r, &t, &name, &ty, &json);
         table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind, key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
     }
     Ok(Schema { tables: out })

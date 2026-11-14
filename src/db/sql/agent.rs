@@ -5,7 +5,7 @@
 use super::exec::Cells;
 use super::run::{run, RunHandle};
 use super::value::{self, Kind};
-use super::worker::{pg_columns, pg_kind, text, to_row};
+use super::worker::{pg_columns, text, to_row};
 use super::{Col, Db, Dialect};
 use crate::agents::config::{Limits, Scope};
 use crate::agents::policy::visible;
@@ -152,7 +152,7 @@ async fn table_cols(db: &Db, schema: &str, table: &str) -> Res<Vec<Col>> {
         .filter_map(|r| {
             let name = text(r, "name")?;
             let full = text(r, "full_type")?;
-            let kind = if d == Dialect::Postgres { pg_kind(r) } else if full.eq_ignore_ascii_case("longtext") && json.contains(&(table.to_string(), name.clone())) { Kind::Json } else { Kind::from_column_type(&full) };
+            let kind = super::worker::column_kind(d, r, table, &name, &full, &json);
             Some(Col::plain(&name, &full, kind, r.int("nullable").map(|n| n != 0).unwrap_or(true)))
         })
         .collect())

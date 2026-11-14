@@ -108,6 +108,8 @@ pub(in crate::app) struct SqlServerWin {
     locks_req: u64,
     locks_wait: bool,
     locks: Option<db::Res<std::sync::Arc<Locks>>>,
+    /// The blocker chains of `locks`, built once per answer and not on every frame.
+    chains: std::sync::Arc<Vec<db::sql::server::locks::Chain>>,
     vars_wait: bool,
     /// When to ask for the processes again; None asks on the next frame.
     next: Option<Instant>,
@@ -201,7 +203,9 @@ impl SqlServerWin {
         s.uptime = Some(41 * 86_400 + 3 * 3600);
         s.sel = Some(8812);
         s.auto = true;
-        s.locks = Some(Ok(std::sync::Arc::new(demo_locks(&rows))));
+        let demo = demo_locks(&rows);
+        s.chains = std::sync::Arc::new(db::sql::server::locks::chains(&demo.waits));
+        s.locks = Some(Ok(std::sync::Arc::new(demo)));
         s.procs = Some(Ok(Processes { rows, me: 8901, uptime: s.uptime, identity: String::new() }));
         s.var_filter = "timeout".into();
         s.vars = Some(Ok(Variables { rows: vars, global: false, defaults: true, uptime: s.uptime }));
@@ -451,6 +455,7 @@ impl App {
                 s.next = Some(Instant::now() + retry_after(r.is_ok()));
                 // A pending Kill follows its thread only while it is the same statement on the same server.
                 s.confirm = s.confirm.take().filter(|c| r.as_ref().is_ok_and(|l| locks::confirm_still_ok(c, l)));
+                s.chains = std::sync::Arc::new(r.as_ref().map(|l| db::sql::server::locks::chains(&l.waits)).unwrap_or_default());
                 s.locks = Some(r.map(std::sync::Arc::new));
             }
             Answer::Vars(r) if req == s.vars_req => {

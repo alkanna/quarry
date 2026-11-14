@@ -3,7 +3,7 @@
 //! keep them in information_schema (INNODB_LOCK_WAITS). Each wait is an edge from a waiting thread to the thread it waits
 //! behind, and `chains` turns the edges into the blocker trees the tab draws, the way the PostgreSQL tab does.
 
-use super::{me_and_identity, proc_list, rows, Proc};
+use super::{me_and_identity, mysql_number as number, proc_list, rows, Proc};
 use crate::db::sql::worker::text;
 use crate::db::sql::{Db, Dialect};
 use crate::db::{e, Res};
@@ -84,13 +84,6 @@ const IDB_ROWS_BARE: &str = "SELECT r.trx_mysql_thread_id AS req_id, b.trx_mysql
     FROM information_schema.INNODB_LOCK_WAITS w \
     JOIN information_schema.INNODB_TRX r ON r.trx_id = w.requesting_trx_id \
     JOIN information_schema.INNODB_TRX b ON b.trx_id = w.blocking_trx_id";
-
-fn number(x: &sqlx::Error) -> Option<u16> {
-    match x {
-        sqlx::Error::Database(d) => d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().map(|m| m.number()),
-        _ => None,
-    }
-}
 
 /// Whether the error says the table is not there (1146, 1109) or its engine is off (1286): MySQL 5.7 has no
 /// performance_schema.data_lock_waits, and a server started without performance_schema has none of its tables.

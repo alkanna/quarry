@@ -175,7 +175,7 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
         Change::SetFkDeferral { .. } => return Err("MySQL and MariaDB have no deferred foreign keys.".into()),
         Change::AddCheck(k) => vec![add_check(d, m, k)?],
         // MySQL has DROP CHECK from 8.0.16 and takes DROP CONSTRAINT only from 8.0.19. MariaDB drops a CHECK with DROP CONSTRAINT.
-        Change::DropCheck(n) => vec![format!("DROP {} {}", if d == Dialect::MySql { "CHECK" } else { "CONSTRAINT" }, d.quote_ident(n))],
+        Change::DropCheck(n) => vec![format!("DROP {} {}", d.drop_check_word(), d.quote_ident(n))],
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
