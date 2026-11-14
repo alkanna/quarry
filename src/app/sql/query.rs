@@ -587,7 +587,7 @@ impl App {
         let numeric = found.is_some_and(|c| is_numeric(c.kind));
         // The server's own column name, which a statement must use.
         let q = d.quote_ident(found.map_or(col, |c| c.src.as_str()));
-        let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", db::copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
+        let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", db::copy::sql_literal(d, Some(&v), numeric, self.sql_bs())) };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
         if self.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
