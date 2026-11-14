@@ -460,8 +460,8 @@ pub trait Steps {
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Done,
-    /// A step failed. `put_back` says the old routine was created again, or why it was not.
-    Failed { why: String, put_back: Result<(), String> },
+    /// A step failed. `put_back` is None when nothing had been dropped yet, else whether the old routine was created again.
+    Failed { why: String, put_back: Option<Result<(), String>> },
 }
 
 /// Runs the plan in order. When a statement after the DROP fails, the old definition is run to put the routine back; a DROP that
@@ -471,10 +471,10 @@ pub async fn run_steps(x: &mut impl Steps, plan: &Plan) -> Outcome {
     for (i, s) in plan.steps.iter().enumerate() {
         if let Err(why) = x.run(s).await {
             if !dropped || plan.restore.is_none() {
-                return Outcome::Failed { why, put_back: Ok(()) };
+                return Outcome::Failed { why, put_back: None };
             }
             let back = x.run(plan.restore.as_deref().unwrap_or_default()).await;
-            return Outcome::Failed { why, put_back: back };
+            return Outcome::Failed { why, put_back: Some(back) };
         }
         dropped |= i == 0 && plan.restore.is_some();
     }
@@ -483,12 +483,11 @@ pub async fn run_steps(x: &mut impl Steps, plan: &Plan) -> Outcome {
 
 /// The words of a failed change for the window. A routine that could not be put back carries its old text, so the person
 /// still has it.
-pub fn failure_text(plan: &Plan, why: &str, put_back: &Result<(), String>) -> String {
+pub fn failure_text(plan: &Plan, why: &str, put_back: &Option<Result<(), String>>) -> String {
     match (plan.restore.as_ref(), put_back) {
-        (None, _) => why.to_string(),
-        (Some(_), Ok(())) if plan.steps.len() > 1 => format!("{why} The old definition was created again, so nothing changed."),
-        (Some(_), Ok(())) => why.to_string(),
-        (Some(old), Err(back)) => format!("{why} The routine is gone and creating the old one again failed too ({back}). Its old definition, to run by hand:\n\n{old}"),
+        (None, _) | (_, None) => why.to_string(),
+        (Some(_), Some(Ok(()))) => format!("{why} The old definition was created again, so nothing changed."),
+        (Some(old), Some(Err(back))) => format!("{why} The routine is gone and creating the old one again failed too ({back}). Its old definition, to run by hand:\n\n{old}"),
     }
 }
 
@@ -581,11 +580,24 @@ struct Session<'a> {
 
 impl Steps for Session<'_> {
     async fn run(&mut self, sql: &str) -> Res<()> {
-        // Prepared, so the server parses exactly one statement whatever the text holds after it.
         let t = std::time::Instant::now();
-        let res = sqlx::query(sql).persistent(false).execute(&mut *self.c).await;
+        // DROP FUNCTION and DROP PROCEDURE are refused by the prepared protocol (1295), so they go as text; the statement is
+        // our own, names quoted by us. A CREATE is prepared, so the server parses exactly one statement whatever follows it.
+        let res = if sql.starts_with("DROP ") {
+            let mut s = sqlx::raw_sql(sql).fetch_many(&mut *self.c);
+            let mut out = Ok(());
+            while let Some(item) = futures_util::StreamExt::next(&mut s).await {
+                if let Err(e) = item {
+                    out = Err(e);
+                    break;
+                }
+            }
+            out
+        } else {
+            sqlx::query(sql).persistent(false).execute(&mut *self.c).await.map(|_| ())
+        };
         self.db.note(self.schema, sql, t, &res);
-        res.map(|_| ()).map_err(se)
+        res.map_err(se)
     }
 }
 
@@ -850,7 +862,7 @@ mod tests {
         assert_eq!(x.ran, ["DROP", "CREATE new", "CREATE old"]);
         let Outcome::Failed { why, put_back } = out else { panic!("expected a failure") };
         assert_eq!(why, "refused 1");
-        assert!(put_back.is_ok());
+        assert_eq!(put_back, Some(Ok(())));
         assert!(failure_text(&two_steps(), &why, &put_back).contains("created again"));
     }
 
@@ -859,14 +871,15 @@ mod tests {
         let mut x = Fake { ran: Vec::new(), fail: vec![0] };
         let out = block(run_steps(&mut x, &two_steps()));
         assert_eq!(x.ran, ["DROP"], "no restore after a drop that did not run");
-        assert!(matches!(out, Outcome::Failed { put_back: Ok(()), .. }));
+        assert!(matches!(out, Outcome::Failed { put_back: None, .. }));
+        assert_eq!(failure_text(&two_steps(), "refused 0", &None), "refused 0");
     }
 
     #[test]
     fn a_failed_restore_hands_back_the_old_text() {
         let mut x = Fake { ran: Vec::new(), fail: vec![1, 2] };
         let Outcome::Failed { why, put_back } = block(run_steps(&mut x, &two_steps())) else { panic!("expected a failure") };
-        assert!(put_back.is_err());
+        assert!(matches!(put_back, Some(Err(_))));
         let text = failure_text(&two_steps(), &why, &put_back);
         assert!(text.contains("CREATE old") && text.contains("refused 1") && text.contains("refused 2"), "{text}");
     }
