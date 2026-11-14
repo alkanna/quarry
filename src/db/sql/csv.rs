@@ -25,6 +25,10 @@ impl AsRef<[u8]> for Shared {
 pub enum Open {
     File(std::fs::File),
     Mem(std::io::Cursor<Shared>),
+    /// A gzip file read as the text inside it. Boxed because it holds an `Open` itself.
+    Gz(Box<flate2::read::MultiGzDecoder<Open>>),
+    /// The first bytes already read to sniff the format, put back in front of the rest.
+    Peeked(Box<std::io::Chain<std::io::Cursor<Vec<u8>>, Open>>),
 }
 
 impl Read for Open {
@@ -32,6 +36,8 @@ impl Read for Open {
         match self {
             Open::File(f) => f.read(buf),
             Open::Mem(c) => c.read(buf),
+            Open::Gz(g) => g.read(buf),
+            Open::Peeked(p) => p.read(buf),
         }
     }
 }
@@ -56,6 +62,41 @@ impl Source {
             Source::File(p) => std::fs::metadata(p).map_or(0, |m| m.len()),
             Source::Mem(b) => b.len() as u64,
         }
+    }
+
+    /// Whether the bytes are gzip, told by their magic number and not the file name, so a dump renamed without .gz still runs.
+    fn is_gzip(&self) -> bool {
+        self.head(2).is_ok_and(|h| h == [0x1f, 0x8b])
+    }
+
+    /// `open` for a SQL script: a gzip file is decompressed as it is read, so a dump written with the .gz option runs as it is.
+    pub fn open_script(&self) -> std::io::Result<Open> {
+        let mut raw = self.open()?;
+        // Sniffed on this handle: a pipe or a file being written cannot be opened a second time without losing the bytes read.
+        let mut head = Vec::with_capacity(2);
+        (&mut raw).take(2).read_to_end(&mut head)?;
+        let gz = head == [0x1f, 0x8b];
+        let raw = Open::Peeked(Box::new(std::io::Cursor::new(head).chain(raw)));
+        Ok(if gz { Open::Gz(Box::new(flate2::read::MultiGzDecoder::new(raw))) } else { raw })
+    }
+
+    /// The size of the script `open_script` reads, which the progress of a run is measured against. A gzip file ends with the
+    /// size of its text modulo 4 GiB, which is as close as a stream gets without reading it twice.
+    pub fn script_len(&self) -> u64 {
+        use std::io::{Seek, SeekFrom};
+        let len = self.len();
+        if len < 18 || !self.is_gzip() {
+            return len;
+        }
+        let mut tail = [0u8; 4];
+        let read = match self {
+            Source::File(p) => std::fs::File::open(p).and_then(|mut f| f.seek(SeekFrom::End(-4)).and_then(|_| f.read_exact(&mut tail))),
+            Source::Mem(b) => {
+                tail.copy_from_slice(&b[b.len() - 4..]);
+                Ok(())
+            }
+        };
+        if read.is_err() { len } else { u32::from_le_bytes(tail) as u64 }
     }
 
     /// The first `max` bytes, enough to find the format.
@@ -233,6 +274,19 @@ impl<R: Read> Chars<R> {
             }
         }
     }
+}
+
+/// All of `bytes` as text in the encoding `enc`, a byte order mark dropped. For files read whole, like JSON.
+pub fn decode_text(bytes: &[u8], enc: Enc) -> Result<String, String> {
+    if enc == Enc::Utf8 && let Ok(s) = std::str::from_utf8(bytes) {
+        return Ok(s.strip_prefix('\u{feff}').unwrap_or(s).to_string());
+    }
+    let mut ch = Chars::new(std::io::Cursor::new(bytes), enc);
+    let mut out = String::with_capacity(bytes.len());
+    while let Some(c) = ch.next()? {
+        out.push(c);
+    }
+    Ok(out)
 }
 
 /// The largest value a field may hold. A quote that never closes would otherwise swallow the whole file.
@@ -474,12 +528,17 @@ impl TableInfo {
     /// Whether rows written inside a transaction go away on a rollback. MyISAM, Aria, MEMORY, CSV and ARCHIVE
     /// keep every row the moment it is written. An unknown engine counts as transactional, like InnoDB, the default.
     pub fn transactional(&self) -> bool {
-        self.engine.is_empty() || ["InnoDB", "XtraDB", "NDB", "NDBCLUSTER", "TokuDB", "RocksDB"].iter().any(|e| e.eq_ignore_ascii_case(&self.engine))
+        engine_rolls_back(&self.engine)
     }
 
     pub fn col(&self, name: &str) -> Option<&TCol> {
         self.cols.iter().find(|c| c.name == name)
     }
+}
+
+/// `TableInfo::transactional` for a bare engine name. Empty, as on PostgreSQL, rolls back.
+pub fn engine_rolls_back(engine: &str) -> bool {
+    engine.is_empty() || ["InnoDB", "XtraDB", "NDB", "NDBCLUSTER", "TokuDB", "RocksDB"].iter().any(|e| e.eq_ignore_ascii_case(engine))
 }
 
 fn norm(s: &str) -> String {
@@ -573,13 +632,28 @@ pub(super) fn to_iso(s: &str, fmt: DateFmt) -> String {
     format!("{date} {hms}")
 }
 
+/// Lead of a cell that came from JSON, which has a NULL of its own and strings that CSV's `\N` would swallow.
+/// `MARK` then `N` is a NULL, `MARK` then `S` and the text is that text as it is, never read as `\N`. A JSON string that
+/// itself starts with `MARK` is written the second way too, so no text can pass for a NULL.
+pub const MARK: char = '\u{1}';
+
+/// The cell without its lead, whether it is a NULL, and whether it is text to take as it is.
+fn unmark(raw: &str) -> (&str, bool, bool) {
+    match raw.strip_prefix(MARK) {
+        Some("N") => (raw, true, false),
+        Some(rest) if rest.starts_with('S') => (&rest[1..], false, true),
+        _ => (raw, false, false),
+    }
+}
+
 /// What a cell becomes for its column: a value to bind, or why it cannot be one.
 pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
     if col.pg {
         return convert_pg(col, raw, empty_null, fmt);
     }
     let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
-    let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
+    let (raw, marked_null, literal) = unmark(raw);
+    let null = marked_null || (!literal && raw == "\\N") || (raw.is_empty() && (empty_null || !text_like));
     if null {
         return if col.nullable || col.auto_increment { Ok(Param::Null) } else { Err("Empty, but the column does not allow NULL. Skip it or fill it in the file.".into()) };
     }
@@ -621,7 +695,8 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
 /// UUID, JSON, hex. Dates and times are left to the cast, which reads more spellings than MySQL does.
 fn convert_pg(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
     let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
-    let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
+    let (raw, marked_null, literal) = unmark(raw);
+    let null = marked_null || (!literal && raw == "\\N") || (raw.is_empty() && (empty_null || !text_like));
     if null {
         return if col.nullable || col.auto_increment { Ok(Param::Null) } else { Err("Empty, but the column does not allow NULL. Skip it or fill it in the file.".into()) };
     }
@@ -1082,5 +1157,46 @@ mod tests {
         let m = Mapping { map: vec![Some(1), Some(1), None], fmts: vec![], empty_null: true };
         assert_eq!(m.duplicate_target(), Some(1));
         assert_eq!(Mapping { map: vec![Some(0), None, Some(1)], ..m }.duplicate_target(), None);
+    }
+
+    #[test]
+    fn a_gzip_script_reads_back_as_its_text() {
+        use std::io::Write;
+        let text = "CREATE TABLE t (a int);\nINSERT INTO t VALUES (1);\n".repeat(50);
+        let gz = |t: &str| {
+            let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            w.write_all(t.as_bytes()).unwrap();
+            w.finish().unwrap()
+        };
+        let read = |src: &Source| {
+            let mut out = String::new();
+            src.open_script().unwrap().read_to_string(&mut out).unwrap();
+            out
+        };
+        let zipped = Source::Mem(Arc::new(gz(&text)));
+        assert_eq!(read(&zipped), text);
+        assert_eq!(zipped.script_len(), text.len() as u64);
+        // Plain text passes through, and so does a file whose name has no .gz but whose bytes are gzip.
+        let plain = Source::Mem(Arc::new(text.clone().into_bytes()));
+        assert_eq!((read(&plain), plain.script_len()), (text.clone(), text.len() as u64));
+        // A plain script, even a one or two byte one, reads back whole: the sniffed bytes are not lost.
+        for t in ["", "S", "SELECT 1;\n"] {
+            assert_eq!(read(&Source::Mem(Arc::new(t.as_bytes().to_vec()))), t);
+        }
+        // Concatenated members, which `cat a.sql.gz b.sql.gz` makes, read as one script.
+        let mut two = gz("SELECT 1;\n");
+        two.extend(gz("SELECT 2;\n"));
+        assert_eq!(read(&Source::Mem(Arc::new(two))), "SELECT 1;\nSELECT 2;\n");
+        // A file on disk takes the same path.
+        let path = std::env::temp_dir().join(format!("quarry-gz-test-{}.sql.gz", std::process::id()));
+        std::fs::write(&path, gz(&text)).unwrap();
+        let file = Source::File(path.clone());
+        assert_eq!((read(&file), file.script_len()), (text.clone(), text.len() as u64));
+        let _ = std::fs::remove_file(&path);
+        // A damaged file is an error and not an empty script.
+        let mut bad = gz(&text);
+        bad.truncate(bad.len() / 2);
+        let mut out = String::new();
+        assert!(Source::Mem(Arc::new(bad)).open_script().unwrap().read_to_string(&mut out).is_err());
     }
 }

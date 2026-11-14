@@ -38,6 +38,7 @@ mod library;
 mod log;
 mod mem;
 mod modals;
+mod mongo_create;
 mod palette;
 mod poll;
 mod query;
@@ -83,6 +84,7 @@ use indexes::*;
 use server::*;
 use sql::server::*;
 use sql::pg_server::*;
+use sql::routines::{RAct, Routines};
 use watch::*;
 use tabs::new_tab_click;
 use drafts::*;
@@ -97,7 +99,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 38] = [
+const SHORTCUTS: [(&str, &str); 39] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -111,6 +113,7 @@ const SHORTCUTS: [(&str, &str); 38] = [
     ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
     ("Cmd+[, Cmd+]", "Back and forward through the tabs you visited"),
     ("Cmd+Alt+1 to Cmd+Alt+8", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell, Watch"),
+    ("", "On a SQL tab: Content, Structure, Relations, Triggers, Info, Query, Shell"),
     ("Cmd+F", "Focus the query"),
     ("Cmd+Shift+F", "Find a collection in the sidebar"),
     ("Up, Down", "Select the previous or next document"),
@@ -179,6 +182,8 @@ pub struct App {
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
+    /// A collection to open once the create that makes it is answered.
+    open_after: Option<(u64, String, String)>,
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
     export_job: Option<export::ExportJob>,
     /// A CSV import or a script file running, shown in the status bar with a Cancel.
@@ -210,6 +215,8 @@ pub struct App {
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
     pg_server: Option<PgServerWin>,
+    /// The routines of each SQL schema the sidebar lists, and the window of the one that is open.
+    routines: Routines,
     /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
     /// the window was closed still reaches the person.
     sql_kills: HashSet<u64>,
@@ -367,6 +374,7 @@ impl App {
             tree_x: egui::Rangef::NOTHING,
             insert: None,
             copying: Default::default(),
+            open_after: None,
             export_job: None,
             sql_job: None,
             prefs: UiPrefs::default(),
@@ -389,6 +397,7 @@ impl App {
             server: None,
             sql_server: None,
             pg_server: None,
+            routines: Routines::default(),
             sql_kills: HashSet::new(),
             conn_test: None,
             test_started: None,
@@ -668,6 +677,7 @@ impl App {
                 self.modal = Some(Modal::Settings);
             }
             Act::Export if !self.tabs.is_empty() => self.export(),
+            Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
             Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),
             Act::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             _ => {}
@@ -762,6 +772,11 @@ impl eframe::App for App {
         }
     }
 
+    // Persistence is on only to keep the window size and position; restoring egui's widget state would change behavior.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Here rather than in ui(): eframe skips ui() while the window is minimised or covered, and agent calls
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
@@ -839,6 +854,7 @@ impl eframe::App for App {
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.pg_server_window(&ctx);
+        self.routine_window(&ctx);
         self.tool_window(&ctx);
         // After the modals, so a browser opened from the connection form draws over it.
         self.cloud_browser_window(&ctx);

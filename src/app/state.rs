@@ -465,6 +465,8 @@ pub(super) struct SqlTab {
     pub(super) query: String,
     /// The query of the last page asked for, which whole-query column actions repeat.
     pub(super) ran: db::sql::PageQuery,
+    /// The Content bar's Save as view button was pressed; `view_requests` opens the dialog on the next frame.
+    pub(super) save_view: bool,
     /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
     pub(super) matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.
@@ -494,6 +496,9 @@ pub(super) struct SqlTab {
     pub(super) qanchor: Option<usize>,
     /// The selected row of that page, whose record Tab opens. Cleared with the checks.
     pub(super) qsel: Option<usize>,
+    /// Alignment, widths, pins, hidden columns and highlights of Query results, by the column names of a result. Kept
+    /// for this tab only: ad hoc results have no table to save them under.
+    pub(super) qprefs: HashMap<Vec<String>, ColPrefs>,
     /// The run the shown results belong to, which their row counts answer to, and the result tab being
     /// read at another page (its answer replaces only that tab).
     pub(super) sets_req: u64,
@@ -911,15 +916,23 @@ pub(super) enum Modal {
     Delete(Sel, Vec<Document>),
     SqlSet(Box<SetForm>),
     SqlRow(Box<RowForm>),
+    /// Update or delete every row the WHERE of the SQL Content page matches.
+    SqlBulk(Box<super::sql::bulk::BulkForm>),
     /// Add or edit a column of the open SQL table, with its ALTER preview.
     ColEdit(Box<ColForm>),
     IdxEdit(Box<IdxForm>),
+    /// Add or edit a CHECK constraint of the open SQL table, with its ALTER preview.
+    CheckEdit(Box<super::sql::checks::CheckForm>),
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
+    SqlRename(Box<super::sql::tableops::RenameForm>),
+    SqlDuplicate(Box<super::sql::tableops::DupForm>),
+    PgTruncate(Box<super::sql::tableops::TruncForm>),
     PgNewDb(Box<super::sql::create_pg::PgNewDb>),
     PgNewSchema(Box<super::sql::create_pg::PgNewSchema>),
     PgNewTable(Box<super::sql::create_pg::PgNewTable>),
+    SqlView(Box<super::sql::viewdef::ViewForm>),
     SqlNewUser(Box<super::sql::users::NewUser>),
     SqlPassword(Box<super::sql::users::PwForm>),
     PgNewRole(Box<super::sql::pg_roles::NewRoleForm>),
@@ -932,11 +945,16 @@ pub(super) enum Modal {
     AggWrite(Vec<Document>),
     ShellWrite(Vec<String>),
     ImportInsert(usize),
+    /// A table maintenance statement of the Info page that locks or rebuilds the table, waiting for a yes.
+    SqlMaintain { what: db::sql::Maint, stmt: String },
+    MongoNewColl(Box<super::mongo_create::MongoNewColl>),
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
     DuplicateColl { conn: u64, db: String, coll: String, name: String },
     Undo,
     Explain { summary: db::ExplainSummary, raw: String, show_raw: bool },
+    /// The plan of a SQL statement, with its ANALYZE run.
+    SqlExplain(Box<super::sql::explain::SqlExplain>),
     ErrorDetails(Box<super::errors::ErrEntry>),
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
@@ -1347,9 +1365,10 @@ impl ConnForm {
         a
     }
 
-    /// The Cloud SQL settings when they apply: only PostgreSQL goes through the proxy.
+    /// The Cloud SQL settings when they apply: PostgreSQL and MySQL go through the proxy, and only while the form is on the
+    /// engine of the instance that was picked.
     pub(super) fn cloud_on(&self) -> Option<&crate::cloudsql::CloudSql> {
-        self.cloud_sql.as_ref().filter(|_| self.engine == db::sql::Engine::Postgres)
+        self.cloud_sql.as_ref().filter(|c| self.engine == if c.mysql { db::sql::Engine::MySql } else { db::sql::Engine::Postgres })
     }
 
     pub(super) fn net(&self) -> db::Net {
@@ -1357,7 +1376,7 @@ impl ConnForm {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
             // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
             proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
-            cloud_sql: self.cloud_sql.clone().filter(|_| self.engine == db::sql::Engine::Postgres),
+            cloud_sql: self.cloud_on().cloned(),
             tools: Default::default(),
             key_passphrase: (self.engine == db::sql::Engine::Postgres && !self.pg_key_pass.is_empty()).then(|| self.pg_key_pass.clone()),
         }
@@ -1399,8 +1418,10 @@ pub(super) enum SideAct {
     Analyze(String, String),
     /// A Query tab for a SQL database.
     NewQuery(String),
-    /// Import a CSV file into a SQL table (database, table).
+    /// Import a CSV, JSON or JSON Lines file into a SQL table (database, table).
     SqlImport(String, String),
+    /// The same, from the text on the clipboard.
+    SqlImportPaste(String, String),
     /// Export a SQL dump of a database, with the table to start from when there is one.
     SqlDump(String, Option<String>),
     /// Run a script file on a SQL database.
@@ -1409,11 +1430,18 @@ pub(super) enum SideAct {
     NewDb,
     NewTable(String),
     SqlDrop(String, String, DropKind),
+    /// Rename a SQL table, view or PostgreSQL schema (database, name, kind), duplicate a table, and empty a PostgreSQL table.
+    SqlRename(String, String, DropKind),
+    SqlDuplicate(String, String),
+    PgTruncate(String, String),
     /// PostgreSQL: a schema of a database, and dropping one (database, schema).
     NewSchema(String),
     DropSchema(String, String),
     /// The Users and privileges window of a SQL connection.
     SqlUsers,
+    /// A new view in a SQL database (the database on MySQL, the PostgreSQL database's picked schema), and the edit of one (database, view).
+    NewView(String),
+    EditView(String, String),
 }
 
 pub(super) enum QAct {

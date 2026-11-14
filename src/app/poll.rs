@@ -4,6 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
+        self.view_requests();
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
@@ -44,11 +45,14 @@ impl App {
                 }
                 Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
+                Msg::SqlExplained { req, sets } => self.sql_explained(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
+                Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
                 Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
                 Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
+                Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
                 Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlSchema { conn, database, schema, res } => {
@@ -59,11 +63,17 @@ impl App {
                     }
                 }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
+                Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
+                Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
                 Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
                 Msg::PgRoles { conn, req, ans } => self.pg_roles_answer(conn, req, ans),
-                Msg::SqlDropInfo { conn, database, schema, table, res } => self.sql_drop_info_done(conn, database, schema, table, res),
+                Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
+                Msg::SqlDropInfo { conn, database, schema, table, res } => {
+                    self.truncate_info_done(conn, &database, &schema, &table, &res);
+                    self.sql_drop_info_done(conn, database, schema, table, res)
+                }
                 Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlKeys { req, res } => self.sql_keys_done(req, res),
@@ -526,6 +536,15 @@ impl App {
             }
             self.copying.remove(&(conn, db.clone(), to));
         }
+        let open = self.open_after.take_if(|o| o.0 == conn && o.1 == db);
+        if res.is_ok() && open.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) && !c.dbs.iter().any(|d| d.0 == db) {
+            // A new database is listed now so its collection has a row to open under.
+            c.dbs.push((db.clone(), None));
+            c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        if res.is_ok() && let Some((_, _, coll)) = open {
+            self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, Open::Here);
+        }
         match res {
             Ok(m) => {
                 // Only a drop the server confirmed forgets its undo entries; a refused one keeps them.
@@ -612,6 +631,7 @@ impl App {
                 t.related.clear();
                 let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
                 t.stats_asked = true;
+                self.sql_remember_filter(i);
                 self.load_related(req);
                 if let Some(s) = ask && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone()) {
                     let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);

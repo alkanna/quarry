@@ -14,9 +14,9 @@
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
 use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
-use crate::db::sql::exec::{sql_state, Tx};
+use crate::db::sql::exec::{bound_pg, sql_state, Conn, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
-use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
+use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
 use crate::db::sql::value::{lit, pg_lit, Param};
 use crate::db::sql::write::PgIds;
 use crate::db::sql::pg::LOCK_WAIT_SECS;
@@ -85,6 +85,8 @@ enum Text {
     Cond,
     /// A CHECK constraint's expression.
     Check,
+    /// The WHERE condition of a partial index.
+    Pred,
     Type,
 }
 
@@ -96,6 +98,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
         Text::Expr => "default expression",
         Text::Cond => "WHEN condition",
         Text::Check => "CHECK expression",
+        Text::Pred => "index condition",
         Text::Type => "type",
     };
     let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Type { "a type name like numeric(10,2)" } else { "one expression" });
@@ -157,6 +160,16 @@ pub fn check_constraint_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Check)?;
     match crate::db::sql::lex::refused_call(s) {
         Some(f) => Err(format!("The CHECK expression calls {f}, which acts outside the row and is refused.")),
+        None => Ok(()),
+    }
+}
+
+/// The WHERE condition of a partial index typed by the person: one expression, and no call the read-only check refuses, because
+/// the server runs it for every row written later. See `scan`.
+pub(in crate::db::sql) fn check_predicate_pg(s: &str) -> Result<(), String> {
+    scan(s, Text::Pred)?;
+    match crate::db::sql::lex::refused_call(s) {
+        Some(f) => Err(format!("The index condition calls {f}, which acts outside the row and is refused.")),
         None => Ok(()),
     }
 }
@@ -388,7 +401,17 @@ const METHODS: [&str; 6] = ["btree", "hash", "gin", "gist", "brin", "spgist"];
 /// CREATE INDEX, then its comment. An index name belongs to the schema, so only the table is written after ON.
 fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, String> {
     if ix.functional {
-        return Err(format!("Index {} has a part this editor cannot write: an expression, a condition, included columns or an operator class.", ix.name));
+        // Only an undo gets here with an index the fields cannot describe: the server's own text puts back exactly what it had.
+        // A constraint's index is not made by CREATE INDEX, so those stay out.
+        if ix.raw.starts_with("CREATE ") && !ix.constraint && ix.kind != IndexKind::Primary {
+            name_ok(&ix.name, "An index")?;
+            let mut out = vec![ix.raw.clone()];
+            if !ix.comment.is_empty() {
+                out.push(comment_stmt(&format!("INDEX {}", D.qualified(schema, &ix.name)), &ix.comment)?);
+            }
+            return Ok(out);
+        }
+        return Err(format!("Index {} has a part this editor cannot write: an expression, an operator class, a collation, a sort of NULLs, storage options or a tablespace.", ix.name));
     }
     if matches!(ix.kind, IndexKind::Fulltext | IndexKind::Spatial) {
         return Err("PostgreSQL has no FULLTEXT or SPATIAL index. Use a gin or gist index.".into());
@@ -403,10 +426,26 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
     if !method.is_empty() && !METHODS.contains(&method.as_str()) {
         return Err(format!("{method:?} is not an index method."));
     }
+    let btree = method.is_empty() || method == "btree";
+    let predicate = ix.predicate.trim();
+    let include = if ix.include.is_empty() {
+        String::new()
+    } else {
+        if !matches!(method.as_str(), "" | "btree" | "gist" | "spgist") {
+            return Err(format!("A {method} index cannot have INCLUDE columns. Only btree, gist and spgist can."));
+        }
+        for c in &ix.include {
+            name_ok(c, "An included column")?;
+        }
+        format!(" INCLUDE ({})", ix.include.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "))
+    };
     let mut out = Vec::new();
     if ix.kind == IndexKind::Primary || ix.constraint {
-        if ix.cols.iter().any(|c| c.desc) || !(method.is_empty() || method == "btree") {
+        if ix.cols.iter().any(|c| c.desc) || !btree {
             return Err("A primary key or unique constraint is a plain btree on its columns, without sort order.".into());
+        }
+        if !predicate.is_empty() || ix.concurrently {
+            return Err("A primary key or unique constraint cannot be partial or built CONCURRENTLY. Add a unique index for that.".into());
         }
         let what = if ix.kind == IndexKind::Primary { "PRIMARY KEY" } else { "UNIQUE" };
         let defer = match (ix.deferrable, ix.deferred) {
@@ -414,7 +453,7 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
             (true, false) => " DEFERRABLE",
             _ => "",
         };
-        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols}){defer}", q(&ix.name)));
+        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols}){include}{defer}", q(&ix.name)));
         if !ix.con_comment.is_empty() {
             out.push(comment_stmt(&format!("CONSTRAINT {} ON {t}", q(&ix.name)), &ix.con_comment)?);
         }
@@ -422,13 +461,114 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
         if ix.deferrable || ix.deferred {
             return Err("Only a primary key or unique constraint can be deferred.".into());
         }
+        if ix.kind == IndexKind::Unique && !btree {
+            return Err("Only a btree index can be UNIQUE.".into());
+        }
+        if !btree && ix.cols.iter().any(|c| c.desc) {
+            return Err("Only a btree index has a sort order.".into());
+        }
         let using = if method.is_empty() { String::new() } else { format!(" USING {method}") };
-        out.push(format!("CREATE {}INDEX {} ON {t}{using} ({cols})", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, q(&ix.name)));
+        if !predicate.is_empty() {
+            check_predicate_pg(predicate)?;
+        }
+        let wher = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
+        out.push(format!("CREATE {}INDEX {}{} ON {t}{using} ({cols}){include}{wher}", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, if ix.concurrently { "CONCURRENTLY " } else { "" }, q(&ix.name)));
     }
     if !ix.comment.is_empty() {
         out.push(comment_stmt(&format!("INDEX {}", D.qualified(schema, &ix.name)), &ix.comment)?);
     }
     Ok(out)
+}
+
+/// The quoted name of the index a CREATE INDEX CONCURRENTLY step makes.
+fn concurrent_name(step: &str) -> Option<&str> {
+    let rest = step.strip_prefix("CREATE INDEX CONCURRENTLY ").or_else(|| step.strip_prefix("CREATE UNIQUE INDEX CONCURRENTLY "))?;
+    let b = rest.as_bytes();
+    if b.first() != Some(&b'"') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() {
+        if b[i] == b'"' {
+            if b.get(i + 1) == Some(&b'"') {
+                i += 2;
+                continue;
+            }
+            return Some(&rest[..=i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The steps that run in the plan's transaction, and the ones that cannot: CREATE INDEX CONCURRENTLY is refused inside a
+/// transaction block, and so is the comment on the index it makes, which has to wait for the index.
+pub(in crate::db::sql) fn split_steps(steps: &[String]) -> (Vec<&String>, Vec<&String>) {
+    let (mut now, mut later) = (Vec::new(), Vec::new());
+    let mut names: Vec<&str> = Vec::new();
+    for s in steps {
+        if let Some(n) = concurrent_name(s) {
+            names.push(n);
+            later.push(s);
+        } else if s.starts_with("COMMENT ON INDEX ") && names.iter().any(|n| s.contains(&format!(".{n} IS "))) {
+            later.push(s);
+        } else {
+            now.push(s);
+        }
+    }
+    (now, later)
+}
+
+/// One statement through the extended protocol, so the server takes exactly one statement from the text.
+async fn exec_one(conn: &mut Conn, sql: &str) -> Result<(), sqlx::Error> {
+    match conn {
+        Conn::Pg(c) => bound_pg(sql, &[]).execute(&mut **c).await.map(|_| ()),
+        Conn::My(_) => Err(sqlx::Error::Protocol("not a PostgreSQL connection".into())),
+    }
+}
+
+/// Runs the steps that cannot share the plan's transaction, one at a time on a connection of their own, after it committed.
+/// A build that fails leaves an INVALID index behind, and only such an index of this table is dropped again, so a retry does
+/// not meet its name and an index of another table with the same name is never touched. The error says the rest was applied.
+async fn run_concurrent(db: &Db, schema: &str, table: &str, steps: &[String]) -> Result<(), String> {
+    let n = steps.len();
+    let late = |what: String| format!("{what}. The other changes were already applied, and the index was not built. Reload the structure and stage it again.");
+    let mut conn = write::writer_conn(db, schema, false).await.map_err(&late)?;
+    // The session is read-only and has a statement timeout, and this statement runs outside the transaction that lifts both.
+    // The connection is closed after, so none of it reaches the next user of a connection.
+    let prep = [db.pg_set_path(schema), "SET default_transaction_read_only = off".to_string(), "SET statement_timeout = 0".to_string()];
+    let mut res = Ok(());
+    for p in &prep {
+        if let Err(e) = exec_one(&mut conn, p).await {
+            res = Err(late(se(e)));
+            break;
+        }
+    }
+    if res.is_ok() {
+        for (i, s) in steps.iter().enumerate() {
+            let t = Instant::now();
+            let out = exec_one(&mut conn, s).await;
+            db.note(schema, s, t, &out);
+            if let Err(e) = out {
+                if let Some(name) = concurrent_name(s) {
+                    let full = format!("{}.{name}", q(schema));
+                    let find = "SELECT 1 AS x FROM pg_index WHERE indexrelid = to_regclass($1) AND indrelid = to_regclass($2) AND NOT indisvalid";
+                    let params = [Param::Text(full.clone()), Param::Text(D.qualified(schema, table))];
+                    let invalid = match &mut conn {
+                        Conn::Pg(c) => bound_pg(find, &params).fetch_all(&mut **c).await.is_ok_and(|r| !r.is_empty()),
+                        Conn::My(_) => false,
+                    };
+                    if invalid {
+                        let _ = exec_one(&mut conn, &format!("DROP INDEX {full}")).await;
+                    }
+                }
+                res = Err(late(format!("{} (concurrent statement {} of {})", se(e), i + 1, n)));
+                break;
+            }
+        }
+    }
+    let _ = conn.close().await;
+    res
 }
 
 /// The statements of one change, written against the table as it is before the change (`sim`).
@@ -518,6 +658,11 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
             let k = sim.fk_at(from).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {from} is not on the table."))?;
             vec![format!("{alter} RENAME CONSTRAINT {} TO {}", q(&k.name), q(to))]
         }
+        Change::AddCheck(k) => vec![add_check(schema, table, k)?],
+        Change::DropCheck(n) => {
+            let k = sim.check_at(n).map(|i| &sim.checks[i]).ok_or_else(|| format!("Check constraint {n} is not on the table."))?;
+            vec![format!("{alter} DROP CONSTRAINT {}", q(&k.name))]
+        }
         Change::SetFkDeferral { name, deferrable, deferred } => {
             let k = sim.fk_at(name).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
             if *deferred && !*deferrable {
@@ -531,6 +676,45 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
             vec![format!("{alter} ALTER CONSTRAINT {} {when}", q(&k.name))]
         }
     })
+}
+
+/// The start of the statement that adds the CHECK `name`, which the run uses to tell which steps add one.
+fn add_check_head(schema: &str, table: &str, name: &str) -> String {
+    format!("ALTER TABLE {} ADD CONSTRAINT {} CHECK ", D.qualified(schema, table), q(name))
+}
+
+/// ADD CONSTRAINT .. CHECK. NOT VALID skips the rows already there, and NOT ENFORCED (PostgreSQL 18) is how a constraint that
+/// was read that way is written back; the server takes only one of the two.
+fn add_check(schema: &str, table: &str, k: &CheckConstraint) -> Result<String, String> {
+    name_ok(&k.name, "A check constraint")?;
+    check_constraint_pg(&k.expr)?;
+    let mut text = format!("{}({})", add_check_head(schema, table, &k.name), k.expr.trim());
+    if k.no_inherit {
+        text.push_str(" NO INHERIT");
+    }
+    if k.not_enforced {
+        text.push_str(" NOT ENFORCED");
+    } else if k.not_valid {
+        text.push_str(" NOT VALID");
+    }
+    Ok(text)
+}
+
+/// PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so one that reaches a volatile or stable function (which
+/// could write, call out or read other tables) is refused. The create dialog does the same for the checks of a new table.
+async fn added_checks_immutable(tx: &mut Tx<'_>, schema: &str, table: &str, added: &[String]) -> Result<(), Fail> {
+    let Some(oid) = super::create::relation_oid(tx, &D.qualified(schema, table)).await.map_err(Fail::Run)? else { return Ok(()) };
+    let rows = tx.fetch_bound(super::create::CHECK_VOLATILE, &[Param::Text(oid)]).await.map_err(|e| Fail::Run(se(e)))?;
+    for r in &rows {
+        let con = crate::db::sql::worker::text(r, "con").unwrap_or_default();
+        if !added.contains(&con) {
+            continue;
+        }
+        let f = crate::db::sql::worker::text(r, "fn").unwrap_or_default();
+        let vol = if crate::db::sql::worker::text(r, "vol").as_deref() == Some("s") { "STABLE" } else { "VOLATILE" };
+        return Err(Fail::Run(format!("The CHECK {con} calls {f}, which is {vol}. PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so only IMMUTABLE functions are allowed there. Nothing was changed.")));
+    }
+    Ok(())
 }
 
 /// The actions PostgreSQL has for a key. The dialog offers the four MySQL has; SET DEFAULT is here so a key that already has
@@ -719,12 +903,12 @@ pub(in crate::db::sql) fn plan(table: &str, st: &Structure, changes: &[Change]) 
         steps.extend(statements(&sim, schema, table, c)?);
         let _ = sim.apply(c);
     }
-    let (cols, idx, fks) = touched(std::slice::from_ref(&changes.to_vec()));
+    let (cols, idx, fks, checks) = touched(std::slice::from_ref(&changes.to_vec()));
     // A dropped column takes whatever depends on it, and the undo only knows the ones read now, so the whole set of
     // indexes, constraints and dependents has to be the same under the lock.
     let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
     let (refs, orphans) = others(&Sim::of(st), schema, changes);
-    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types, refs, orphans, own_share: shares_only(changes) };
+    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks, &checks), cols, idx, fks, checks, all, types, refs, orphans, own_share: shares_only(changes) };
     Ok(Plan { steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
 }
 
@@ -756,7 +940,7 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
     }
     groups.reverse();
     let loss = undo_loss(&sim, &groups);
-    let (cols, idx, fks) = touched(&groups);
+    let (cols, idx, fks, checks) = touched(&groups);
     let mut run = sim.clone();
     let mut steps = Vec::new();
     for c in groups.iter().flatten() {
@@ -764,7 +948,7 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
         run.apply(c)?;
     }
     let (refs, orphans) = others(&sim, schema, &groups.iter().flatten().cloned().collect::<Vec<_>>());
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, expect: Vec::new(), refs, orphans, groups })
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, checks, expect: Vec::new(), refs, orphans, groups })
 }
 
 /// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), a statement failed (the transaction
@@ -784,7 +968,8 @@ pub(in crate::db::sql) async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &s
     let fks = tx.fetch_bound(D.foreign_keys(), &args).await.map_err(se)?;
     let cons = tx.fetch_bound(crate::db::sql::pg::catalog::CONSTRAINTS, &args).await.map_err(se)?;
     let deps = tx.fetch_bound(crate::db::sql::pg::catalog::COLUMN_DEPS, &args).await.map_err(se)?;
-    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
+    let constraints = constraints(&cons);
+    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), checks: pg_checks(&constraints), constraints, pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
 pub(in crate::db::sql) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
@@ -899,6 +1084,28 @@ pub(in crate::db::sql) async fn run_locked<T>(db: &Db, scope: &str, read_only: b
     }
 }
 
+/// What a create, drop, rename or view change says when the COMMIT did not confirm.
+pub(in crate::db::sql) const REFRESH_NEXT: &str = "Refresh the lists and check before running it again.";
+
+impl From<Fail> for String {
+    fn from(f: Fail) -> String {
+        match f {
+            Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
+        }
+    }
+}
+
+/// One write transaction of a create, a drop, a rename or a view change, ended by COMMIT, or by ROLLBACK when `body` failed
+/// (`run_locked`). A failed COMMIT does not say that nothing changed, so it says so.
+pub(in crate::db::sql) async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
+    run_locked(db, scope, read_only, &[], REFRESH_NEXT, async |tx| body(tx).await.map_err(Fail::Run)).await.map_err(String::from)
+}
+
+/// `exec` for a statement on the object `name`, where a lock timeout names the session that holds the lock.
+pub(in crate::db::sql) async fn exec_named(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str, name: &str) -> Res<()> {
+    exec(tx, db, schema, sql).await.map_err(|x| lock_error(&x, name).unwrap_or_else(|| se(x)))
+}
+
 /// The note for a plan that did not run. `changed` words a refusal because the objects were not as expected, which reads
 /// differently for each feature and for an undo.
 pub(in crate::db::sql) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String {
@@ -975,7 +1182,7 @@ async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &Foreign
 /// Runs `steps` as one transaction: the lock first, with a timeout so a busy table fails the plan instead of queueing
 /// behind it, then the check that the touched columns and indexes are as `expect` says, then the statements, then COMMIT.
 /// Any failure leaves the transaction to roll back. Returns the ids the undo will check, read before the COMMIT.
-pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<PgIds, Fail> {
+pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<(PgIds, Option<String>), Fail> {
     // The changed table and the other tables of its keys, in one fixed order. A key takes a lock on both of its tables, and
     // the parent can be changed by another session between the plan and here, so it is locked before it is read.
     let locks: Vec<Lock> = lock_order(schema, table, expect.own_share, &expect.refs)
@@ -986,11 +1193,28 @@ pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &
             Lock { name, mode, plain_only: false, gone }
         })
         .collect();
-    run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
-        checked_run(tx, db, schema, table, steps, expect, undo).await?;
+    let (now, later) = split_steps(steps);
+    let now: Vec<String> = now.into_iter().cloned().collect();
+    let later: Vec<String> = later.into_iter().cloned().collect();
+    let names: Vec<String> = later.iter().filter_map(|s| concurrent_name(s)).map(String::from).collect();
+    let ids = run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
+        checked_run(tx, db, schema, table, &now, expect, undo).await?;
+        // An index name belongs to the schema and not to the table, so a table, index or sequence of another table may hold it.
+        // Seen here, after the transaction's own drops, it still rolls everything back instead of failing after the commit.
+        for name in &names {
+            let full = format!("{}.{name}", q(schema));
+            let rows = tx.fetch_bound("SELECT to_regclass($1)::text AS r", &[Param::Text(full)]).await.map_err(|e| Fail::Run(se(e)))?;
+            if rows.first().and_then(|r| crate::db::sql::worker::text(r, "r")).is_some() {
+                return Err(Fail::Run(format!("The schema {schema} already has something called {name}: an index name belongs to the schema, not to the table. Pick another name. Nothing was changed.")));
+            }
+        }
         Ok(ids_in(tx, schema, table).await)
     })
-    .await
+    .await?;
+    // The committed part stays committed when a concurrent build fails, so the failure comes back beside the ids and the
+    // caller still records the undo of what ran.
+    let late = if later.is_empty() { None } else { run_concurrent(db, schema, table, &later).await.err() };
+    Ok((ids, late))
 }
 
 async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
@@ -998,7 +1222,7 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
     // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
     set_path(tx, db, schema).await.map_err(|e| Fail::Run(se(e)))?;
     let st = read_in(tx, schema, table).await.map_err(Fail::Run)?;
-    let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks);
+    let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks, &expect.checks);
     if now.len() != expect.snap.len() {
         return Err(Fail::Changed("the table".into()));
     }
@@ -1049,6 +1273,10 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
         }
         exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())))?;
     }
+    let added: Vec<String> = expect.checks.iter().filter(|n| steps.iter().any(|s| s.starts_with(&add_check_head(schema, table, n)))).cloned().collect();
+    if !added.is_empty() && !undo {
+        added_checks_immutable(tx, schema, table, &added).await?;
+    }
     Ok(())
 }
 
@@ -1081,7 +1309,7 @@ pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_
         _ => PgIds::default(),
     };
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
+    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), checks: u.checks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
     let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only, true).await }).await;
     let unsure = matches!(out, Err(Fail::Unknown(_)));
     let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| plan_failed(f, true));
@@ -1103,10 +1331,13 @@ impl Worker {
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let out = run(&db, &schema, &table, &steps, &expect, read_only, false).await;
             let unsure = matches!(out, Err(Fail::Unknown(_)));
-            let (res, ids) = match out {
-                Ok(ids) => (Ok(()), ids),
-                Err(f) => (Err(plan_failed(f, false)), PgIds::default()),
+            let (res, ids, late) = match out {
+                Ok((ids, late)) => (Ok(()), ids, late),
+                Err(f) => (Err(plan_failed(f, false)), PgIds::default(), None),
             };
+            // A concurrent build that failed after the commit is an error that still carries the undo of what did run, and the
+            // structure is reloaded.
+            let unsure = unsure || late.is_some();
             let mut done = done;
             let undo = match (res.is_ok(), undo) {
                 (true, Some(mut u)) => {
@@ -1115,7 +1346,13 @@ impl Worker {
                     let (st, loads) = futures_util::future::join(load(&db, &schema, &table), futures_util::future::join_all(want.iter().map(|&i| load(&db, &u.refs[i].schema, &u.refs[i].table)))).await;
                     match st {
                         Ok(st) => {
-                            u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
+                            u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks, &u.checks);
+                            // A concurrent index that failed to build is not there to drop, and its drop would fail the whole undo.
+                            if late.is_some() {
+                                let built: Vec<String> = st.indexes.iter().map(|i| format!("DROP INDEX {}.{}", q(&schema), q(&i.name))).collect();
+                                let unbuilt: Vec<String> = steps.iter().filter_map(|s| concurrent_name(s)).map(|n| format!("DROP INDEX {}.{n}", q(&schema))).filter(|d| !built.contains(d)).collect();
+                                u.steps.retain(|s| !unbuilt.contains(s));
+                            }
                             // The undo of a dropped key puts it back and leans on the parent as it is now.
                             let mut unread = None;
                             for (&i, loaded) in want.iter().zip(loads) {
@@ -1140,7 +1377,7 @@ impl Worker {
                 }
                 _ => None,
             };
-            Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: res.map(|_| done), undo, sql_mode: None, alter: true, unsure }
+            Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: match late { Some(e) => Err(e), None => res.map(|_| done) }, undo, sql_mode: None, alter: true, unsure }
         });
     }
 }
@@ -1148,7 +1385,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sql::structure::{ColDep, Index, IndexCol};
+    use crate::db::sql::structure::{ColDep, Constraint, Index, IndexCol};
 
     #[test]
     fn expressions_stay_one_expression() {
@@ -1293,6 +1530,93 @@ mod tests {
         assert_eq!(p.undo.unwrap().steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_note_pkey\"", "ALTER TABLE \"public\".\"t\" ALTER COLUMN \"note\" DROP NOT NULL"]);
     }
 
+    fn ix_on(name: &str, cols: &[&str]) -> IndexDef {
+        IndexDef { name: name.into(), cols: cols.iter().map(|c| crate::db::sql::ddl::IdxCol { name: (*c).into(), prefix: None, desc: false }).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_create_index_carries_its_method_condition_include_and_concurrently() {
+        let t = "\"public\".\"t\"";
+        let base = ix_on("t_n", &["name"]);
+        let add = |ix: IndexDef| steps(&[Change::AddIndex(ix)]);
+        assert_eq!(add(IndexDef { method: "hash".into(), ..base.clone() }), [format!("CREATE INDEX \"t_n\" ON {t} USING hash (\"name\")")]);
+        assert_eq!(add(IndexDef { kind: IndexKind::Unique, predicate: "note IS NOT NULL".into(), ..base.clone() }), [format!("CREATE UNIQUE INDEX \"t_n\" ON {t} (\"name\") WHERE note IS NOT NULL")]);
+        assert_eq!(add(IndexDef { include: vec!["note".into()], ..base.clone() }), [format!("CREATE INDEX \"t_n\" ON {t} (\"name\") INCLUDE (\"note\")")]);
+        let all = IndexDef { kind: IndexKind::Unique, method: "btree".into(), include: vec!["note".into()], predicate: "id > 0".into(), concurrently: true, comment: "why".into(), ..base.clone() };
+        assert_eq!(add(all), [format!("CREATE UNIQUE INDEX CONCURRENTLY \"t_n\" ON {t} USING btree (\"name\") INCLUDE (\"note\") WHERE id > 0"), "COMMENT ON INDEX \"public\".\"t_n\" IS 'why'".to_string()]);
+        // a unique constraint can carry INCLUDE columns, and nothing else of these
+        let uq = IndexDef { kind: IndexKind::Unique, constraint: true, include: vec!["note".into()], ..base.clone() };
+        assert_eq!(add(uq.clone()), [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_n\" UNIQUE (\"name\") INCLUDE (\"note\")")]);
+        let st = table();
+        let refused = |ix: IndexDef| plan("t", &st, &[Change::AddIndex(ix)]).err().unwrap_or_default();
+        assert!(refused(IndexDef { method: "hash".into(), include: vec!["note".into()], ..base.clone() }).contains("INCLUDE"));
+        assert!(refused(IndexDef { method: "gin".into(), kind: IndexKind::Unique, ..base.clone() }).contains("UNIQUE"));
+        assert!(refused(IndexDef { method: "bogus".into(), ..base.clone() }).contains("not an index method"));
+        assert!(refused(IndexDef { concurrently: true, ..uq.clone() }).contains("CONCURRENTLY"));
+        assert!(refused(IndexDef { predicate: "id > 0".into(), ..uq }).contains("partial"));
+        let mut desc = ix_on("t_d", &["name"]);
+        desc.cols[0].desc = true;
+        assert!(refused(IndexDef { method: "gist".into(), ..desc }).contains("sort order"));
+    }
+
+    #[test]
+    fn an_index_condition_stays_one_expression() {
+        for ok in ["qty > 1", "(note IS NOT NULL)", "status = 'open;closed'", "lower(name) <> 'x'"] {
+            assert!(check_predicate_pg(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "qty > 1; DROP TABLE t", "qty > 1 -- c", "qty > 1 /* c */", "(qty > 1", "qty > 1)", "name = 'open", "qty > 1) WITH (fillfactor = 10"] {
+            assert!(check_predicate_pg(bad).is_err(), "{bad}");
+        }
+        // the plan refuses the same text before any statement exists
+        let ix = IndexDef { predicate: "qty > 1; DROP TABLE t".into(), ..ix_on("t_n", &["name"]) };
+        assert!(plan("t", &table(), &[Change::AddIndex(ix)]).err().unwrap_or_default().contains("index condition"));
+    }
+
+    #[test]
+    fn a_concurrent_index_runs_after_the_transaction_with_its_comment_and_is_undone_by_a_drop() {
+        let ix = IndexDef { concurrently: true, comment: "why".into(), ..ix_on("t_n", &["name"]) };
+        let p = plan("t", &table(), &[Change::DropIndex("t_name".into()), Change::AddIndex(ix)]).unwrap();
+        let (now, later) = split_steps(&p.steps);
+        assert_eq!(now.len(), 1);
+        assert!(now[0].starts_with("DROP INDEX"));
+        assert_eq!(later.len(), 2);
+        assert!(later[0].starts_with("CREATE INDEX CONCURRENTLY \"t_n\"") && later[1].starts_with("COMMENT ON INDEX"));
+        let sql = p.sql();
+        let (drop, note, create) = (sql.find("DROP INDEX").unwrap(), sql.find("cannot run inside a transaction").unwrap(), sql.find("CONCURRENTLY \"t_n\"").unwrap());
+        assert!(drop < note && note < create, "{sql}");
+        // the undo is a plain DROP, which runs in the transaction
+        let undo = p.undo.unwrap();
+        assert_eq!(undo.steps[0], "DROP INDEX \"public\".\"t_n\"");
+        assert!(undo.steps.iter().all(|s| split_steps(std::slice::from_ref(s)).1.is_empty()), "{:?}", undo.steps);
+        // without a concurrent index the preview is the plain script
+        assert!(!plan("t", &table(), &[Change::DropIndex("t_name".into())]).unwrap().sql().contains("CONCURRENTLY"));
+        // a name with a quote in it is read to its end
+        assert_eq!(concurrent_name("CREATE INDEX CONCURRENTLY \"a\"\" ON \" ON t (x)"), Some("\"a\"\" ON \""));
+    }
+
+    #[test]
+    fn any_index_can_be_dropped_and_undone_from_the_servers_own_text() {
+        let raw = "CREATE INDEX t_part ON public.t USING btree (name text_pattern_ops) WHERE (note IS NOT NULL)";
+        let mut st = table();
+        st.indexes.push(Index { complex: true, ..index("t_part", raw, &["name"]) });
+        let p = plan("t", &st, &[Change::DropIndex("t_part".into())]).unwrap();
+        assert_eq!(p.steps, ["DROP INDEX \"public\".\"t_part\"".to_string()]);
+        assert_eq!(p.undo.unwrap().steps, [raw.to_string()]);
+        // a constraint's index is not made by CREATE INDEX, so its drop is still not undoable
+        let mut st = table();
+        st.indexes.push(Index { complex: true, constraint: true, unique: true, ..index("t_ex", "CREATE UNIQUE INDEX t_ex ON public.t USING btree (name) INCLUDE (note) WITH (fillfactor=70)", &["name"]) });
+        assert!(plan("t", &st, &[Change::DropIndex("t_ex".into())]).unwrap().undo.is_err());
+    }
+
+    #[test]
+    fn a_partial_or_covering_index_is_read_into_the_form_and_written_back_the_same() {
+        let ix = Index { predicate: "(note IS NOT NULL)".into(), include: vec!["note".into()], ..index("t_p", "CREATE INDEX t_p ON public.t USING btree (name) INCLUDE (note) WHERE (note IS NOT NULL)", &["name"]) };
+        let d = IndexDef::from_index(&ix);
+        assert!(!d.functional);
+        assert_eq!((d.predicate.as_str(), d.include.as_slice()), ("(note IS NOT NULL)", &["note".to_string()][..]));
+        assert_eq!(steps(&[Change::AddIndex(d)]), ["CREATE INDEX \"t_p\" ON \"public\".\"t\" (\"name\") INCLUDE (\"note\") WHERE (note IS NOT NULL)".to_string()]);
+    }
+
     #[test]
     fn indexes_the_editor_cannot_write_back_are_flagged() {
         assert!(!IndexDef::from_index(&table().indexes[1]).functional);
@@ -1423,6 +1747,65 @@ mod tests {
         assert!(plan("t", &st, &[Change::DropFk("missing".into())]).is_err());
     }
 
+    fn chk(name: &str, expr: &str) -> CheckConstraint {
+        CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_check_is_added_and_dropped_as_a_constraint() {
+        let t = "\"public\".\"t\"";
+        assert_eq!(steps(&[Change::AddCheck(chk("t_name_check", "length(name) > 0"))]), [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_name_check\" CHECK (length(name) > 0)")]);
+        let both = CheckConstraint { not_valid: true, no_inherit: true, ..chk("Odd \"name\"", " price > 0 ") };
+        assert_eq!(steps(&[Change::AddCheck(both)]), [format!("ALTER TABLE {t} ADD CONSTRAINT \"Odd \"\"name\"\"\" CHECK (price > 0) NO INHERIT NOT VALID")]);
+        assert!(steps(&[Change::AddCheck(CheckConstraint { not_enforced: true, not_valid: true, ..chk("c", "a > 0") })])[0].ends_with("CHECK (a > 0) NOT ENFORCED"));
+        // a condition that is not one expression, one that acts outside the row, an empty one and a long name are refused
+        for bad in [chk("c", "a > 0); DROP TABLE t; --"), chk("c", "a > 0 -- x"), chk("c", "pg_advisory_lock(1) IS NOT NULL"), chk("c", ""), chk(&"n".repeat(64), "a > 0"), chk("", "a > 0")] {
+            assert!(plan("t", &table(), &[Change::AddCheck(bad.clone())]).is_err(), "{bad:?}");
+        }
+        let mut st = table();
+        st.checks = vec![chk("T_chk", "a > 0")];
+        assert_eq!(plan("t", &st, &[Change::DropCheck("T_chk".into())]).unwrap().steps, [format!("ALTER TABLE {t} DROP CONSTRAINT \"T_chk\"")]);
+        // PostgreSQL tells two names apart that differ only in case
+        assert!(plan("t", &st, &[Change::DropCheck("t_chk".into())]).is_err());
+        assert!(plan("t", &st, &[Change::AddCheck(chk("t_chk", "a > 1"))]).is_ok());
+        assert!(plan("t", &st, &[Change::AddCheck(chk("T_chk", "a > 1"))]).unwrap().undo.is_err());
+    }
+
+    #[test]
+    fn the_undo_of_a_check_change_is_the_check_as_it_was() {
+        let mut st = table();
+        let old = CheckConstraint { not_valid: true, ..chk("t_chk", "a > 0") };
+        st.checks = vec![old.clone()];
+        let undo = plan("t", &st, &[Change::DropCheck("t_chk".into())]).unwrap().undo.unwrap();
+        assert_eq!(undo.groups, [vec![Change::AddCheck(old.clone())]]);
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_chk\" CHECK (a > 0) NOT VALID"]);
+        let undo = plan("t", &table(), &[Change::AddCheck(old.clone())]).unwrap().undo.unwrap();
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_chk\""]);
+        // an edit is a drop and an add of the same name: undone by dropping the new one and adding the old one back
+        let new = chk("t_chk", "a > 5");
+        let p = plan("t", &st, &[Change::DropCheck("t_chk".into()), Change::AddCheck(new)]).unwrap();
+        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.undo.unwrap().steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_chk\"", "ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_chk\" CHECK (a > 0) NOT VALID"]);
+        // the plan checks the constraint again under the lock, and adding one takes the exclusive lock
+        let e = plan("t", &table(), &[Change::AddCheck(chk("c", "a > 0"))]).unwrap().expect.unwrap();
+        assert_eq!(e.checks, ["c"]);
+        assert!(!e.own_share);
+    }
+
+    #[test]
+    fn a_check_is_read_from_the_catalog_text() {
+        let con = |def: &str| Constraint { name: "c".into(), kind: 'c', def: def.into() };
+        let k = CheckConstraint::from_pg(&con("CHECK ((total >= (0)::numeric))")).unwrap();
+        assert_eq!((k.expr.as_str(), k.not_valid, k.no_inherit, k.not_enforced), ("(total >= (0)::numeric)", false, false, false));
+        let k = CheckConstraint::from_pg(&con("CHECK (status = ANY (ARRAY['a'::text, 'b)'::text])) NO INHERIT NOT VALID")).unwrap();
+        assert_eq!((k.expr.as_str(), k.not_valid, k.no_inherit), ("status = ANY (ARRAY['a'::text, 'b)'::text])", true, true));
+        // a quote that is escaped in an E string does not end the string
+        let k = CheckConstraint::from_pg(&con("CHECK (note <> E'it\\'s)')")).unwrap();
+        assert_eq!(k.expr, "note <> E'it\\'s)'");
+        assert!(CheckConstraint::from_pg(&con("CHECK ((a > 0)) NOT ENFORCED")).unwrap().not_enforced);
+        assert!(CheckConstraint::from_pg(&Constraint { kind: 'u', ..con("UNIQUE (a)") }).is_none());
+    }
+
     #[test]
     fn the_undo_of_a_key_change_is_the_key_as_it_was() {
         let mut st = table();
@@ -1518,7 +1901,7 @@ mod tests {
         // a name that is not there is not matched by another case
         assert!(plan("t", &st, &[Change::DropFk("T_FK".into())]).is_err());
         // the snapshot the transaction compares reads the right key for each
-        let snap = snapshot(&st, &[], &[], &["t_fk".to_string(), "T_fk".to_string()]);
+        let snap = snapshot(&st, &[], &[], &["t_fk".to_string(), "T_fk".to_string()], &[]);
         assert!(snap[0].1.as_deref().unwrap().contains("|name|") && snap[1].1.as_deref().unwrap().contains("|note|"), "{snap:?}");
         // a key of one case can be added beside one of another
         let two = plan("t", &st, &[Change::AddFk(fk("T_FK", &["id"], "", "p", &["id"]))]).unwrap();

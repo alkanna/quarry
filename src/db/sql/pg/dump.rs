@@ -1631,7 +1631,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
         // A restore runs long, so no statement timeout; a lock timeout so one statement never waits for another session for ever.
         c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", crate::db::sql::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
     }
-    let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
+    let mut file = src.open_script().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = PgSplitter::new(false);
     let mut buf = vec![0u8; 256 << 10];
     let (mut n, mut eof, mut in_tx) = (0u64, false, false);

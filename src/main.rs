@@ -72,6 +72,9 @@ fn main() -> eframe::Result {
                 b.with_activation_policy(ActivationPolicy::Accessory).with_activate_ignoring_other_apps(false);
             })
         }),
+        // Demo and screenshot runs keep the fixed size above, so pictures stay the same and never overwrite the user's window.
+        persist_window: shot.is_none() && std::env::var("QUARRY_DEMO").is_err(),
+        persistence_path: dirs::config_dir().map(|d| d.join("quarry").join("window.ron")),
         ..Default::default()
     };
     let res = eframe::run_native("Quarry", opts, Box::new(move |cc| Ok(Box::new(app::App::new(cc, shot)))));

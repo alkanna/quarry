@@ -3,7 +3,7 @@
 //! database, so tests of one server run side by side.
 
 use crate::db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Pos};
-use crate::db::sql::structure::{Column, Structure};
+use crate::db::sql::structure::{CheckConstraint, Column, Structure};
 use crate::db::sql::testing::{every_pg, live_pgbouncer, LivePg, PgFixture};
 use crate::db::sql::{Db, Dialect};
 use crate::db::{Msg, Res, UndoAction};
@@ -218,11 +218,16 @@ fn indexes_and_constraints_are_made_renamed_and_dropped() {
         t.apply(&[Change::AddIndex(index("t_pk2", IndexKind::Primary, &["name", "id"]))]);
         let st = t.structure();
         assert!(st.indexes.iter().any(|i| i.primary && i.name == "t_pk2" && i.cols.len() == 2), "{var}");
-        // an index the editor cannot write back is refused instead of being dropped for good
-        t.sql("CREATE INDEX t_partial ON t (qty) WHERE qty > 1");
-        let err = t.plan(&[Change::DropIndex("t_partial".into())]).unwrap().undo.unwrap_err();
-        assert!(err.contains("cannot be read back"), "{var}: {err}");
-        assert!(t.plan(&[Change::AddIndex(IndexDef::from_index(&t.structure().indexes.iter().find(|i| i.name == "t_partial").unwrap().clone()))]).unwrap_err().contains("cannot write"), "{var}");
+        // an index the editor cannot write is dropped and undone from the server's own text, and comes back exactly
+        t.sql("CREATE INDEX t_partial ON t (note text_pattern_ops) WHERE qty > 1");
+        t.sql("COMMENT ON INDEX t_partial IS 'by pattern'");
+        let before = t.shape();
+        let a = t.apply(&[Change::DropIndex("t_partial".into())]);
+        assert!(t.structure().indexes.iter().all(|i| i.name != "t_partial"), "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        let back = t.structure().indexes.into_iter().find(|i| i.name == "t_partial").unwrap();
+        assert!(back.complex && back.comment == "by pattern" && back.predicate.contains("qty"), "{var}");
     });
 }
 
@@ -545,6 +550,66 @@ fn a_type_text_that_is_a_whole_column_clause_is_refused_by_the_server() {
 }
 
 #[test]
+fn an_index_with_a_condition_included_columns_a_method_and_concurrently_is_built_and_undone() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "ixopts", TABLE_DDL);
+        let before = t.shape();
+        let mut partial = index("t_opts", IndexKind::Index, &["name"]);
+        (partial.predicate, partial.include) = ("qty > 1".into(), vec!["note".into()]);
+        let a = t.apply(&[Change::AddIndex(partial)]);
+        let got = t.structure().indexes.into_iter().find(|i| i.name == "t_opts").unwrap();
+        assert!(!got.complex && got.predicate.contains("qty") && got.include == ["note"], "{var}: {got:?}");
+        // read back into the form it is the same index, so an edit of anything else keeps the condition
+        let def = IndexDef::from_index(&got);
+        assert!(!def.functional && def.predicate == got.predicate && def.include == got.include, "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        // a concurrent build runs after the transaction of the other changes, and the undo is a plain drop of both
+        let mut conc = index("t_conc", IndexKind::Index, &["note"]);
+        (conc.concurrently, conc.method, conc.comment) = (true, "hash".into(), "built apart".into());
+        let a = t.apply(&[add(ColDef::new("extra", "text")), Change::AddIndex(conc)]);
+        let st = t.structure();
+        let ix = st.indexes.iter().find(|i| i.name == "t_conc").unwrap();
+        assert!(t.col("extra").is_some() && ix.kind == "HASH" && ix.comment == "built apart", "{var}");
+        assert_eq!(t.one("SELECT indisvalid::text FROM pg_index WHERE indexrelid = 't_conc'::regclass"), "true", "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        // every index has a use count, and the statistics reset time of the database is read beside them
+        let st = t.structure();
+        assert!(st.usage.unavailable.is_empty() && st.indexes.iter().all(|i| i.scans.is_some()), "{var}: {:?}", st.usage);
+    });
+}
+
+#[test]
+fn a_concurrent_index_never_touches_an_index_of_another_table_and_a_late_failure_keeps_the_undo() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "ixlate", TABLE_DDL);
+        // the name belongs to the schema: another table's index of that name stops the plan before anything runs
+        t.sql("CREATE TABLE other (x integer); CREATE INDEX t_taken ON other (x)");
+        let mut clash = index("t_taken", IndexKind::Index, &["note"]);
+        clash.concurrently = true;
+        let before = t.shape();
+        let p = t.plan(&[add(ColDef::new("extra", "text")), Change::AddIndex(clash)]).unwrap();
+        let (res, undo) = t.run(p);
+        assert!(res.unwrap_err().contains("already has something called"), "{var}");
+        assert!(undo.is_none() && t.col("extra").is_none() && t.shape() == before, "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM pg_indexes WHERE indexname = 't_taken' AND tablename = 'other'"), "1", "{var}");
+        // a build that fails after the commit (duplicate values) is an error, the committed column stays and can be undone,
+        // and the INVALID index it left is gone
+        t.sql("UPDATE t SET note = 'same'");
+        let mut dup = index("t_note_dup", IndexKind::Unique, &["note"]);
+        dup.concurrently = true;
+        let p = t.plan(&[add(ColDef::new("extra", "text")), Change::AddIndex(dup)]).unwrap();
+        let (res, undo) = t.run(p);
+        assert!(res.unwrap_err().contains("were already applied"), "{var}");
+        assert!(t.col("extra").is_some(), "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM pg_class WHERE relname = 't_note_dup'"), "0", "{var}");
+        t.undo(undo.expect("the committed part keeps its undo")).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(t.col("extra").is_none(), "{var}");
+    });
+}
+
+#[test]
 fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
     every_pg(|l, var| {
         let t = fixture(l, var, "plain", TABLE_DDL);
@@ -556,8 +621,6 @@ fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
         t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(t.shape(), before, "{var}");
         let mut complex = vec![
-            "CREATE INDEX c1 ON t (name) WHERE qty > 1",
-            "CREATE INDEX c2 ON t (name) INCLUDE (qty)",
             "CREATE INDEX c3 ON t (note text_pattern_ops)",
             "CREATE INDEX c4 ON t (name NULLS FIRST)",
             "CREATE INDEX c5 ON t (name DESC NULLS LAST)",
@@ -571,7 +634,7 @@ fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
         for ddl in &complex {
             t.sql(ddl);
         }
-        for ddl in ["CREATE INDEX p1 ON t (name DESC)", "CREATE INDEX p2 ON t (name DESC NULLS FIRST)", "CREATE INDEX p3 ON t (qty NULLS LAST)", "CREATE INDEX p4 ON t USING hash (name)"] {
+        for ddl in ["CREATE INDEX p1 ON t (name DESC)", "CREATE INDEX p2 ON t (name DESC NULLS FIRST)", "CREATE INDEX p3 ON t (qty NULLS LAST)", "CREATE INDEX p4 ON t USING hash (name)", "CREATE INDEX p5 ON t (name) WHERE qty > 1", "CREATE INDEX p6 ON t (name) INCLUDE (qty)"] {
             t.sql(ddl);
         }
         for i in t.structure().indexes {
@@ -609,6 +672,56 @@ fn an_undo_does_not_reach_a_table_dropped_and_made_again_with_the_same_structure
         let why = res.unwrap_err();
         assert!(why.contains("dropped and made again") && kept.is_none(), "{var}: {why}");
         assert!(t.col("price").is_some(), "{var}: the column of the new table is still there");
+    });
+}
+
+#[test]
+fn check_constraints_are_added_dropped_edited_and_undone() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "chk", TABLE_DDL);
+        let chk = |name: &str, expr: &str| CheckConstraint { name: name.into(), expr: expr.into(), ..Default::default() };
+        let find = |n: &str| t.structure().checks.into_iter().find(|k| k.name == n);
+        // an add is read back from the catalog and undone by a drop
+        let undo = t.apply(&[Change::AddCheck(chk("t_qty_ck", "qty >= 0"))]);
+        let k = find("t_qty_ck").unwrap_or_else(|| panic!("{var}: not read back"));
+        assert!(k.expr.contains("qty >= 0") && !k.not_valid && !k.no_inherit, "{var}: {k:?}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(find("t_qty_ck").is_none(), "{var}");
+        // a string with a quote and a bracket survives the read and an edit, and the flags are kept through drop and undo
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_name_ck CHECK (name <> 'it''s)' AND name IN ('a', 'b', 'c')) NO INHERIT NOT VALID");
+        let old = find("t_name_ck").unwrap();
+        assert!(old.not_valid && old.no_inherit && old.expr.contains("it''s)"), "{var}: {old:?}");
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into())]);
+        assert!(find("t_name_ck").is_none(), "{var}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // The server parses the saved text again, so it may print the condition with other casts than the first time. The
+        // constraint is back with its flags and its strings, and a second round trip leaves the text exactly as it is.
+        let old = find("t_name_ck").unwrap_or_else(|| panic!("{var}: not back"));
+        assert!(old.not_valid && old.no_inherit && old.expr.contains("it''s)") && old.expr.contains("'a'") && old.expr.contains("'c'"), "{var}: {old:?}");
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into())]);
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(find("t_name_ck"), Some(old.clone()), "{var}");
+        // an edit is a drop and an add, and its undo puts the old condition back
+        let undo = t.apply(&[Change::DropCheck("t_name_ck".into()), Change::AddCheck(chk("t_name_ck", "length(name) < 40"))]);
+        assert!(find("t_name_ck").is_some_and(|k| k.expr.contains("length") && !k.not_valid), "{var}");
+        let (res, _) = t.undo(undo);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(find("t_name_ck"), Some(old), "{var}");
+        // NOT VALID skips the rows already there; without it a row that breaks the check refuses the add and nothing changes
+        t.apply(&[Change::AddCheck(CheckConstraint { not_valid: true, ..chk("t_big_ck", "qty > 100") })]);
+        assert!(find("t_big_ck").is_some_and(|k| k.not_valid), "{var}");
+        let p = t.plan(&[Change::AddCheck(chk("t_never_ck", "qty > 100"))]).unwrap();
+        let (res, _) = t.run(p);
+        assert!(res.is_err() && find("t_never_ck").is_none(), "{var}");
+        // a duplicate is refused by the plan's undo, and a CHECK that reaches a stable function is refused when it runs
+        assert!(t.plan(&[Change::AddCheck(chk("t_big_ck", "qty > 1"))]).unwrap().undo.is_err(), "{var}");
+        t.sql("CREATE FUNCTION t_stable(integer) RETURNS integer LANGUAGE sql STABLE AS 'SELECT $1'");
+        let p = t.plan(&[Change::AddCheck(chk("t_fn_ck", "t_stable(qty) >= 0"))]).unwrap();
+        let (res, _) = t.run(p);
+        assert!(res.unwrap_err().contains("IMMUTABLE") && find("t_fn_ck").is_none(), "{var}");
     });
 }
 

@@ -255,8 +255,18 @@ impl App {
         r.on_hover_text("Press / or Cmd+Shift+F");
         ui.add_space(14.0);
         let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+        let mongo_conn = self.active.and_then(|id| self.conn(id)).filter(|c| !c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| c.meta.id);
         let mut new_db = None;
         ui.horizontal(|ui| {
+            if let Some(id) = mongo_conn {
+                ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if plus_button(ui, true).on_hover_text("New database… (asks to unlock writes first)").clicked() {
+                        new_db = Some(id);
+                    }
+                });
+                return;
+            }
             ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
             if let Some((id, writable, pg)) = sql_conn {
                 // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
@@ -305,6 +315,8 @@ impl App {
         let mut refresh = None;
         let mut sql_users = None;
         let mut manage = false;
+        // The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
+        let mongo_active = self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql());
         // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
@@ -340,7 +352,7 @@ impl App {
                 new = true;
                 ui.close();
             }
-            if ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
+            if !mongo_active && ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
                 cloud = true;
                 ui.close();
             }
@@ -510,6 +522,7 @@ impl App {
         let mut toggle = None;
         let mut open = None;
         let mut side: Vec<SideAct> = Vec::new();
+        let mut routine_acts: Vec<RAct> = Vec::new();
         let mut connect = false;
         let mut revealed = false;
         let mut lazy: Vec<String> = Vec::new();
@@ -563,7 +576,7 @@ impl App {
                     matches.extend(extra);
                     matches.sort();
                 }
-                if !filter.is_empty() && matches.is_empty() {
+                if !filter.is_empty() && matches.is_empty() && self.routines_matching(id, &ns, &filter) == 0 {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
@@ -617,6 +630,12 @@ impl App {
                                 side.push(SideAct::SqlRunFile(db_name.clone()));
                             }
                         }
+                        {
+                            // Functions and procedures of this database, or of the schema the switcher shows on PostgreSQL.
+                            ui.separator();
+                            let (ns_name, sys) = (if pg { picked } else { db_name.as_str() }, sql::ns::system_ns(pg, picked, db_name));
+                            Self::routines_new_items(ui, db_name, ns_name, pg, writable, sys, &mut routine_acts);
+                        }
                         if pg {
                             // PostgreSQL's items stay enabled on a locked connection and ask to unlock, like the structure editor does.
                             let own = c.sql.as_ref().and_then(|s| s.opts.database()) == Some(db_name.as_str());
@@ -627,6 +646,12 @@ impl App {
                             }
                             if ui.add_enabled(!sys_schema, egui::Button::new("New table…")).on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::NewTable(db_name.clone()));
+                            }
+                            if ui.add_enabled(!sys_schema, egui::Button::new("New view…")).on_disabled_hover_text("Belongs to the server").clicked() {
+                                side.push(SideAct::NewView(db_name.clone()));
+                            }
+                            if ui.add_enabled(!sys_schema && !picked.is_empty(), egui::Button::new(format!("Rename schema {picked}…"))).on_disabled_hover_text("Belongs to the server").clicked() {
+                                side.push(SideAct::SqlRename(db_name.clone(), picked.to_string(), DropKind::Schema));
                             }
                             if ui.add_enabled_ui(!sys_schema && !picked.is_empty(), |ui| danger_item(ui, format!("Drop schema {picked}…"))).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                 side.push(SideAct::DropSchema(db_name.clone(), picked.to_string()));
@@ -640,6 +665,9 @@ impl App {
                             ui.separator();
                             if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
                                 side.push(SideAct::NewTable(db_name.clone()));
+                            }
+                            if ui.add_enabled(writable && !system, egui::Button::new("New view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a view" }).clicked() {
+                                side.push(SideAct::NewView(db_name.clone()));
                             }
                             if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
                                 side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
@@ -793,16 +821,35 @@ impl App {
                             if sql {
                                 if !is_view {
                                     ui.separator();
-                                    if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
+                                    if ui.button("Import file…").on_hover_text("Adds the rows of a CSV, JSON or JSON Lines file to this table").clicked() {
                                         side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
+                                    }
+                                    if ui.button("Import from clipboard…").on_hover_text("Adds the rows of CSV or JSON text on the clipboard to this table").clicked() {
+                                        side.push(SideAct::SqlImportPaste(db_name.clone(), coll.clone()));
                                     }
                                 }
                                 if ui.button("Export as SQL dump…").clicked() {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
+                                if is_view {
+                                    // PostgreSQL's items stay enabled on a locked connection and ask to unlock; MySQL's wait for the unlock like its other writes.
+                                    let system = sql::ns::system_ns(pg, picked, db_name);
+                                    if ui.add_enabled(!system && (pg || writable), egui::Button::new("Edit view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to edit a view" }).clicked() {
+                                        side.push(SideAct::EditView(db_name.clone(), coll.clone()));
+                                    }
+                                }
                                 if pg {
                                     let system = db::sql::pg::create::system_schema(picked);
                                     ui.separator();
+                                    if ui.add_enabled(!system, egui::Button::new("Rename…")).on_disabled_hover_text("Belongs to the server").clicked() {
+                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                    }
+                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Duplicate…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                    }
+                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Empty table…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Deletes every row and keeps the table").clicked() {
+                                        side.push(SideAct::PgTruncate(db_name.clone(), coll.clone()));
+                                    }
                                     if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
                                     }
@@ -811,6 +858,12 @@ impl App {
                                     let on = writable && !system;
                                     let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
                                     ui.separator();
+                                    if ui.add_enabled(on, egui::Button::new("Rename…")).on_disabled_hover_text(note).clicked() {
+                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                    }
+                                    if !is_view && ui.add_enabled(on, egui::Button::new("Duplicate…")).on_disabled_hover_text(note).on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                    }
                                     if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
                                     }
@@ -846,6 +899,10 @@ impl App {
                                 side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
                             }
                         });
+                    }
+                    if sql && (!pg || !picked.is_empty()) {
+                        let sys = sql::ns::system_ns(pg, picked, db_name);
+                        self.routines_group(ui, id, db_name, if pg { picked } else { db_name }, &filter, pg, writable, sys, &mut routine_acts);
                     }
                     ui.add_space(4.0);
                 });
@@ -889,6 +946,9 @@ impl App {
         for a in side {
             self.side_act(id, a);
         }
+        for a in routine_acts {
+            self.routine_act(id, a);
+        }
     }
 
     /// The switcher row of an open PostgreSQL database, with the pick made this frame. Nothing until its schemas arrived.
@@ -904,7 +964,9 @@ impl App {
     /// when the connection is not open.
     pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
         let Some(c) = self.conn(conn) else { return false };
-        match (c.sql.clone(), c.client.clone()) {
+        let (sql, client) = (c.sql.clone(), c.client.clone());
+        self.routines_forget(conn, db);
+        match (sql, client) {
             (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
             (Some(sql), _) => {
                 self.sql_refresh_schema(conn, db, "");
@@ -919,18 +981,28 @@ impl App {
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
+            SideAct::NewDb if self.conn(conn).is_some_and(|c| !c.meta.engine.is_sql()) => return self.mongo_new_db(conn),
             SideAct::NewDb => return self.sql_new_db(conn),
             SideAct::SqlUsers => return self.open_sql_users(conn),
             SideAct::NewTable(db) if self.is_pg(conn) => return self.pg_new_table(conn, db),
             SideAct::NewTable(db) => return self.sql_new_table(conn, db),
+            SideAct::SqlRename(db, name, kind) => return self.sql_rename_ask(conn, db, name, kind),
+            SideAct::SqlDuplicate(db, name) => return self.sql_duplicate_ask(conn, db, name),
+            SideAct::PgTruncate(db, table) => return self.pg_truncate_ask(conn, db, table),
             SideAct::SqlDrop(db, table, kind) if self.is_pg(conn) => return self.pg_drop_ask(conn, db, table, kind),
             SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
+            SideAct::NewView(db) => return self.sql_new_view(conn, db, String::new()),
+            SideAct::EditView(db, name) => return self.sql_edit_view(conn, db, name),
             SideAct::NewSchema(db) => return self.pg_new_schema(conn, db),
             SideAct::DropSchema(db, schema) => return self.pg_drop_ask(conn, db, schema, DropKind::Schema),
             SideAct::SqlImport(db, table) => {
                 // The schema the sidebar shows is the one the menu was opened on.
                 let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });
                 return self.open_sql_import(conn, db, schema, table);
+            }
+            SideAct::SqlImportPaste(db, table) => {
+                let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });
+                return self.open_sql_import_paste(conn, db, schema, table);
             }
             SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
             SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
@@ -954,6 +1026,7 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         match a {
+            SideAct::NewColl(db, false) => self.mongo_new_coll(conn, db),
             SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
             SideAct::Refresh(db) => {
                 self.refresh_db(conn, &db);
@@ -989,7 +1062,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlImportPaste(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }
@@ -999,7 +1072,7 @@ impl App {
 
 /// Whether `name` holds `needle`, which is already lower case, ignoring case. Names are mostly ASCII, so this compares bytes
 /// instead of lower-casing every name on every frame the filter is on.
-fn contains_ci(name: &str, needle: &str) -> bool {
+pub(in crate::app) fn contains_ci(name: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
@@ -1073,6 +1146,7 @@ fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     ui.painter().line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
     ui.painter().line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
     focus_ring(ui, &r, rect, R_SM as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "New database"));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed })
 }
 

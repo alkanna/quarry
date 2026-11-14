@@ -76,12 +76,14 @@ fn sql_double(f: f64) -> String {
 }
 
 /// `bs` is false when the server has NO_BACKSLASH_ESCAPES, where doubling a backslash would change the text.
-pub fn sql_literal(b: Option<&Bson>, numeric: bool, bs: bool) -> String {
+/// `d` picks the binary form: MySQL reads 0x.., PostgreSQL only takes bytea as a '\x..' string.
+pub fn sql_literal(d: sql::Dialect, b: Option<&Bson>, numeric: bool, bs: bool) -> String {
     match b {
         None | Some(Bson::Null) | Some(Bson::Undefined) => "NULL".into(),
         Some(Bson::Int32(_) | Bson::Int64(_)) => text(b).unwrap_or_default(),
         Some(Bson::Double(f)) if f.is_finite() => sql_double(*f),
         Some(Bson::Boolean(v)) => if *v { "TRUE" } else { "FALSE" }.into(),
+        Some(Bson::Binary(x)) if d == sql::Dialect::Postgres => sql::value::pg_lit(&format!("\\x{}", sql::value::hex_digits(&x.bytes, true))),
         // A bare 0x is not valid SQL, and '' would turn a binary value into text.
         Some(Bson::Binary(x)) if x.bytes.is_empty() => "X''".into(),
         Some(Bson::Binary(x)) => format!("0x{}", sql::value::hex_digits(&x.bytes, true)),
@@ -104,8 +106,14 @@ fn json_literal(b: Option<&Bson>, numeric: bool) -> String {
     }
 }
 
+/// One CSV field, quoted when it holds a separator, quote or line break. `quote_empty` also quotes empty text, for writers
+/// whose reader would take a record of one empty field for a blank line.
+pub fn csv_field(s: &str, quote_empty: bool) -> String {
+    if s.contains([',', '"', '\n', '\r']) || (quote_empty && s.is_empty()) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
 fn csv_cell(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+    csv_field(s, false)
 }
 
 fn md_cell(s: &str) -> String {
@@ -139,7 +147,7 @@ pub fn format(dialect: sql::Dialect, f: Fmt, s: &Sheet, header: bool) -> String 
             let mut out = format!("INSERT INTO {}", dialect.quote_ident(s.table));
             out.push_str(&format!(" ({})", s.cols.iter().map(|c| dialect.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
-            let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
+            let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(dialect, value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
         }
         Fmt::SqlUpdate => {
@@ -150,8 +158,8 @@ pub fn format(dialect: sql::Dialect, f: Fmt, s: &Sheet, header: bool) -> String 
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
-                let wh = s.pk.iter().map(|p| format!("{} = {}", dialect.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
+                let set = sets.iter().map(|c| format!("{} = {}", dialect.quote_ident(&c.src), sql_literal(dialect, value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let wh = s.pk.iter().map(|p| format!("{} = {}", dialect.quote_ident(p), sql_literal(dialect, key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
                 out.push(format!("UPDATE {} SET {set} WHERE {wh};", dialect.quote_ident(s.table)));
             }
             out.join("\n")
@@ -274,7 +282,7 @@ impl Writer {
         for d in rows {
             match self.f {
                 Fmt::SqlInsert => {
-                    let r = format!("({})", self.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, self.bs)).collect::<Vec<_>>().join(", "));
+                    let r = format!("({})", self.cols.iter().map(|c| sql_literal(self.dialect, value(d, c), c.numeric, self.bs)).collect::<Vec<_>>().join(", "));
                     out.push_str(&if self.any { format!(",\n{r}") } else { r });
                     self.any = true;
                 }
@@ -284,8 +292,8 @@ impl Writer {
                     if sets.is_empty() || self.pk.is_empty() || !self.pk.iter().all(|p| key.contains_key(p)) {
                         continue;
                     }
-                    let set = sets.iter().map(|c| format!("{} = {}", self.dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
-                    let wh = self.pk.iter().map(|p| format!("{} = {}", self.dialect.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
+                    let set = sets.iter().map(|c| format!("{} = {}", self.dialect.quote_ident(&c.src), sql_literal(self.dialect, value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
+                    let wh = self.pk.iter().map(|p| format!("{} = {}", self.dialect.quote_ident(p), sql_literal(self.dialect, key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
                     let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", self.dialect.quote_ident(&self.table)));
                     out.push_str(&l);
                 }
@@ -379,15 +387,24 @@ mod tests {
     #[test]
     fn literals_follow_the_server_escape_mode() {
         let s = Bson::String("a\\b'c".into());
-        assert_eq!(sql_literal(Some(&s), false, true), "'a\\\\b''c'");
-        assert_eq!(sql_literal(Some(&s), false, false), "'a\\b''c'");
+        assert_eq!(sql_literal(sql::Dialect::MySql, Some(&s), false, true), "'a\\\\b''c'");
+        assert_eq!(sql_literal(sql::Dialect::MySql, Some(&s), false, false), "'a\\b''c'");
         let empty = Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![] });
-        assert_eq!(sql_literal(Some(&empty), false, true), "X''");
+        assert_eq!(sql_literal(sql::Dialect::MySql, Some(&empty), false, true), "X''");
+    }
+
+    #[test]
+    fn postgres_binary_is_a_bytea_string() {
+        let bin = |b: &[u8]| Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: b.to_vec() });
+        assert_eq!(sql_literal(sql::Dialect::Postgres, Some(&bin(&[1, 255])), false, false), "E'\\\\x01FF'");
+        assert_eq!(sql_literal(sql::Dialect::Postgres, Some(&bin(&[])), false, false), "E'\\\\x'");
+        assert_eq!(sql_literal(sql::Dialect::MySql, Some(&bin(&[1, 255])), false, true), "0x01FF");
+        assert_eq!(sql_literal(sql::Dialect::MariaDb, Some(&bin(&[])), false, true), "X''");
     }
 
     #[test]
     fn doubles_are_written_so_they_read_back_exactly() {
-        let lit = |f: f64| sql_literal(Some(&Bson::Double(f)), true, true);
+        let lit = |f: f64| sql_literal(sql::Dialect::MySql, Some(&Bson::Double(f)), true, true);
         // Plain digits past DECIMAL's 65 digits or 30 decimals read back as 1e65 and 0.
         assert_eq!(lit(1e300), "1e300");
         assert_eq!(lit(1e-100), "1e-100");

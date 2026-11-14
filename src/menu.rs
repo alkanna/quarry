@@ -134,13 +134,15 @@ impl MenuBar {
 
         let view = Submenu::new("View", true);
         add(&view, &[
-            Some(("Documents", key(CMD_ALT, Key::Num1))),
-            Some(("Aggregate", key(CMD_ALT, Key::Num2))),
-            Some(("Indexes", key(CMD_ALT, Key::Num3))),
-            Some(("Schema", key(CMD_ALT, Key::Num4))),
-            Some(("Import", key(CMD_ALT, Key::Num5))),
-            Some(("Compare", key(CMD_ALT, Key::Num6))),
+            // Menu labels are fixed when the bar is built, so each item names the view of both engines in that position.
+            Some(("Documents or Content", key(CMD_ALT, Key::Num1))),
+            Some(("Aggregate or Structure", key(CMD_ALT, Key::Num2))),
+            Some(("Indexes or Relations", key(CMD_ALT, Key::Num3))),
+            Some(("Schema or Triggers", key(CMD_ALT, Key::Num4))),
+            Some(("Import or Info", key(CMD_ALT, Key::Num5))),
+            Some(("Compare or Query", key(CMD_ALT, Key::Num6))),
             Some(("Shell", key(CMD_ALT, Key::Num7))),
+            Some(("Watch", key(CMD_ALT, Key::Num8))),
             None,
             Some(("Query Log", key(CMD, Key::L))),
             None,

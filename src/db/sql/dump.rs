@@ -423,7 +423,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     }
     let timeout = db.dialect.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
-    let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
+    let mut file = src.open_script().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = ScriptSplitter::new(mode_of(&mut c).await);
     if let Some(max) = max_packet(&mut c).await {
         sp.set_max(max);

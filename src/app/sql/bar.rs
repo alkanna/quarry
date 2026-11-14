@@ -63,6 +63,8 @@ pub(in crate::app) struct Bar {
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
     pub(in crate::app) ac: Ac,
     pub(in crate::app) wants: Wants,
+    /// Set by the Explain button; `sql_content` runs the same entry point as Cmd+E.
+    pub(in crate::app) explain: bool,
     /// Initial open states; only the offline demo sets them.
     pub(in crate::app) preset: Preset,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
@@ -900,8 +902,17 @@ fn write_rules(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dial
     }
 }
 
+/// What the bar shows beside Run: the table's filter history and its saved filters, and what was picked in them.
+pub(in crate::app) struct Side<'a> {
+    pub(in crate::app) hist: &'a QueryHist,
+    pub(in crate::app) pick: &'a crate::app::library::picker::PickData,
+    pub(in crate::app) qacts: Vec<QAct>,
+    pub(in crate::app) pick_acts: Vec<crate::app::library::picker::PickAct>,
+}
+
 /// Draws the bar and the clause chips. Returns true when the query should run.
-pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let memo = match s.bar.memo.take() {
@@ -932,7 +943,8 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         ui.set_width(size - 18.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-            let run_w = 112.0;
+            // Run, the history and library icons, and the chip of a bound script when there is one.
+            let run_w = if side.pick.bound.is_some() { 440.0 } else { 172.0 };
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
@@ -1014,9 +1026,13 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 }
             });
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
                     run = true;
                 }
+                vsep(ui, 6.0);
+                picker_button(ui, side.pick, true, &mut side.pick_acts);
+                history_menu(ui, side.hist, &[], Some(d), &mut side.qacts);
             });
         });
     });
@@ -1036,7 +1052,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     // The statement is built only where it is shown (SQL mode) or copied.
     let select = |t: &Tab| page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
     let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
-    let mut copy = false;
+    let (mut copy, mut save_view) = (false, false);
     let Some(s) = t.sql.as_mut() else { return false };
     let b = &mut s.bar;
     let mut run = false;
@@ -1044,7 +1060,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     let mono = FontId::monospace(TXT_SMALL);
     let grouped = !b.c.group.trim().is_empty();
     ui.horizontal_top(|ui| {
-        let w = ui.available_width() - 190.0;
+        let w = ui.available_width() - 320.0;
         // The option chips are framed and so 2 px taller than the others; a row sized for them centers every chip.
         ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
@@ -1176,8 +1192,8 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             copy = quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked();
-            // Step 8 adds Explain.
-            quiet_enabled(ui, false, "Explain").on_disabled_hover_text("Coming with the Query view");
+            save_view = quiet(ui, "Save as view…").on_hover_text("Create a view from the SELECT of the rows shown").clicked();
+            b.explain = quiet(ui, "Explain").on_hover_text("Explain the SELECT in a new Query tab (Cmd+E)").clicked();
         });
     });
     // The full SELECT, folded under the bar in SQL mode.
@@ -1213,6 +1229,9 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     }
     if copy {
         ui.ctx().copy_text(format!("{};", stmt.unwrap_or_else(|| select(t))));
+    }
+    if save_view && let Some(s) = t.sql.as_mut() {
+        s.save_view = true;
     }
     run
 }

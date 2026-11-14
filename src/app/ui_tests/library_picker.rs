@@ -15,14 +15,6 @@ fn sql_with_scripts(a: &mut App) {
     a.demo_scripts();
 }
 
-fn said(a: &App, part: &str) -> bool {
-    a.status.contains(part) || a.last_problem().contains(part)
-}
-
-fn query(a: &App) -> String {
-    a.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
-}
-
 fn names(ui: &UiApp, kind: PickKind, of: impl Fn(&crate::app::library::picker::PickData) -> Vec<usize>) -> Vec<String> {
     let d = ui.app().pick_data(&ui.h.ctx, kind);
     of(&d).into_iter().map(|i| d.rows[i].name.clone()).collect()
@@ -89,7 +81,7 @@ fn return_in_the_picker_opens_and_open_in_sidebar_shows_the_panel() {
     ui.click("Library 5");
     ui.show("Script Late shipments");
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
-    assert!(query(ui.app()).starts_with("-- Paid orders that never shipped"));
+    assert!(ui.query_text().starts_with("-- Paid orders that never shipped"));
     ui.click_contains("Library 5");
     ui.click("Open in sidebar");
     assert!(ui.app().prefs.side_mode() == SideMode::Library && !ui.app().prefs.sidebar_hidden);
@@ -157,12 +149,12 @@ fn the_palette_opens_and_runs_scripts_and_has_the_library_commands() {
     ui.h.state_mut().open_palette_with("Orphaned".into());
     ui.settle();
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
-    assert!(query(ui.app()).starts_with("SELECT p.*"), "{}", query(ui.app()));
-    assert!(!said(ui.app(), "Offline demo"));
+    assert!(ui.query_text().starts_with("SELECT p.*"), "{}", ui.query_text());
+    assert!(!ui.said("Offline demo"));
     ui.h.state_mut().open_palette_with("Orphaned".into());
     ui.settle();
     ui.key(CMD, egui::Key::Enter);
-    assert!(said(ui.app(), "Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
+    assert!(ui.said("Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
     // The commands: a new group opens its dialog.
     ui.h.state_mut().open_palette_with(">New group".into());
     ui.settle();

@@ -685,7 +685,7 @@ impl App {
             let ch: Vec<_> = db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").collect();
             cells += ch.len();
             if summary.is_empty() {
-                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)), bs);
+                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(d, v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)), bs);
                 let set: Vec<String> = ch.iter().take(2).map(|(p, _, b)| format!("{} = {}", d.quote_ident(p), lit(p, b.as_ref()))).collect();
                 let wh: Vec<String> = dr.current.get_document("_id").map(|k| k.iter().map(|(n, v)| format!("{} = {}", d.quote_ident(n), lit(n, Some(v)))).collect()).unwrap_or_default();
                 summary = format!("UPDATE {} SET {}{} WHERE {}", d.quote_ident(&sel.coll), set.join(", "), if ch.len() > 2 { ", …" } else { "" }, wh.join(" AND "));
@@ -743,6 +743,29 @@ impl App {
         let n = self.t().map_or(0, |t| t.checked.len());
         let why = self.sql_edit_block();
         let none = if n == 0 { "Check rows first" } else { "" };
+        // Every row the page's WHERE matches, beyond the page on screen. Drawn first, so it sits rightmost.
+        let mut bulk = None;
+        dots_menu(ui, |ui| {
+            menu_look(ui);
+            if ui.add_enabled(why.is_none(), egui::Button::new("Update matching…")).on_hover_text("Set columns on every row the WHERE matches").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
+                bulk = Some(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(why.is_none(), egui::Button::new(RichText::new("Delete all matching rows…").color(ALERT()))).on_disabled_hover_text(why.unwrap_or_default()).clicked() {
+                bulk = Some(false);
+                ui.close();
+            }
+        })
+        .on_hover_text("More actions");
+        if let Some(update) = bulk {
+            self.open_bulk(update);
+        }
+        // Checked rows start the dialog on them; otherwise it starts on every row the WHERE matches.
+        if quiet(ui, "Export…").on_hover_text("Write the checked rows, this page or every matching row to a file").clicked() {
+            let rows = self.checked_sql_rows();
+            self.open_export(rows, n == 0);
+        }
         if quiet_enabled(ui, n > 0 && why.is_none(), "Delete").on_hover_text(why.unwrap_or(if n == 0 { none } else { "Delete the checked rows" })).on_disabled_hover_text(why.unwrap_or(none)).clicked() {
             let rows = self.checked_sql_rows();
             self.docs_act(&ui.ctx().clone(), DocsAct::Delete, rows);
@@ -767,6 +790,19 @@ impl App {
     fn checked_sql_rows(&self) -> Vec<Document> {
         let Some(t) = self.t() else { return Vec::new() };
         App::checked_docs(&t.checked, Rows::Raw(&t.docs))
+    }
+
+    /// File > Insert Document on a SQL tab: the row form lives on the Content grid, so the tab goes there first.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(in crate::app) fn sql_insert_row_menu(&mut self) {
+        if self.t().is_none_or(|t| t.sel.coll.is_empty()) {
+            return self.warn("Open a table first to insert a row.");
+        }
+        self.set_view(View::Documents);
+        if let Some(why) = self.sql_edit_block() {
+            return self.warn(why);
+        }
+        self.sql_new_row(None);
     }
 
     /// Opens the insert form, filled from `from` for a duplicate.
@@ -876,7 +912,7 @@ impl App {
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
-        let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
+        let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
         // `pk IN (...)` for one key column, a row-value list for several.
         let key_list = || -> String {
             if pk.len() == 1 {
@@ -998,10 +1034,10 @@ impl App {
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);
         let lit = match &parsed {
-            Ok(v) => copy::sql_literal(Some(v), is_numeric(col.kind), bs),
+            Ok(v) => copy::sql_literal(d, Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
         egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));
@@ -1117,7 +1153,7 @@ impl App {
                 CellAct::FilterValue => {
                     let numeric = self.sql_col(&col).is_some_and(|c| is_numeric(c.kind));
                     let q = self.sql_dialect().quote_ident(&col);
-                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
+                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(self.sql_dialect(), Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
                     t.filter_txt = text;
                     t.page = 0;

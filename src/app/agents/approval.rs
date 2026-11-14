@@ -15,6 +15,13 @@ const SHELL_WARNING: &str = if cfg!(target_os = "macos") {
     "Scripts run in Quarry's shell with this connection's password and can read files on this computer. Read the whole script before you allow it."
 };
 
+/// A SQL script never gets the password: its queries come back through Quarry. It still runs as code on this machine.
+const SQL_SHELL_WARNING: &str = if cfg!(target_os = "macos") {
+    "Scripts run in Quarry's shell and can read files on this Mac. Their SQL goes through Quarry, never with the password. Read the whole script before you allow it."
+} else {
+    "Scripts run in Quarry's shell and can read files on this computer. Their SQL goes through Quarry, never with the password. Read the whole script before you allow it."
+};
+
 const READS: [&str; 10] = ["list_connections", "list_databases", "list_collections", "describe", "find", "aggregate", "count", "explain", "select_rows", "query_sql"];
 const STRUCTURE: [&str; 6] = ["create_collection", "drop_collection", "create_index", "drop_index", "create_table", "drop_table"];
 
@@ -61,6 +68,7 @@ impl App {
         let mut answer = esc.then_some(if ask.gone { Answer::Close } else { Answer::Deny });
         let w = 520.0f32.min(ctx.content_rect().width() - 40.0);
         let shell = ask.tool == "run_shell";
+        let sql = conn.is_some_and(|c| c.meta.engine.is_sql());
         let p = self.agents.cfg.conn(ask.conn);
         let large_change = p.map_or(0, |p| p.large_change);
         let undo_docs = self.agents.cfg.limits.undo_docs;
@@ -96,7 +104,7 @@ impl App {
                         ui.horizontal_top(|ui| {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), Sense::hover());
                             ui.painter().circle_filled(r.center(), STATUS_DOT_R, ALERT());
-                            ui.add(egui::Label::new(RichText::new(SHELL_WARNING).color(TEXT())).wrap());
+                            ui.add(egui::Label::new(RichText::new(if sql { SQL_SHELL_WARNING } else { SHELL_WARNING }).color(TEXT())).wrap());
                         });
                     });
                     ui.add_space(8.0);
@@ -133,7 +141,7 @@ impl App {
                 if why.connect {
                     fact(ui, WARNING(), &format!("{name} is not open."), Some("Allowing connects to it first."));
                 }
-                if shell {
+                if shell && !sql {
                     fact(ui, FAINT(), "Its output is checked by the detectors, not by field rules.", None);
                 }
                 if let Some(reason) = ask.reason.as_deref().filter(|r| !r.trim().is_empty()) {

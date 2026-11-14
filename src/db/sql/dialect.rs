@@ -12,7 +12,48 @@ pub enum Dialect {
     Postgres,
 }
 
+/// Table maintenance statements of the Info page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Maint {
+    Analyze,
+    Optimize,
+    Check,
+    Vacuum,
+    Reindex,
+}
+
+impl Maint {
+    /// Whether the statement rebuilds the table or holds a lock on it for a while, so it asks first.
+    pub fn heavy(self) -> bool {
+        matches!(self, Maint::Optimize | Maint::Vacuum | Maint::Reindex)
+    }
+
+    /// What the confirmation tells about the cost.
+    pub fn warning(self) -> &'static str {
+        match self {
+            Maint::Optimize => "OPTIMIZE TABLE rebuilds the table and locks it while it runs on most storage engines. Large tables can take a long time.",
+            Maint::Vacuum => "VACUUM reclaims dead rows and can take a long time on a large table. It runs outside a transaction and cannot be undone.",
+            Maint::Reindex => "REINDEX TABLE rebuilds every index of the table and blocks writes to it while it runs.",
+            Maint::Analyze | Maint::Check => "",
+        }
+    }
+}
+
 impl Dialect {
+    /// The statement for `what` on a table, or None where the engine has no such command.
+    pub fn maintenance(self, what: Maint, space: &str, table: &str) -> Option<String> {
+        let t = self.qualified(space, table);
+        Some(match (self.is_mysql_family(), what) {
+            (true, Maint::Analyze) => format!("ANALYZE TABLE {t}"),
+            (true, Maint::Optimize) => format!("OPTIMIZE TABLE {t}"),
+            (true, Maint::Check) => format!("CHECK TABLE {t}"),
+            (false, Maint::Analyze) => format!("ANALYZE {t}"),
+            (false, Maint::Vacuum) => format!("VACUUM {t}"),
+            (false, Maint::Reindex) => format!("REINDEX TABLE {t}"),
+            _ => return None,
+        })
+    }
+
     /// Users, server variables, sql_mode and charsets exist only on these two. Anything gated on it
     /// takes the not supported path for PostgreSQL.
     pub fn is_mysql_family(self) -> bool {
@@ -53,6 +94,16 @@ impl Dialect {
     pub fn columns(self) -> &'static str {
         if self == Dialect::Postgres { return super::pg::catalog::COLUMNS }
         "SELECT COLUMN_NAME AS name, COLUMN_TYPE AS full_type, IS_NULLABLE = 'YES' AS nullable, COLUMN_KEY AS col_key, COLUMN_DEFAULT AS col_default, EXTRA AS extra, COLLATION_NAME AS collation, COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
+    }
+
+    /// The CHECK constraints of MariaDB 10.2 and later, for finding the columns declared JSON. Params: [schema] or, with
+    /// `by_table`, [schema, table]. Columns: tbl, clause.
+    pub fn json_checks(self, by_table: bool) -> &'static str {
+        if by_table {
+            "SELECT TABLE_NAME AS tbl, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?"
+        } else {
+            "SELECT TABLE_NAME AS tbl, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ?"
+        }
     }
 
     /// One row per indexed column, the primary key first. Params: [schema, table]. Columns: name,
@@ -179,6 +230,16 @@ impl Dialect {
         }
     }
 
+    /// MariaDB keeps the status variables in information_schema, MySQL 8 only in performance_schema.
+    pub fn global_status_table(self) -> &'static str {
+        if self == Dialect::MariaDb { "information_schema.GLOBAL_STATUS" } else { "performance_schema.global_status" }
+    }
+
+    /// MySQL drops a CHECK by its own keyword, MariaDB by the generic CONSTRAINT.
+    pub fn drop_check_word(self) -> &'static str {
+        if self == Dialect::MySql { "CHECK" } else { "CONSTRAINT" }
+    }
+
     /// MySQL counts milliseconds but only limits SELECT statements. MariaDB counts seconds, as a
     /// float, and limits every statement.
     pub fn session_timeout(self, ms: u64) -> String {
@@ -204,6 +265,26 @@ impl Dialect {
             Dialect::MySql => (at(0), at(1)) >= (5, 7),
             Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 5, 2),
             Dialect::Postgres => true,
+        }
+    }
+
+    /// MySQL keeps and enforces a CHECK from 8.0.16 and parses and ignores it before. MariaDB enforces it from 10.2.1.
+    pub fn enforces_checks(self, version: &str) -> bool {
+        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
+        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
+        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        match self {
+            Dialect::MySql => (at(0), at(1), at(2)) >= (8, 0, 16),
+            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 2, 1),
+            Dialect::Postgres => true,
+        }
+    }
+
+    /// A CHECK can be NOT ENFORCED on MySQL from 8.0.16. MariaDB has no such clause, and PostgreSQL 18 has one the editor leaves to a query.
+    pub fn can_not_enforce(self, version: &str) -> bool {
+        match self {
+            Dialect::MySql => self.enforces_checks(version),
+            Dialect::MariaDb | Dialect::Postgres => false,
         }
     }
 
@@ -383,6 +464,19 @@ impl super::Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_text_per_dialect() {
+        assert_eq!(Dialect::MySql.maintenance(Maint::Analyze, "shop", "orders").as_deref(), Some("ANALYZE TABLE `shop`.`orders`"));
+        assert_eq!(Dialect::MariaDb.maintenance(Maint::Optimize, "shop", "a`b").as_deref(), Some("OPTIMIZE TABLE `shop`.`a``b`"));
+        assert_eq!(Dialect::MySql.maintenance(Maint::Check, "shop", "orders").as_deref(), Some("CHECK TABLE `shop`.`orders`"));
+        assert_eq!(Dialect::MySql.maintenance(Maint::Vacuum, "shop", "orders"), None);
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Vacuum, "public", "orders").as_deref(), Some("VACUUM \"public\".\"orders\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Analyze, "public", "orders").as_deref(), Some("ANALYZE \"public\".\"orders\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Reindex, "public", "o\"x").as_deref(), Some("REINDEX TABLE \"public\".\"o\"\"x\""));
+        assert_eq!(Dialect::Postgres.maintenance(Maint::Optimize, "public", "orders"), None);
+        assert!(Maint::Vacuum.heavy() && Maint::Optimize.heavy() && !Maint::Analyze.heavy() && !Maint::Check.heavy());
+    }
 
     #[test]
     fn version_string_tells_the_engine() {

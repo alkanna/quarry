@@ -179,13 +179,106 @@ pub(super) fn view_button(ui: &mut egui::Ui, cell: egui::Rect, inset: f32, v: Op
 
 /// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
 /// than the cell starts at its left padding so its beginning stays visible.
-fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
+pub(super) fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
     match align {
         1 => x + (w - gw) / 2.0,
         2 => x + w - 8.0 - gw,
         _ => x + 8.0,
     }
     .max(x + 8.0)
+}
+
+/// Applies column actions to one set of column preferences. `n` is how many columns show before any were picked.
+pub(super) fn col_acts_on(p: &mut ColPrefs, n: usize, fields: &[String], acts: Vec<ColAct>) {
+    for a in acts {
+        let mut shown = visible_cols(Some(p), fields, n);
+        match a {
+            ColAct::Highlight(c) => {
+                let c = db::strip_indices(&c);
+                if !p.highlight.contains(&c) {
+                    p.highlight.push(c);
+                } else {
+                    p.highlight.retain(|x| *x != c);
+                }
+                continue;
+            }
+            ColAct::Pin(c) => {
+                if !p.pinned.contains(&c) {
+                    p.pinned.push(c);
+                } else {
+                    p.pinned.retain(|x| *x != c);
+                }
+                continue;
+            }
+            ColAct::Hide(c) => {
+                shown.retain(|x| *x != c);
+                p.pinned.retain(|x| *x != c);
+            }
+            ColAct::Move(c, d) => {
+                if let Some(i) = shown.iter().position(|x| *x == c) {
+                    let j = (i as i32 + d).clamp(0, shown.len() as i32 - 1) as usize;
+                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
+                    shown.swap(i, j);
+                    // Moving across the edge of the pinned block changes which columns are pinned.
+                    p.pinned = shown[..pinned_n].to_vec();
+                }
+            }
+            ColAct::MoveTo(c, to) => {
+                if let Some(i) = shown.iter().position(|x| *x == c) {
+                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
+                    let c = shown.remove(i);
+                    shown.insert(if to > i { to - 1 } else { to }.min(shown.len()), c);
+                    p.pinned = shown[..pinned_n].to_vec();
+                }
+            }
+            ColAct::Show(c) => {
+                if !shown.contains(&c) {
+                    shown.push(c);
+                }
+            }
+            ColAct::Align(c, a) => {
+                if a == 0 {
+                    p.align.remove(&c);
+                } else {
+                    p.align.insert(c, a);
+                }
+                continue;
+            }
+            ColAct::Customize { col, label, path } => {
+                if path != col {
+                    if shown.contains(&path) {
+                        shown.retain(|x| *x != col);
+                        p.pinned.retain(|x| *x != col);
+                    } else {
+                        shown.iter_mut().chain(p.pinned.iter_mut()).filter(|x| **x == col).for_each(|x| *x = path.clone());
+                    }
+                    // A column already at that path keeps its own width and alignment.
+                    if let Some(w) = p.widths.remove(&col) {
+                        p.widths.entry(path.clone()).or_insert(w);
+                    }
+                    if let Some(a) = p.align.remove(&col) {
+                        p.align.entry(path.clone()).or_insert(a);
+                    }
+                    p.labels.remove(&col);
+                    let (from, to) = (db::strip_indices(&col), db::strip_indices(&path));
+                    if p.highlight.contains(&from) {
+                        p.highlight.retain(|h| *h != from && *h != to);
+                        p.highlight.push(to);
+                    }
+                }
+                if label.trim().is_empty() {
+                    p.labels.remove(&path);
+                } else {
+                    p.labels.insert(path, label.trim().to_string());
+                }
+            }
+            ColAct::Reset => {
+                *p = ColPrefs::default();
+                continue;
+            }
+        }
+        p.shown = Some(shown);
+    }
 }
 
 pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
@@ -373,95 +466,7 @@ impl App {
     pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
         let n = self.default_cols();
         let p = self.prefs.cols.entry(key.to_string()).or_default();
-        for a in acts {
-            let mut shown = visible_cols(Some(p), fields, n);
-            match a {
-                ColAct::Highlight(c) => {
-                    let c = db::strip_indices(&c);
-                    if !p.highlight.contains(&c) {
-                        p.highlight.push(c);
-                    } else {
-                        p.highlight.retain(|x| *x != c);
-                    }
-                    continue;
-                }
-                ColAct::Pin(c) => {
-                    if !p.pinned.contains(&c) {
-                        p.pinned.push(c);
-                    } else {
-                        p.pinned.retain(|x| *x != c);
-                    }
-                    continue;
-                }
-                ColAct::Hide(c) => {
-                    shown.retain(|x| *x != c);
-                    p.pinned.retain(|x| *x != c);
-                }
-                ColAct::Move(c, d) => {
-                    if let Some(i) = shown.iter().position(|x| *x == c) {
-                        let j = (i as i32 + d).clamp(0, shown.len() as i32 - 1) as usize;
-                        let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                        shown.swap(i, j);
-                        // Moving across the edge of the pinned block changes which columns are pinned.
-                        p.pinned = shown[..pinned_n].to_vec();
-                    }
-                }
-                ColAct::MoveTo(c, to) => {
-                    if let Some(i) = shown.iter().position(|x| *x == c) {
-                        let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                        let c = shown.remove(i);
-                        shown.insert(if to > i { to - 1 } else { to }.min(shown.len()), c);
-                        p.pinned = shown[..pinned_n].to_vec();
-                    }
-                }
-                ColAct::Show(c) => {
-                    if !shown.contains(&c) {
-                        shown.push(c);
-                    }
-                }
-                ColAct::Align(c, a) => {
-                    if a == 0 {
-                        p.align.remove(&c);
-                    } else {
-                        p.align.insert(c, a);
-                    }
-                    continue;
-                }
-                ColAct::Customize { col, label, path } => {
-                    if path != col {
-                        if shown.contains(&path) {
-                            shown.retain(|x| *x != col);
-                            p.pinned.retain(|x| *x != col);
-                        } else {
-                            shown.iter_mut().chain(p.pinned.iter_mut()).filter(|x| **x == col).for_each(|x| *x = path.clone());
-                        }
-                        // A column already at that path keeps its own width and alignment.
-                        if let Some(w) = p.widths.remove(&col) {
-                            p.widths.entry(path.clone()).or_insert(w);
-                        }
-                        if let Some(a) = p.align.remove(&col) {
-                            p.align.entry(path.clone()).or_insert(a);
-                        }
-                        p.labels.remove(&col);
-                        let (from, to) = (db::strip_indices(&col), db::strip_indices(&path));
-                        if p.highlight.contains(&from) {
-                            p.highlight.retain(|h| *h != from && *h != to);
-                            p.highlight.push(to);
-                        }
-                    }
-                    if label.trim().is_empty() {
-                        p.labels.remove(&path);
-                    } else {
-                        p.labels.insert(path, label.trim().to_string());
-                    }
-                }
-                ColAct::Reset => {
-                    *p = ColPrefs::default();
-                    continue;
-                }
-            }
-            p.shown = Some(shown);
-        }
+        col_acts_on(p, n, fields, acts);
         self.save_prefs();
     }
 

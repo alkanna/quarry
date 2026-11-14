@@ -186,6 +186,8 @@ impl App {
                 self.pg_server = Some(PgServerWin::demo(CONN, which));
             }
             "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
+            // The same panes as QUARRY_TEST_SQL=routines, over the public schema.
+            v if v.starts_with("routines") => self.demo_routines(CONN, DB, SCHEMA, true, v.trim_start_matches("routines").trim_start_matches('-')),
             _ => {}
         }
     }
@@ -218,7 +220,7 @@ impl App {
 
     /// The orders table of the design as the Structure, Info, Relations and Triggers views show it: a bigint identity
     /// key, a unique uuid, a CHECK, a foreign key to customers, a generated column and a trigger, as step 4 reads them.
-    fn pg_structure_demo(&mut self, which: &str) {
+    pub(in crate::app) fn pg_structure_demo(&mut self, which: &str) {
         let view = match which {
             "structure" => View::Structure,
             "info" => View::Info,
@@ -231,7 +233,7 @@ impl App {
         t.selected = None;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(orders_structure());
-            s.st.sel = [Some(3), None, Some(0), None, Some(0)];
+            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
     }
 
@@ -453,6 +455,7 @@ fn orders_structure() -> Structure {
             ix("idx_orders_customer_created", false, &[("customer_id", false), ("created_at", true)], false, "CREATE INDEX idx_orders_customer_created ON public.orders USING btree (customer_id, created_at DESC)"),
         ],
         constraints: vec![constraint("orders_pkey", 'p', "PRIMARY KEY (id)"), constraint("orders_public_id_key", 'u', "UNIQUE (public_id)"), constraint("orders_total_check", 'c', "CHECK ((total >= (0)::numeric))")],
+        checks: vec![db::sql::structure::CheckConstraint { name: "orders_total_check".into(), expr: "total >= (0)::numeric".into(), ..Default::default() }],
         foreign_keys: vec![fk("orders_customer_id_fkey", "orders", "customer_id", "customers", "id", "RESTRICT")],
         referenced_by: vec![fk("order_items_order_id_fkey", "order_items", "order_id", "orders", "id", "CASCADE"), fk("events_order_id_fkey", "events", "order_id", "orders", "id", "SET NULL")],
         triggers: vec![Trigger {

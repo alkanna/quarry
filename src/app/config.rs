@@ -657,7 +657,7 @@ mod tests {
         let m: ConnMeta = serde_json::from_str(old).unwrap();
         assert!(m.cloud_sql.is_none());
         assert!(!serde_json::to_string(&m).unwrap().contains("cloud_sql"));
-        let set = ConnMeta { cloud_sql: Some(crate::cloudsql::CloudSql { instance: "p:r:i".into(), iam: true, ip: crate::cloudsql::IpKind::Psc }), ..m };
+        let set = ConnMeta { cloud_sql: Some(crate::cloudsql::CloudSql { instance: "p:r:i".into(), iam: true, ip: crate::cloudsql::IpKind::Psc, mysql: false }), ..m };
         let back: ConnMeta = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
         assert_eq!(back.cloud_sql, set.cloud_sql);
     }

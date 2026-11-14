@@ -762,6 +762,11 @@ impl App {
     pub(in crate::app) fn script_to_link(&mut self, id: u64, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
         let s = self.library.scripts.iter().find(|s| s.id == id)?.clone();
         let l = self.library.links.iter().find(|l| l.id == link)?.clone();
+        // A SQL Content filter has no file form: as .json it would read back as a Mongo filter, as .sql as a script.
+        if s.kind == "where" {
+            self.warn(format!("\"{}\" is a table filter, which is only kept in Quarry. It stays where it is.", s.name));
+            return None;
+        }
         let ext = kind_ext(&s.kind);
         if !l.exts.iter().any(|e| e == ext) {
             self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));

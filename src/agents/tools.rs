@@ -4,7 +4,7 @@
 
 use super::config::OpClass;
 use crate::db::sql::Dialect;
-use crate::db::sql::lex::{Tok, read_only_check, split_statements, tokens};
+use crate::db::sql::lex::{Tok, nth_reading, read_only_check, readings};
 use mongodb::bson::{Bson, Document};
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
@@ -218,7 +218,10 @@ fn build_tools() -> Vec<ToolDef> {
     ]
 }
 
-const SHELL_DESCRIPTION: &str = "Run JavaScript on a MongoDB connection in Quarry's shell (Node.js MongoDB driver). `script` is a function expression that Quarry calls, such as async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. Its return value and its console.log output come back. `db` is the current database (the `database` argument) and each of its collections is also a global by name. The user approves every script, it is refused where rules hide data, and on a locked connection allowing it unlocks writes.";
+const SHELL_DESCRIPTION: &str = "Run JavaScript in Quarry's shell on a MongoDB, MySQL, MariaDB or PostgreSQL connection. `script` is a function expression that Quarry calls; its return value and its console.log output come back. \
+MongoDB: `db` is the current database (the `database` argument, a Node.js driver Db) and each of its collections is also a global by name, as in async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. On a locked connection allowing it unlocks writes. \
+SQL: there is no `db`. `sql` is a tagged template whose ${values} are sent as values, never as SQL text: await sql`SELECT id, total FROM orders WHERE id = ${id}` returns the rows as an array, with .affected (and .insertId on MySQL) after a write. sql.unsafe(text, values) takes ? placeholders on MySQL and $1, $2 on PostgreSQL. `table(\"orders\")` and a global per table of the `database` argument (the MySQL database or PostgreSQL schema) have find(where, { select, orderBy, limit, offset }), findOne, count, insert, update(where, set) and delete(where). One statement per query. Each statement is checked by Quarry as it runs, and rows are scrubbed by the connection's data rules before the script sees them. On a locked connection the script runs read-only and every write is refused; it never unlocks it. \
+The user approves every script, and it is refused where rules hide data.";
 
 /// The shell runs `return (<script>)` and calls what that gives, so a bare statement fails only after the user approved
 /// it. This cheap check refuses that before any approval, with the form that works.
@@ -228,7 +231,7 @@ fn shell_fn(script: &str) -> Result<String, ArgErr> {
     let head = if after(t, "async") { t["async".len()..].trim_start() } else { t };
     let opens = after(head, "function") || head.starts_with('(');
     if !opens || !(t.contains("=>") || t.contains("function")) {
-        return bad("`script` must be a JavaScript function that Quarry calls, with `db` as the current database, such as: async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. Its return value and console.log output come back.");
+        return bad("`script` must be a JavaScript function that Quarry calls, such as: async function run() { return await db.collection(\"users\").find().limit(5).toArray() } on MongoDB, or async function run() { return await sql`SELECT id FROM users LIMIT 5` } on SQL. Its return value and console.log output come back.");
     }
     Ok(script.to_string())
 }
@@ -647,13 +650,112 @@ fn command_class(command: &Document) -> OpClass {
     OpClass::RunScripts
 }
 
-/// GRANT, REVOKE and user or role statements, by their first words.
-fn touches_users(sql: &str, d: Dialect) -> bool {
-    split_statements(sql, d).into_iter().any(|(_, stmt)| {
-        let w: Vec<String> = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).take(2).map(|(_, r)| stmt[r].to_ascii_uppercase()).collect();
-        let first = w.first().map(String::as_str).unwrap_or("");
-        let second = w.get(1).map(String::as_str).unwrap_or("");
-        matches!(first, "GRANT" | "REVOKE") || (matches!(first, "CREATE" | "ALTER" | "DROP" | "RENAME") && matches!(second, "USER" | "ROLE" | "GROUP")) || (first == "SET" && matches!(second, "PASSWORD" | "ROLE"))
+/// The words of each statement, upper case, under every way a server may read the text, so a verb that an executable
+/// comment or a quote rule hides from one reading is still seen in another. Strings and dollar-quoted bodies are not
+/// words, so what they hold is never read as a statement of its own.
+fn statements(sql: &str, d: Dialect) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for n in 0..readings(d) {
+        let mut w: Vec<String> = Vec::new();
+        for (t, r) in nth_reading(sql, d, n) {
+            if t == Tok::Punct && &sql[r.clone()] == ";" {
+                out.push(std::mem::take(&mut w));
+            } else if t == Tok::Word {
+                w.push(sql[r].to_ascii_uppercase());
+            }
+        }
+        out.push(w);
+    }
+    out
+}
+
+fn word(w: &[String], i: usize) -> &str {
+    w.get(i).map(String::as_str).unwrap_or("")
+}
+
+/// The words after SET or RESET with SESSION and LOCAL left out, so SET LOCAL SESSION AUTHORIZATION reads as
+/// AUTHORIZATION.
+fn set_target(w: &[String]) -> &[String] {
+    let rest = w.get(1..).unwrap_or(&[]);
+    let skip = rest.iter().take_while(|x| matches!(x.as_str(), "SESSION" | "LOCAL")).count();
+    &rest[skip..]
+}
+
+/// GRANT, REVOKE and user or role statements, by their first words, and anything that switches the role or the
+/// authorization a session runs as.
+pub(crate) fn touches_users(sql: &str, d: Dialect) -> bool {
+    statements(sql, d).iter().any(|w| {
+        let (first, second) = (word(w, 0), word(w, 1));
+        let set = matches!(first, "SET" | "RESET") && set_target(w).first().is_some_and(|t| matches!(t.as_str(), "ROLE" | "PASSWORD" | "AUTHORIZATION" | "DEFAULT"));
+        matches!(first, "GRANT" | "REVOKE" | "REASSIGN")
+            || (matches!(first, "CREATE" | "ALTER" | "DROP" | "RENAME") && matches!(second, "USER" | "ROLE" | "GROUP"))
+            || (first == "DROP" && second == "OWNED")
+            || (first == "ALTER" && second == "DEFAULT")
+            || set
+    })
+}
+
+/// Statements that make, change or drop objects rather than rows, by their first word. TRUNCATE counts: it empties a
+/// table at once and no undo covers it.
+pub(crate) fn changes_structure(sql: &str, d: Dialect) -> bool {
+    statements(sql, d).iter().any(|w| matches!(word(w, 0), "CREATE" | "ALTER" | "DROP" | "RENAME" | "TRUNCATE" | "COMMENT" | "IMPORT"))
+}
+
+/// A CALL runs a procedure whose body Quarry does not read, so it may change data, structure or both.
+pub(crate) fn calls_procedure(sql: &str, d: Dialect) -> bool {
+    statements(sql, d).iter().any(|w| word(w, 0) == "CALL")
+}
+
+/// PostgreSQL functions the read-only check refuses that are plain data changes on a connection that may write.
+const PG_DATA_FUNCTIONS: [&str; 5] = ["nextval", "setval", "setseed", "txid_current", "pg_current_xact_id"];
+
+/// Why a statement is never an agent's to run, whatever the connection allows: its effect cannot be read from its text
+/// (DO blocks, prepared statements, functions that run SQL text or change settings), or it acts on the server rather
+/// than on data (global settings, killing sessions, server files, replication). Classing such a statement by its
+/// first words would let a DROP or a CREATE ROLE through as a data change, so it is refused instead of guessed.
+pub(crate) fn never_for_agents(sql: &str, d: Dialect) -> Option<String> {
+    for w in statements(sql, d) {
+        let (first, second) = (word(&w, 0), word(&w, 1));
+        let opaque = matches!(first, "DO" | "PREPARE" | "EXECUTE" | "DEALLOCATE");
+        if opaque {
+            return Some(format!("{first} runs SQL that Quarry cannot read, so it is not allowed for agents."));
+        }
+        // Each engine refuses its own server-level statements; RESET, LOAD and ALTER SYSTEM or INSTANCE stay shared.
+        let engine = if d == Dialect::Postgres { matches!(first, "COPY" | "DISCARD" | "SECURITY") } else {
+            matches!(first, "KILL" | "SHUTDOWN" | "RESTART" | "INSTALL" | "UNINSTALL" | "CLONE" | "PURGE" | "BINLOG" | "FLUSH" | "CHANGE" | "CACHE")
+                || (matches!(first, "START" | "STOP") && matches!(second, "REPLICA" | "SLAVE" | "GROUP_REPLICATION"))
+                || (first == "LOCK" && second == "INSTANCE")
+        };
+        let server = engine || matches!(first, "RESET" | "LOAD") || (first == "ALTER" && matches!(second, "SYSTEM" | "INSTANCE"));
+        if server {
+            let what = w.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
+            return Some(format!("{what} acts on the server, not on data, and is not allowed for agents."));
+        }
+        // SET GLOBAL, SET PERSIST and SET @@global.x outlive the session and change the server for everyone.
+        let global = |x: &String| matches!(x.as_str(), "GLOBAL" | "PERSIST" | "PERSIST_ONLY") || x.strip_prefix("@@").is_some_and(|v| v.trim_start_matches(['`', '"', '\'']).starts_with("GLOBAL") || v.trim_start_matches(['`', '"', '\'']).starts_with("PERSIST"));
+        if first == "SET" && w.iter().any(global) {
+            return Some("A global setting changes the server for every session and is not allowed for agents.".into());
+        }
+        if w.windows(2).any(|p| p[0] == "INTO" && matches!(p[1].as_str(), "OUTFILE" | "DUMPFILE")) || w.iter().any(|x| x == "LOAD_FILE") {
+            return Some("Reading or writing files on the server is not allowed for agents.".into());
+        }
+    }
+    if d == Dialect::Postgres
+        && let Some(f) = crate::db::sql::lex::refused_calls(sql).into_iter().find(|f| !PG_DATA_FUNCTIONS.contains(&f.as_str()))
+    {
+        // A name spelled with a Unicode escape could be any of them.
+        let f = if f.starts_with('\0') { "A function named with a Unicode escape".to_string() } else { format!("{f}()") };
+        return Some(format!("{f} changes settings, sessions or the server, or runs SQL Quarry cannot read, so it is not allowed for agents."));
+    }
+    None
+}
+
+/// A locking read (FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE, FOR KEY SHARE, LOCK IN SHARE MODE) under any reading. It
+/// writes nothing, but holds row locks other sessions wait on.
+pub(crate) fn locks_rows(sql: &str, d: Dialect) -> bool {
+    (0..readings(d)).any(|n| {
+        let w: Vec<String> = nth_reading(sql, d, n).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| sql[r].to_ascii_uppercase()).collect();
+        w.windows(2).any(|p| p[0] == "FOR" && matches!(p[1].as_str(), "UPDATE" | "SHARE" | "NO" | "KEY")) || w.windows(4).any(|p| p[0] == "LOCK" && p[1] == "IN" && p[2] == "SHARE" && p[3] == "MODE")
     })
 }
 
@@ -885,10 +987,70 @@ mod tests {
         }
         for no in ["db.users.find().limit(5).toArray()", "return 1", "await db.collection('x').findOne()", "(1)", "asyncfunction run() { }", "functional()", "x => 1", "async x => 1"] {
             let e = shell(no).unwrap_err().0;
-            assert!(e.contains("async function run()") && e.contains("`db`"), "{no}: {e}");
+            assert!(e.contains("async function run()") && e.contains("db.collection") && e.contains("sql`SELECT"), "{no}: {e}");
         }
+        assert!(shell("async function run() { return await sql`SELECT 1` }").is_ok());
         let d = tool("run_shell").unwrap().description;
         assert!(d.contains("function expression") && d.contains("async function run()") && d.contains("`db` is the current database") && d.contains("return value"), "{d}");
+        // Agents learn what a SQL script gets, and that a locked SQL connection stays read-only.
+        for w in ["MySQL", "PostgreSQL", "there is no `db`", "sql`SELECT", "sql.unsafe", "table(\"orders\")", ".affected", "runs read-only"] {
+            assert!(d.contains(w), "{w}: {d}");
+        }
+    }
+
+    /// The SQL a script sends is classed statement by statement as it runs, under every reading of its text.
+    #[test]
+    fn statement_classes_for_scripts() {
+        let my = Dialect::MySql;
+        let pg = Dialect::Postgres;
+        for s in ["GRANT ALL ON *.* TO x", "/*!50000 GRANT ALL ON *.* TO x */", "SELECT 1; CREATE USER x", "SET PASSWORD = 'x'", "drop role app"] {
+            assert!(touches_users(s, my), "{s}");
+        }
+        assert!(touches_users("ALTER ROLE app WITH PASSWORD 'x'", pg));
+        assert!(!touches_users("SELECT 'GRANT ALL'", my));
+        assert!(!touches_users("CREATE TABLE users (id int)", my));
+        for s in ["CREATE TABLE t (a int)", "drop table t", "ALTER TABLE t ADD c int", "TRUNCATE t", "RENAME TABLE a TO b", "/*!32302 DROP TABLE t */", "SELECT 1; DROP TABLE t"] {
+            assert!(changes_structure(s, my), "{s}");
+        }
+        assert!(changes_structure("COMMENT ON TABLE t IS 'x'", pg) && changes_structure("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1; $$", pg));
+        for s in ["INSERT INTO t VALUES (1)", "UPDATE t SET a = 'DROP TABLE x'", "DELETE FROM t", "SELECT 'CREATE TABLE'"] {
+            assert!(!changes_structure(s, my), "{s}");
+        }
+        for s in ["SELECT * FROM t FOR UPDATE", "select * from t for share", "SELECT * FROM t LOCK IN SHARE MODE", "SELECT * FROM t /*! FOR UPDATE */"] {
+            assert!(locks_rows(s, my), "{s}");
+        }
+        assert!(locks_rows("SELECT * FROM t FOR NO KEY UPDATE", pg) && locks_rows("SELECT * FROM t FOR KEY SHARE", pg));
+        assert!(!locks_rows("SELECT 'FOR UPDATE' FROM t", my) && !locks_rows("INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 1", my));
+    }
+
+    /// What a statement wraps or what it acts on can make its first words lie: a DO block or a prepared statement can hold
+    /// a DROP or a CREATE ROLE, and a SET can switch the role or a server setting. These are refused rather than guessed.
+    #[test]
+    fn statements_whose_effect_the_text_does_not_show_are_never_the_agents() {
+        let my = Dialect::MySql;
+        let pg = Dialect::Postgres;
+        for s in ["SET ROLE admin", "SET SESSION ROLE admin", "SET LOCAL ROLE admin", "SET SESSION AUTHORIZATION 'admin'", "SET LOCAL SESSION AUTHORIZATION admin", "RESET ROLE", "RESET SESSION AUTHORIZATION", "REASSIGN OWNED BY a TO b", "DROP OWNED BY a", "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO a"] {
+            assert!(touches_users(s, pg), "{s}");
+        }
+        for s in ["SET ROLE admin", "SET DEFAULT ROLE ALL TO app", "/*!80000 SET ROLE admin */"] {
+            assert!(touches_users(s, my), "{s}");
+        }
+        assert!(!touches_users("UPDATE t SET role = 'admin'", my) && !touches_users("SET SESSION sql_mode = ''", my) && !touches_users("SET search_path = shop", pg));
+        let never = |s: &str, d: Dialect| never_for_agents(s, d);
+        for s in ["PREPARE s FROM 'DROP TABLE orders'", "EXECUTE s", "DEALLOCATE PREPARE s", "SET GLOBAL max_connections = 1", "SET PERSIST max_connections = 1", "SET @@global.read_only = 0", "SET @@`global`.read_only = 0", "SET @x = 1, GLOBAL read_only = 0", "KILL 42", "KILL QUERY 42", "SHUTDOWN", "RESTART", "LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t", "INSTALL PLUGIN x SONAME 'x.so'", "FLUSH PRIVILEGES", "RESET MASTER", "PURGE BINARY LOGS TO 'x'", "CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'x'", "STOP REPLICA", "SELECT 1 INTO OUTFILE '/tmp/x'", "SELECT LOAD_FILE('/etc/passwd')", "ALTER INSTANCE ROTATE INNODB MASTER KEY", "/*! KILL 42 */"] {
+            assert!(never(s, my).is_some(), "{s}");
+        }
+        for s in ["DO $$ BEGIN EXECUTE 'DROP TABLE orders'; EXECUTE 'CREATE ROLE x SUPERUSER'; END $$", "do 'BEGIN NULL; END'", "PREPARE p AS DELETE FROM t", "EXECUTE p", "ALTER SYSTEM SET work_mem = '1GB'", "COPY t TO PROGRAM 'rm -rf /'", "COPY t FROM '/etc/passwd'", "LOAD 'plugin'", "DISCARD ALL", "RESET ALL", "SELECT set_config('role', 'admin', false)", "SELECT pg_catalog.set_config('role', 'admin', false)", "SELECT nextval('s'), set_config('role', 'x', false)", "SELECT pg_terminate_backend(42)", "SELECT dblink_exec('x', 'DROP TABLE t')", "SELECT * FROM query_to_xml('DROP TABLE t', true, true, '')", "SELECT pg_reload_conf()", "SELECT lo_import('/etc/passwd')", "SECURITY LABEL ON TABLE t IS 'x'"] {
+            assert!(never(s, pg).is_some(), "{s}");
+        }
+        // Plain reads and writes, and data functions a writer may call, are classed as usual.
+        for s in ["SELECT * FROM t", "INSERT INTO t VALUES (1)", "UPDATE t SET a = 'EXECUTE s'", "SET @x = 1", "SET SESSION sql_mode = ''", "SELECT @@global.read_only", "DROP TABLE t", "CALL p()", "SELECT 'KILL 42'"] {
+            assert!(never(s, my).is_none(), "{s}");
+        }
+        for s in ["SELECT nextval('s')", "INSERT INTO t VALUES (nextval('s'))", "SELECT pg_sleep(1)", "SET search_path = shop", "UPDATE t SET note = 'DO $$'", "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"] {
+            assert!(never(s, pg).is_none(), "{s}");
+        }
+        assert!(calls_procedure("CALL refresh()", pg) && calls_procedure("/*!50000 CALL refresh() */", my) && !calls_procedure("SELECT 'CALL x'", my));
     }
 
     #[test]

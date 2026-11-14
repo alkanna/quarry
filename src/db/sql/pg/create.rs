@@ -8,7 +8,7 @@
 
 use crate::db::sql::create::{Ddl, DropInfo};
 use crate::db::sql::ddl::{fk_problem, ref_state, snapshot, ColDef};
-use crate::db::sql::pg::ddl::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock};
+use crate::db::sql::pg::ddl::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, in_tx, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock, REFRESH_NEXT};
 use crate::db::sql::exec::{sql_state, Cells, Conn, SqlRow, Tx};
 use sqlx::Connection as _;
 use crate::db::sql::structure::{num, Column, ForeignKey, Index, IndexCol, Structure};
@@ -40,10 +40,8 @@ pub fn system_db(name: &str) -> bool {
 /// How many dependent objects a confirmation lists before it says "and N more".
 pub(in crate::db::sql) const LISTED: usize = 20;
 
-const LOCKED: &str = "Writes are locked on this connection. Unlock them first.";
-
 /// A name this app creates. PostgreSQL would take a newline or a tab, but nobody could type it back.
-fn new_name(what: &str, name: &str) -> Res<()> {
+pub(in crate::db::sql) fn new_name(what: &str, name: &str) -> Res<()> {
     name_ok(name, what)?;
     if name.chars().any(|c| c.is_control()) {
         return Err(format!("{what} name cannot contain control characters or line breaks."));
@@ -485,7 +483,7 @@ fn fingerprint(st: &Structure) -> Vec<String> {
     let cols: Vec<String> = st.columns.iter().map(|c| c.name.clone()).collect();
     let idx: Vec<String> = st.indexes.iter().map(|i| i.name.clone()).collect();
     let mut v = vec![format!("columns {}", cols.join(","))];
-    v.extend(snapshot(st, &cols, &idx, &[]).into_iter().map(|(k, x)| format!("{k}={}", x.unwrap_or_default())));
+    v.extend(snapshot(st, &cols, &idx, &[], &[]).into_iter().map(|(k, x)| format!("{k}={}", x.unwrap_or_default())));
     v.extend(table_state(st));
     v
 }
@@ -500,7 +498,7 @@ const EXTRAS: &str = "SELECT what FROM (
 ) x ORDER BY 1";
 
 /// The whole fingerprint of a table, read inside the transaction that makes or drops it.
-async fn state_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Vec<String>> {
+pub(super) async fn state_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Vec<String>> {
     let st = read_in(tx, schema, table).await?;
     let mut v = fingerprint(&st);
     let extras = tx.fetch_bound(EXTRAS, &[Param::Text(D.qualified(schema, table))]).await.map_err(se)?;
@@ -776,7 +774,7 @@ async fn table_info(db: &Db, schema: &str, table: &str, read_only: bool) -> Res<
 /// on a session, and its backends are not read-only to begin with.
 async fn maintenance(db: &Db, read_only: bool) -> Res<Conn> {
     if read_only {
-        return Err(LOCKED.into());
+        return Err(write::LOCKED.into());
     }
     let mut c = db.acquire_conn().await?;
     if !db.pooler() && let Err(x) = c.execute(&format!("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '{WRITE_LOCK_SECS}s'")).await {
@@ -948,16 +946,7 @@ async fn begin<'c>(c: &'c mut Conn, db: &Db, scope: &str) -> Res<Tx<'c>> {
     Ok(tx)
 }
 
-/// One write transaction of a create or a drop, ended by COMMIT, or by ROLLBACK when `body` failed (`run_locked`). A failed COMMIT
-/// does not say that nothing changed, so it says so.
-async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
-    let run = run_locked(db, scope, read_only, &[], "Refresh the lists and check before running it again.", async |tx| body(tx).await.map_err(Fail::Run)).await;
-    run.map_err(|f| match f {
-        Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
-    })
-}
-
-async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
+pub(super) async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT oid::text AS n FROM pg_namespace WHERE nspname = $1", &[Param::Text(schema.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
 }
@@ -985,7 +974,7 @@ pub(in crate::db::sql) async fn check_ids(db: &Db, schema: &str, table: &str, id
     }
 }
 
-async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
+pub(super) async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT to_regclass($1)::oid::text AS n", &[Param::Text(name.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
 }
@@ -1013,15 +1002,15 @@ async fn drop_schema(db: &Db, name: &str, cascade: bool, read_only: bool) -> Res
 }
 
 /// What a create made, for the undo: the table's oid and how it reads right after.
-struct Made {
-    oid: String,
-    state: Vec<String>,
+pub(super) struct Made {
+    pub(super) oid: String,
+    pub(super) state: Vec<String>,
 }
 
 /// The first function a CHECK of the table `$1` (an oid) reaches that is not IMMUTABLE, with its constraint: called by name, behind an
 /// operator or through a cast. pg_depend records what the server resolved, so an overload, a search_path hit or a user operator is
 /// the function that really runs. Built-ins are pinned and never recorded, which the name list of `check_constraint_pg` covers.
-const CHECK_VOLATILE: &str = "WITH d AS (
+pub(super) const CHECK_VOLATILE: &str = "WITH d AS (
     SELECT k.conname, d.refclassid, d.refobjid FROM pg_constraint k JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass AND d.objid = k.oid
     WHERE k.conrelid = $1::text::oid AND k.contype = 'c'
 ), f AS (
@@ -1029,7 +1018,7 @@ const CHECK_VOLATILE: &str = "WITH d AS (
     UNION ALL SELECT d.conname, o.oprcode::oid FROM d JOIN pg_operator o ON o.oid = d.refobjid WHERE d.refclassid = 'pg_operator'::regclass
     UNION ALL SELECT d.conname, c.castfunc FROM d JOIN pg_cast c ON c.oid = d.refobjid WHERE d.refclassid = 'pg_cast'::regclass AND c.castfunc <> 0
 )
-SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2 LIMIT 1";
+SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2";
 
 /// Refuses a CHECK that reaches a function that is not IMMUTABLE. PostgreSQL assumes a CHECK is immutable and runs it on every row
 /// written, so a volatile or stable user function there (one that writes, calls out or reads other tables) would act on each insert.
@@ -1050,7 +1039,7 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
         let name = D.qualified(&s, &t);
         Lock { gone: Some(format!("the referenced table {name} (it is gone)")), name, mode: "SHARE ROW EXCLUSIVE", plain_only: false }
     }).collect();
-    let run = run_locked(db, &spec.schema, read_only, &locks, "Refresh the lists and check before running it again.", async |tx| {
+    let run = run_locked(db, &spec.schema, read_only, &locks, REFRESH_NEXT, async |tx| {
         let own = spec.as_structure();
         for k in spec.fks.iter().filter(|k| !spec.self_ref(k)) {
             let (ps, name) = (spec.parent_schema(k), D.qualified(spec.parent_schema(k), &k.ref_table));
@@ -1084,7 +1073,7 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
 }
 
 /// The DROP keyword for a relation of pg_class kind `relkind`.
-fn drop_word(relkind: &str) -> &'static str {
+pub(super) fn drop_word(relkind: &str) -> &'static str {
     match relkind {
         "v" => "VIEW",
         "m" => "MATERIALIZED VIEW",
@@ -1268,11 +1257,11 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
     out
 }
 
-fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
+pub(in crate::db::sql) fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
+    write::undo_action(conn, &db.pg_database(), schema, table, undo)
 }
 
-fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
+pub(super) fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
     match res {
         Ok(dbs) => (Ok(said), dbs),
         Err(err) => (Err(err), None),

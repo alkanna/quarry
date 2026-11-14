@@ -90,6 +90,25 @@ pub struct Index {
     pub deferred: bool,
     /// PostgreSQL: the comment on the constraint that owns the index, which is not the index's own.
     pub con_comment: String,
+    /// PostgreSQL: the WHERE condition of a partial index as `pg_get_expr` prints it, empty when there is none.
+    pub predicate: String,
+    /// PostgreSQL: the INCLUDE columns, which are stored in the index but are not part of its key.
+    pub include: Vec<String>,
+    /// How many times the index was used since the statistics were last reset, None when the server does not say.
+    pub scans: Option<u64>,
+    /// PostgreSQL 16 and later: when the index was last used, as the server prints the timestamp.
+    pub last_scan: Option<String>,
+}
+
+/// Where the per index usage counts of a structure come from and why there may be none.
+#[derive(Clone, Debug, Default)]
+pub struct IndexUsage {
+    /// Why no index has a count (performance_schema is off, the view cannot be read). Empty when counts were read.
+    pub unavailable: String,
+    /// PostgreSQL: when the statistics of the database were last reset, as the server prints it. Empty when never.
+    pub reset: String,
+    /// MySQL and MariaDB: how long the server has been up, which is as far back as the counts go.
+    pub uptime: Option<u64>,
 }
 
 /// An object the server drops together with a PostgreSQL column, from `pg_depend`.
@@ -119,6 +138,70 @@ pub struct Constraint {
     pub kind: char,
     /// Such as "PRIMARY KEY (a, b)" or "CHECK ((total >= 0))".
     pub def: String,
+}
+
+/// A table CHECK constraint, as its engine reports it. The expression is what goes between the brackets of
+/// `CHECK (...)`. A CHECK written on a column is one of these on MySQL, and MariaDB keeps it apart in `Column::check`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CheckConstraint {
+    pub name: String,
+    pub expr: String,
+    /// PostgreSQL: added NOT VALID, so the rows already in the table were never checked.
+    pub not_valid: bool,
+    /// PostgreSQL: not inherited by child tables.
+    pub no_inherit: bool,
+    /// MySQL 8.0.16 and PostgreSQL 18: NOT ENFORCED, so the server keeps the CHECK and never evaluates it.
+    pub not_enforced: bool,
+}
+
+impl CheckConstraint {
+    /// A PostgreSQL check constraint from the text `pg_get_constraintdef` gives, such as `CHECK ((a > 0)) NO INHERIT NOT VALID`.
+    /// None for any other kind of constraint.
+    pub fn from_pg(c: &Constraint) -> Option<CheckConstraint> {
+        if c.kind != 'c' {
+            return None;
+        }
+        let rest = c.def.trim().strip_prefix("CHECK")?.trim_start().strip_prefix('(')?;
+        let b: Vec<char> = rest.chars().collect();
+        let (mut i, mut depth) = (0, 1);
+        while i < b.len() {
+            match b[i] {
+                q @ ('\'' | '"') => {
+                    // A backslash escapes inside an E'...' string, which the catalog writes for a value that has one.
+                    let escapes = q == '\'' && i > 0 && matches!(b[i - 1], 'e' | 'E') && (i < 2 || !(b[i - 2].is_alphanumeric() || b[i - 2] == '_'));
+                    i += 1;
+                    while i < b.len() {
+                        if escapes && b[i] == '\\' {
+                            i += 2;
+                        } else if b[i] == q {
+                            if b.get(i + 1) == Some(&q) {
+                                i += 2;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+        let expr: String = b[..i].iter().collect();
+        let tail: String = b[i + 1..].iter().collect::<String>().to_ascii_uppercase();
+        Some(CheckConstraint { name: c.name.clone(), expr: expr.trim().to_string(), not_valid: tail.contains("NOT VALID"), no_inherit: tail.contains("NO INHERIT"), not_enforced: tail.contains("NOT ENFORCED") })
+    }
 }
 
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
@@ -255,11 +338,15 @@ pub struct Structure {
     /// PostgreSQL primary key, unique, check and exclusion constraints. Empty on MySQL, whose keys are indexes and
     /// whose CHECKs are not read here.
     pub constraints: Vec<Constraint>,
+    /// The table's CHECK constraints on every engine. On PostgreSQL they are read from `constraints`. MariaDB before 10.5.10
+    /// does not report a CHECK written on a column, so it is missing here and in `Column::check`.
+    pub checks: Vec<CheckConstraint>,
     /// The schema of a PostgreSQL table, which also says the structure came from PostgreSQL. None on MySQL, where the
     /// database is the namespace and the statements are written for a session switched to it.
     pub pg_schema: Option<String>,
     /// PostgreSQL: what depends on each column, so dropping a column can say what goes with it. Empty on MySQL.
     pub pg_deps: Vec<ColDep>,
+    pub usage: IndexUsage,
 }
 
 impl Structure {
@@ -412,7 +499,7 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
             last.complex |= r.int("complex") == Some(1);
         } else {
             let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment") });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment"), predicate: s(r, "pred"), include: text(r, "incl").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), scans: None, last_scan: None });
         }
     }
     out
@@ -513,6 +600,93 @@ pub(super) fn constraints(rows: &[SqlRow]) -> Vec<Constraint> {
     rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect()
 }
 
+/// The CHECK constraints among PostgreSQL's constraints.
+pub(super) fn pg_checks(cons: &[Constraint]) -> Vec<CheckConstraint> {
+    cons.iter().filter_map(CheckConstraint::from_pg).collect()
+}
+
+/// The `CONSTRAINT `name` CHECK (expr)` clauses of a MySQL or MariaDB CREATE TABLE text, as (name, expr). MySQL's information_schema
+/// spells the string literals of a condition with their quotes escaped once more (`_utf8mb4\'a\'`), which is not text that can be
+/// written back, where SHOW CREATE TABLE gives the condition as the server would read it.
+fn create_checks(create: &str) -> Vec<(String, String)> {
+    let b: Vec<char> = create.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let quoted = |from: usize, q: char| -> usize {
+        // The index just past the quoted text that opens at `from`: a quote doubles itself, and a backslash escapes in a string.
+        let mut j = from + 1;
+        while j < b.len() {
+            if q == '\'' && b[j] == '\\' {
+                j += 2;
+            } else if b[j] == q {
+                if b.get(j + 1) == Some(&q) {
+                    j += 2;
+                } else {
+                    return j + 1;
+                }
+            } else {
+                j += 1;
+            }
+        }
+        b.len()
+    };
+    let head: Vec<char> = "CONSTRAINT `".chars().collect();
+    while i + head.len() < b.len() {
+        // A table constraint starts its own line, which a default or comment holding the same words does not.
+        if b[i..i + head.len()] != head[..] || i < 3 || b[i - 3..i] != ['\n', ' ', ' '] {
+            i += 1;
+            continue;
+        }
+        let end = quoted(i + head.len() - 1, '`');
+        let name: String = b[i + head.len()..end.saturating_sub(1).max(i + head.len())].iter().collect::<String>().replace("``", "`");
+        let rest: String = b[end..(end + 8).min(b.len())].iter().collect();
+        i = end;
+        if rest != " CHECK (" {
+            continue;
+        }
+        let start = end + 8;
+        let (mut j, mut depth) = (start, 1);
+        while j < b.len() {
+            match b[j] {
+                q @ ('\'' | '"' | '`') => {
+                    j = quoted(j, q);
+                    continue;
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if depth == 0 {
+            out.push((name, b[start..j].iter().collect()));
+            i = j;
+        }
+    }
+    out
+}
+
+/// MySQL 8.0.16 and later list every CHECK of the table here, one written on a column included. MariaDB names a column CHECK
+/// after its column and reports it in `Column::check`, so only its table level ones are read here. A server without the view
+/// (MySQL before 8.0.16 parses a CHECK and drops it) has none to list.
+async fn table_checks(db: &Db, schema: &str, table: &str) -> Vec<CheckConstraint> {
+    let rows = match db.dialect {
+        Dialect::MySql => query(db, "SELECT cc.CONSTRAINT_NAME AS name, cc.CHECK_CLAUSE AS expr, tc.ENFORCED = 'NO' AS not_enforced FROM information_schema.CHECK_CONSTRAINTS cc JOIN information_schema.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK' ORDER BY cc.CONSTRAINT_NAME", schema, table).await,
+        Dialect::MariaDb => match query(db, "SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS expr, 0 AS not_enforced FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Table' ORDER BY CONSTRAINT_NAME", schema, table).await {
+            Ok(r) => Ok(r),
+            // Before 10.5.10 there is no LEVEL column, and the view lists only the table level ones.
+            Err(_) => query(db, "SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS expr, 0 AS not_enforced FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? ORDER BY CONSTRAINT_NAME", schema, table).await,
+        },
+        Dialect::Postgres => return Vec::new(),
+    };
+    rows.unwrap_or_default().iter().map(|r| CheckConstraint { name: s(r, "name"), expr: s(r, "expr"), not_enforced: r.int("not_enforced").is_some_and(|n| n != 0), ..Default::default() }).collect()
+}
+
 /// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
@@ -533,6 +707,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
         Dialect::Postgres => {
             if let Ok(rows) = query(db, super::pg::catalog::CONSTRAINTS, schema, table).await {
                 st.constraints = constraints(&rows);
+                st.checks = pg_checks(&st.constraints);
             }
             // Not optional: an undo of a dropped column trusts this list to say what went with the column.
             st.pg_deps = col_deps(&query(db, super::pg::catalog::COLUMN_DEPS, schema, table).await?);
@@ -548,7 +723,16 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
             "SELECT CONSTRAINT_NAME AS name, NULL AS srid, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Column'",
         ),
     };
-    let (idx, cols) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table));
+    let (idx, cols, checks) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table), table_checks(db, schema, table));
+    st.checks = checks;
+    if d == Dialect::MySql {
+        let written = create_checks(&st.create);
+        for k in &mut st.checks {
+            if let Some((_, e)) = written.iter().find(|(n, _)| *n == k.name) {
+                k.expr = e.clone();
+            }
+        }
+    }
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
@@ -562,8 +746,86 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
         let Some(c) = st.columns.iter_mut().find(|c| c.name == name) else { continue };
         c.srid = num(&r, "srid").and_then(|n| u32::try_from(n).ok());
         c.check = text(&r, "clause");
+        if d == Dialect::MariaDb && is_json_alias(&c.full_type, &name, c.check.as_deref().unwrap_or_default()) {
+            c.kind = Some(Kind::Json);
+        }
     }
     Ok(())
+}
+
+/// The PostgreSQL view of index use, with the reset time of the database's statistics beside it. `last_idx_scan` exists from 16 on,
+/// so it is read through the row's JSON, which leaves it out on older servers.
+const PG_USAGE: &str = "SELECT s.indexrelname::text AS name, s.idx_scan::bigint AS scans, to_jsonb(s) ->> 'last_idx_scan' AS last_scan, \
+     (SELECT d.stats_reset::text FROM pg_stat_database d WHERE d.datname = current_database()) AS reset \
+     FROM pg_stat_user_indexes s WHERE s.schemaname = $1 AND s.relname = $2";
+
+/// The rows exist once the table has been opened since the server started, so a table with none says nothing instead of zero.
+const MY_USAGE: &str = "SELECT INDEX_NAME AS name, COUNT_STAR AS scans FROM performance_schema.table_io_waits_summary_by_index_usage WHERE OBJECT_SCHEMA = ? AND OBJECT_NAME = ? AND INDEX_NAME IS NOT NULL";
+
+/// Reads how often each index was used. It never fails the structure: a server or role that cannot say leaves the counts
+/// empty and the reason in `st.usage`.
+async fn usage(db: &Db, schema: &str, table: &str, st: &mut Structure) {
+    let d = db.dialect;
+    if d == Dialect::Postgres {
+        match query(db, PG_USAGE, schema, table).await {
+            Ok(rows) => {
+                for r in &rows {
+                    if st.usage.reset.is_empty() {
+                        st.usage.reset = s(r, "reset");
+                    }
+                    if let Some(ix) = st.indexes.iter_mut().find(|i| i.name == s(r, "name")) {
+                        ix.scans = num(r, "scans");
+                        ix.last_scan = text(r, "last_scan");
+                    }
+                }
+            }
+            Err(_) => st.usage.unavailable = "The server did not let this login read pg_stat_user_indexes.".into(),
+        }
+        return;
+    }
+    // A server with the schema off still has the tables in some versions, and they stay empty, so the switch decides which
+    // answer is used. The three reads are independent, so they share one round trip.
+    let uptime_sql = format!("SELECT VARIABLE_VALUE AS v FROM {} WHERE VARIABLE_NAME = 'Uptime'", d.global_status_table());
+    let (on, used, up) = tokio::join!(db.meta(schema, "SELECT @@performance_schema AS on_", []), query(db, MY_USAGE, schema, table), db.meta(schema, &uptime_sql, []));
+    if on.ok().and_then(|r| r.first().and_then(|r| num(r, "on_"))) != Some(1) {
+        st.usage.unavailable = "Index use is counted by performance_schema, which is off on this server. Turn it on in the server configuration and restart it.".into();
+        return;
+    }
+    match used {
+        Ok(rows) => {
+            for r in &rows {
+                if let Some(ix) = st.indexes.iter_mut().find(|i| i.name == s(r, "name")) {
+                    ix.scans = num(r, "scans");
+                }
+            }
+            st.usage.uptime = up.ok().and_then(|r| r.first().and_then(|r| text(r, "v")?.trim().parse().ok()));
+        }
+        Err(_) => st.usage.unavailable = "This login cannot read performance_schema, which counts how often an index is used.".into(),
+    }
+}
+
+/// The column a `json_valid(col)` CHECK clause guards, or None for any other clause. Only the bare call counts: a clause
+/// that combines it with more tests says nothing about the column being JSON alone.
+pub(super) fn json_check_col(clause: &str) -> Option<String> {
+    let c = clause.trim();
+    let head = c.get(..11).filter(|h| h.eq_ignore_ascii_case("json_valid("))?;
+    let inner = c[head.len()..].strip_suffix(')')?.trim();
+    match inner.strip_prefix('`') {
+        Some(q) => q.strip_suffix('`').filter(|n| !n.replace("``", "").contains('`')).map(|n| n.replace("``", "`")),
+        None => (!inner.is_empty() && inner.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')).then(|| inner.to_string()),
+    }
+}
+
+/// MariaDB's JSON is an alias for LONGTEXT with a `json_valid` CHECK on the column, so that pair is what tells a JSON column
+/// from plain text.
+pub(super) fn is_json_alias(full_type: &str, name: &str, clause: &str) -> bool {
+    full_type.eq_ignore_ascii_case("longtext") && json_check_col(clause).is_some_and(|c| c == name)
+}
+
+/// The `(table, column)` pairs that the CHECK rows of a MariaDB schema declare JSON, given rows of `Dialect::json_checks`.
+/// The caller still has to confirm the column is LONGTEXT.
+pub(super) fn json_check_pairs(rows: &[SqlRow]) -> Vec<(String, String)> {
+    rows.iter().filter_map(|r| Some((text(r, "tbl")?, json_check_col(&text(r, "clause")?)?))).collect()
 }
 
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
@@ -598,10 +860,13 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         status: status(&stat),
         create: create.and_then(|r| text_at(&r, 1)).unwrap_or_default(),
         constraints: Vec::new(),
+        checks: Vec::new(),
         pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
         pg_deps: Vec::new(),
+        usage: IndexUsage::default(),
     };
     extras(db, schema, table, &mut st).await?;
+    usage(db, schema, table, &mut st).await;
     if d == Dialect::Postgres {
         let kind = stat.first().and_then(|r| text(r, "kind")).unwrap_or_default();
         pg_finish(db, schema, table, &kind, &mut st).await?;
@@ -722,6 +987,29 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn check_conditions_are_read_from_the_create_text() {
+        let create = "CREATE TABLE `t` (\n  `a` int,\n  `we``ird` varchar(9) DEFAULT 'CONSTRAINT `x` CHECK (1)',\n  CONSTRAINT `c1` CHECK ((`a` > 0)),\n  CONSTRAINT `c``2` CHECK ((`we``ird` <> _utf8mb4'it\\'s)' and `a` in (1,2))) /*!80016 NOT ENFORCED */,\n  CONSTRAINT `fk` FOREIGN KEY (`a`) REFERENCES `u` (`id`)\n) ENGINE=InnoDB";
+        let got = create_checks(create);
+        assert_eq!(got, [("c1".to_string(), "(`a` > 0)".to_string()), ("c`2".to_string(), "(`we``ird` <> _utf8mb4'it\\'s)' and `a` in (1,2))".to_string())]);
+        assert!(create_checks("CREATE TABLE `t` (`a` int)").is_empty());
+    }
+
+    #[test]
+    fn mariadb_json_alias_is_a_longtext_with_its_own_json_valid_check() {
+        assert_eq!(json_check_col("json_valid(`doc`)").as_deref(), Some("doc"));
+        assert_eq!(json_check_col("JSON_VALID(`we``ird`)").as_deref(), Some("we`ird"));
+        assert_eq!(json_check_col("json_valid(doc)").as_deref(), Some("doc"));
+        // Other checks, and a combined one, say nothing about the column being JSON.
+        assert_eq!(json_check_col("`age` > 0"), None);
+        assert_eq!(json_check_col("json_valid(`a`) and json_valid(`b`)"), None);
+        assert_eq!(json_check_col("json_valid(concat(`a`,`b`))"), None);
+        assert!(is_json_alias("longtext", "doc", "json_valid(`doc`)"));
+        assert!(is_json_alias("LONGTEXT", "doc", "json_valid(`doc`)"));
+        assert!(!is_json_alias("text", "doc", "json_valid(`doc`)"));
+        assert!(!is_json_alias("longtext", "other", "json_valid(`doc`)"));
+    }
+
     use super::*;
 
     #[test]

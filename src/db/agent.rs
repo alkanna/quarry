@@ -8,7 +8,7 @@ use super::*;
 use crate::agents::audit::{Audit, Entry};
 use crate::agents::config::{Limits, Scope};
 use crate::agents::link::{self, ClientInfo, Listener, Token, ToolErr};
-use crate::agents::policy::visible;
+use crate::agents::policy::{ShellSql, visible};
 use crate::agents::scrub::{NsRules, Rules, scrub_error};
 use crate::agents::tools::Call;
 use serde_json::{Value, json};
@@ -88,9 +88,16 @@ pub struct AgentJob {
     pub keep_undo: bool,
     /// The connection's writes are unlocked.
     pub writable: bool,
-    /// run_shell: the Bun job, built by the App, which alone may read the connection's address, and the secrets in it to
-    /// take out of the output.
-    pub shell: Option<(ShellJob, Redact)>,
+    pub shell: Option<AgentShell>,
+}
+
+/// run_shell: the Bun job, built by the App, which alone may read the connection's address.
+pub struct AgentShell {
+    pub job: ShellJob,
+    /// The secrets in that address, taken out of the output. Empty on SQL, whose runner never gets one.
+    pub redact: Redact,
+    /// SQL connections: what each statement of the script may do. None on MongoDB.
+    pub sql: Option<ShellSql>,
 }
 
 /// What a write touches, read before it is decided. With `docs` the write runs on exactly these documents or rows, one at
@@ -642,9 +649,10 @@ async fn exec(job: &AgentJob, h: &sql::RunHandle) -> Res<Answer> {
         (AgentTarget::Sql(db), C::CreateIndex { .. } | C::DropIndex { .. } | C::CreateTable { .. } | C::DropTable { .. }) => sql::agent::structure(db, &job.call, job.writable, rules, l, h).await,
         (AgentTarget::Mongo(c), C::RunCommand { db, command, .. }) => run_command(c, db, command, rules, l, t).await,
         (AgentTarget::Sql(db), C::RunSql { db: schema, sql, .. }) => sql::agent::run_sql(db, schema.as_deref().unwrap_or(""), sql, !job.writable, rules, l, h).await,
-        (AgentTarget::Mongo(_), C::RunShell { .. }) => match &job.shell {
-            Some((s, redact)) => agent_shell(s, redact, rules, l).await,
-            None => Err("Quarry could not prepare the shell for this script.".into()),
+        (target, C::RunShell { .. }) => match &job.shell {
+            // A SQL connection's script must come with its statement checks, and a MongoDB one without SQL to check.
+            Some(s) if matches!(target, AgentTarget::Sql(_)) == s.sql.is_some() => agent_shell(s, rules, l).await,
+            _ => Err("Quarry could not prepare the shell for this script.".into()),
         },
         _ => Err("This tool does not run on this kind of connection.".into()),
     }
@@ -1082,13 +1090,69 @@ impl ShellLog {
     }
 }
 
-/// run_shell: the user's own Bun runner on a job the App built, which the policy runs only on an unlocked connection.
-/// Its output is free text no field rule can follow, so the connection's secrets are replaced and the value detectors
-/// run over it, which is best effort. Log and result together stay under the byte limit. Dropping this future (a cancel
-/// or the time limit) kills the Bun process.
-async fn agent_shell(job: &ShellJob, redact: &Redact, rules: &Rules, l: &Limits) -> Res<Answer> {
+/// The checks of an agent's SQL script on top of the relay's own. Rows of free SQL belong to no one table, so every rule
+/// applies to them, as in `free_sql`.
+struct AgentGate<'a> {
+    sql: ShellSql,
+    nsr: NsRules<'a>,
+}
+
+impl sql::RelayGate for AgentGate<'_> {
+    fn statement(&self, stmt: &str, d: sql::Dialect, read_only: bool) -> Res<()> {
+        self.sql.check(stmt, d, read_only)
+    }
+
+    fn row(&self, d: &mut Document) {
+        self.nsr.scrub_doc(d);
+    }
+
+    fn error(&self, e: String) -> String {
+        scrub_error(&e, &self.nsr)
+    }
+}
+
+/// Interrupts the statement a script's SQL connection is running when the run is dropped by a cancel or the time limit,
+/// as Stop does in the Shell tab. Killing Bun alone leaves it running on the server, holding its locks.
+struct StopRelays<'a> {
+    relays: &'a [(String, SqlRelay)],
+    done: bool,
+}
+
+impl Drop for StopRelays<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        for (_, c) in self.relays {
+            let id = c.conn_id.load(Ordering::SeqCst);
+            // Behind a pooler the pid may now be another client's, and the relay's connection closes as it drops.
+            if id != 0 && !sql::Relay::pooled(&c.db) {
+                let db = c.db.clone();
+                rt.spawn(async move {
+                    let _ = sql::Relay::kill(&db, id).await;
+                });
+            }
+        }
+    }
+}
+
+/// run_shell: the user's own Bun runner on a job the App built. On MongoDB the policy runs it only on an unlocked
+/// connection, and its output is free text no field rule can follow, so the connection's secrets are replaced and the
+/// value detectors run over it, which is best effort. On SQL every statement comes back through the relay, which checks
+/// it, runs it read-only on a locked connection, and scrubs its rows and errors by the rules before the script sees them;
+/// the output then gets the detectors too. Log and result together stay under the byte limit. Dropping this future (a
+/// cancel or the time limit) kills the Bun process and the statement in flight.
+async fn agent_shell(s: &AgentShell, rules: &Rules, l: &Limits) -> Res<Answer> {
+    let (job, redact) = (&s.job, &s.redact);
     let max = l.bytes as usize;
     let nsr = rules.all();
+    let gate = s.sql.map(|sql| AgentGate { sql, nsr: rules.all() });
+    let note = if gate.is_some() {
+        "Quarry scrubbed each row by this connection's data rules before the script saw it, and checked the output with its value detectors. A value the script computes or renames can slip past the field rules, so treat it as best effort."
+    } else {
+        "Quarry replaced this connection's secrets and checked the output with its value detectors only, not field rules, so treat it as best effort."
+    };
     let clean = |s: &str| nsr.scrub_text(&redact.apply(s));
     let margin = redact.longest().max(256);
     let log = std::sync::Mutex::new(ShellLog::default());
@@ -1101,14 +1165,15 @@ async fn agent_shell(job: &ShellJob, redact: &Redact, rules: &Rules, l: &Limits)
     };
     // Held until the script ends: a dropped sender reads as Stop in the runner.
     let (_stop, cancel) = tokio::sync::oneshot::channel::<()>();
-    let res = run_shell(0, job, &send, cancel).await;
+    let mut stop = StopRelays { relays: &job.sql, done: false };
+    let res = run_shell_gated(0, job, gate.as_ref().map(|g| g as &dyn sql::RelayGate), &send, cancel).await;
+    stop.done = true;
     let log = log.into_inner().unwrap_or_default();
-    shell_answer(res, log, &clean, max, margin)
+    shell_answer(res, log, &clean, max, margin, note)
 }
 
 /// The agent's answer from a script's result and log, cleaned and held to `max` bytes in all.
-fn shell_answer(res: Res<String>, mut log: ShellLog, clean: &dyn Fn(&str) -> String, max: usize, margin: usize) -> Res<Answer> {
-    let note = "Quarry replaced this connection's secrets and checked the output with its value detectors only, not field rules, so treat it as best effort.";
+fn shell_answer(res: Res<String>, mut log: ShellLog, clean: &dyn Fn(&str) -> String, max: usize, margin: usize, note: &str) -> Res<Answer> {
     match res {
         Ok(out) => {
             let (mut result, was_cut) = clean_head(&out, max, margin, clean);
@@ -1457,15 +1522,15 @@ mod tests {
         assert!(log.bytes <= max, "{}", log.bytes);
         assert!(log.lines.iter().all(|l| !l.contains("Sup3r")), "half a secret never shows");
         assert_eq!(log.lines.len(), 11);
-        let a = shell_answer(Ok(format!("\"{}\"", "r".repeat(600))), log, &clean, max, margin).unwrap();
+        let a = shell_answer(Ok(format!("\"{}\"", "r".repeat(600))), log, &clean, max, margin, "best effort").unwrap();
         let total = a.value["result"].as_str().unwrap().len() + a.value["log"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().len()).sum::<usize>();
         assert!(total <= max, "{total}");
         assert_eq!(a.value["log_left_out"]["lines"], json!(8), "the cut line, five dropped, two given way to the result");
         assert!(a.value["note"].as_str().unwrap().contains("left out"));
-        let big = shell_answer(Ok("Sup3rSecret".repeat(500)), ShellLog::default(), &clean, max, margin).unwrap();
+        let big = shell_answer(Ok("Sup3rSecret".repeat(500)), ShellLog::default(), &clean, max, margin, "best effort").unwrap();
         let res = big.value["result"].as_str().unwrap();
         assert!(res.len() <= max && !res.contains("Su") && big.value["note"].as_str().unwrap().contains("result was cut"), "{res}");
-        let e = shell_answer(Err("auth failed for mongodb://app:Sup3rSecret@h/db".into()), ShellLog::default(), &clean, max, margin).unwrap_err();
+        let e = shell_answer(Err("auth failed for mongodb://app:Sup3rSecret@h/db".into()), ShellLog::default(), &clean, max, margin, "best effort").unwrap_err();
         assert!(!e.contains("Sup3rSecret"), "{e}");
     }
 
@@ -1620,7 +1685,7 @@ mod tests {
 
     fn shell(c: &Client, code: &str, read_only: bool, limits: Limits) -> Option<AgentJob> {
         let call = Call::RunShell { conn: ConnRef::Id(1), db: Some("quarry_test".into()), script: code.into() };
-        Some(AgentJob { shell: Some((shell_job(code, read_only)?, Redact::new("mongodb://app:S3cr%40tPass@db.example.org/shop", &[]))), writable: !read_only, ..job(c, call, limits) })
+        Some(AgentJob { shell: Some(AgentShell { job: shell_job(code, read_only)?, redact: Redact::new("mongodb://app:S3cr%40tPass@db.example.org/shop", &[]), sql: None }), writable: !read_only, ..job(c, call, limits) })
     }
 
     #[test]

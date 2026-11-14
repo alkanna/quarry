@@ -16,6 +16,30 @@ fn open_import(ui: &mut UiApp, csv: &str, rows: usize) {
 }
 
 #[test]
+fn a_json_array_and_json_lines_import_and_undo_on_every_engine() {
+    every_engine("json import", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        // A duplicate key stops a JSON import with nothing written, as it does a CSV one.
+        open_import(ui, r#"[{"id":4,"name":"delta","qty":40},{"id":1,"name":"dup","qty":0}]"#, 2);
+        ui.click("Import 2 rows");
+        ui.wait("the refusal", |a| a.last_problem().to_lowercase().contains("duplicate"));
+        fx.expect_unchanged(ui, &t, ORIGINAL);
+        // An array of objects, the keys in any order, and one undo takes exactly those rows out.
+        open_import(ui, r#"[{"qty":40,"id":4,"name":"delta"},{"id":5,"name":"eps","qty":50}]"#, 2);
+        ui.click("Import 2 rows");
+        fx.expect(ui, &t, "1:alpha:10,2:beta:20,3:gamma:30,4:delta:40,5:eps:50");
+        ui.wait("the open table to reload", |a| a.t().is_some_and(|t| t.docs.len() == 5));
+        undo_last(ui, 1, &t);
+        fx.expect(ui, &t, ORIGINAL);
+        ui.wait("the open table to follow the undo", |a| a.t().is_some_and(|t| t.docs.len() == 3));
+        // JSON Lines, a blank line between the objects.
+        open_import(ui, "{\"id\":6,\"name\":\"zeta\",\"qty\":60}\n\n{\"id\":7,\"name\":\"eta\",\"qty\":70}\n", 2);
+        ui.click("Import 2 rows");
+        fx.expect(ui, &t, "1:alpha:10,2:beta:20,3:gamma:30,6:zeta:60,7:eta:70");
+    });
+}
+
+#[test]
 fn a_csv_file_imports_updates_and_undoes_on_every_engine() {
     every_engine("csv import", |fx, ui| {
         let t = open_unlocked(fx, ui);

@@ -6,19 +6,19 @@ use crate::app::*;
 use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
-use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
+use db::sql::Maint;
+use db::sql::structure::{CheckConstraint, Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
-const LATER: &str = "Comes with writes";
 
 /// What the four views keep per tab.
 #[derive(Default)]
 pub(in crate::app) struct StructState {
     pub(in crate::app) load: Load,
     pub(in crate::app) data: Option<Structure>,
-    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
-    pub(in crate::app) sel: [Option<usize>; 5],
+    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers, checks.
+    pub(in crate::app) sel: [Option<usize>; 6],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(in crate::app) staged: Vec<Change>,
     /// The statement and warnings of `staged`, kept between frames.
@@ -60,6 +60,9 @@ pub(in crate::app) enum Act {
     Copy(String),
     Open { db: String, table: String },
     Refresh,
+    /// Opens the Query view with this maintenance statement for the table, to read the result there.
+    Maintain(Maint),
+    Truncate,
     NewColumn,
     EditColumn(usize),
     DuplicateColumn(usize),
@@ -74,6 +77,9 @@ pub(in crate::app) enum Act {
     NewIndex,
     EditIndex(usize),
     DropIndex(usize),
+    NewCheck,
+    EditCheck(usize),
+    DropCheck(usize),
     Unstage(usize),
     Discard,
     Apply,
@@ -107,7 +113,7 @@ impl App {
 
     /// The loaded structure, taken out of the tab while the view draws it (put back with `keep`).
     /// Draws the wait or the error and returns None until there is data.
-    fn take_structure(&mut self, ui: &mut egui::Ui) -> Option<(Structure, [Option<usize>; 5])> {
+    fn take_structure(&mut self, ui: &mut egui::Ui) -> Option<(Structure, [Option<usize>; 6])> {
         let st = &self.tabs[self.cur].sql.as_ref()?.st;
         if st.data.is_none() && matches!(st.load, Load::Idle) {
             self.request_structure();
@@ -144,7 +150,7 @@ impl App {
         }
     }
 
-    fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 5], acts: Vec<Act>) {
+    fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 6], acts: Vec<Act>) {
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             (s.st.data, s.st.sel) = (Some(data), sel);
         }
@@ -167,6 +173,11 @@ impl App {
                 }
                 self.request_structure();
             }
+            Act::Maintain(what) => self.sql_maintain(what),
+            Act::Truncate => {
+                let sel = self.tabs[self.cur].sel.clone();
+                self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
+            }
             Act::NewColumn => self.open_col_form(None),
             Act::EditColumn(i) => self.open_col_form(Some(i)),
             Act::DuplicateColumn(i) => self.duplicate_column(i),
@@ -180,10 +191,37 @@ impl App {
             Act::NewIndex => self.open_idx_form(None),
             Act::EditIndex(i) => self.open_idx_form(Some(i)),
             Act::DropIndex(i) => self.stage_drop_index(i),
+            Act::NewCheck => self.open_check_form(None),
+            Act::EditCheck(i) => self.open_check_form(Some(i)),
+            Act::DropCheck(i) => self.stage_drop_check(i),
             Act::Unstage(i) => self.unstage(i),
             Act::Discard => self.discard_staged(),
             Act::Apply => self.request_alter_apply(),
         }
+    }
+
+    /// Runs a maintenance statement of the Info page. All of them count as writes: ANALYZE and CHECK are refused by a read-only session
+    /// on some servers, and the Query view's read-only gate would turn them away anyway. The heavy ones ask first.
+    pub(in crate::app) fn sql_maintain(&mut self, what: Maint) {
+        let sel = self.tabs[self.cur].sel.clone();
+        if !self.conn_writable(sel.conn) {
+            return self.warn_ro();
+        }
+        let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) else { return };
+        if what.heavy() {
+            self.modal = Some(Modal::SqlMaintain { what, stmt });
+        } else {
+            self.sql_maintain_run(stmt);
+        }
+    }
+
+    /// The Query view runs each statement on its own outside any transaction, so VACUUM works, and it logs the statement and shows the server's rows.
+    pub(in crate::app) fn sql_maintain_run(&mut self, stmt: String) {
+        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+            s.query = format!("{stmt};");
+        }
+        self.tabs[self.cur].view = View::Sql;
+        self.sql_run(true, false);
     }
 
     /// The count shown beside a view's tab once the structure is known.
@@ -209,6 +247,7 @@ impl App {
         let col = sel[0].filter(|i| *i < d.columns.len());
         let conn = self.t().map_or(0, |t| t.sel.conn);
         let pg = self.is_pg(conn);
+        let dialect = self.alter_env().0;
         let (order, unsigned, collation, cardinality) = (self.supports(conn, db::sql::Feature::ColumnOrder), self.supports(conn, db::sql::Feature::Unsigned), self.supports(conn, db::sql::Feature::Collation), self.supports(conn, db::sql::Feature::IndexCardinality));
         let mut left = Vec::new();
         edit_row_with(ui, editable, note, |ui, on| {
@@ -306,6 +345,14 @@ impl App {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 caption(ui, "INDEXES");
                 stat_chip(ui, &d.indexes.len().to_string());
+                if !d.indexes.is_empty() {
+                    if !d.usage.unavailable.is_empty() {
+                        ui.label(RichText::new("use not counted").size(TXT_SMALL).color(FAINT())).on_hover_text(&d.usage.unavailable);
+                    } else if d.indexes.iter().any(|i| i.scans.is_some()) {
+                        let (since, tip) = usage_note(&d.usage);
+                        ui.label(RichText::new(since).size(TXT_SMALL).color(FAINT())).on_hover_text(tip);
+                    }
+                }
                 right_group(ui, |ui| {
                     if quiet_enabled(ui, editable, "+ Index").on_disabled_hover_text(why).clicked() {
                         acts.push(Act::NewIndex);
@@ -321,9 +368,9 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-            let ishown: Vec<usize> = (0..6).filter(|i| cardinality || *i != 4).collect();
-            let iall = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
-            let heads: Vec<GCol> = iall.into_iter().enumerate().filter(|(i, _)| ishown.contains(i)).map(|(_, g)| g).collect();
+            let (used, last, partial) = (d.indexes.iter().any(|i| i.scans.is_some()), d.indexes.iter().any(|i| i.last_scan.is_some()), d.indexes.iter().any(|i| !i.predicate.is_empty()));
+            let iall = [(0, gc("Key name", 2.0)), (1, gc("Columns", 2.4)), (8, gc("Where", 1.8)), (2, gc("Unique", 0.8)), (3, gc("Type", 0.8)), (4, gc_r("Cardinality", 1.2)), (6, gc_r("Used", 0.9)), (7, gc_r("Last used", 1.4)), (5, gc("Comment", 2.4))];
+            let (ishown, heads): (Vec<usize>, Vec<GCol>) = iall.into_iter().filter(|(i, _)| match *i { 4 => cardinality, 6 => used, 7 => last, 8 => partial, _ => true }).unzip();
             let mut imenu = |ui: &mut egui::Ui, r: usize| {
                 if ui.add_enabled(editable, egui::Button::new("Edit index")).on_disabled_hover_text(why).clicked() {
                     acts.push(Act::EditIndex(r));
@@ -345,6 +392,64 @@ impl App {
             }
             if let (Some(r), true) = (hit.double, editable) {
                 acts.push(Act::EditIndex(r));
+            }
+            ui.add_space(14.0);
+            let ck = sel[5].filter(|i| *i < d.checks.len());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                caption(ui, "CHECK CONSTRAINTS");
+                stat_chip(ui, &d.checks.len().to_string());
+                right_group(ui, |ui| {
+                    if quiet_enabled(ui, editable, "+ Check").on_hover_text("Add a CHECK constraint").on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::NewCheck);
+                    }
+                    if let Some(i) = ck {
+                        if quiet_enabled(ui, editable, "Drop").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::DropCheck(i));
+                        }
+                        if quiet_enabled(ui, editable, "Edit").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::EditCheck(i));
+                        }
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            if d.checks.is_empty() {
+                ui.label(RichText::new("This table has no CHECK constraints.").size(TXT_SMALL).color(FAINT()));
+            } else {
+                let heads = [gc("Name", 2.0), gc("Expression", 4.6), gc("State", 1.6)];
+                let mut cmenu = |ui: &mut egui::Ui, r: usize| {
+                    if ui.add_enabled(editable, egui::Button::new("Edit check")).on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::EditCheck(r));
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.add_enabled_ui(editable, |ui| {
+                        if danger_item(ui, "Drop check").clicked() {
+                            acts.push(Act::DropCheck(r));
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_disabled_hover_text(why);
+                    ui.separator();
+                    if ui.button("Copy expression").clicked() {
+                        acts.push(Act::Copy(d.checks[r].expr.clone()));
+                        ui.close();
+                    }
+                };
+                let hit = grid_ex(ui, "checks", &heads, d.checks.len(), sel[5], |ui, rect, r, c| {
+                    if c == 0 && staged.iter().any(|s| matches!(s, Change::DropCheck(n) if *n == d.checks[r].name)) {
+                        ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, ALERT());
+                    }
+                    check_cell(ui, rect, &d.checks[r], c, dialect)
+                }, Some(&mut cmenu));
+                if let Some(r) = hit.click {
+                    sel[5] = Some(r);
+                }
+                if let (Some(r), true) = (hit.double, editable) {
+                    acts.push(Act::EditCheck(r));
+                }
             }
         });
         self.hold_staged(staged, memo);
@@ -586,6 +691,8 @@ impl App {
             ("Comment", s.comment.clone()),
             ]
         };
+        let (is_view, writable) = (self.sel_is_view(), self.sel_writable());
+        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&self.tabs[self.cur].sel.db.as_str());
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -601,13 +708,24 @@ impl App {
                         });
                     }
                 });
-                if !pg {
+                {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        for name in ["Analyze", "Optimize", "Check"] {
-                            ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
+                        let tools: &[(&str, Maint)] = if pg { &[("Vacuum", Maint::Vacuum), ("Analyze", Maint::Analyze), ("Reindex", Maint::Reindex)] } else { &[("Analyze", Maint::Analyze), ("Optimize", Maint::Optimize), ("Check", Maint::Check)] };
+                        for (name, what) in tools {
+                            let note = if is_view { "A view has no table to maintain" } else { "Read-only: unlock writes to run this" };
+                            if ui.add_enabled(!is_view && writable, egui::Button::new(*name)).on_hover_text(format!("Run {} on this table and show the result in the Query view", name.to_uppercase())).on_disabled_hover_text(note).clicked() {
+                                acts.push(Act::Maintain(*what));
+                            }
                         }
-                        ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
+                        // PostgreSQL gets its TRUNCATE from the sidebar flow, so only MySQL and MariaDB offer it here.
+                        if !pg {
+                        let can_empty = !is_view && writable && !system;
+                        let note = if system { "Belongs to the server" } else if is_view { "A view has no rows to empty" } else { "Read-only: unlock writes to empty this table" };
+                        if ui.add_enabled_ui(can_empty, |ui| danger(ui, "Truncate...")).inner.on_hover_text("Deletes every row and keeps the table").on_disabled_hover_text(note).clicked() {
+                            acts.push(Act::Truncate);
+                        }
+                        }
                     });
                 }
             });
@@ -786,8 +904,10 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
     match col {
         0 => named(ui, rect, &ix.name, ix.name == "PRIMARY", mono()),
         1 => {
-            let cols: Vec<String> = ix.cols.iter().map(|c| format!("{}{}{}", c.name, c.prefix.map_or(String::new(), |n| format!("({n})")), if c.desc { " DESC" } else { "" })).collect();
-            put(ui, rect, &cols.join(", "), mono(), TEXT(), false);
+            // A key part that is an expression has no column name, so the expression stands in for it.
+            let cols: Vec<String> = ix.cols.iter().map(|c| format!("{}{}{}", if c.name.is_empty() { c.expr.as_deref().unwrap_or_default() } else { c.name.as_str() }, c.prefix.map_or(String::new(), |n| format!("({n})")), if c.desc { " DESC" } else { "" })).collect();
+            let inc = if ix.include.is_empty() { String::new() } else { format!("  INCLUDE {}", ix.include.join(", ")) };
+            put(ui, rect, &format!("{}{inc}", cols.join(", ")), mono(), TEXT(), false);
         }
         2 => tick(ui, rect, ix.unique),
         3 => {
@@ -796,10 +916,64 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
         4 => {
             put(ui, rect, &ix.cardinality.map_or(String::new(), |n| group(&n.to_string())), mono(), C_NUMBER(), true);
         }
+        6 => match ix.scans {
+            // A key that enforces uniqueness is needed even when no query reads it, so it is never called unused.
+            Some(0) if !(ix.unique || ix.primary || ix.constraint || ix.name == "PRIMARY") => put(ui, rect, "unused", mono(), FAINT(), true),
+            Some(n) => put(ui, rect, &group(&n.to_string()), mono(), C_NUMBER(), true),
+            None => {}
+        },
+        7 => put(ui, rect, ix.last_scan.as_deref().map(stamp).as_deref().unwrap_or_default(), mono(), MUTED(), true),
+        8 => put(ui, rect, &ix.predicate, mono(), MUTED(), false),
         _ => {
             put(ui, rect, &ix.comment, FontId::proportional(TXT_BODY), TEXT(), false);
         }
     }
+}
+
+fn check_cell(ui: &egui::Ui, rect: Rect, k: &CheckConstraint, col: usize, dialect: db::sql::Dialect) {
+    let mono = || FontId::monospace(TXT_SMALL);
+    match col {
+        0 => put(ui, rect, &k.name, mono(), TEXT(), false),
+        1 => put(ui, rect, &k.expr, mono(), TEXT(), false),
+        _ => {
+            // MySQL says whether a CHECK is enforced; PostgreSQL says only the unusual: NOT VALID and NO INHERIT.
+            let mut v: Vec<&str> = Vec::new();
+            if k.not_valid {
+                v.push("NOT VALID");
+            }
+            if k.no_inherit {
+                v.push("NO INHERIT");
+            }
+            if k.not_enforced {
+                v.push("NOT ENFORCED");
+            } else if dialect == db::sql::Dialect::MySql {
+                v.push("ENFORCED");
+            }
+            put(ui, rect, &v.join(", "), mono(), MUTED(), false);
+        }
+    }
+}
+
+/// A server timestamp to the minute, without the fraction and zone: "2026-11-14 10:03".
+fn stamp(t: &str) -> String {
+    t.replace('T', " ").chars().take(16).collect()
+}
+
+/// The short note beside the index list and the tooltip that says what the counts mean and when they restart.
+fn usage_note(u: &db::sql::structure::IndexUsage) -> (String, String) {
+    let tip = "How often a query used each index. A count of zero on an index that is not a key of the table may mean it can be dropped, but check that nothing reads it only now and then, such as a monthly report.";
+    if !u.reset.is_empty() {
+        return (format!("use counted since {}", stamp(&u.reset)), format!("{tip} The server counts from the last reset of this database's statistics. A restore or crash recovery also clears them."));
+    }
+    if let Some(secs) = u.uptime {
+        let ago = match secs {
+            0..3600 => format!("{} min", secs / 60),
+            3600..86400 => format!("{} h", secs / 3600),
+            _ => format!("{} days", secs / 86400),
+        };
+        return (format!("use counted for {ago}"), format!("{tip} The server counts from its start, and a table that falls out of its table cache starts again."));
+    }
+    ("use counted".into(), format!("{tip} No reset time is recorded, so the count may go back a long way."))
 }
 
 /// A bordered table with a header row, striped rows and a row number. `cell` paints one cell and
@@ -1020,6 +1194,7 @@ impl App {
                 ix("idx_customer_created", false, &[("customer_id", false), ("created_at", true)], 4402, "Recent orders per customer"),
                 ix("fk_orders_customer", false, &[("customer_id", false)], 1190, "Made for the foreign key"),
             ],
+            checks: vec![db::sql::structure::CheckConstraint { name: "chk_orders_total".into(), expr: "`total` >= 0".into(), ..Default::default() }, db::sql::structure::CheckConstraint { name: "chk_orders_currency".into(), expr: "`currency` in (_utf8mb4'EUR',_utf8mb4'USD',_utf8mb4'GBP')".into(), ..Default::default() }],
             foreign_keys: vec![fk("fk_orders_customer", "orders", "customer_id", "customers", "id", "CASCADE", "RESTRICT"), fk("fk_orders_currency", "orders", "currency", "currencies", "code", "CASCADE", "SET NULL")],
             referenced_by: vec![fk("fk_items_order", "order_items", "order_id", "orders", "id", "CASCADE", "CASCADE"), fk("fk_payments_order", "payments", "order_id", "orders", "id", "CASCADE", "RESTRICT"), fk("fk_shipments_order", "shipments", "order_id", "orders", "id", "CASCADE", "RESTRICT")],
             triggers: vec![Trigger {
@@ -1064,7 +1239,7 @@ impl App {
         t.selected = None;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(d);
-            s.st.sel = [Some(3), None, Some(0), None, Some(0)];
+            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
     }
 }

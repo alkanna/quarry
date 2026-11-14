@@ -3,9 +3,9 @@
 
 use super::config::{Access, ConnPolicy, Mode, OpClass, Scope, ScopeMode};
 use super::scrub::{Rules, wild};
-use super::tools::{Call, Target, each_stage};
+use super::tools::{Call, Target, calls_procedure, changes_structure, each_stage, locks_rows, never_for_agents, touches_users};
 use crate::db::sql::Dialect;
-use crate::db::sql::lex::{Tok, split_statements, tokens, use_target};
+use crate::db::sql::lex::{Tok, read_only_check, split_statements, tokens, use_target};
 use std::collections::HashSet;
 
 /// What the App knows about the connection right now.
@@ -103,9 +103,12 @@ pub fn decide(p: Option<&ConnPolicy>, live: LiveState, call: &Call, class: OpCla
     let shell = matches!(call, Call::RunShell { .. });
     let always = shell || class == OpClass::ChangeStructure;
     // Free SQL runs read-only on a locked connection, as the user's own does, because the database holds it there (BEGIN
-    // READ ONLY on PostgreSQL, a read-only session on MySQL), so it never needs the unlock. The shell's read-only guard
-    // patches the driver inside the process the script controls, so a script can undo it: the shell unlocks like a write.
-    let writes = matches!(class, OpClass::ChangeData | OpClass::ChangeStructure | OpClass::RunScripts) && !matches!(call, Call::RunSql { .. });
+    // READ ONLY on PostgreSQL, a read-only session on MySQL), so it never needs the unlock. A SQL script is held the same
+    // way: its runner has no driver, and every statement comes back through Quarry's relay. On MongoDB the shell's
+    // read-only guard patches the driver inside the process the script controls, so a script can undo it: the shell
+    // unlocks like a write there.
+    let held_read_only = matches!(call, Call::RunSql { .. }) || (shell && live.sql.is_some());
+    let writes = matches!(class, OpClass::ChangeData | OpClass::ChangeStructure | OpClass::RunScripts) && !held_read_only;
     let why = AskWhy {
         setting: mode == Mode::Ask,
         always,
@@ -123,6 +126,59 @@ pub fn decide(p: Option<&ConnPolicy>, live: LiveState, call: &Call, class: OpCla
         return Decision::Allow;
     }
     Decision::Ask(why)
+}
+
+/// What an agent's script may send on a SQL connection. Its SQL is only known as it runs, so Quarry's relay asks this
+/// about each statement once its values are filled in, before the read-only check and the read-only session hold it.
+/// The approval covered the script, so the settings in force then decide: users and roles are never the agent's, the
+/// credential and activity namespaces that free SQL may not name are refused here too, and a class set to Never refuses
+/// its statements.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShellSql {
+    pub change: Mode,
+    pub structure: Mode,
+}
+
+impl ShellSql {
+    pub fn new(p: &ConnPolicy) -> ShellSql {
+        ShellSql { change: p.change, structure: p.structure }
+    }
+
+    /// `sql` may hold several statements (run_sql); each is classed on its own.
+    pub fn check(&self, sql: &str, d: Dialect, read_only: bool) -> Result<(), String> {
+        if let Some(s) = system_in_sql(sql, d) {
+            return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
+        }
+        if touches_users(sql, d) {
+            return Err("Agents can't manage users, roles or the server.".into());
+        }
+        // Classed by its first words, a DO block or a prepared statement would pass a DROP or a CREATE ROLE as a data
+        // change, so what cannot be classed from its text is refused instead.
+        if let Some(why) = never_for_agents(sql, d) {
+            return Err(why);
+        }
+        if read_only {
+            // MySQL's read-only check passes a SELECT whole, and a READ ONLY session still takes the locks it asks for.
+            if locks_rows(sql, d) {
+                return Err("A locking read (FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE) is not allowed while the connection is locked for writes.".into());
+            }
+            return Ok(());
+        }
+        for (_, stmt) in split_statements(sql, d) {
+            if read_only_check(stmt, d).is_ok() {
+                continue;
+            }
+            if calls_procedure(stmt, d) && (self.change == Mode::Never || self.structure == Mode::Never) {
+                return Err("CALL runs a procedure Quarry cannot read, which may change data or structure, so it needs neither Change data nor Change structure set to Never on this connection.".into());
+            }
+            let class = if changes_structure(stmt, d) { OpClass::ChangeStructure } else { OpClass::ChangeData };
+            let mode = if class == OpClass::ChangeStructure { self.structure } else { self.change };
+            if mode == Mode::Never {
+                return Err(format!("{} is set to Never for agents on this connection, so this statement was not run.", class_name(class)));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether free-form text tools are unsafe for this call: query_sql and run_sql on SQL engines, run_command and
@@ -164,10 +220,18 @@ fn reach(p: &ConnPolicy, live: LiveState, call: &Call) -> Result<(), String> {
             }
         }
         Call::QuerySql { sql, .. } | Call::RunSql { sql, .. } => {
-            if let Some(d) = live.sql
-                && let Some(s) = system_in_sql(sql, d)
-            {
-                return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
+            if let Some(d) = live.sql {
+                if let Some(s) = system_in_sql(sql, d) {
+                    return Err(format!("{s} holds server credentials or internals and is not allowed for agents."));
+                }
+                if let Some(why) = never_for_agents(sql, d) {
+                    return Err(why);
+                }
+                // Free SQL is classed statement by statement like a script's, so Never on Change data or Change
+                // structure holds for it too.
+                if matches!(call, Call::RunSql { .. }) {
+                    ShellSql::new(p).check(sql, d, false)?;
+                }
             }
         }
         _ => {}
@@ -366,7 +430,8 @@ mod tests {
                                     let shell = matches!(call, Call::RunShell { .. });
                                     let free = call.is_free_text();
                                     let write = *class != OpClass::ReadData;
-                                    let unlocks = write && !matches!(call, Call::RunSql { .. });
+                                    // Every call here is on MySQL, where free SQL and scripts both run read-only when locked.
+                                    let unlocks = write && !matches!(call, Call::RunSql { .. }) && !shell;
                                     if access == Access::NotShared || mode == Mode::Never || (access == Access::Read && write) || (hides && free) {
                                         assert!(is_refused(&d), "{ctx}");
                                         continue;
@@ -446,6 +511,115 @@ mod tests {
         assert!(matches!(&d, Decision::Ask(w) if w.unlock && w.always && !w.session_ok), "{d:?}");
         let run = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE t SET a = 1".into() };
         assert_eq!(decide(Some(&p), LiveState { sql: Some(Dialect::Postgres), ..locked }, &run, OpClass::RunScripts, &Grants::default(), None, false), Decision::Allow);
+        // A SQL script reaches the server only through Quarry's relay, so a locked connection holds it read-only: it still
+        // always asks, but never to unlock.
+        for d in [Dialect::MySql, Dialect::Postgres] {
+            let d = decide(Some(&p), LiveState { sql: Some(d), ..locked }, &shell, OpClass::RunScripts, &Grants::default(), None, false);
+            assert!(matches!(&d, Decision::Ask(w) if !w.unlock && w.always && !w.session_ok), "{d:?}");
+        }
+    }
+
+    /// The same access level and settings hold for SQL scripts: shared read only refuses them, Never refuses them, rules
+    /// that hide data refuse them, and scope must be the whole connection.
+    #[test]
+    fn sql_scripts_follow_the_connection_settings() {
+        let shell = Call::RunShell { conn: ConnRef::Id(1), db: Some("shop".into()), script: "async function run() { return await sql`SELECT 1` }".into() };
+        let live = LiveState { sql: Some(Dialect::MySql), ..OPEN };
+        let g = Grants::default();
+        assert!(is_refused(&decide(Some(&pol(Access::Read, Mode::Allow)), live, &shell, OpClass::RunScripts, &g, None, false)));
+        assert!(is_refused(&decide(Some(&pol(Access::ReadWrite, Mode::Never)), live, &shell, OpClass::RunScripts, &g, None, false)));
+        let Decision::Refuse(why) = decide(Some(&pol(Access::ReadWrite, Mode::Allow)), live, &shell, OpClass::RunScripts, &g, None, true) else { panic!("hidden data refuses the shell") };
+        assert!(why.contains("the shell are off"), "{why}");
+        let only = ConnPolicy { scope: Scope { mode: ScopeMode::Only, globs: vec!["shop".into()] }, ..pol(Access::ReadWrite, Mode::Allow) };
+        assert!(is_refused(&decide(Some(&only), live, &shell, OpClass::RunScripts, &g, None, false)));
+        let mysql = Call::RunShell { conn: ConnRef::Id(1), db: Some("mysql".into()), script: "async function run() { return 1 }".into() };
+        assert!(is_refused(&decide(Some(&pol(Access::ReadWrite, Mode::Allow)), live, &mysql, OpClass::RunScripts, &g, None, false)), "a system database as the script's own");
+        // The hide rule check sees a SQL script as free text, against the catalog's columns.
+        let rule = RuleSpec { on: true, matcher: Matcher::FieldName("^password$".into()), scope: Vec::new(), action: Action::Remove, mode: PresetMode::Hide };
+        let rules = Rules::compile(&crate::agents::scrub::tests_support::no_presets(), &Default::default(), &[rule], &[], &[0; 32]).unwrap();
+        let users = (("shop".to_string(), "users".to_string()), vec!["id".to_string(), "password".to_string()]);
+        let orders = (("shop".to_string(), "orders".to_string()), vec!["id".to_string()]);
+        assert!(hides_data(&rules, &shell, Some(&[users, orders.clone()])));
+        assert!(!hides_data(&rules, &shell, Some(&[orders])));
+        assert!(hides_data(&rules, &shell, None), "a catalog not loaded yet counts as hiding");
+    }
+
+    /// Each statement of a SQL script is classed as it reaches the relay: users and roles and server internals never run,
+    /// a class set to Never refuses its statements, reads always pass, and a locked connection refuses locking reads
+    /// on top of what its read-only check and session refuse.
+    #[test]
+    fn sql_script_statements_are_classed_as_they_run() {
+        let open = ShellSql { change: Mode::Ask, structure: Mode::Ask };
+        for d in [Dialect::MySql, Dialect::Postgres] {
+            for ro in [false, true] {
+                assert!(open.check("SELECT id FROM orders", d, ro).is_ok(), "{d:?}");
+                let e = open.check("GRANT SELECT ON orders TO app", d, ro).unwrap_err();
+                assert!(e.contains("users, roles"), "{d:?}: {e}");
+                assert!(open.check("CREATE USER x", d, ro).is_err(), "{d:?}");
+            }
+            assert!(open.check("UPDATE orders SET total = 0", d, false).is_ok(), "{d:?}");
+            assert!(open.check("DROP TABLE orders", d, false).is_ok(), "{d:?}");
+            assert!(open.check("SELECT id FROM orders FOR UPDATE", d, false).is_ok(), "{d:?}: a writer may lock rows");
+            let e = open.check("SELECT id FROM orders FOR UPDATE", d, true).unwrap_err();
+            assert!(e.contains("locking read"), "{d:?}: {e}");
+        }
+        assert!(open.check("SELECT * FROM mysql.user", Dialect::MySql, true).unwrap_err().contains("not allowed for agents"));
+        assert!(open.check("USE mysql", Dialect::MySql, false).is_err());
+        assert!(open.check("SELECT rolpassword FROM pg_authid", Dialect::Postgres, true).unwrap_err().contains("not allowed for agents"));
+        assert!(open.check("SELECT * FROM t LOCK IN SHARE MODE", Dialect::MySql, true).is_err());
+        let no_structure = ShellSql { structure: Mode::Never, ..open };
+        for s in ["DROP TABLE orders", "TRUNCATE orders", "ALTER TABLE orders ADD c int", "CREATE TABLE x (a int)"] {
+            let e = no_structure.check(s, Dialect::MySql, false).unwrap_err();
+            assert!(e.contains("Change structure is set to Never"), "{s}: {e}");
+        }
+        assert!(no_structure.check("DELETE FROM orders", Dialect::MySql, false).is_ok());
+        let no_change = ShellSql { change: Mode::Never, ..open };
+        for s in ["DELETE FROM orders", "INSERT INTO orders VALUES (1)"] {
+            let e = no_change.check(s, Dialect::Postgres, false).unwrap_err();
+            assert!(e.contains("Change data is set to Never"), "{s}: {e}");
+        }
+        // A procedure's body is not read, so CALL needs both classes.
+        for p in [no_change, no_structure] {
+            let e = p.check("CALL refresh()", Dialect::Postgres, false).unwrap_err();
+            assert!(e.contains("CALL runs a procedure"), "{e}");
+        }
+        assert!(open.check("CALL refresh()", Dialect::MySql, false).is_ok());
+        assert!(no_change.check("SELECT 1", Dialect::Postgres, false).is_ok() && no_change.check("DROP TABLE orders", Dialect::Postgres, false).is_ok());
+        let p = ConnPolicy { change: Mode::Never, structure: Mode::Allow, ..ConnPolicy::default() };
+        assert_eq!(ShellSql::new(&p), ShellSql { change: Mode::Never, structure: Mode::Allow });
+    }
+
+    /// With Change structure set to Never and Change data allowed, nothing that wraps a DROP or a role change gets through
+    /// as a data change, in a script or in run_sql, locked or not.
+    #[test]
+    fn wrapped_structure_and_role_changes_are_refused() {
+        let s = ShellSql { change: Mode::Allow, structure: Mode::Never };
+        let my = ["PREPARE s FROM 'DROP TABLE orders'", "EXECUTE s", "SET ROLE admin", "SET DEFAULT ROLE ALL TO app", "SET GLOBAL read_only = 0", "SET PERSIST max_connections = 1", "KILL 1", "SHUTDOWN", "LOAD DATA INFILE '/tmp/x' INTO TABLE orders", "SELECT LOAD_FILE('/etc/passwd')"];
+        let pg = ["DO $$ BEGIN EXECUTE 'DROP TABLE orders'; EXECUTE 'CREATE ROLE x SUPERUSER'; END $$", "SET SESSION ROLE x", "SET LOCAL ROLE x", "SET SESSION AUTHORIZATION x", "RESET ROLE", "ALTER SYSTEM SET fsync = off", "SELECT set_config('role', 'x', false)", "COPY orders TO PROGRAM 'id'", "SELECT pg_terminate_backend(1)"];
+        let live = |d| LiveState { sql: Some(d), ..OPEN };
+        let p = ConnPolicy { change: Mode::Allow, structure: Mode::Never, scripts: Mode::Allow, ..pol(Access::ReadWrite, Mode::Allow) };
+        for (d, list) in [(Dialect::MySql, &my[..]), (Dialect::Postgres, &pg[..])] {
+            for q in list {
+                for ro in [false, true] {
+                    assert!(s.check(q, d, ro).is_err(), "{d:?} script ro={ro}: {q}");
+                }
+                let run = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: q.to_string() };
+                let class = crate::agents::tools::classify(&run, Some(d));
+                for writable in [false, true] {
+                    let d2 = decide(Some(&p), LiveState { writable, ..live(d) }, &run, class, &Grants::default(), None, false);
+                    assert!(is_refused(&d2), "{d:?} run_sql writable={writable}: {q} => {d2:?}");
+                }
+            }
+        }
+        // run_sql now keeps Change structure = Never too, and still runs data changes.
+        let drop = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE orders SET a = 1; DROP TABLE orders".into() };
+        let Decision::Refuse(why) = decide(Some(&p), live(Dialect::MySql), &drop, OpClass::RunScripts, &Grants::default(), None, false) else { panic!("DROP under Never") };
+        assert!(why.contains("Change structure is set to Never"), "{why}");
+        let update = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE orders SET a = 1".into() };
+        assert_eq!(decide(Some(&p), live(Dialect::MySql), &update, OpClass::RunScripts, &Grants::default(), None, false), Decision::Allow);
+        // A read through query_sql may not read server files either.
+        let file = Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: "SELECT LOAD_FILE('/etc/passwd')".into(), limit: None };
+        assert!(is_refused(&decide(Some(&p), live(Dialect::MySql), &file, OpClass::ReadData, &Grants::default(), None, false)));
     }
 
     #[test]

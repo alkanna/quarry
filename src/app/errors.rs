@@ -81,6 +81,7 @@ fn fix_label(f: Fix, timeout_ms: u64) -> String {
         Fix::RaiseLimit => format!("Raise limit to {} s", raised(timeout_ms) / 1000),
         Fix::Refresh => "Refresh sidebar".into(),
         Fix::Validator => "Open Validator".into(),
+        Fix::Structure => "Open Structure".into(),
     }
 }
 
@@ -441,6 +442,12 @@ impl App {
                     self.set_cur(i);
                 }
                 self.set_view(View::Schema);
+            }
+            Act::Fix(Fix::Structure) => {
+                if let Some((i, _)) = tab {
+                    self.set_cur(i);
+                }
+                self.set_view(View::Structure);
             }
             Act::Undo(at) => {
                 if let Some(i) = self.undo.iter().position(|a| a.at == at) {

@@ -23,10 +23,6 @@ fn set_query(ui: &mut UiApp, text: &str) {
     a.tabs[c].sql.as_mut().unwrap().query = text.into();
 }
 
-fn query(ui: &UiApp) -> String {
-    ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
-}
-
 fn dialog_name(ui: &UiApp) -> Option<String> {
     match &ui.app().modal {
         Some(Modal::SaveScript(f)) => Some(f.name.clone()),
@@ -125,9 +121,14 @@ fn cmd_s_with_staged_grid_edits_saves_only_the_edits() {
 
 #[test]
 fn cmd_s_in_a_view_without_a_script_does_nothing() {
-    // A table's Content grid holds no script. Its own Cmd+S stands aside while the cell editor is open, and the library
-    // must not answer the key there with a warning about a missing script.
-    let Some(mut ui) = demo_ui(|a| a.load_sql_demo()) else { return };
+    // A table's Structure view holds no script, and the library must not answer the key there with a warning about a
+    // missing script.
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        if let Some(t) = a.tm() {
+            t.view = View::Structure;
+        }
+    }) else { return };
     assert!(ui.app().tab_text().is_none() && ui.app().drafts.is_empty());
     ui.key(CMD, egui::Key::S);
     assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))));
@@ -159,7 +160,7 @@ fn a_recent_script_loads_its_text_into_the_empty_tab() {
     let tabs = ui.app().tabs.len();
     ui.click("Library 5");
     ui.click("Script Late shipments");
-    assert!(query(&ui).starts_with("-- Paid orders that never shipped"));
+    assert!(ui.query_text().starts_with("-- Paid orders that never shipped"));
     assert_eq!(ui.app().tabs.len(), tabs, "an empty tab is reused, as a click on a table does");
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some());
 }
@@ -173,7 +174,7 @@ fn a_script_opens_beside_a_tab_that_holds_text() {
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.settle();
     assert_eq!(ui.app().tabs.len(), tabs + 1);
-    assert!(query(&ui).starts_with("SELECT tier"));
+    assert!(ui.query_text().starts_with("SELECT tier"));
     // The first tab kept what was typed there.
     let first = ui.app().tabs.iter().filter_map(|t| t.sql.as_ref()).any(|s| s.query == "SELECT 7");
     assert!(first);
@@ -273,7 +274,7 @@ fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_pick
     assert!(rows.contains(&(lost, 0)), "{rows:?}");
     ui.click("Library 6");
     ui.click("Script Lost script");
-    assert_eq!(query(&ui), "SELECT 2;");
+    assert_eq!(ui.query_text(), "SELECT 2;");
 }
 
 #[test]
@@ -312,4 +313,33 @@ fn the_picker_lists_are_built_only_while_it_is_open() {
     ui.show("Script Late shipments");
     let open = ui.app().pick_data(&ctx, PickKind::Sql);
     assert!(open.full && open.rows.len() == 5);
+}
+
+#[test]
+fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let t = ui.app().t().unwrap();
+    assert!(t.view == View::Documents && t.sql.is_some() && t.sel.coll == "orders", "the demo opens on the orders Content view");
+    // The bar in Rules mode has written the demo's WHERE back in its own spelling by now; that is the text saved.
+    let (filter, sort) = (t.filter_txt.clone(), t.sort_txt.clone());
+    assert!(filter.contains("'paid'") && sort == "created_at DESC", "{filter} / {sort}");
+    ui.h.state_mut().save_script();
+    assert!(matches!(&ui.app().modal, Some(Modal::SaveScript(f)) if f.kind == "where"), "the Content view saves a table filter");
+    // The name field takes the focus when the dialog first draws.
+    ui.settle();
+    ui.type_text("Paid over 50");
+    ui.click("Save");
+    let s = ui.app().library.scripts.iter().find(|s| s.kind == "where").cloned().expect("a saved filter");
+    assert_eq!((s.name.as_str(), s.body.as_str(), s.sort.as_str(), s.db.as_str(), s.coll.as_str()), ("Paid over 50", filter.as_str(), sort.as_str(), "shop", "orders"));
+    let ctx = ui.h.ctx.clone();
+    assert_eq!(ui.app().pick_data(&ctx, PickKind::Where).count, 1);
+    // Another kind's picker does not list it, nor does a Mongo view.
+    assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
+    let a = ui.h.state_mut();
+    let c = a.cur;
+    (a.tabs[c].filter_txt, a.tabs[c].sort_txt) = (String::new(), String::new());
+    a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
+    ui.settle();
+    let t = ui.app().t().unwrap();
+    assert_eq!((t.sel.coll.as_str(), t.filter_txt.as_str(), t.sort_txt.as_str()), ("orders", filter.as_str(), sort.as_str()));
 }

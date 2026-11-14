@@ -57,7 +57,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.show("acme-prod:europe-west1:orders-db");
     // A project with nothing to list is folded away, its reason on hover, so dozens of them do not bury the list.
     assert!(ui.h.query_all_by_label("acme-sandbox").next().is_none(), "a refused project is folded by default");
-    ui.click("1 more without PostgreSQL");
+    ui.click("1 more without instances");
     ui.show("acme-sandbox");
     assert!(ui.h.query_all_by_label("acme-prod:us-central1:billing-legacy").next().is_none(), "a stopped instance shows only on request");
     ui.click("Show stopped instances");
@@ -73,7 +73,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.click("Use acme-prod:europe-west1:orders-db");
     ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
-    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public }));
+    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert_eq!((f.name.as_str(), f.addr.user.as_str(), f.engine), ("orders-db", "jane@example.com", db::sql::Engine::Postgres));
     ui.show("From gcloud, editable");
     ui.show("No password. The proxy signs in with Application Default Credentials, which must be this user's account");
@@ -87,7 +87,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.click("Save and connect");
     ui.wait("the form to close", |a| a.modal.is_none());
     let c = ui.app().conns.last().expect("the saved connection");
-    assert_eq!(c.meta.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public }));
+    assert_eq!(c.meta.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert!(c.meta.ssh.is_none());
     assert!(!c.masked_uri.contains("****") && c.masked_uri.contains("jane%40example.com@"), "the stored address has no password: {}", c.masked_uri);
 
@@ -124,6 +124,32 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.wait("the connection through the proxy", |a| a.conn(id).is_some_and(|c| c.status == Status::Ready));
     assert!(matches!(ui.app().conn(id).unwrap().tunnel, Some(db::Way::CloudSql(_))), "the proxy is kept with the connection");
     *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = None;
+}
+
+const QUEUE: &str = r#"[
+  {"connectionName":"acme-prod:europe-west1:queue","name":"queue","region":"europe-west1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"databaseFlags":[{"name":"cloudsql_iam_authentication","value":"on"}]}}
+]"#;
+
+#[test]
+fn a_mysql_instance_fills_the_mysql_form_with_a_password_sign_in_even_when_iam_is_on() {
+    let mut ui = bare();
+    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().open_cloud_browser(false);
+    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(QUEUE) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
+    let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(vec![Project { id: "acme-prod".into(), name: String::new() }]), adc: true };
+    feed(&mut ui, Found::Start(start), "the project list", |a| a.cloud.start.is_some());
+
+    ui.show("acme-prod:europe-west1:queue");
+    ui.click("Use acme-prod:europe-west1:queue");
+    ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
+    let f = form(ui.app());
+    // The instance has the IAM flag on, but IAM sign-in is not offered for MySQL, so the form asks for a password.
+    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:queue".into(), iam: false, ip: IpKind::Public, mysql: true }));
+    assert_eq!((f.name.as_str(), f.engine, f.addr.scheme.as_str(), f.addr.port), ("queue", db::sql::Engine::MySql, "mysql", 3306));
+    assert!(f.addr.user.is_empty(), "the IAM user was filled in for MySQL");
+    ui.show_contains("Not offered for MySQL instances");
+    assert!(ui.h.query_all_by_label("Sign in with IAM").next().is_none(), "MySQL shows the IAM switch");
+    ui.show("Password");
 }
 
 /// An answer to a connect the user stopped, or one a newer connect replaced, changes nothing: dropping it is what stops

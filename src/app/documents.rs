@@ -342,7 +342,7 @@ impl App {
                     vsep(ui, 6.0);
                     let button = picker_button(ui, &pick, true, &mut pick_acts);
                     demo_pick.get_or_insert(button);
-                    history_menu(ui, &hist, &index_sorts, &mut qacts);
+                    history_menu(ui, &hist, &index_sorts, None, &mut qacts);
                 });
             });
         });

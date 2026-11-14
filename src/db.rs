@@ -20,10 +20,11 @@ mod js_ls;
 mod log;
 mod shell;
 pub mod sql;
+pub mod collopts;
 pub mod copy;
 mod tools;
 mod worker;
-pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
+pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentShell, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
 pub use analysis::*;
 pub use code::*;
 pub use dates::*;
@@ -221,8 +222,12 @@ pub enum Msg {
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
     /// A Custom Query run: one result per statement.
     SqlRan { req: u64, sets: Vec<sql::ResultSet> },
+    /// The plan of a statement: the sets of the run that explained it.
+    SqlExplained { req: u64, sets: Vec<sql::ResultSet> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
+    /// The count, columns and key the bulk UPDATE or DELETE dialog of request `req` waits for; see `sql::bulk`.
+    SqlBulkPrep { req: u64, res: Res<sql::bulk::BulkPrep> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.
     SqlExport { req: u64, res: Res<sql::export::Done> },
     /// A CSV import or a script file run finished; see `sql::import` and `sql::dump`.
@@ -246,6 +251,10 @@ pub enum Msg {
     SqlAltered { conn: u64, database: String, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool },
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
+    /// A view's definition for the edit dialog.
+    SqlViewDef { conn: u64, database: String, schema: String, name: String, res: Res<sql::view::ViewDef> },
+    /// A view created or replaced, or an undo of either. `need_drop` is a PostgreSQL edit that CREATE OR REPLACE refused because the columns changed.
+    SqlViewSaved { conn: u64, database: String, schema: String, name: String, kind: sql::view::ViewDone, res: Res<String>, undo: Option<UndoAction>, need_drop: bool, sql_mode: Option<String> },
     /// What a drop confirmation says will be lost; `table` is empty for a database.
     /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
     SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
@@ -254,7 +263,11 @@ pub enum Msg {
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
+    /// A table, view or PostgreSQL schema was renamed, or a rename was undone. `schema` is the schema holding it (the old name for a schema rename), `whole` is set for a schema rename. A refused undo hands its entry back.
+    SqlRenamed { conn: u64, database: String, schema: String, from: String, to: String, whole: bool, res: Res<String>, undo: Option<UndoAction> },
     SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// An answer about the routines (functions and procedures) of a SQL schema: the list, one definition, a save or a drop; `req` is 0 for the list.
+    SqlRoutine { conn: u64, req: u64, ans: sql::routines::Answer },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
     /// What SHOW GRANTS says for the account the Users window asked about with `req`.

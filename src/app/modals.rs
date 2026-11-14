@@ -112,14 +112,20 @@ impl App {
                 Modal::SqlRunFile(f) => self.sql_run_file_dialog(ui, f, &mut keep),
                 Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
                 Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
+                Modal::SqlBulk(f) => self.sql_bulk_dialog(ui, f, &mut keep),
                 Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),
                 Modal::IdxEdit(f) => self.idx_dialog(ui, f, &mut keep),
+                Modal::CheckEdit(f) => self.check_dialog(ui, f, &mut keep),
                 Modal::SqlNewDb(f) => self.sql_new_db_dialog(ui, f, &mut keep),
                 Modal::SqlNewTable(f) => self.sql_new_table_dialog(ui, f, &mut keep),
                 Modal::SqlDrop(f) => self.sql_drop_dialog(ui, f, &mut keep),
+                Modal::SqlRename(f) => self.sql_rename_dialog(ui, f, &mut keep),
+                Modal::SqlDuplicate(f) => self.sql_duplicate_dialog(ui, f, &mut keep),
+                Modal::PgTruncate(f) => self.pg_truncate_dialog(ui, f, &mut keep),
                 Modal::PgNewDb(f) => self.pg_new_db_dialog(ui, f, &mut keep),
                 Modal::PgNewSchema(f) => self.pg_new_schema_dialog(ui, f, &mut keep),
                 Modal::PgNewTable(f) => self.pg_new_table_dialog(ui, f, &mut keep),
+                Modal::SqlView(f) => self.sql_view_dialog(ui, f, &mut keep),
                 Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
                 Modal::SqlPassword(f) => self.sql_password_dialog(ui, f, &mut keep),
                 Modal::PgNewRole(f) => self.pg_new_role_dialog(ui, f, &mut keep),
@@ -146,6 +152,7 @@ impl App {
                         }
                     });
                 }
+                Modal::MongoNewColl(f) => self.mongo_new_coll_dialog(ui, f, &mut keep),
                 Modal::NewCollection { conn, db, name, view, source, pipeline } => self.new_collection_dialog(ui, conn, db, name, view, source, pipeline, &mut keep),
                 Modal::Tool(f) => self.tool_dialog(ui, f, &mut keep),
                 Modal::Relations { conn, db } => self.relations_dialog(ui, conn, db, &mut keep),
@@ -187,6 +194,25 @@ impl App {
                                 self.ok("Importing…");
                             }
                             keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::SqlMaintain { what, stmt } => {
+                    ui.set_width(480.0);
+                    dialog_head(ui, &Head::new("Run this statement?").sub("Table maintenance").glyph(glyphs::warn).tone(ALERT()));
+                    dialog_body(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(what.warning()).color(TEXT())).wrap());
+                        ui.add_space(10.0);
+                        code_card(ui, "", |ui| ui.add(egui::Label::new(RichText::new(stmt.as_str()).monospace().color(BRIGHT())).wrap()));
+                    });
+                    dialog_foot(ui, |ui| {
+                        if danger_solid(ui, true, "Run").clicked() {
+                            let stmt = std::mem::take(stmt);
+                            keep = false;
+                            self.sql_maintain_run(stmt);
                         }
                         if ui.button("Cancel").clicked() {
                             keep = false;
@@ -295,6 +321,7 @@ impl App {
                 Modal::Rename { doc: d, path, name } => self.rename_field_dialog(ui, d, path, name, &mut keep),
                 Modal::UpdateMany { set_txt, unset_txt, preview } => self.update_many_dialog(ui, set_txt, unset_txt, preview, &mut keep),
                 Modal::Undo => self.undo_dialog(ui, &mut keep),
+                Modal::SqlExplain(x) => self.sql_explain_dialog(ui, x, &mut keep),
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
                 // Drawn by their own functions before this dialog.
                 Modal::Palette { .. } | Modal::Settings => {}
@@ -302,6 +329,9 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        } else if let Modal::SqlExplain(mut x) = m {
+            // Closing must not leave an ANALYZE running: it holds the locks of the statement it executes.
+            self.sql_explain_stop(&mut x);
         } else if matches!(m, Modal::PgNewRole(_) | Modal::PgPassword(_)) {
             // Esc closes without the dialog's own buttons, so the password fields are forgotten here; dropping the form wipes them.
             super::sql::pg_roles::forget_pg_secrets(ctx, &m);

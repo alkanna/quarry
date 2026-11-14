@@ -62,7 +62,7 @@ impl App {
     /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
     /// stay off while it is open; a new kind of window belongs in this list.
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.tool.is_some() || !self.agents.asks.is_empty() || self.agents.activity_open || self.agents.rules.is_some()
+        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.routines.window_open() || self.tool.is_some() || !self.agents.asks.is_empty() || self.agents.activity_open || self.agents.rules.is_some()
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -73,8 +73,8 @@ impl App {
         let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
         // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
         // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
-        // would also open the Save dialog. A view that holds no script (a table's Content grid, Indexes and the like) leaves
-        // the key alone, so a press there while the grid's cell editor is open does not warn about a missing script.
+        // would also open the Save dialog. A view that holds no script (a table's Structure, Indexes and the like) leaves
+        // the key alone. The cell editor of a SQL grid owns the key while it is open.
         // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
         if self.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
             self.save_script_as();
@@ -133,7 +133,9 @@ impl App {
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
             self.set_view(View::Documents);
-            ctx.memory_mut(|m| m.request_focus(query_id("QUERY")));
+            // The SQL bar's text field exists only in SQL mode, so Rules mode switches over to it. Its text is already written out.
+            let sql_tab = self.tm().and_then(|t| t.sql.as_mut()).map(|s| s.bar.c.sql = true).is_some();
+            ctx.memory_mut(|m| m.request_focus(query_id(if sql_tab { "SQL-WHERE" } else { "QUERY" })));
         }
         if k(cmd, Key::Comma) {
             self.modal = Some(Modal::Settings);

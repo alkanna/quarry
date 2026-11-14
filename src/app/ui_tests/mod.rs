@@ -25,23 +25,35 @@ mod library_open;
 mod library_panel;
 mod library_picker;
 mod library_save;
+mod mongo_create;
 mod mongo_edit;
+mod conn_paste;
 mod pg_roles;
 mod pg_server;
 mod rail;
 mod sidebar;
 mod sidebar_resize;
+mod sql_bulk;
+mod sql_chrome_fixes;
+mod sql_bulk_dialog;
+mod sql_checks;
 mod sql_create;
 mod sql_dump;
 mod sql_edit;
+mod sql_explain;
 mod sql_format;
 mod sql_import;
+mod sql_locks;
+mod sql_query_sort;
 mod sql_record;
 mod sql_relations;
+mod sql_routines;
 mod sql_structure;
 mod sql_suggest;
+mod sql_tableops;
 mod sql_triggers;
 mod sql_view;
+mod sql_viewdef;
 mod tabs;
 mod vim;
 
@@ -242,6 +254,33 @@ impl UiApp {
         self.click("READ-ONLY");
         self.click("Allow writes");
         self.wait("writes to be allowed", |a| a.conn(CONN).is_some_and(|c| c.writable));
+    }
+
+    /// Turns every connection read-only again, without the badge and its dialog.
+    pub fn lock(&mut self) {
+        for c in &mut self.h.state_mut().conns {
+            c.writable = false;
+        }
+    }
+
+    /// Whether the topmost widget with this name is disabled. A dialog is drawn after the page, so its button comes last.
+    pub fn disabled(&self, label: &str) -> bool {
+        self.h.query_all_by_label(label).last().unwrap_or_else(|| panic!("no widget named {label}")).accesskit_node().is_disabled()
+    }
+
+    /// Whether some label on screen holds `part`, such as a line of the SQL preview.
+    pub fn shows(&self, part: &str) -> bool {
+        self.h.query_all_by_label_contains(part).next().is_some()
+    }
+
+    /// Whether the app said `part`: in the status line, where the offline demo's notes go, or in a toast.
+    pub fn said(&self, part: &str) -> bool {
+        self.app().status.contains(part) || self.app().last_problem().contains(part)
+    }
+
+    /// The text of the current tab's SQL query.
+    pub fn query_text(&self) -> String {
+        self.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
     }
 
     /// The grid cell of a column in a row, numbered as the grid shows it (from 1).

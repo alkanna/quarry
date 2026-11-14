@@ -4,8 +4,9 @@ use super::*;
 
 /// Recent Query, Sort and Project inputs of this collection; picking one fills that box.
 /// Like the original's history menu (onHistory, renderer line 96157): each list can clear its box,
-/// and Sort also offers the key of every index of the collection.
-pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: &mut Vec<QAct>) {
+/// and Sort also offers the key of every index of the collection. With `sql` it is the SQL Content bar's: the WHERE
+/// and ORDER BY texts of the table, kept in `selector` and `sort`.
+pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], sql: Option<db::sql::Dialect>, acts: &mut Vec<QAct>) {
     icon_menu(ui, paint_clock, true, |ui| {
         popover_body(ui, 380.0, |ui| {
             popover_head(ui, "History", "", "Pick an entry to fill its box.");
@@ -14,8 +15,14 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id)).unwrap_or(0);
             let mut needle: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
             let from_index: Vec<&String> = index_sorts.iter().filter(|k| !h.sort.contains(k)).collect();
-            let labels = [format!("Query  {}", h.selector.len()), format!("Sort  {}", h.sort.len() + from_index.len()), format!("Project  {}", h.project.len())];
-            segmented(ui, &mut tab, &[(0, labels[0].as_str()), (1, labels[1].as_str()), (2, labels[2].as_str())]);
+            let names = if sql.is_some() { ["WHERE", "ORDER BY", ""] } else { ["Query", "Sort", "Project"] };
+            let labels = [format!("{}  {}", names[0], h.selector.len()), format!("{}  {}", names[1], h.sort.len() + from_index.len()), format!("{}  {}", names[2], h.project.len())];
+            if sql.is_some() {
+                tab = tab.min(1);
+                segmented(ui, &mut tab, &[(0, labels[0].as_str()), (1, labels[1].as_str())]);
+            } else {
+                segmented(ui, &mut tab, &[(0, labels[0].as_str()), (1, labels[1].as_str()), (2, labels[2].as_str())]);
+            }
             ui.add_space(8.0);
             well_field(ui, filter_id, FieldIcon::Search, None, |ui| ui.add(field_edit(&mut needle, filter_id, "Filter history", ui.available_width(), egui::TextStyle::Body)));
             ui.data_mut(|d| {
@@ -38,11 +45,13 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
             };
             let (row, _) = pop_row(ui, POP_ROW_H);
             let p = ui.painter();
-            mono_at(p, row.rect.left(), row.rect.center().y, "{}", FAINT());
-            let clear = format!("Clear the {} box", ["Query", "Sort", "Project"][tab]);
+            // A SQL box is cleared by emptying it; a Mongo one by the empty document.
+            let empty = if sql.is_some() { "" } else { "{}" };
+            mono_at(p, row.rect.left(), row.rect.center().y, if sql.is_some() { "''" } else { "{}" }, FAINT());
+            let clear = format!("Clear the {} box", names[tab]);
             galley_at(p, row.rect.left() + 26.0, row.rect.center().y, p.layout_no_wrap(clear, FontId::proportional(TXT_BODY), MUTED()), MUTED());
             if row.clicked() {
-                acts.push(act("{}".into()));
+                acts.push(act(empty.into()));
                 ui.close();
             }
             ui.add_space(4.0);
@@ -63,7 +72,10 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
                     let rect = row.rect;
                     let p = ui.painter();
                     let right = if from_index { tag_at(p, rect.right(), rect.center().y, "index", MUTED()) - 8.0 } else { rect.right() };
-                    let mut job = json_job(&one_line(v));
+                    let mut job = match sql {
+                        Some(d) => sql_job_in(&one_line(v), TXT_BODY, d),
+                        None => json_job(&one_line(v)),
+                    };
                     job.wrap = egui::text::TextWrapping::truncate_at_width(right - rect.left());
                     galley_at(p, rect.left(), rect.center().y, p.layout_job(job), TEXT());
                     if row.on_hover_text(v.as_str()).clicked() {
@@ -72,7 +84,11 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
                     }
                 }
             });
-            popover_foot(ui, None, &["Kept for each collection.", "Sort also lists the key of every index."]);
+            if sql.is_some() {
+                popover_foot(ui, None, &["Kept for each table, from the pages that loaded."]);
+            } else {
+                popover_foot(ui, None, &["Kept for each collection.", "Sort also lists the key of every index."]);
+            }
         });
     })
     .on_hover_text("History");

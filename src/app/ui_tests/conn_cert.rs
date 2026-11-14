@@ -1,4 +1,4 @@
-//! The client certificate rows of the PostgreSQL TLS tab. They show on PostgreSQL only and are greyed with Cloud SQL. With
+//! The client certificate rows of the PostgreSQL TLS tab. MySQL shows the files, PostgreSQL also a passphrase, and Cloud SQL greys them. With
 //! QUARRY_TEST_PGCERT and QUARRY_TEST_PGCERT_DIR set (see `db::sql::pg::cert`), the form's Test signs in with the
 //! certificate and an encrypted key whose passphrase is in the form, then fails with the passphrase cleared.
 
@@ -22,7 +22,10 @@ fn the_tls_tab_takes_a_client_certificate_and_test_signs_in_with_it() {
     let mut ui = UiApp { h };
     open_form(&mut ui, db::sql::Engine::MySql, db::sql::Addr { scheme: "mysql".into(), port: 3306, ..Default::default() });
     ui.show("CA file");
-    assert!(ui.h.query_all_by_label("Client cert").next().is_none(), "MySQL has no client certificate rows");
+    // MySQL takes the certificate and key files but has no passphrase field, since its driver cannot read an encrypted key.
+    ui.show("Client cert");
+    ui.show("Client key");
+    assert!(ui.h.query_all_by_label("Passphrase").next().is_none(), "MySQL has no passphrase row");
 
     let base = std::env::var("QUARRY_TEST_PGCERT").ok().and_then(|u| db::sql::Addr::parse(&u)).unwrap_or_else(|| db::sql::Addr { scheme: "postgres".into(), host: "h".into(), port: 5432, user: "u".into(), ..Default::default() });
     open_form(&mut ui, db::sql::Engine::Postgres, base.clone());
