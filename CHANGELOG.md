@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.46.1](https://github.com/alkanna/quarry/compare/v0.46.0...v0.46.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* bugs from two full review passes across the app ([#230](https://github.com/alkanna/quarry/issues/230)) ([ec8def4](https://github.com/alkanna/quarry/commit/ec8def4b0a44707411fbcffc239a020b155bfcb3))
+* PostgreSQL filter rules read back into rule chips ([#232](https://github.com/alkanna/quarry/issues/232)) ([f547d8d](https://github.com/alkanna/quarry/commit/f547d8dc4b2249425d50bbdcf996a25378487f73))
+
 ## [0.46.0](https://github.com/alkanna/quarry/compare/v0.45.0...v0.46.0) (2026-11-13)
 
 
