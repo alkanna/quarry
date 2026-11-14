@@ -120,7 +120,7 @@ fn live_an_alter_runs_past_the_statement_timeout() {
 fn live_plain_doubles_read_back_as_the_same_double() {
     every_server(|l, var| {
         for f in [26.75, 0.1, 1e-6, 0.30000000000000004, 123456789012345.67, 999999999999999.9, 1.0 / 3.0, -2.5e-6, 1e-7, 1e300] {
-            let lit = crate::db::copy::sql_literal(Some(&Bson::Double(f)), true, true);
+            let lit = crate::db::copy::sql_literal(crate::db::sql::Dialect::MySql, Some(&Bson::Double(f)), true, true);
             assert_eq!(l.one(&format!("SELECT ({lit}) + 0e0 = {f:e}")), "1", "{var}: {lit}");
         }
     });
