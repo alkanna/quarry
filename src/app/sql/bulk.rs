@@ -61,7 +61,7 @@ fn plan_of(f: &BulkForm, d: db::sql::Dialect, bs: bool) -> Result<BulkPlan, Stri
     } else {
         BulkOp::Delete
     };
-    Ok(BulkPlan { op, filter: f.filter.clone(), cols: p.cols.clone(), pk: p.pk.clone(), bs, expected: p.count, undo: bulk::undo_fits(p.count), engine: p.engine.clone() })
+    Ok(BulkPlan { op, filter: f.filter.clone(), cols: p.cols.clone(), pk: p.pk.clone(), bs, expected: p.count, undo: p.keeps_undo(), engine: p.engine.clone() })
 }
 
 impl App {
@@ -209,9 +209,11 @@ impl App {
             });
         });
         ui.add_space(10.0);
-        if let Some(n) = count.filter(|n| *n > 0) {
-            if bulk::undo_fits(n) {
+        if let Some(p) = f.prep.as_ref().filter(|p| p.count > 0) {
+            if p.keeps_undo() {
                 banner(ui, Notice::Info, "", &format!("Undo is available: the old rows are kept until you undo or quit, up to {} rows.", group(&db::sql::import::UNDO_MAX_ROWS.to_string())), None);
+            } else if p.pk.is_empty() {
+                banner(ui, Notice::Danger, "No undo.", &format!("{table} has no primary key to find the rows again by, so this cannot be undone."), None);
             } else {
                 banner(ui, Notice::Danger, "No undo.", &format!("Over {} rows: the old rows are not kept, so this cannot be undone.", group(&db::sql::import::UNDO_MAX_ROWS.to_string())), None);
             }

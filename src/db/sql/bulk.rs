@@ -52,6 +52,12 @@ impl BulkPrep {
     pub fn rolls_back(&self) -> bool {
         super::csv::engine_rolls_back(&self.engine)
     }
+
+    /// Whether the old rows can be kept for undo. They are found again by their key, so a table without one, or whose key
+    /// is not in SELECT *, changes without undo; the page's own key may have been read before the table lost it.
+    pub fn keeps_undo(&self) -> bool {
+        !self.pk.is_empty() && undo_fits(self.count)
+    }
 }
 
 /// How a run ended. `kept` is set when a write that should have been refused stayed, on an engine without transactions:
@@ -237,6 +243,8 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", plural(p.expected, "row", "rows"), p.engine, if p.undo { " Undo puts back the rows read before it." } else { "" })
     } else if p.undo {
         what
+    } else if p.pk.is_empty() {
+        format!("{what}. No undo was kept: the table has no primary key.")
     } else {
         format!("{what}. No undo was kept for a change this large.")
     };
@@ -341,6 +349,11 @@ mod tests {
     #[test]
     fn undo_is_kept_up_to_the_import_cap() {
         assert!(undo_fits(UNDO_MAX_ROWS) && !undo_fits(UNDO_MAX_ROWS + 1));
+        let prep = |count, pk: &[&str]| BulkPrep { count, cols: cols(), pk: pk.iter().map(|p| p.to_string()).collect(), engine: String::new() };
+        assert!(prep(3, &["id"]).keeps_undo());
+        assert!(!prep(UNDO_MAX_ROWS + 1, &["id"]).keeps_undo());
+        // Rows without a key could never be found again, so a keyless table changes without undo instead of being refused.
+        assert!(!prep(3, &[]).keeps_undo());
     }
 
     #[test]
@@ -374,6 +387,26 @@ mod tests {
             assert!(matches!(r.undo, Some((SqlUndo::Delete(ref rows), _)) if rows.len() == 3), "{var}");
             assert_eq!(l.count("quarry_bulk.moved"), 0, "{var}");
             l.sql("DROP TABLE quarry_bulk.moved");
+        });
+    }
+
+    #[test]
+    fn live_a_table_without_a_key_changes_without_undo() {
+        super::super::testing::every_server(|l, var| {
+            l.sql("CREATE DATABASE IF NOT EXISTS quarry_bulk");
+            l.sql("DROP TABLE IF EXISTS quarry_bulk.keyless");
+            l.sql("CREATE TABLE quarry_bulk.keyless (name VARCHAR(20), qty INT)");
+            l.sql("INSERT INTO quarry_bulk.keyless VALUES ('alpha', 10), ('beta', 20), ('gamma', 30)");
+            let filter = "qty > 15";
+            let p = l.w.rt.block_on(prep(&l.db, "quarry_bulk", "keyless", filter)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(p.pk.is_empty() && p.count == 2 && !p.keeps_undo(), "{var}");
+            // The plan the dialog builds from this count runs; one that asked for undo would be refused.
+            let plan = |undo| BulkPlan { op: BulkOp::Update(vec![("name".into(), Bson::String("zeta".into()))]), filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: p.count, undo, engine: p.engine.clone() };
+            assert!(l.w.rt.block_on(run(&l.db, "quarry_bulk", "keyless", &plan(true), false)).is_err(), "{var}");
+            let r = l.w.rt.block_on(run(&l.db, "quarry_bulk", "keyless", &plan(p.keeps_undo()), false)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(r.undo.is_none() && !r.kept, "{var}");
+            assert_eq!(l.one("SELECT GROUP_CONCAT(name ORDER BY qty) FROM quarry_bulk.keyless"), "alpha,zeta,zeta", "{var}");
+            l.sql("DROP TABLE quarry_bulk.keyless");
         });
     }
 }
