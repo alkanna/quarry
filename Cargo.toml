@@ -17,7 +17,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "sync", "net", "time"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 json5 = "1"
 keyring = "4"
 rfd = "0.17"

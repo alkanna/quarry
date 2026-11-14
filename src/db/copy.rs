@@ -106,8 +106,14 @@ fn json_literal(b: Option<&Bson>, numeric: bool) -> String {
     }
 }
 
+/// One CSV field, quoted when it holds a separator, quote or line break. `quote_empty` also quotes empty text, for writers
+/// whose reader would take a record of one empty field for a blank line.
+pub fn csv_field(s: &str, quote_empty: bool) -> String {
+    if s.contains([',', '"', '\n', '\r']) || (quote_empty && s.is_empty()) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
 fn csv_cell(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+    csv_field(s, false)
 }
 
 fn md_cell(s: &str) -> String {

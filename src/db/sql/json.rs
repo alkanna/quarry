@@ -2,347 +2,128 @@
 //! CSV the import already reads: the keys become the header, nested objects and arrays become JSON text, so the column
 //! mapping, the check, duplicate handling, batching and undo all work on it unchanged.
 //!
-//! The reader is written here, not taken from serde_json, because the import needs what that crate's value type loses:
-//! a number keeps its own text (a DECIMAL must not pass through f64) and an object keeps its key order. The text is read
-//! twice, one row at a time, so only the text and the CSV it becomes are in memory, never the parsed file.
+//! The text is parsed with serde_json, but each value stays the raw text it was written as, because the import needs what
+//! that crate's value type loses: a number keeps its own text (a DECIMAL must not pass through f64) and an object keeps
+//! its key order. The text is read twice, one row at a time, so only the text and the CSV it becomes are in memory, never
+//! the parsed file.
 
 use super::csv::{self, Source, MARK};
+use crate::db::copy::csv_field;
+use serde::de::{self, Deserialize, Deserializer as _, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 use std::io::Read;
 
 /// The most a file may hold. It is read whole to find every key before the first row can be written out.
 pub const JSON_MAX: u64 = 256 << 20;
 
-/// How deep arrays and objects may nest, so a hostile file cannot overflow the stack.
-const DEPTH_MAX: usize = 128;
+/// An object's keys in their written order, each with its value as the text it was written as. A repeated key appears
+/// twice, so the caller decides which one wins.
+struct Row<'a>(Vec<(String, &'a RawValue)>);
 
-/// A JSON value that keeps the order of an object's keys and a number's own text.
-#[derive(Debug, PartialEq)]
-enum J {
-    Null,
-    Bool(bool),
-    Num(String),
-    Str(String),
-    Arr(Vec<J>),
-    Obj(Vec<(String, J)>),
-}
-
-impl J {
-    /// Compact JSON text, keys in their original order.
-    fn write(&self, out: &mut String) {
-        match self {
-            J::Null => out.push_str("null"),
-            J::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            J::Num(n) => out.push_str(n),
-            J::Str(s) => write_str(s, out),
-            J::Arr(a) => {
-                out.push('[');
-                for (i, x) in a.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    x.write(out);
-                }
-                out.push(']');
+impl<'de> Deserialize<'de> for Row<'de> {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Row<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
             }
-            J::Obj(o) => {
-                out.push('{');
-                for (i, (k, x)) in o.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    write_str(k, out);
-                    out.push(':');
-                    x.write(out);
-                }
-                out.push('}');
-            }
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            J::Null => "null",
-            J::Bool(_) => "a boolean",
-            J::Num(_) => "a number",
-            J::Str(_) => "a string",
-            J::Arr(_) => "an array",
-            J::Obj(_) => "an object",
-        }
-    }
-}
-
-fn write_str(s: &str, out: &mut String) {
-    out.push_str(&serde_json::to_string(s).unwrap_or_default());
-}
-
-/// A reader over the text, remembering where it is so an error can say line and column.
-struct P<'a> {
-    t: &'a str,
-    b: &'a [u8],
-    i: usize,
-}
-
-type R<T> = Result<T, (usize, String)>;
-
-impl<'a> P<'a> {
-    fn new(t: &'a str) -> P<'a> {
-        P { t, b: t.as_bytes(), i: 0 }
-    }
-
-    fn ws(&mut self) {
-        while self.b.get(self.i).is_some_and(u8::is_ascii_whitespace) {
-            self.i += 1;
-        }
-    }
-
-    fn err<T>(&self, msg: &str) -> R<T> {
-        Err((self.i, msg.to_string()))
-    }
-
-    fn lit(&mut self, word: &str, v: J) -> R<J> {
-        if self.t[self.i..].starts_with(word) {
-            self.i += word.len();
-            Ok(v)
-        } else {
-            self.err("expected a value")
-        }
-    }
-
-    fn value(&mut self, depth: usize) -> R<J> {
-        if depth > DEPTH_MAX {
-            return self.err("nested too deeply");
-        }
-        match self.b.get(self.i) {
-            Some(b'{') => {
-                self.i += 1;
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Row<'de>, A::Error> {
                 let mut v = Vec::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b'}') {
-                    self.i += 1;
-                    return Ok(J::Obj(v));
+                while let Some(kv) = m.next_entry::<String, &RawValue>()? {
+                    v.push(kv);
                 }
-                loop {
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b'"') {
-                        return self.err("expected a key in quotes");
-                    }
-                    let k = self.string()?;
-                    self.ws();
-                    if self.b.get(self.i) != Some(&b':') {
-                        return self.err("expected a colon after the key");
-                    }
-                    self.i += 1;
-                    self.ws();
-                    v.push((k, self.value(depth + 1)?));
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b'}') => {
-                            self.i += 1;
-                            return Ok(J::Obj(v));
-                        }
-                        _ => return self.err("expected a comma or a closing brace"),
-                    }
-                }
-            }
-            Some(b'[') => {
-                self.i += 1;
-                let mut v = Vec::new();
-                self.ws();
-                if self.b.get(self.i) == Some(&b']') {
-                    self.i += 1;
-                    return Ok(J::Arr(v));
-                }
-                loop {
-                    self.ws();
-                    v.push(self.value(depth + 1)?);
-                    self.ws();
-                    match self.b.get(self.i) {
-                        Some(b',') => self.i += 1,
-                        Some(b']') => {
-                            self.i += 1;
-                            return Ok(J::Arr(v));
-                        }
-                        _ => return self.err("expected a comma or a closing bracket"),
-                    }
-                }
-            }
-            Some(b'"') => Ok(J::Str(self.string()?)),
-            Some(b't') => self.lit("true", J::Bool(true)),
-            Some(b'f') => self.lit("false", J::Bool(false)),
-            Some(b'n') => self.lit("null", J::Null),
-            Some(b'-' | b'0'..=b'9') => self.number(),
-            Some(_) => self.err("expected a value"),
-            None => self.err("the text ends where a value should be"),
-        }
-    }
-
-    /// The number as written: `-0`, `1E5` and 40 digits stay what they are.
-    fn number(&mut self) -> R<J> {
-        let start = self.i;
-        let digits = |p: &mut P| {
-            let from = p.i;
-            while p.b.get(p.i).is_some_and(u8::is_ascii_digit) {
-                p.i += 1;
-            }
-            p.i > from
-        };
-        if self.b.get(self.i) == Some(&b'-') {
-            self.i += 1;
-        }
-        match self.b.get(self.i) {
-            Some(b'0') => self.i += 1,
-            Some(b'1'..=b'9') => {
-                digits(self);
-            }
-            _ => return self.err("a number needs digits"),
-        }
-        if self.b.get(self.i) == Some(&b'.') {
-            self.i += 1;
-            if !digits(self) {
-                return self.err("a number needs digits after the point");
+                Ok(Row(v))
             }
         }
-        if matches!(self.b.get(self.i), Some(b'e' | b'E')) {
-            self.i += 1;
-            if matches!(self.b.get(self.i), Some(b'+' | b'-')) {
-                self.i += 1;
-            }
-            if !digits(self) {
-                return self.err("a number needs digits in its exponent");
-            }
-        }
-        Ok(J::Num(self.t[start..self.i].to_string()))
-    }
-
-    fn hex4(&mut self) -> R<u32> {
-        let h = self.t.get(self.i..self.i + 4).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()));
-        match h.and_then(|h| u32::from_str_radix(h, 16).ok()) {
-            Some(n) => {
-                self.i += 4;
-                Ok(n)
-            }
-            None => self.err("a \\u escape needs four hex digits"),
-        }
-    }
-
-    fn string(&mut self) -> R<String> {
-        self.i += 1;
-        let mut out = String::new();
-        loop {
-            let from = self.i;
-            while self.b.get(self.i).is_some_and(|&c| c != b'"' && c != b'\\' && c >= 0x20) {
-                self.i += 1;
-            }
-            out.push_str(&self.t[from..self.i]);
-            match self.b.get(self.i) {
-                Some(b'"') => {
-                    self.i += 1;
-                    return Ok(out);
-                }
-                Some(b'\\') => {
-                    self.i += 1;
-                    let c = self.b.get(self.i).copied();
-                    self.i += 1;
-                    match c {
-                        Some(b'"') => out.push('"'),
-                        Some(b'\\') => out.push('\\'),
-                        Some(b'/') => out.push('/'),
-                        Some(b'b') => out.push('\u{8}'),
-                        Some(b'f') => out.push('\u{c}'),
-                        Some(b'n') => out.push('\n'),
-                        Some(b'r') => out.push('\r'),
-                        Some(b't') => out.push('\t'),
-                        Some(b'u') => {
-                            let hi = self.hex4()?;
-                            let n = if (0xD800..0xDC00).contains(&hi) {
-                                if !self.t[self.i..].starts_with("\\u") {
-                                    return self.err("a high surrogate needs its low half");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xDC00..0xE000).contains(&lo) {
-                                    return self.err("a high surrogate needs its low half");
-                                }
-                                0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
-                            } else {
-                                hi
-                            };
-                            match char::from_u32(n) {
-                                Some(c) => out.push(c),
-                                None => return self.err("a lone surrogate"),
-                            }
-                        }
-                        _ => return self.err("an unknown escape"),
-                    }
-                }
-                Some(_) => return self.err("a line break or control character inside a string"),
-                None => return self.err("the string is not closed"),
-            }
-        }
+        d.deserialize_map(V)
     }
 }
 
-/// Line and column (1-based) of byte `at` of `t`.
-fn place(t: &str, at: usize) -> (usize, usize) {
-    let head = &t.as_bytes()[..at.min(t.len())];
-    let line = head.iter().filter(|&&b| b == b'\n').count() + 1;
-    let col = head.iter().rev().take_while(|&&b| b != b'\n').count() + 1;
-    (line, col)
+/// Calls `f` with the number and raw text of each item of an array.
+struct Items<'f, 'a> {
+    f: &'f mut dyn FnMut(usize, &'a RawValue) -> Result<(), String>,
+    /// Where the callback's own error goes, since a visitor can only fail with serde's error type.
+    fail: &'f mut Option<String>,
+}
+
+impl<'de> Visitor<'de> for Items<'_, 'de> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an array")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut n = 0;
+        while let Some(item) = seq.next_element::<&RawValue>()? {
+            n += 1;
+            if let Err(m) = (self.f)(n, item) {
+                *self.fail = Some(m);
+                return Err(de::Error::custom("stopped"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What kind of value a raw JSON text holds, from its first character. The text is already known to be valid.
+fn kind(raw: &RawValue) -> &'static str {
+    match raw.get().as_bytes()[0] {
+        b'n' => "null",
+        b't' | b'f' => "a boolean",
+        b'"' => "a string",
+        b'[' => "an array",
+        b'{' => "an object",
+        _ => "a number",
+    }
+}
+
+fn is_nested(raw: &RawValue) -> bool {
+    matches!(raw.get().as_bytes()[0], b'[' | b'{')
+}
+
+fn bad(e: serde_json::Error) -> String {
+    let text = e.to_string();
+    let msg = text.rsplit_once(" at line ").map_or(text.as_str(), |(m, _)| m);
+    format!("Not valid JSON at line {}, column {}: {msg}", e.line(), e.column())
+}
+
+fn row(raw: &RawValue) -> Result<Row<'_>, String> {
+    serde_json::from_str(raw.get()).map_err(bad)
 }
 
 /// Calls `f` with each object of the text in turn: the items of an array, or objects one after another. True when they
 /// were not in an array (JSON Lines). Only one object is alive at a time.
-fn each_row(t: &str, mut f: impl FnMut(Vec<(String, J)>)) -> Result<bool, String> {
+fn each_row<'t>(t: &'t str, mut f: impl FnMut(Row<'t>) -> Result<(), String>) -> Result<bool, String> {
     let t = t.strip_prefix('\u{feff}').unwrap_or(t);
-    let mut p = P::new(t);
-    let bad = |p: &P, (at, msg): (usize, String)| {
-        let (l, c) = place(p.t, at);
-        format!("Not valid JSON at line {l}, column {c}: {msg}")
-    };
     let (mut seen, mut lines) = (0usize, false);
-    loop {
-        p.ws();
-        if p.i >= p.b.len() {
-            return Ok(lines);
-        }
+    for next in serde_json::Deserializer::from_str(t).into_iter::<&RawValue>() {
+        let raw = next.map_err(bad)?;
         seen += 1;
-        if p.b[p.i] == b'[' {
-            p.i += 1;
-            let mut n = 0;
-            p.ws();
-            if p.b.get(p.i) == Some(&b']') {
-                p.i += 1;
-                continue;
-            }
-            loop {
-                p.ws();
-                let item = p.value(1).map_err(|e| bad(&p, e))?;
-                n += 1;
-                match item {
-                    J::Obj(o) => f(o),
-                    other => return Err(format!("Item {n} of the array is {}, not an object.", other.kind())),
-                }
-                p.ws();
-                match p.b.get(p.i) {
-                    Some(b',') => p.i += 1,
-                    Some(b']') => {
-                        p.i += 1;
-                        break;
+        match raw.get().as_bytes()[0] {
+            b'[' => {
+                let mut fail = None;
+                let mut item = |n: usize, item: &'t RawValue| {
+                    if item.get().starts_with('{') {
+                        f(row(item)?)
+                    } else {
+                        Err(format!("Item {n} of the array is {}, not an object.", kind(item)))
                     }
-                    _ => return Err(bad(&p, (p.i, "expected a comma or a closing bracket".into()))),
+                };
+                // The scan above already checked the text, so only the callback can fail here.
+                let r = serde_json::Deserializer::from_str(raw.get()).deserialize_seq(Items { f: &mut item, fail: &mut fail });
+                if let Some(m) = fail {
+                    return Err(m);
                 }
+                r.map_err(bad)?;
             }
-        } else {
-            match p.value(0).map_err(|e| bad(&p, e))? {
-                J::Obj(o) => {
-                    lines = true;
-                    f(o);
-                }
-                other => return Err(format!("Value {seen} is {}, not an object. Expected an array of objects or one object per line.", other.kind())),
+            b'{' => {
+                lines = true;
+                f(row(raw)?)?;
             }
+            _ => return Err(format!("Value {seen} is {}, not an object. Expected an array of objects or one object per line.", kind(raw))),
         }
     }
+    Ok(lines)
 }
 
 /// What a JSON file became.
@@ -406,16 +187,17 @@ pub fn flatten(text: &str) -> Result<Flat, String> {
     let mut rows = 0u64;
     let lines = each_row(text, |row| {
         rows += 1;
-        for (k, v) in row {
+        for (k, v) in row.0 {
             let i = *at.entry(k.clone()).or_insert_with(|| {
                 names.push(k);
                 nested.push(false);
                 names.len() - 1
             });
-            if matches!(v, J::Arr(_) | J::Obj(_)) {
+            if is_nested(v) {
                 nested[i] = true;
             }
         }
+        Ok(())
     })?;
     if rows == 0 {
         return Err("The text holds no objects to import.".into());
@@ -427,33 +209,56 @@ pub fn flatten(text: &str) -> Result<Flat, String> {
     let mut out = String::new();
     push_row(&mut out, names.iter().map(String::as_str));
     each_row(text, |row| {
-        let mut cells: Vec<Option<J>> = (0..names.len()).map(|_| None).collect();
+        let mut cells: Vec<Option<&RawValue>> = vec![None; names.len()];
         // A repeated key keeps its last value, as a parser that builds a map does.
-        for (k, v) in row {
+        for (k, v) in row.0 {
             cells[at[&k]] = Some(v);
         }
-        let texts: Vec<String> = cells.iter().map(cell_text).collect();
+        let texts = cells.iter().map(|c| cell_text(*c)).collect::<Result<Vec<_>, _>>()?;
         push_row(&mut out, texts.iter().map(String::as_str));
+        Ok(())
     })?;
     Ok(Flat { csv: out.into_bytes(), names, nested, rows, lines })
 }
 
 /// What a value is written as in the CSV, with the lead `csv::convert` reads (see `MARK`).
-fn cell_text(c: &Option<J>) -> String {
-    match c {
-        None => String::new(),
-        Some(J::Null) => format!("{MARK}N"),
-        Some(J::Bool(b)) => b.to_string(),
-        Some(J::Num(n)) => n.clone(),
-        // Text that CSV would read as a NULL, or that opens like this lead, is marked as the text it is.
-        Some(J::Str(s)) if s == "\\N" || s.starts_with(MARK) => format!("{MARK}S{s}"),
-        Some(J::Str(s)) => s.clone(),
-        Some(v) => {
-            let mut t = String::new();
-            v.write(&mut t);
-            t
+fn cell_text(c: Option<&RawValue>) -> Result<String, String> {
+    let Some(raw) = c else { return Ok(String::new()) };
+    let t = raw.get();
+    Ok(match t.as_bytes()[0] {
+        b'n' => format!("{MARK}N"),
+        b'"' => {
+            let s: String = serde_json::from_str(t).map_err(bad)?;
+            // Text that CSV would read as a NULL, or that opens like this lead, is marked as the text it is.
+            if s == "\\N" || s.starts_with(MARK) { format!("{MARK}S{s}") } else { s }
         }
+        b'[' | b'{' => compact(t)?,
+        // Booleans and numbers as written: `-0`, `1E5` and 40 digits stay what they are.
+        _ => t.to_string(),
+    })
+}
+
+/// Valid JSON text without the whitespace between tokens. Strings are written out again, so the escapes are the same
+/// whatever the file used, while keys keep their order and numbers their own text.
+fn compact(t: &str) -> Result<String, String> {
+    let (b, mut out, mut i) = (t.as_bytes(), String::with_capacity(t.len()), 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let mut j = i + 1;
+                while b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                let s: String = serde_json::from_str(&t[i..=j]).map_err(bad)?;
+                out.push_str(&serde_json::to_string(&s).unwrap_or_default());
+                i = j;
+            }
+            c if c.is_ascii_whitespace() => {}
+            c => out.push(c as char),
+        }
+        i += 1;
     }
+    Ok(out)
 }
 
 /// One CSV record. An empty value is quoted, since a line with nothing on it is not a record to the reader.
@@ -462,13 +267,7 @@ fn push_row<'a>(out: &mut String, cells: impl Iterator<Item = &'a str>) {
         if i > 0 {
             out.push(',');
         }
-        if c.is_empty() || c.contains([',', '"', '\n', '\r']) {
-            out.push('"');
-            out.push_str(&c.replace('"', "\"\""));
-            out.push('"');
-        } else {
-            out.push_str(c);
-        }
+        out.push_str(&csv_field(c, true));
     }
     out.push('\n');
 }
@@ -584,7 +383,7 @@ mod tests {
         assert_eq!(flatten("[{}]").unwrap_err(), "The objects have no keys.");
         assert_eq!(flatten("   ").unwrap_err(), "The text holds no objects to import.");
         let deep = format!("[{{\"a\": {}1{}}}]", "[".repeat(200), "]".repeat(200));
-        assert!(flatten(&deep).unwrap_err().contains("nested too deeply"));
+        assert!(flatten(&deep).unwrap_err().contains("recursion limit"));
     }
 
     #[test]

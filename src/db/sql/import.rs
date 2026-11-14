@@ -471,10 +471,6 @@ mod tests {
         (r, prog)
     }
 
-    fn csv_quote(s: &str) -> String {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    }
-
     /// A note that would end a statement, close a quote, escape a quote, break a line and hide a NULL.
     fn hostile(i: usize) -> String {
         format!("it's \"quoted\", ok\\; DROP TABLE big; -- {i}\nsecond line \\' \\N \u{1F600} `x`")
@@ -489,7 +485,7 @@ mod tests {
             l.sql("INSERT INTO quarry_ie_import.big (name, qty) VALUES ('old1', 1), ('old2', 2), ('old3', 3)");
             let mut csv = String::from("name,qty,price,note,seen\n");
             for i in 0..50_000usize {
-                let note = if i % 997 == 0 { csv_quote(&hostile(i)) } else { format!("note {i}") };
+                let note = if i % 997 == 0 { crate::db::copy::csv_field(&hostile(i), true) } else { format!("note {i}") };
                 let seen = if i % 2 == 0 { format!("{:02}/03/2026 10:{:02}", 1 + i % 28, i % 60) } else { String::new() };
                 csv.push_str(&format!("row{i},{},{}.{:02},{note},{seen}\n", i % 1000, i % 500, i % 100));
             }
@@ -628,7 +624,7 @@ mod tests {
                 let values = ["a\\", "\\'", "'; DROP TABLE bs; --", "x\\\\y", "it's", "\"; DELETE FROM bs; #", "back`tick", "\\0 \\n \\t", "caf\u{e9} \u{1F600}"];
                 let mut csv = String::from("v\n");
                 for v in values {
-                    csv.push_str(&csv_quote(v));
+                    csv.push_str(&crate::db::copy::csv_field(v, true));
                     csv.push('\n');
                 }
                 let plan = plan_for(&l, "quarry_ie_import", "bs", csv, &["v"], Dup::Stop);
