@@ -161,6 +161,12 @@ impl App {
         Some(Row { name, sub, glyph, mark: Some(mark), tag: c.meta.tag.clone(), meta, keys: String::new(), status, act: Act::Jump(j) })
     }
 
+    /// The command names and the shortcut hints they show, which are painted and so have no accessible name.
+    #[cfg(test)]
+    pub(super) fn command_hints(&self) -> Vec<(String, String)> {
+        self.commands().into_iter().map(|(_, r)| (r.name, r.keys)).collect()
+    }
+
     /// Every command that applies right now, in groups: the current tab, the active connection, the app.
     fn commands(&self) -> Vec<(String, Row)> {
         let mut out = Vec::new();

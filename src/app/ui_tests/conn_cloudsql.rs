@@ -126,6 +126,32 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = None;
 }
 
+const QUEUE: &str = r#"[
+  {"connectionName":"acme-prod:europe-west1:queue","name":"queue","region":"europe-west1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"databaseFlags":[{"name":"cloudsql_iam_authentication","value":"on"}]}}
+]"#;
+
+#[test]
+fn a_mysql_instance_fills_the_mysql_form_with_a_password_sign_in_even_when_iam_is_on() {
+    let mut ui = bare();
+    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().open_cloud_browser(false);
+    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(QUEUE) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
+    let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(vec![Project { id: "acme-prod".into(), name: String::new() }]), adc: true };
+    feed(&mut ui, Found::Start(start), "the project list", |a| a.cloud.start.is_some());
+
+    ui.show("acme-prod:europe-west1:queue");
+    ui.click("Use acme-prod:europe-west1:queue");
+    ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
+    let f = form(ui.app());
+    // The instance has the IAM flag on, but IAM sign-in is not offered for MySQL, so the form asks for a password.
+    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:queue".into(), iam: false, ip: IpKind::Public, mysql: true }));
+    assert_eq!((f.name.as_str(), f.engine, f.addr.scheme.as_str(), f.addr.port), ("queue", db::sql::Engine::MySql, "mysql", 3306));
+    assert!(f.addr.user.is_empty(), "the IAM user was filled in for MySQL");
+    ui.show_contains("Not offered for MySQL instances");
+    assert!(ui.h.query_all_by_label("Sign in with IAM").next().is_none(), "MySQL shows the IAM switch");
+    ui.show("Password");
+}
+
 /// An answer to a connect the user stopped, or one a newer connect replaced, changes nothing: dropping it is what stops
 /// its proxy or tunnel. No server is needed, since the answers are sent the way the worker sends them.
 #[test]

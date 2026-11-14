@@ -1146,6 +1146,7 @@ fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     ui.painter().line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
     ui.painter().line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
     focus_ring(ui, &r, rect, R_SM as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "New database"));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed })
 }
 
