@@ -98,11 +98,11 @@ fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.h.state_mut().status = "idle".into();
     ui.click("Explain");
-    assert!(reached_server_call(&ui), "the Explain button did not reach the server call: {}");
+    assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.h.state_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
-    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Content view: {}");
+    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Content view");
     // The Query view: the button and the shortcut explain the statement under the caret.
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
     ui.h.state_mut().status = "idle".into();
@@ -111,7 +111,7 @@ fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
     ui.h.state_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
-    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Query view: {}");
+    assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Query view");
 }
 
 #[test]
