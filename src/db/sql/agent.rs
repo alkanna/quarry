@@ -803,6 +803,199 @@ mod tests {
         });
     }
 
+    /// A run_shell job on a SQL connection as the App builds it: one relay on the connection's pool, read-only unless
+    /// `writable`, with the statement checks `sql` and a global `users`. None when Bun is missing.
+    fn shell_job(db: &Db, schema: &str, code: &str, writable: bool, sql: crate::agents::policy::ShellSql) -> Option<AgentJob> {
+        if std::process::Command::new("bun").arg("--version").output().is_err() {
+            println!("skipped: bun is not installed");
+            return None;
+        }
+        let pg = db.dialect == Dialect::Postgres;
+        let entry = json!({ "name": "shop", "db": if pg { db.pg_database() } else { schema.to_string() }, "tables": ["users"], "dialect": if pg { "postgres" } else { "mysql" } });
+        let input = json!({ "mongo": [], "sql": [entry], "code": code, "packages": [], "timeoutMs": 30000, "main": "shop" });
+        let relay = crate::db::SqlRelay { db: db.clone(), schema: schema.into(), read_only: !writable, conn_id: Default::default() };
+        let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql: vec![("shop".into(), relay)] };
+        let call = Call::RunShell { conn: crate::agents::tools::ConnRef::Id(1), db: Some(schema.into()), script: code.into() };
+        let shell = crate::db::AgentShell { job, redact: crate::db::Redact::default(), sql: Some(sql) };
+        Some(AgentJob { activity: 9, conn: 1, target: crate::db::AgentTarget::Sql(db.clone()), call, rules: std::sync::Arc::new(rules()), limits: Limits::default(), scope: Scope::default(), snap: None, keep_undo: false, writable, shell: Some(shell) })
+    }
+
+    /// What an agent's script returned, or the error the agent got.
+    fn run_script(w: &crate::db::Worker, job: AgentJob) -> Result<Value, String> {
+        let (reply, ans) = tokio::sync::oneshot::channel();
+        w.agent_run(job, reply);
+        let v = w.rt.block_on(ans).unwrap().map_err(|e| e.message)?;
+        let s = v["result"].as_str().unwrap_or_default();
+        Ok(serde_json::from_str::<Value>(s).map(|x| x["v"].clone()).unwrap_or_else(|_| json!(s)))
+    }
+
+    /// A script that tries each of `paths` in turn and returns, by name, "ran" or "refused: " and the error the script got.
+    fn tries(paths: &[(&str, &str)]) -> String {
+        let body: String = paths.iter().map(|(k, e)| format!("    [{k:?}, () => {e}],\n")).collect();
+        format!("async function run() {{\n  const out = {{}};\n  for (const [k, f] of [\n{body}  ]) {{\n    try {{ await f(); out[k] = 'ran'; }} catch (e) {{ out[k] = 'refused: ' + (e && e.message ? e.message : e); }}\n  }}\n  return out;\n}}")
+    }
+
+    /// Every path asked to be refused was, by Quarry or by the server's read-only guard. A refusal must say why, so a typo
+    /// or a missing helper in the script, which also throws, never passes for one.
+    fn all_refused(out: &Value, paths: &[(&str, &str)], var: &str) {
+        const WHY: [&str; 6] = ["read-only", "read only", "not allowed", "one statement", "locking read", "users, roles"];
+        for (k, _) in paths {
+            let got = out[*k].as_str().unwrap_or("missing");
+            let low = got.to_lowercase();
+            assert!(got.starts_with("refused") && WHY.iter().any(|w| low.contains(w)), "{var}: {k} {got}\n{out}");
+        }
+    }
+
+    /// Every path of an unlocked script ran.
+    fn all_ran(out: &Value, paths: &[(&str, &str)], var: &str) {
+        for (k, _) in paths {
+            assert_eq!(out[*k].as_str(), Some("ran"), "{var}: {k}\n{out}");
+        }
+    }
+
+    const ALLOW_ALL: crate::agents::policy::ShellSql = crate::agents::policy::ShellSql { change: crate::agents::config::Mode::Allow, structure: crate::agents::config::Mode::Allow };
+    const NO_STRUCTURE: crate::agents::policy::ShellSql = crate::agents::policy::ShellSql { change: crate::agents::config::Mode::Allow, structure: crate::agents::config::Mode::Never };
+
+    /// Write paths of a SQL script that both engines have: the sql tag, the table helpers, several statements in one text.
+    const SHARED_WRITES: [(&str, &str); 12] = [
+        ("insert", "sql`INSERT INTO users (id, email) VALUES (${50}, ${'new@example.org'})`"),
+        ("update", "sql`UPDATE users SET age = ${0}`"),
+        ("delete", "sql`DELETE FROM users WHERE id = ${1}`"),
+        ("create", "sql`CREATE TABLE made (a int)`"),
+        ("drop", "sql`DROP TABLE users`"),
+        ("truncate", "sql`TRUNCATE users`"),
+        ("helper_insert", "users.insert({ id: 51, email: 'h@example.org' })"),
+        ("helper_update", "users.update({ id: 1 }, { age: 0 })"),
+        ("helper_delete", "users.delete({ id: 2 })"),
+        ("table_update", "table('users').update({}, { age: 0 })"),
+        ("multi", "sql.unsafe('SELECT 1; DELETE FROM users')"),
+        ("call", "sql`CALL agent_p()`"),
+    ];
+
+    /// The same paths on an unlocked connection, each of which must run: proof that a refusal above came from the lock and
+    /// not from a script that never reached the relay.
+    const UNLOCKED_RUNS: [(&str, &str); 8] = [
+        ("insert", "sql`INSERT INTO users (id, email, age) VALUES (${60}, ${'w@example.org'}, ${1})`"),
+        ("helper_insert", "users.insert({ id: 62, email: 'h2@example.org', age: 3 })"),
+        ("helper_update", "users.update({ id: 60 }, { age: 2 })"),
+        ("helper_delete", "users.delete({ id: 62 })"),
+        ("table_update", "table('users').update({ id: 5 }, { age: 61 })"),
+        ("unsafe", "sql.unsafe('UPDATE users SET age = age + 1 WHERE id = 4')"),
+        ("call", "sql`CALL agent_p()`"),
+        ("function", "sql`SELECT agent_ins()`"),
+    ];
+
+    /// Reads through a script see rows already scrubbed: the script itself never holds the hidden value.
+    fn script_reads_are_scrubbed(w: &crate::db::Worker, db: &Db, schema: &str, var: &str) {
+        let read = "async function run() { const rows = await sql`SELECT id, email, password FROM users ORDER BY id`; return { n: rows.length, pw: rows[0].password, leaked: rows.some((r) => r.password === 's3cret' || r.email === 'ana@example.org') }; }";
+        let Some(j) = shell_job(db, schema, read, false, ALLOW_ALL) else { return };
+        let out = run_script(w, j).unwrap();
+        assert_eq!((out["n"].clone(), out["pw"].clone(), out["leaked"].clone()), (json!(5), json!("hidden"), json!(false)), "{var}: {out}");
+    }
+
+    /// A read-only agent script on MySQL and MariaDB: every write path is refused, those the lexer passes (a stored
+    /// function called from SELECT or SET) by the read-only session, and nothing changed on the server. Unlocked, it writes
+    /// through the same paths, while Never and users stay refused and errors lose the values they quote.
+    #[test]
+    fn live_agent_sql_shell_my_read_only_blocks_every_write() {
+        every_server(|l, var| {
+            let db = crate::db::sql::testing::unique_name("agent_sh");
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.users (id INT PRIMARY KEY, email VARCHAR(80), password VARCHAR(40), age INT, code VARCHAR(20) UNIQUE); INSERT INTO {db}.users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE {db}.audit_log (what VARCHAR(20)); CREATE PROCEDURE {db}.agent_p() INSERT INTO {db}.audit_log VALUES ('proc')"));
+            l.sql(&format!("CREATE FUNCTION {db}.agent_ins() RETURNS INT DETERMINISTIC BEGIN INSERT INTO {db}.audit_log VALUES ('fn'); RETURN 1; END"));
+            script_reads_are_scrubbed(&l.w, &l.db, &db, var);
+            let mut paths: Vec<(&str, &str)> = SHARED_WRITES.to_vec();
+            paths.extend([
+                ("replace", "sql`REPLACE INTO users (id, email) VALUES (1, 'r@example.org')`"),
+                ("rename", "sql`RENAME TABLE users TO gone`"),
+                ("multi_hidden", "sql.unsafe('SELECT 1 /*! ; DELETE FROM users */')"),
+                // The lexer passes these whole; the READ ONLY session refuses the INSERT inside the function.
+                ("function", "sql`SELECT agent_ins()`"),
+                ("set_function", "sql`SET @x = agent_ins()`"),
+                ("for_update", "sql`SELECT id FROM users FOR UPDATE`"),
+                ("share_mode", "sql`SELECT id FROM users LOCK IN SHARE MODE`"),
+                ("read_write", "sql.unsafe('SET SESSION TRANSACTION READ WRITE')"),
+                ("start", "sql.unsafe('START TRANSACTION READ WRITE')"),
+                ("outfile", "sql.unsafe(\"SELECT 1 INTO OUTFILE '/tmp/quarry_agent_out'\")"),
+                ("grant", "sql`GRANT SELECT ON users TO CURRENT_USER`"),
+                ("system", "sql`SELECT user, authentication_string FROM mysql.user`"),
+            ]);
+            let Some(j) = shell_job(&l.db, &db, &tries(&paths), false, ALLOW_ALL) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_refused(&out, &paths, var);
+            assert!(out["function"].as_str().unwrap().to_lowercase().contains("read only") || out["function"].as_str().unwrap().contains("READ ONLY"), "{var}: the session refused it, not the lexer: {out}");
+            assert!(out["for_update"].as_str().unwrap().contains("locking read"), "{var}: {out}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "5", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users WHERE age = 0 OR email LIKE 'r@%'")), "0", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "0", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{db}' AND table_name IN ('made', 'gone')")), "0", "{var}");
+            // Unlocked: every path reaches the server and data changes run, structure is set to Never, users are never the
+            // agent's, and a duplicate key's value is gone from the error the script gets.
+            let refused = [("drop", "sql`DROP TABLE users`"), ("grant", "sql`GRANT SELECT ON users TO CURRENT_USER`"), ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`")];
+            let paths: Vec<(&str, &str)> = UNLOCKED_RUNS.iter().chain(&refused).copied().collect();
+            let Some(j) = shell_job(&l.db, &db, &tries(&paths), true, NO_STRUCTURE) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_ran(&out, &UNLOCKED_RUNS, var);
+            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
+            assert!(out["grant"].as_str().unwrap().contains("users, roles"), "{var}: {out}");
+            let dup = out["dup"].as_str().unwrap();
+            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
+            assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 60")), "2", "{var}");
+            assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 5")), "61", "{var}");
+            assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 4")), "56", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "6", "{var}: one inserted, one inserted and deleted");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "2", "{var}: the procedure and the function both wrote");
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    /// The same on PostgreSQL 18 and 13, where each statement also runs in its own BEGIN READ ONLY that is rolled back:
+    /// a function that inserts, sequences, a data-modifying CTE, DO, and set_config on the session are all refused.
+    #[test]
+    fn live_agent_sql_shell_pg_read_only_blocks_every_write() {
+        every_pg(|l, var| {
+            let f = PgFixture::new(l, "agent_pgsh", "CREATE TABLE users (id int PRIMARY KEY, email text, password text, age int, code text UNIQUE); INSERT INTO users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE audit_log (what text); CREATE SEQUENCE agent_seq; CREATE FUNCTION agent_ins() RETURNS int LANGUAGE sql AS $$ INSERT INTO agent_pgsh.audit_log VALUES ('fn'); SELECT 1 $$; CREATE PROCEDURE agent_p() LANGUAGE sql AS $$ INSERT INTO agent_pgsh.audit_log VALUES ('proc') $$;");
+            script_reads_are_scrubbed(&l.w, &f.db, "agent_pgsh", var);
+            let mut paths: Vec<(&str, &str)> = SHARED_WRITES.to_vec();
+            paths.extend([
+                ("rename", "sql`ALTER TABLE users RENAME TO gone`"),
+                // The lexer passes this whole; the READ ONLY transaction refuses the INSERT inside the function.
+                ("function", "sql`SELECT agent_ins()`"),
+                ("for_update", "sql`SELECT id FROM users FOR UPDATE`"),
+                ("nextval", "sql`SELECT nextval('agent_seq')`"),
+                ("setval", "sql`SELECT setval('agent_seq', 100)`"),
+                ("cte", "sql`WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d`"),
+                ("do", "sql.unsafe('DO $$ BEGIN INSERT INTO audit_log VALUES (1); END $$')"),
+                ("read_write", "sql.unsafe(\"SELECT set_config('default_transaction_read_only', 'off', false)\")"),
+                ("begin", "sql.unsafe('BEGIN READ WRITE')"),
+                ("grant", "sql`GRANT SELECT ON users TO PUBLIC`"),
+                ("system", "sql`SELECT rolname, rolpassword FROM pg_authid`"),
+            ]);
+            let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&paths), false, ALLOW_ALL) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_refused(&out, &paths, var);
+            assert!(out["function"].as_str().unwrap().contains("read-only transaction"), "{var}: the transaction refused it, not the lexer: {out}");
+            assert_eq!(f.one("SELECT count(*)::text FROM users"), "5", "{var}");
+            assert_eq!(f.one("SELECT count(*)::text FROM users WHERE age = 0"), "0", "{var}");
+            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "0", "{var}");
+            assert_eq!(f.one("SELECT is_called::text FROM agent_seq"), "false", "{var}: the sequence never moved");
+            assert_eq!(f.one("SELECT count(*)::text FROM pg_tables WHERE schemaname = 'agent_pgsh' AND tablename IN ('made', 'gone')"), "0", "{var}");
+            let refused = [("drop", "sql`DROP TABLE users`"), ("grant", "sql`GRANT SELECT ON users TO PUBLIC`"), ("dup", "sql`INSERT INTO users (id, code) VALUES (${61}, ${'zz-unique-17'})`")];
+            let paths: Vec<(&str, &str)> = UNLOCKED_RUNS.iter().chain(&refused).copied().collect();
+            let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&paths), true, NO_STRUCTURE) else { return };
+            let out = run_script(&l.w, j).unwrap();
+            all_ran(&out, &UNLOCKED_RUNS, var);
+            assert!(out["drop"].as_str().unwrap().contains("Change structure is set to Never"), "{var}: {out}");
+            assert!(out["grant"].as_str().unwrap().contains("users, roles"), "{var}: {out}");
+            let dup = out["dup"].as_str().unwrap();
+            assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
+            assert_eq!(f.one("SELECT age::text FROM users WHERE id = 60"), "2", "{var}");
+            assert_eq!(f.one("SELECT age::text FROM users WHERE id = 5"), "61", "{var}");
+            assert_eq!(f.one("SELECT age::text FROM users WHERE id = 4"), "56", "{var}");
+            assert_eq!(f.one("SELECT count(*)::text FROM users"), "6", "{var}: one inserted, one inserted and deleted");
+            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "2", "{var}: the procedure and the function both wrote");
+        });
+    }
+
     /// A column type that closes the column list early would make MySQL run CREATE TABLE ... SELECT, copying rows of
     /// another table, hidden columns included, into one the agent can read.
     #[test]

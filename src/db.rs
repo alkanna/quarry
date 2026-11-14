@@ -24,7 +24,7 @@ pub mod collopts;
 pub mod copy;
 mod tools;
 mod worker;
-pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
+pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentShell, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
 pub use analysis::*;
 pub use code::*;
 pub use dates::*;
