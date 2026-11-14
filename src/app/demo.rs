@@ -587,6 +587,10 @@ impl App {
             _ => {}
         }
         self.sql_create_demo(which);
+        // QUARRY_TEST_SQL=routines opens a function; routines-edit, routines-run, routines-drop and routines-new show the other panes.
+        if let Some(v) = which.strip_prefix("routines") {
+            self.demo_routines(3, "shop", "shop", false, v.trim_start_matches('-'));
+        }
     }
 
     /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of

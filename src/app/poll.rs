@@ -49,6 +49,7 @@ impl App {
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
                 Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
                 Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
+                Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
                 Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlSchema { conn, database, schema, res } => {

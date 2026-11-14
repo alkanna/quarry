@@ -30,6 +30,7 @@ pub mod csv;
 pub mod import;
 pub mod dump;
 pub mod server;
+pub mod routines;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]

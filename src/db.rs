@@ -255,6 +255,8 @@ pub enum Msg {
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
     SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// An answer about the routines (functions and procedures) of a SQL schema: the list, one definition, a save or a drop; `req` is 0 for the list.
+    SqlRoutine { conn: u64, req: u64, ans: sql::routines::Answer },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
     /// What SHOW GRANTS says for the account the Users window asked about with `req`.

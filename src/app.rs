@@ -83,6 +83,7 @@ use indexes::*;
 use server::*;
 use sql::server::*;
 use sql::pg_server::*;
+use sql::routines::{RAct, Routines};
 use watch::*;
 use tabs::new_tab_click;
 use drafts::*;
@@ -210,6 +211,8 @@ pub struct App {
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
     pg_server: Option<PgServerWin>,
+    /// The routines of each SQL schema the sidebar lists, and the window of the one that is open.
+    routines: Routines,
     /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
     /// the window was closed still reaches the person.
     sql_kills: HashSet<u64>,
@@ -389,6 +392,7 @@ impl App {
             server: None,
             sql_server: None,
             pg_server: None,
+            routines: Routines::default(),
             sql_kills: HashSet::new(),
             conn_test: None,
             test_started: None,
@@ -839,6 +843,7 @@ impl eframe::App for App {
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.pg_server_window(&ctx);
+        self.routine_window(&ctx);
         self.tool_window(&ctx);
         // After the modals, so a browser opened from the connection form draws over it.
         self.cloud_browser_window(&ctx);

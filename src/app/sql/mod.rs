@@ -14,6 +14,7 @@ pub(super) mod pg_server;
 pub(super) mod query;
 pub(super) mod record;
 pub(super) mod rel;
+pub(super) mod routines;
 pub(super) mod server;
 pub(super) mod structure;
 pub(super) mod trig;
