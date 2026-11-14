@@ -148,6 +148,16 @@ fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Resp
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// The key each column of a result goes by in its column choices. A join can return two columns of one name, so the
+/// second and later ones carry their position after a separator the SQL names cannot hold.
+pub(in crate::app) fn result_keys(cols: &[Col]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(cols.len());
+    for (i, c) in cols.iter().enumerate() {
+        out.push(if out.contains(&c.name) { format!("{}\u{1}{i}", c.name) } else { c.name.clone() });
+    }
+    out
+}
+
 /// What the grid asks for: a row-menu action with its row, a check click (row and whether Shift extends a
 /// range) and the header's select all.
 #[derive(Default)]
@@ -176,16 +186,16 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
     let wide = set.widest.get_or_init(|| {
         set.cols.iter().map(|c| set.rows.iter().take(60).filter_map(|r| r.value(&c.name)).map(|v| if let mongodb::bson::raw::RawBsonRef::String(s) = v { s.chars().count() + 2 } else { 10 }).max().unwrap_or(0)).collect()
     });
+    let names = result_keys(&set.cols);
     // A chosen width wins over the measured one.
-    let widths: Vec<f32> = set.cols.iter().zip(wide).map(|(c, &longest)| prefs.widths.get(&c.name).copied().unwrap_or_else(|| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0))).collect();
+    let widths: Vec<f32> = set.cols.iter().zip(wide).enumerate().map(|(ci, (c, &longest))| prefs.widths.get(&names[ci]).copied().unwrap_or_else(|| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0))).collect();
     // The order the columns show in, as indexes into `set.cols`: pinned first, hidden ones left out. Headers drag to
     // reorder, and the choices live in `prefs`, kept for results with the same columns so the next page keeps them.
-    let names: Vec<String> = set.cols.iter().map(|c| c.name.clone()).collect();
     let shown = table::visible_cols(Some(prefs), &names, usize::MAX);
-    let order: Vec<usize> = shown.iter().filter_map(|n| set.cols.iter().position(|c| c.name == *n)).collect();
+    let order: Vec<usize> = shown.iter().filter_map(|n| names.iter().position(|c| c == n)).collect();
     let lead = CHECK_W + NUM_W;
     let total = lead + order.iter().map(|&ci| widths[ci]).sum::<f32>();
-    let aligns: Vec<u8> = set.cols.iter().map(|c| prefs.align.get(&c.name).copied().unwrap_or(if is_numeric(c.kind) { 2 } else { 0 })).collect();
+    let aligns: Vec<u8> = set.cols.iter().enumerate().map(|(ci, c)| prefs.align.get(&names[ci]).copied().unwrap_or(if is_numeric(c.kind) { 2 } else { 0 })).collect();
     let pins = shown.iter().filter(|c| prefs.pinned.contains(*c)).count();
     let mut out = GridOut::default();
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
@@ -220,7 +230,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                             }
                             // Read by the whole name: a column name can hold a dot, which a path would split.
                             let v = set.rows[i].raw().get(&c.name).ok().flatten().map(Val::R);
-                            if prefs.highlight.contains(&db::strip_indices(&c.name)) {
+                            if prefs.highlight.contains(&db::strip_indices(&names[ci])) {
                                 ui.painter().rect_filled(cell, 0, HIGHLIGHT());
                             }
                             // The row takes the clicks, so a double click finds its cell by where it landed.
@@ -318,7 +328,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                     ui.painter().rect_filled(cell, 0, hover_fill(state));
                 }
                 let dir = set.sort.iter().find(|(n, _)| *n == c.name).map(|(_, desc)| *desc);
-                let pinned = prefs.pinned.contains(&c.name);
+                let pinned = prefs.pinned.contains(&names[ci]);
                 let color = if dir.is_some() { PRIMARY() } else if pinned { WARNING() } else if st.lifted || state > 0 { BRIGHT() } else { MUTED() };
                 let label = match dir {
                     Some(false) => format!("{} ↑", c.name),
@@ -334,13 +344,13 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                 let r = r.on_hover_text("Click for column options. Shift-click adds a sort key. Sorting only orders the rows on this page.");
                 let shift_sort = r.clicked() && ui.input(|i| i.modifiers.shift);
                 if shift_sort {
-                    out.head.push((c.name.clone(), HeadAct::AddSort));
+                    out.head.push((names[ci].clone(), HeadAct::AddSort));
                 }
                 let open = if r.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if r.clicked() && !shift_sort { Some(egui::SetOpenCommand::Toggle) } else { None };
                 let mut acts = Vec::new();
                 // Clicks inside, such as the Data submenu, keep it open; each action closes it itself.
-                egui::Popup::menu(&r).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| query_col_popover(ui, &c.name, dir, prefs, &mut acts));
-                out.head.extend(acts.into_iter().map(|a| (c.name.clone(), a)));
+                egui::Popup::menu(&r).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| query_col_popover(ui, &names[ci], dir, prefs, &mut acts));
+                out.head.extend(acts.into_iter().map(|a| (names[ci].clone(), a)));
                 r
             })
         });
@@ -989,7 +999,7 @@ impl App {
                 ui.add_space(4.0);
             }
             let checked_n = s.qchecked.len();
-            let colnames: Vec<String> = s.sets[sel].cols.iter().map(|c| c.name.clone()).collect();
+            let colnames = result_keys(&s.sets[sel].cols);
             let nshown = table::visible_cols(s.qprefs.get(&colnames), &colnames, usize::MAX).len();
             let sorted_by = s.sets[sel].sort.clone();
             if !s.sets[sel].rows.is_empty() && !text_mode && (!sorted_by.is_empty() || nshown < colnames.len()) {

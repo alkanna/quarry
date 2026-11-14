@@ -354,7 +354,10 @@ impl App {
     pub(in crate::app) fn query_head_act(&mut self, ui: &egui::Ui, c: &str, act: HeadAct) {
         let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
         let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
-        let names: Vec<String> = set.cols.iter().map(|x| x.name.clone()).collect();
+        let names = super::sql::query::result_keys(&set.cols);
+        // The name the column has in the result, for the actions that read or sort by it.
+        let key = c;
+        let c = c.split('\u{1}').next().unwrap_or(c);
         let sort = set.sort.clone();
         // Only the actions that read the values need them, and the read goes through `self`.
         let rows: Vec<db::Row> = if matches!(act, HeadAct::Data(_) | HeadAct::Width(WidthPreset::Max)) { set.rows.clone() } else { Vec::new() };
@@ -382,8 +385,8 @@ impl App {
                 if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
                     let widths = &mut s.qprefs.entry(names).or_default().widths;
                     match w {
-                        Some(w) => widths.insert(c.into(), w),
-                        None => widths.remove(c),
+                        Some(w) => widths.insert(key.into(), w),
+                        None => widths.remove(key),
                     };
                 }
             }
