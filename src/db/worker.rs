@@ -1306,6 +1306,29 @@ mod tests {
     }
 
     #[test]
+    fn live_create_with_options_is_accepted_by_the_server() {
+        use crate::db::collopts::{CollForm, Kind, create_command};
+        let Some((w, rx, t)) = live("opt_base") else { return };
+        let cases: Vec<(&str, CollForm)> = vec![
+            ("opt_capped", CollForm { kind: Kind::Capped, capped_size: "4096".into(), capped_max: "5".into(), ..Default::default() }),
+            ("opt_ts", CollForm { kind: Kind::TimeSeries, ts_time: "at".into(), ts_meta: "who".into(), ts_expire: "3600".into(), ..Default::default() }),
+            ("opt_clustered", CollForm { kind: Kind::Clustered, cl_expire: "600".into(), ..Default::default() }),
+            ("opt_rules", CollForm { collate: true, locale: "fr".into(), strength: 2, validate: true, validator: "{ bsonType: 'object', required: ['a'] }".into(), level: "moderate".into(), action: "warn".into(), ..Default::default() }),
+        ];
+        for (name, form) in cases {
+            let drop_it = |n: &str| w.rt.block_on(async { t.client.database(&t.db).collection::<mongodb::bson::Document>(n).drop().await.unwrap() });
+            drop_it(name);
+            let cmd = create_command(name, &form, None).unwrap();
+            w.db_change(0, t.client.clone(), t.db.clone(), cmd, "ok".into());
+            let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
+            res.unwrap_or_else(|e| panic!("{name}: {e}"));
+            let specs: Vec<mongodb::results::CollectionSpecification> = w.rt.block_on(async { t.client.database(&t.db).list_collections().filter(doc! { "name": name }).await.unwrap().try_collect().await.unwrap() });
+            assert_eq!(specs.len(), 1, "{name}");
+            drop_it(name);
+        }
+    }
+
+    #[test]
     fn live_aggregate_returns_rows_as_bson_bytes() {
         let Some((w, rx, t)) = live("agg_rows") else { return };
         seed(&w, &t, (0..1500).map(|i| doc! { "_id": i, "g": i % 3 }).collect());
