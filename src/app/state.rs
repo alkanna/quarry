@@ -937,6 +937,8 @@ pub(super) enum Modal {
     DuplicateColl { conn: u64, db: String, coll: String, name: String },
     Undo,
     Explain { summary: db::ExplainSummary, raw: String, show_raw: bool },
+    /// The plan of a SQL statement, with its ANALYZE run.
+    SqlExplain(Box<super::sql::explain::SqlExplain>),
     ErrorDetails(Box<super::errors::ErrEntry>),
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },

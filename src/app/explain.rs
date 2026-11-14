@@ -67,14 +67,9 @@ impl App {
             if t.view == View::Sql {
                 return self.sql_run(false, true);
             }
-            // The grid has no editor to run EXPLAIN in, so a Query tab gets the SELECT its last page ran.
+            // The plan is of the SELECT the last page ran, not of what the bar holds now.
             let text = s.ran.select_sql(self.dialect_of(t.sel.conn), t.sel.space(), &t.sel.coll, &s.pk, None);
-            let (conn, db) = (t.sel.conn, t.sel.db.clone());
-            self.sql_new_query(conn, db);
-            if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-                s.query = text;
-            }
-            return self.sql_run(true, true);
+            return self.sql_explain(text);
         }
         let what = match t.view {
             View::Documents if !db::is_shell(&t.filter_txt) => Ok(db::ExplainOf::Find(Box::new(t.query.clone()))),

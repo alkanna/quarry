@@ -221,6 +221,8 @@ pub enum Msg {
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
     /// A Custom Query run: one result per statement.
     SqlRan { req: u64, sets: Vec<sql::ResultSet> },
+    /// The plan of a statement: the sets of the run that explained it.
+    SqlExplained { req: u64, sets: Vec<sql::ResultSet> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.

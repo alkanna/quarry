@@ -14,6 +14,7 @@ pub mod ddl;
 pub mod create;
 pub mod export;
 pub mod lex;
+pub mod plan;
 pub mod format;
 pub mod value;
 pub mod check;

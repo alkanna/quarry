@@ -773,6 +773,16 @@ impl Worker {
         });
     }
 
+    /// Runs the explain `script` on a session of its own, the way a Query run does, so the read-only guard, the statement
+    /// timeout and the pooler rules apply to it as they do there.
+    pub fn sql_explain(&self, req: u64, db: Db, schema: String, script: String, read_only: bool) {
+        self.spawn(async move {
+            let h = RunHandle::default();
+            let sets = run(&db, &schema, &script, read_only, &h.conn, &h.cancel, 0).await;
+            Msg::SqlExplained { req, sets }
+        });
+    }
+
     /// The row count of a paged statement, read in the background on a connection of its own under the
     /// statement timeout. `idx` is the result tab it belongs to.
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {
