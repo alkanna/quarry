@@ -242,6 +242,24 @@ pub(crate) fn refused_call(expr: &str) -> Option<String> {
     })
 }
 
+/// Every function in the text that the read-only check refuses, under both readings of backslashes, for a caller that lets
+/// some of them through and must still see the rest.
+pub(crate) fn refused_calls(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for bs in [false, true] {
+        let code = code_of(text, bs);
+        for i in 0..code.len() {
+            let (called, field) = call_or_field(&code, i);
+            let Some(name) = ident(&code[i]).filter(|_| called || field) else { continue };
+            let hit = name == UNSURE || (called && refused_function(&name)) || (field && refused_field(&name));
+            if hit && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 /// Functions whose effect stays on the session after the transaction ends: a session advisory lock stays on the backend
 /// and a dblink connection stays open there. The transaction-scoped `pg_advisory_xact_lock` family is not listed.
 const SESSION_FUNCTIONS_EXACT: &[&str] = &["pg_advisory_lock", "pg_advisory_lock_shared", "pg_try_advisory_lock", "pg_try_advisory_lock_shared"];

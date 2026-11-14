@@ -5,7 +5,8 @@ use super::Dialect;
 use std::ops::Range;
 
 mod pg;
-pub(super) use pg::{dollar_quote, refused_call};
+pub(super) use pg::dollar_quote;
+pub(crate) use pg::{refused_call, refused_calls};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
