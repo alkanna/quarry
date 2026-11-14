@@ -86,7 +86,7 @@ pub fn list_sql(d: Dialect) -> &'static str {
                 WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') \
                 ORDER BY p.proname, 3";
     }
-    "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, '' AS args, COALESCE(DTD_IDENTIFIER, '') AS returns, COALESCE(ROUTINE_BODY, '') AS lang FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE') ORDER BY ROUTINE_NAME, ROUTINE_TYPE"
+    "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, '' AS args, COALESCE(DTD_IDENTIFIER, '') AS `returns`, COALESCE(ROUTINE_BODY, '') AS lang FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE') ORDER BY ROUTINE_NAME, ROUTINE_TYPE"
 }
 
 /// A row of `list_sql`, read through `get` so a test needs no server.
@@ -183,7 +183,7 @@ pub const PG_PARAMS: &str = "SELECT (a.n)::int::text AS pos, COALESCE((p.proargn
     FROM pg_proc p CROSS JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[])) WITH ORDINALITY AS a(t, n) WHERE p.oid = $1::oid ORDER BY a.n";
 
 /// MySQL's detail row. Params: [schema, name, type].
-pub const MY_DETAIL: &str = "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, COALESCE(DTD_IDENTIFIER, '') AS returns, COALESCE(ROUTINE_BODY, '') AS lang, COALESCE(SECURITY_TYPE, '') AS security, COALESCE(IS_DETERMINISTIC, '') AS deterministic, \
+pub const MY_DETAIL: &str = "SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind, COALESCE(DTD_IDENTIFIER, '') AS `returns`, COALESCE(ROUTINE_BODY, '') AS lang, COALESCE(SECURITY_TYPE, '') AS security, COALESCE(IS_DETERMINISTIC, '') AS is_det, \
     COALESCE(SQL_DATA_ACCESS, '') AS access, COALESCE(ROUTINE_COMMENT, '') AS comment, COALESCE(DEFINER, '') AS definer, COALESCE(ROUTINE_DEFINITION, '') AS body, COALESCE(SQL_MODE, '') AS sql_mode \
     FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ? AND ROUTINE_TYPE = ?";
 
@@ -241,7 +241,7 @@ pub fn my_detail(get: &dyn Fn(&str) -> Option<String>, params: Vec<Param>, creat
         lang: g("lang"),
         security: g("security"),
         owner: g("definer"),
-        behavior: if g("deterministic").eq_ignore_ascii_case("YES") { "DETERMINISTIC".into() } else { "NOT DETERMINISTIC".into() },
+        behavior: if g("is_det").eq_ignore_ascii_case("YES") { "DETERMINISTIC".into() } else { "NOT DETERMINISTIC".into() },
         data_access: g("access"),
         comment: g("comment"),
         sql_mode: g("sql_mode"),
@@ -279,6 +279,11 @@ pub fn template(d: Dialect, kind: Kind, schema: &str) -> String {
 
 /// What a CREATE statement says about itself: its kind and, when the lexer finds it, its name without the database.
 pub fn head_of(d: Dialect, sql: &str) -> Option<(Kind, Option<String>)> {
+    head_parts(d, sql).map(|(k, _, n)| (k, n))
+}
+
+/// `head_of` with the database or schema the name is qualified with, when it is.
+pub fn head_parts(d: Dialect, sql: &str) -> Option<(Kind, Option<String>, Option<String>)> {
     let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens(sql, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let word = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
     if !word(0, "CREATE") {
@@ -293,8 +298,8 @@ pub fn head_of(d: Dialect, sql: &str) -> Option<(Kind, Option<String>)> {
     let part = |k: usize| toks.get(k).filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted)).map(|(t, r)| unquote(&sql[r.clone()], *t == Tok::Quoted));
     let dot = |k: usize| toks.get(k).is_some_and(|(t, r)| *t == Tok::Punct && &sql[r.clone()] == ".");
     // A PostgreSQL name may be quoted with double quotes, which the lexer reads as a string.
-    let name = if dot(k + 1) { part(k + 2) } else { part(k) };
-    Some((kind, name))
+    let (qual, name) = if dot(k + 1) { (part(k), part(k + 2)) } else { (None, part(k)) };
+    Some((kind, qual, name))
 }
 
 fn unquote(tok: &str, quoted: bool) -> String {
@@ -360,6 +365,10 @@ pub fn plan(d: Dialect, schema: &str, old: Option<&Detail>, text: &str, recreate
     }
     if old.header_missing.is_some() {
         return Err("Only the body could be read, so the routine cannot be saved from it.".into());
+    }
+    // A header qualified with another database would drop this routine and create one elsewhere, which nothing puts back.
+    if let Some(q) = head_parts(d, text).and_then(|h| h.1).filter(|q| !q.eq_ignore_ascii_case(schema)) {
+        return Err(format!("The header names the database {q}, but this routine is in {schema}. Create it in {q} as a new routine instead."));
     }
     if name.as_deref().is_some_and(|n| !n.eq_ignore_ascii_case(&r.name)) {
         return Err(format!("The name is {}, not {}. A different name would make another {}; use New {} for that.", name.unwrap_or_default(), r.name, r.kind.noun(), r.kind.noun()));
@@ -451,8 +460,8 @@ pub trait Steps {
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Done,
-    /// A step failed. `put_back` says the old routine was created again, or why it was not.
-    Failed { why: String, put_back: Result<(), String> },
+    /// A step failed. `put_back` is None when nothing had been dropped yet, else whether the old routine was created again.
+    Failed { why: String, put_back: Option<Result<(), String>> },
 }
 
 /// Runs the plan in order. When a statement after the DROP fails, the old definition is run to put the routine back; a DROP that
@@ -462,10 +471,10 @@ pub async fn run_steps(x: &mut impl Steps, plan: &Plan) -> Outcome {
     for (i, s) in plan.steps.iter().enumerate() {
         if let Err(why) = x.run(s).await {
             if !dropped || plan.restore.is_none() {
-                return Outcome::Failed { why, put_back: Ok(()) };
+                return Outcome::Failed { why, put_back: None };
             }
             let back = x.run(plan.restore.as_deref().unwrap_or_default()).await;
-            return Outcome::Failed { why, put_back: back };
+            return Outcome::Failed { why, put_back: Some(back) };
         }
         dropped |= i == 0 && plan.restore.is_some();
     }
@@ -474,12 +483,11 @@ pub async fn run_steps(x: &mut impl Steps, plan: &Plan) -> Outcome {
 
 /// The words of a failed change for the window. A routine that could not be put back carries its old text, so the person
 /// still has it.
-pub fn failure_text(plan: &Plan, why: &str, put_back: &Result<(), String>) -> String {
+pub fn failure_text(plan: &Plan, why: &str, put_back: &Option<Result<(), String>>) -> String {
     match (plan.restore.as_ref(), put_back) {
-        (None, _) => why.to_string(),
-        (Some(_), Ok(())) if plan.steps.len() > 1 => format!("{why} The old definition was created again, so nothing changed."),
-        (Some(_), Ok(())) => why.to_string(),
-        (Some(old), Err(back)) => format!("{why} The routine is gone and creating the old one again failed too ({back}). Its old definition, to run by hand:\n\n{old}"),
+        (None, _) | (_, None) => why.to_string(),
+        (Some(_), Some(Ok(()))) => format!("{why} The old definition was created again, so nothing changed."),
+        (Some(old), Some(Err(back))) => format!("{why} The routine is gone and creating the old one again failed too ({back}). Its old definition, to run by hand:\n\n{old}"),
     }
 }
 
@@ -572,11 +580,21 @@ struct Session<'a> {
 
 impl Steps for Session<'_> {
     async fn run(&mut self, sql: &str) -> Res<()> {
-        // Prepared, so the server parses exactly one statement whatever the text holds after it.
         let t = std::time::Instant::now();
-        let res = sqlx::query(sql).persistent(false).execute(&mut *self.c).await;
-        self.db.note(self.schema, sql, t, &res);
-        res.map(|_| ()).map_err(se)
+        // Routine DDL is refused by the prepared protocol (1295) on MySQL, DROP and CREATE alike, so it goes as text. The text is the
+        // person's own definition and runs with their own rights; the server reads the CREATE with its whole body as one statement.
+        let res = {
+            let mut s = sqlx::raw_sql(sql).fetch_many(&mut *self.c);
+            let mut out = Ok(());
+            while let Some(item) = futures_util::StreamExt::next(&mut s).await {
+                if let Err(e) = item {
+                    out = Err(e);
+                    break;
+                }
+            }
+            out
+        };
+        res.map_err(se)
     }
 }
 
@@ -670,7 +688,7 @@ mod tests {
 
     #[test]
     fn mysql_detail_without_show_create_falls_back_to_the_body() {
-        let pairs = [("name", "f"), ("kind", "FUNCTION"), ("body", "RETURN 1"), ("deterministic", "YES"), ("security", "DEFINER")];
+        let pairs = [("name", "f"), ("kind", "FUNCTION"), ("body", "RETURN 1"), ("is_det", "YES"), ("security", "DEFINER")];
         let d = my_detail(&row(&pairs), Vec::new(), None).unwrap();
         assert_eq!(d.source, "RETURN 1");
         assert!(d.header_missing.is_some());
@@ -734,6 +752,17 @@ mod tests {
         assert!(p.steps[0].starts_with("CREATE OR REPLACE DEFINER="), "{}", p.steps[0]);
         assert!(p.restore.is_none());
         assert_eq!(with_or_replace(Dialect::MariaDb, "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1"), "CREATE OR REPLACE FUNCTION f() RETURNS INT RETURN 1");
+    }
+
+    #[test]
+    fn a_header_in_another_database_is_not_an_edit() {
+        for d in [Dialect::MySql, Dialect::MariaDb] {
+            let old = detail(d, "CREATE FUNCTION `add`(a INT) RETURNS INT RETURN a");
+            let err = plan(d, "shop", Some(&old), "CREATE FUNCTION `archive`.`add`(a INT) RETURNS INT RETURN a", false).unwrap_err();
+            assert!(err.contains("archive") && err.contains("shop"), "{err}");
+            assert!(plan(d, "shop", Some(&old), "CREATE FUNCTION `shop`.`add`(a INT) RETURNS INT RETURN a", false).is_ok());
+            assert!(plan(d, "shop", Some(&old), "CREATE FUNCTION `add`(a INT) RETURNS INT RETURN a", false).is_ok());
+        }
     }
 
     #[test]
@@ -830,7 +859,7 @@ mod tests {
         assert_eq!(x.ran, ["DROP", "CREATE new", "CREATE old"]);
         let Outcome::Failed { why, put_back } = out else { panic!("expected a failure") };
         assert_eq!(why, "refused 1");
-        assert!(put_back.is_ok());
+        assert_eq!(put_back, Some(Ok(())));
         assert!(failure_text(&two_steps(), &why, &put_back).contains("created again"));
     }
 
@@ -839,14 +868,15 @@ mod tests {
         let mut x = Fake { ran: Vec::new(), fail: vec![0] };
         let out = block(run_steps(&mut x, &two_steps()));
         assert_eq!(x.ran, ["DROP"], "no restore after a drop that did not run");
-        assert!(matches!(out, Outcome::Failed { put_back: Ok(()), .. }));
+        assert!(matches!(out, Outcome::Failed { put_back: None, .. }));
+        assert_eq!(failure_text(&two_steps(), "refused 0", &None), "refused 0");
     }
 
     #[test]
     fn a_failed_restore_hands_back_the_old_text() {
         let mut x = Fake { ran: Vec::new(), fail: vec![1, 2] };
         let Outcome::Failed { why, put_back } = block(run_steps(&mut x, &two_steps())) else { panic!("expected a failure") };
-        assert!(put_back.is_err());
+        assert!(matches!(put_back, Some(Err(_))));
         let text = failure_text(&two_steps(), &why, &put_back);
         assert!(text.contains("CREATE old") && text.contains("refused 1") && text.contains("refused 2"), "{text}");
     }

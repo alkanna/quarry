@@ -197,9 +197,9 @@ fn live_postgres_routines_list_view_create_edit_recreate_and_drop() {
         assert!(locked.why.contains("locked"), "{var}: {}", locked.why);
 
         // A routine something depends on is not dropped, and not taken along.
-        l.qsql(&pool, &format!("CREATE VIEW {s}.v AS SELECT {s}.add(1::bigint, 2) AS n"));
+        l.qsql(&pool, &format!("CREATE VIEW {s}.v AS SELECT {s}.add(1, 2) AS n"));
         let all = list_of(&l.w, &l.rx, &db, "quarry_test", &s);
-        let big = all.iter().find(|r| r.name == "add" && r.args.contains("bigint")).unwrap().clone();
+        let big = all.iter().find(|r| r.name == "add" && r.args.contains("integer")).unwrap().clone();
         assert!(drop_it(&l.w, &l.rx, &db, &s, &big, false).is_err(), "{var}: the view needs it");
         assert!(list_of(&l.w, &l.rx, &db, "quarry_test", &s).iter().any(|r| r.key() == big.key()), "{var}");
         l.qsql(&pool, &format!("DROP VIEW {s}.v"));
