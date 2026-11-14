@@ -762,6 +762,11 @@ impl eframe::App for App {
         }
     }
 
+    // Persistence is on only to keep the window size and position; restoring egui's widget state would change behavior.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Here rather than in ui(): eframe skips ui() while the window is minimised or covered, and agent calls
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
