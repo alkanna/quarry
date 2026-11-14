@@ -312,7 +312,7 @@ async fn read_def(db: &Db, schema: &str, name: &str) -> Res<ViewDef> {
 
 async fn my_def(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, name: &str) -> Res<ViewDef> {
     let sql = d.create_stmt(true, schema, name);
-    let rows = sqlx::raw_sql(&sql).fetch_all(&mut *c).await.map_err(se)?;
+    let rows = sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     let create = rows.first().and_then(|r| text_at(r, 1));
     let (schema, name) = (schema.to_string(), name.to_string());
     let create = create.ok_or_else(|| format!("{name} is not a view in {schema}."))?;
@@ -447,9 +447,9 @@ async fn undo_pg(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: boo
 }
 
 async fn undo_pg_with(db: &Db, schema: &str, name: &str, u: &ViewUndo, read_only: bool, force_drop: bool) -> Res<()> {
-    let (owned, u, schema, name) = (db.clone(), u.clone(), schema.to_string(), name.to_string());
-    let run = run_locked(db, &schema, read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
-        let (db, u, schema, name) = (&owned, &u, schema.as_str(), name.as_str());
+    let (owned, u, scope, name) = (db.clone(), u.clone(), schema.to_string(), name.to_string());
+    let run = run_locked(db, &scope.clone(), read_only, &[], "Refresh the lists and check before running it again.", async move |tx| {
+        let (db, u, schema, name) = (&owned, &u, scope.as_str(), name.as_str());
         set_path(tx, db, schema).await.map_err(|x| Fail::Run(se(x)))?;
         let now = pg_def_in(tx, schema, name).await.map_err(Fail::Run)?.filter(|n| !n.materialized).ok_or_else(|| Fail::Run(format!("Not undone: the view {name} is gone.")))?;
         if now.body != u.left {
