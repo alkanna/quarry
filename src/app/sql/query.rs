@@ -614,7 +614,9 @@ impl App {
             return self.warn("Finish or cancel the cell edit first.");
         }
         if self.is_pg(sel.conn) {
-            let filter = self.dup_filter(sel.conn, &key, value);
+            // The detail line quotes a name that needs it, such as "Email", as an index definition would.
+            let col = key.strip_prefix('"').and_then(|k| k.strip_suffix('"')).map_or_else(|| key.clone(), |k| k.replace("\"\"", "\""));
+            let filter = self.dup_filter(sel.conn, &col, value);
             return self.sql_open_filtered(sel, filter);
         }
         let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };

@@ -24,6 +24,14 @@ fn a_postgresql_duplicate_opens_the_table_filtered_on_its_value() {
 }
 
 #[test]
+fn a_quoted_postgresql_column_is_quoted_once() {
+    let Some(mut ui) = demo_ui(App::load_pg_demo) else { return };
+    dup_toast(&mut ui, "error returned from database: 23505: duplicate key value violates unique constraint \"u\"\nDetail: Key (\"Email\")=(a@b.c) already exists.");
+    ui.click("Show the other row");
+    assert_eq!(ui.app().t().map(|t| t.filter_txt.clone()).as_deref(), Some("\"Email\" = 'a@b.c'"));
+}
+
+#[test]
 fn a_postgresql_key_of_two_columns_offers_no_filter() {
     let Some(mut ui) = demo_ui(App::load_pg_demo) else { return };
     dup_toast(&mut ui, "error returned from database: 23505: duplicate key value violates unique constraint \"orders_a_b_key\"\nDetail: Key (a, b)=(1, 2) already exists.");
