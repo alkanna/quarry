@@ -20,6 +20,7 @@ mod compare;
 pub(crate) mod config;
 mod conn_form;
 mod conns_panel;
+mod crumbs;
 mod conn_pg_advanced;
 mod danger;
 mod demo;

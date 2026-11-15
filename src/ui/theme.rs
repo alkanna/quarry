@@ -1136,7 +1136,7 @@ pub(crate) const PICK_CHEVRON: f32 = 26.0;
 /// Also where the macOS traffic lights are centered, so it stays 40.
 pub(crate) const HEADER_H: f32 = 40.0;
 
-pub(crate) const TAB_STRIP_H: f32 = 34.0;
+pub(crate) const TAB_STRIP_H: f32 = 46.0;
 
 pub(crate) const STATUS_H: f32 = 26.0;
 
