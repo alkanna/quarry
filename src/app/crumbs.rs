@@ -25,7 +25,7 @@ fn crumb(ui: &mut egui::Ui, text: &str, color: Color32, label: &str) -> egui::Re
     p.galley(egui::pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
     chevron(p, egui::pos2(rect.right() - 11.0, rect.center().y), true, if r.hovered() { MUTED() } else { FAINT() });
     focus_ring(ui, &r, rect, R_SM as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    a11y(&r, egui::Role::Button, label);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -88,7 +88,7 @@ fn caption_row(ui: &mut egui::Ui, text: &str) {
 
 fn crumb_row(ui: &mut egui::Ui, kind: &str, name: &str, current: &str) -> Option<String> {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(CRUMB_MENU_W, 28.0), Sense::click());
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, true, format!("{kind} {name}")));
+    a11y(&r, egui::Role::MenuItem, format_args!("{kind} {name}"));
     let on = name == current;
     let state = state_of(&r);
     let p = ui.painter();
@@ -238,6 +238,6 @@ fn lock_chip(ui: &mut egui::Ui, writes: bool) -> egui::Response {
     p.galley(egui::pos2(x, rect.center().y - g.size().y / 2.0 + optical_dy(&g)), g, ink);
     p.galley(egui::pos2(lx, rect.center().y - l.size().y / 2.0 + optical_dy(&l)), l, ink);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, if writes { "WRITES ON" } else { "READ-ONLY" }));
+    a11y(&r, egui::Role::Button, if writes { "WRITES ON" } else { "READ-ONLY" });
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

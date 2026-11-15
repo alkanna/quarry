@@ -43,7 +43,7 @@ pub(super) fn window_buttons(ui: &mut egui::Ui, full: egui::Rect) {
         let x = right - BUTTONS_W + WIN_BUTTON_W * i as f32;
         let rect = egui::Rect::from_min_max(egui::pos2(x, full.top()), egui::pos2(x + WIN_BUTTON_W, full.bottom()));
         let r = ui.interact(rect, egui::Id::unique(("window-button", i)), Sense::click());
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+        a11y(&r, egui::Role::Button, name);
         let mut state = state_of(&r);
         if i == 1 {
             state = state.max(if nc_press { 2 } else if nc_hover { 1 } else { 0 });

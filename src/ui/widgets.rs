@@ -736,6 +736,12 @@ pub(crate) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: C
     p.layout_job(job)
 }
 
+/// Names a painted widget for screen readers and the UI tests, which find widgets by these names. The name is only
+/// formatted when accessibility asks for it.
+pub(crate) fn a11y(r: &egui::Response, role: egui::Role, name: impl std::fmt::Display) {
+    r.widget_info(|| egui::WidgetInfo::labeled(role, true, &name));
+}
+
 /// A painted icon to put before a button's text, in the text's color so it follows the button's hover and press.
 pub(crate) fn icon_atom(paint: fn(&egui::Painter, egui::Pos2, Color32)) -> egui::Atom<'static> {
     egui::Atom::paint(egui::vec2(16.0, 16.0), move |ui, a| paint(ui.painter(), a.rect.center(), a.fallback_text_color))

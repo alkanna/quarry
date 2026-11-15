@@ -83,7 +83,7 @@ impl App {
                     })
                 })
                 .inner;
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Page size"));
+            a11y(&r, egui::Role::Button, "Page size");
             ui.label(stats_job(info.ms, info.stats));
             if let Some(rows) = info.grouped {
                 ui.label(RichText::new(grouped_text(rows)).size(TXT_SMALL).color(MUTED())).on_hover_text("Double-click a group to see its rows");
