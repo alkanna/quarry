@@ -51,7 +51,7 @@ fn the_scope_shows_one_connection_or_all_of_them() {
     let Some(mut ui) = demo_ui(load) else { return };
     assert!(ui.shown("Monthly revenue") && ui.shown("Slow orders lookup"));
     assert!(!ui.shown("Paid orders") && !ui.shown("Legacy export"));
-    ui.click("All connections");
+    ui.click("All");
     assert!(ui.app().prefs.lib_scope_all);
     assert!(ui.shown("Paid orders") && ui.shown("Legacy export"));
     ui.click("shop-prod");
@@ -83,7 +83,7 @@ fn a_clicked_script_gets_a_preview_with_open_run_and_new_tab() {
         assert!(ui.shown(b), "{b}");
     }
     // A filter has nothing to run.
-    ui.click("All connections");
+    ui.click("All");
     ui.click("Paid orders");
     assert!(ui.shown("Open") && ui.shown("New tab") && !ui.shown("Run all"));
     ui.click("New tab");
@@ -265,11 +265,11 @@ fn a_deleted_script_unbinds_its_tab_and_its_id_is_never_given_again() {
 fn the_scope_control_spans_the_panel_in_two_equal_halves() {
     let Some(ui) = demo_ui(load) else { return };
     let name = ui.app().active.and_then(|id| ui.app().conn(id)).map(|c| c.meta.name.clone()).expect("an active connection");
-    let all = ui.h.get_by_label("All connections").rect();
+    let all = ui.h.get_by_label("All").rect();
     let one = ui.h.query_all_by_label(&name).map(|n| n.rect()).find(|r| (r.center().y - all.center().y).abs() < 1.0).expect("the connection half of the scope");
     assert!((one.width() - all.width()).abs() < 1.0, "halves {} and {}", one.width(), all.width());
-    // The sidebar is 250 wide less its margins: two hugging labels come to far less.
-    assert!(one.width() + all.width() > 200.0, "the control spans {}", one.width() + all.width());
+    // The sidebar is 250 wide less its margins and the two buttons beside the control: two hugging labels come to far less.
+    assert!(one.width() + all.width() > 120.0, "the control spans {}", one.width() + all.width());
 }
 
 #[test]
