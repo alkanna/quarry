@@ -3,14 +3,23 @@
 name: CI
 
 # Runs only once a maintainer adds the "ci" label to the pull request, then on every push to it.
+# It also runs on master after each merge: a pull request can only restore caches made on its own branch
+# or on master, so without a master run every new pull request compiled everything from scratch.
 on:
   pull_request:
     types: [labeled, synchronize]
+  push:
+    branches: [master]
+
+# Two merges in a row only need the cache of the last one.
+concurrency:
+  group: ci-${{ github.event_name == 'push' && 'master' || github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   test:
     # Checks the label just added, so adding some other label to a "ci" pull request does not rerun it.
-    if: github.event.label.name == 'ci' || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'ci'))
+    if: github.event_name == 'push' || github.event.label.name == 'ci' || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'ci'))
     strategy:
       fail-fast: false
       matrix:
@@ -22,7 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # A failing test still leaves the compiled dependencies worth keeping, so a rerun starts warm.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       # The runners' apt mirror sometimes fails to resolve for a few minutes, which failed whole runs, so it is tried again.
       - name: Linux libraries
         if: runner.os == 'Linux'
