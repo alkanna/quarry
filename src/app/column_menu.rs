@@ -208,6 +208,10 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
         });
         item(ui, "Update values to…", HeadAct::Update, acts);
     }
+    // SQL rows are written through the bulk update dialog, which counts the rows and keeps an undo.
+    if !agg && sql {
+        item(ui, "Update values to…", HeadAct::Update, acts);
+    }
     ui.separator();
     item(ui, "Customize…", HeadAct::Customize, acts);
     ui.separator();
@@ -337,6 +341,7 @@ impl App {
                 let code = update_script(&t.sel.coll, db::Scope { filter: with_exists(t.query.filter.clone(), c), ..t.query.scope() }, Bson::Array(vec![Bson::Document(stage)]), &note);
                 self.open_in_shell(code);
             }
+            HeadAct::Update if t.sql.is_some() => self.open_bulk_with(true, Some(c.into())),
             HeadAct::Update => {
                 let note = format!("Replace null with the new value of {c}, then run.");
                 let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
