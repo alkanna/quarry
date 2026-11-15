@@ -194,6 +194,7 @@ impl App {
             v if v.starts_with("routines") => self.demo_routines(CONN, DB, SCHEMA, true, v.trim_start_matches("routines").trim_start_matches('-')),
             _ => {}
         }
+        self.demo_seed_ran();
     }
 
     /// The autocomplete schema of the public schema, which also gives the sidebar its row counts, and the values the

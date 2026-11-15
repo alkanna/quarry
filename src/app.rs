@@ -629,6 +629,7 @@ impl App {
                 if let Some(r) = st.script {
                     t.script = app.rebind(&t, r);
                 }
+                t.seed_ran();
                 app.tabs.push(t);
             }
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));

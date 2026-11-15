@@ -717,6 +717,7 @@ impl App {
             let t = &self.tabs[self.cur];
             let mut n = Tab::new(t.sel.clone());
             (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
+            n.seed_ran();
             self.tabs.insert(self.cur + 1, n);
             self.set_cur(self.cur + 1);
             self.reset_doc_state();

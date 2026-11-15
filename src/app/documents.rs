@@ -295,10 +295,6 @@ impl App {
         let fid = query_id("QUERY");
         let focused = ui.memory(|m| m.has_focus(fid));
         let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-        // A tab this bar has not drawn before takes the texts it opens with as what ran, which also covers the demo and restored tabs.
-        if t.ran_txt.is_none() {
-            t.ran_txt = Some(super::run::bar_texts(t));
-        }
         let dirty = super::run::query_dirty(t);
         let edge = if t.bar_err.is_some() { ALERT() } else if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
         let bar_err = t.bar_err.clone();
@@ -762,7 +758,6 @@ impl App {
             DocsAct::Filter => {
                 let t = self.tm().unwrap();
                 t.filter_txt = db::shell_text(&by_id());
-                t.page = 0;
                 self.run_query();
             }
             DocsAct::Update => {

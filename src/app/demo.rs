@@ -88,6 +88,7 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        self.demo_seed_ran();
         // QUARRY_TEST_CROWD=1 adds long collection names and thirty connections, for the one-line rows and the scrolling connections menu.
         if std::env::var("QUARRY_TEST_CROWD").is_ok() {
             if let Some((_, Some(c))) = self.conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
@@ -426,6 +427,8 @@ impl App {
             "bar" => {
                 self.tabs[i].filter_txt = "{ status: 'paid', total: { $gt: 50 } }}".into();
                 self.run_query();
+                // The picture is of the refused query alone, not of a line edited since the rows below.
+                self.tabs[i].seed_ran();
             }
             "toast" => {
                 self.err(DUP);
@@ -604,6 +607,14 @@ impl App {
         // QUARRY_TEST_SQL=routines opens a function; routines-edit, routines-run, routines-drop and routines-new show the other panes.
         if let Some(v) = which.strip_prefix("routines") {
             self.demo_routines(3, "shop", "shop", false, v.trim_start_matches('-'));
+        }
+        self.demo_seed_ran();
+    }
+
+    /// The demo's tabs set their query lines without running them, so what they hold is what the rows below came from.
+    pub(super) fn demo_seed_ran(&mut self) {
+        for t in &mut self.tabs {
+            t.seed_ran();
         }
     }
 

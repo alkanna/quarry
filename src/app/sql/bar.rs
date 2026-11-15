@@ -71,8 +71,6 @@ pub(in crate::app) struct Bar {
     show_draft: bool,
     /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
     adding: Option<Add>,
-    /// Whether the bar has taken the page it first showed as the one that ran.
-    ran_seen: bool,
     /// Whether the bar holds another query than the page's, worked out once a frame by `bar` so the results need not
     /// build the query again.
     pub(in crate::app) dirty: bool,
@@ -87,10 +85,6 @@ pub(in crate::app) struct Bar {
 }
 
 impl Bar {
-    pub(in crate::app) fn ran_seen(&self) -> bool {
-        self.ran_seen
-    }
-
     /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
     /// the text as it ran, so only this comparison reads the other spelling.
     pub(in crate::app) fn ran_as_shown<'a>(&self, ran: &'a PageQuery) -> std::borrow::Cow<'a, PageQuery> {
@@ -1079,13 +1073,6 @@ pub(in crate::app) fn stale_note(ui: &mut egui::Ui) -> bool {
 pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
     let mut q = page_query(t);
     let Some(s) = t.sql.as_mut() else { return false };
-    // A tab whose page this bar did not ask for (the offline demo) takes the texts it opens with as what ran.
-    if !s.bar.ran_seen {
-        s.bar.ran_seen = true;
-        if s.ran == PageQuery::default() {
-            s.ran = q.clone();
-        }
-    }
     let matched = s.matched.unwrap_or(0);
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let memo = match s.bar.memo.take() {

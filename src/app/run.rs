@@ -19,11 +19,7 @@ impl App {
                 push_history(&mut h.sort, &so);
                 push_history(&mut h.project, &p);
                 self.save_prefs();
-                let t = self.tm().unwrap();
-                t.query = q;
-                t.page = 0;
-                t.bar_err = None;
-                t.ran_txt = Some(bar_texts(t));
+                self.tm().unwrap().apply_find(q);
                 self.reload();
             }
             // Nothing ran, so the message goes under the bar and the rows stay.
@@ -79,9 +75,7 @@ impl App {
                 t.view = View::Documents;
                 t.filter_txt = text.trim().to_string();
                 t.clear_options();
-                t.query = q;
-                t.page = 0;
-                t.ran_txt = Some(bar_texts(t));
+                t.apply_find(q);
                 self.reload();
             }
             ShellKind::Aggregate(p) => {
@@ -114,9 +108,32 @@ impl App {
     }
 }
 
-/// The texts of the Documents bar, in the order `Tab::ran_txt` keeps them.
-pub(super) fn bar_texts(t: &Tab) -> [String; 7] {
-    bar_refs(t).map(|s| s.clone())
+impl Tab {
+    /// Shows the rows of a find query read from the bar: the page starts over and the bar's texts are what ran.
+    pub(super) fn apply_find(&mut self, q: Query) {
+        self.query = q;
+        self.page = 0;
+        self.bar_err = None;
+        self.ran_txt = bar_refs(self).map(|s| s.clone());
+    }
+
+    /// A header sort runs the new sort with the rest of the query that ran before, so only the sort is recorded as run: the
+    /// other boxes may hold edits that did not run.
+    pub(super) fn ran_sort(&mut self) {
+        self.ran_txt[1] = self.sort_txt.clone();
+    }
+
+    /// Takes what the query line holds as what ran, for a tab whose texts were set without a run: restored, duplicated or
+    /// built by the demo. A run or a page load records what ran itself.
+    pub(super) fn seed_ran(&mut self) {
+        self.ran_txt = bar_refs(self).map(|s| s.clone());
+        if self.sql.is_some() {
+            let q = super::sql::bar::page_query(self);
+            if let Some(s) = self.sql.as_mut() {
+                s.ran = q;
+            }
+        }
+    }
 }
 
 fn bar_refs(t: &Tab) -> [&String; 7] {
@@ -131,8 +148,8 @@ pub(super) fn query_dirty(t: &Tab) -> bool {
     }
     match &t.sql {
         // The SQL bar builds its query once a frame and keeps the answer, so the results do not build it again.
-        Some(s) => s.bar.ran_seen() && s.bar.dirty,
-        None => t.ran_txt.as_ref().is_some_and(|r| r.iter().zip(bar_refs(t)).any(|(a, b)| a != b)),
+        Some(s) => s.bar.dirty,
+        None => t.ran_txt.iter().zip(bar_refs(t)).any(|(a, b)| a != b),
     }
 }
 
@@ -181,5 +198,19 @@ mod tests {
         assert_eq!(find_query(&t).unwrap().hint, Some(Bson::Document(doc! { "status": 1 })));
         t.collation_txt = "{ strength: 'x' }".into();
         assert!(find_query(&t).err().unwrap().starts_with("Collation: "));
+    }
+
+    #[test]
+    fn texts_set_without_a_run_are_edits_until_seeded() {
+        let mut t = Tab::new(Sel { conn: 0, db: "d".into(), coll: "c".into(), ..Default::default() });
+        assert!(!query_dirty(&t), "a new tab is out of date");
+        t.filter_txt = "{ a: 1 }".into();
+        assert!(query_dirty(&t), "a typed filter is not an edit");
+        t.seed_ran();
+        assert!(!query_dirty(&t), "a seeded tab is out of date");
+        t.sort_txt = "{ a: -1 }".into();
+        t.filter_txt = "{ a: 2 }".into();
+        t.ran_sort();
+        assert!(query_dirty(&t), "a header sort hid a filter that did not run");
     }
 }
