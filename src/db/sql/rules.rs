@@ -796,7 +796,7 @@ mod tests {
     fn filter_help_shows_each_dialects_own_operators() {
         let pg = filter_help(Dialect::Postgres);
         let my = filter_help(Dialect::MySql);
-        assert!(pg.contains("\"name\" ILIKE '%paid%'") && pg.contains("\"name\" ~ '^[0-9]+$'"), "{pg}");
+        assert!(pg.contains("\"name\" ILIKE '%paid%'") && pg.contains("\"name\"::text ~ '^[0-9]+$'"), "{pg}");
         assert!(my.contains("`name` LIKE '%paid%'") && my.contains("`name` REGEXP '^[0-9]+$'") && !my.contains("ILIKE"), "{my}");
     }
 
