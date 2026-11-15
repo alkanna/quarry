@@ -755,8 +755,6 @@ impl App {
             self.script_banners(ui);
         }
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view, mut run_sel) = (false, false, false, false, false, None, false, None);
-        let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
-        let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
         let selection = self.editor_selection(ui.ctx());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
