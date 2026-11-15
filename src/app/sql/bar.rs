@@ -73,6 +73,8 @@ pub(in crate::app) struct Bar {
     adding: Option<Add>,
     /// Whether the bar has taken the page it first showed as the one that ran.
     ran_seen: bool,
+    /// A WHERE text as it ran and as the rules respelled it.
+    respelled: Option<(String, String)>,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
     memo: Option<ColsMemo>,
     /// Whether the WHERE text read as rules, for the text, the column pairs and the mode it was read with.
@@ -84,6 +86,16 @@ pub(in crate::app) struct Bar {
 impl Bar {
     pub(in crate::app) fn ran_seen(&self) -> bool {
         self.ran_seen
+    }
+
+    /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
+    /// the text as it ran, so only this comparison reads the other spelling.
+    pub(in crate::app) fn ran_as_shown(&self, ran: &PageQuery) -> PageQuery {
+        let mut r = ran.clone();
+        if let Some((from, to)) = &self.respelled && r.filter == *from {
+            r.filter = to.clone();
+        }
+        r
     }
 }
 
@@ -1056,12 +1068,12 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         let mut all = b.rules.clone();
         all.extend(b.draft.clone());
         let out = rules::to_sql(&all, b.any, d, bs);
-        if s.ran.filter == t.filter_txt {
-            s.ran.filter = out.clone();
+        if out != t.filter_txt {
+            b.respelled = Some((t.filter_txt.clone(), out.clone()));
         }
         q.filter = out;
     }
-    let dirty = q != s.ran;
+    let dirty = q != b.ran_as_shown(&s.ran);
     let (mut copy, mut save_view) = (false, false);
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);

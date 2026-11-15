@@ -126,7 +126,7 @@ pub(super) fn query_dirty(t: &Tab) -> bool {
         return false;
     }
     match &t.sql {
-        Some(s) => s.bar.ran_seen() && sql::bar::page_query(t) != s.ran,
+        Some(s) => s.bar.ran_seen() && sql::bar::page_query(t) != s.bar.ran_as_shown(&s.ran),
         None => t.ran_txt.as_ref().is_some_and(|r| *r != bar_texts(t)),
     }
 }
