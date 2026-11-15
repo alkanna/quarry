@@ -28,6 +28,7 @@ impl App {
     pub(in crate::app) fn put_sql_schema(&mut self, conn: u64, key: String, schema: Arc<db::sql::schema::Schema>) {
         self.sql_rows.insert((conn, key.clone()), schema.tables.iter().filter_map(|t| Some((t.name.clone(), t.rows?))).collect());
         self.sql_schema.insert((conn, key), schema);
+        self.lint_schema_changed(conn);
     }
 
     /// Sends what an input asked for while it was drawn: the schema's tables and columns the first time one of its inputs

@@ -5,18 +5,19 @@
 use super::lex::{self, Tok};
 use super::{Db, Dialect};
 use sqlx::{AssertSqlSafe, Connection, Executor, SqlSafeStr};
+use std::ops::Range;
 use std::time::Duration;
 
-/// What the server refused in a statement. `at` is a byte offset into it, at the token to mark. `warn` is a name the
+/// What the server refused in a statement. `span` is the bytes of the token to mark, on one line. `warn` is a name the
 /// server does not know, which an earlier statement of the script may still create, so it is not called an error.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lint {
-    pub at: usize,
+    pub span: Range<usize>,
     pub msg: String,
     pub warn: bool,
 }
 
-/// Longer statements are pasted dumps, not typing, and are never sent on a pause.
+/// Longer statements are pasted dumps, not typing; the editor never sends them.
 pub const LINT_MAX: usize = 64 * 1024;
 
 /// PostgreSQL's unknown table, column, type and schema. An unknown function is 42883 too, but so is an operator that does
@@ -29,23 +30,24 @@ const MY_UNKNOWN: [u16; 5] = [1146, 1054, 1305, 1049, 1109];
 /// a syntax error nor an unknown name; `Err` when the check could not run (no connection, a lock, a timeout), so the
 /// statement is not taken as clean.
 pub(super) async fn check(db: &Db, schema: &str, stmt: &str) -> Result<Option<Lint>, ()> {
-    if stmt.trim().is_empty() || stmt.len() > LINT_MAX {
+    if stmt.trim().is_empty() {
         return Ok(None);
     }
-    // The server's own lock timeout ends a parse that waits behind an ALTER first; this only covers a server that hangs.
-    let r = tokio::time::timeout(Duration::from_secs(5), async {
+    let found = async {
         match db.dialect {
             Dialect::Postgres => pg(db, schema, stmt).await,
             _ => my(db, schema, stmt).await,
         }
-    });
-    r.await.map_err(|_| ())?
+    };
+    // The server's own lock timeout ends a parse that waits behind an ALTER first; this only covers a server that hangs.
+    let lint = tokio::time::timeout(Duration::from_secs(5), found).await.map_err(|_| ())??;
+    Ok(lint.map(|(at, msg, warn)| Lint { span: span_at(stmt, at, db.dialect), msg: crate::db::lint_wording(&msg, warn), warn }))
 }
 
 /// Parse and Describe inside a read-only transaction that is rolled back, on a pooled connection: the schema is a SET
 /// LOCAL, and the named statement sqlx makes is closed before the transaction ends, so the connection goes back as it
 /// came. Behind a pooler the transaction keeps every message on one backend, as `Conn::describe` relies on.
-async fn pg(db: &Db, schema: &str, stmt: &str) -> Result<Option<Lint>, ()> {
+async fn pg(db: &Db, schema: &str, stmt: &str) -> Result<Option<Found>, ()> {
     let mut locals = if schema.is_empty() { String::new() } else { format!("{}; ", db.pg_set_path(schema)) };
     locals.push_str("SET LOCAL lock_timeout = '1s'");
     let mut c = db.pg_pool().map_err(|_| ())?.acquire().await.map_err(|_| ())?;
@@ -69,13 +71,13 @@ async fn pg(db: &Db, schema: &str, stmt: &str) -> Result<Option<Lint>, ()> {
         Some(sqlx::postgres::PgErrorPosition::Original(p)) => stmt.char_indices().map(|(i, _)| i).chain([stmt.len()]).nth(p.saturating_sub(1)).unwrap_or(stmt.len()),
         _ => name_at(stmt, d.message(), Dialect::Postgres),
     };
-    Ok(Some(Lint { at, msg: crate::db::lint_wording(d.message(), warn), warn }))
+    Ok(Some((at, d.message().to_string(), warn)))
 }
 
 /// COM_STMT_PREPARE on a connection of its own, closed afterwards so the prepared statement and the USE go with it.
 /// ponytail: one connection per check, which through a tunnel is a full sign-in per pause; keep a checker connection
 /// per Db if that shows.
-async fn my(db: &Db, schema: &str, stmt: &str) -> Result<Option<Lint>, ()> {
+async fn my(db: &Db, schema: &str, stmt: &str) -> Result<Option<Found>, ()> {
     let mut conn = db.acquire_conn().await.map_err(|_| ())?;
     let r = async {
         let c = conn.my().map_err(|_| ())?;
@@ -93,23 +95,33 @@ async fn my(db: &Db, schema: &str, stmt: &str) -> Result<Option<Lint>, ()> {
     let d = err.as_database_error().and_then(|d| d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()).ok_or(())?;
     let (n, msg) = (d.number(), d.message());
     let at = match n {
-        1064 => mysql_near(stmt, msg),
+        1064 => near_at(stmt, msg),
         n if MY_UNKNOWN.contains(&n) => name_at(stmt, msg, db.dialect),
         1205 => return Err(()),
         _ => return Ok(None),
     };
-    let warn = n != 1064;
-    Ok(Some(Lint { at, msg: crate::db::lint_wording(msg, warn), warn }))
+    Ok(Some((at, msg.to_string(), n != 1064)))
 }
 
-/// Where a MySQL syntax error points. The server gives no offset, only the text from the failing token on (`near '...'`,
-/// cut at 80 characters, empty at the end) and its line. An uncut text is the tail of the statement, so it is matched
-/// there and never at an earlier copy of the same words. A sentence in another language marks the start.
-fn mysql_near(stmt: &str, msg: &str) -> usize {
+/// What the server said of a statement before it is worded: a byte offset into it, its sentence, and whether it is a warning.
+type Found = (usize, String, bool);
+
+/// The token at byte `at` of `stmt`, cut at its first line break (a string or comment can span lines). Past the last
+/// token is the end of the statement, which the last token stands for.
+fn span_at(stmt: &str, at: usize, d: Dialect) -> Range<usize> {
+    let toks = lex::tokens(stmt, d);
+    let mut code = toks.into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).map(|(_, r)| r);
+    let mut last = None;
+    let r = code.find(|r| { last = Some(r.clone()); r.end > at }).or(last).unwrap_or(0..stmt.len());
+    r.start..r.start + stmt[r.clone()].find('\n').unwrap_or(r.len())
+}
+
+/// Where a MySQL syntax error points. The server gives no offset, only the text from the failing token on and its line
+/// (`db::mysql_near`). An uncut text is the tail of the statement, so it is matched there and never at an earlier copy of
+/// the same words. A sentence in another language marks the start.
+fn near_at(stmt: &str, msg: &str) -> usize {
     let found = || {
-        let i = msg.rfind("' at line ")?;
-        let line: usize = msg[i + 10..].trim().parse().ok()?;
-        let near = &msg[msg[..i].find(" near '")? + 7..i];
+        let (near, line) = crate::db::mysql_near(msg)?;
         if stmt.ends_with(near) {
             return Some(stmt.len() - near.len());
         }
@@ -138,16 +150,24 @@ mod tests {
     #[test]
     fn mysql_near_finds_the_failing_token_on_its_line() {
         let msg = "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'FRO A' at line 1";
-        assert_eq!(mysql_near("SELCT ( FRO A", msg), 8);
+        assert_eq!(near_at("SELCT ( FRO A", msg), 8);
         assert_eq!(crate::db::lint_wording(msg, false), "Syntax error near 'FRO A'");
         // A cut text is looked for from the start of its line.
         let stmt = format!("SELECT 1\nFROM t\nWHER x = 1 {}", "y ".repeat(60));
         let msg = format!("... MariaDB server version for the right syntax to use near '{}' at line 3", &stmt[stmt.find("x = 1").unwrap()..][..80]);
-        assert_eq!(mysql_near(&stmt, &msg), stmt.find("x = 1").unwrap());
+        assert_eq!(near_at(&stmt, &msg), stmt.find("x = 1").unwrap());
         // An uncut one is the tail, not an earlier copy.
-        assert_eq!(mysql_near("SELECT 1 1", "... to use near '1' at line 1"), 9);
-        assert_eq!(mysql_near("SELECT (", "... to use near '' at line 1"), 8);
-        assert_eq!(mysql_near("SELECT (", "Erreur de syntaxe"), 0);
+        assert_eq!(near_at("SELECT 1 1", "... to use near '1' at line 1"), 9);
+        assert_eq!(near_at("SELECT (", "... to use near '' at line 1"), 8);
+        assert_eq!(near_at("SELECT (", "Erreur de syntaxe"), 0);
+    }
+
+    #[test]
+    fn a_mark_covers_one_token_on_one_line() {
+        assert_eq!(span_at("SELCT ( FRO A", 0, Dialect::MySql), 0..5);
+        assert_eq!(span_at("SELECT (", 8, Dialect::MySql), 7..8);
+        assert_eq!(span_at("SELECT 'a\nb' x", 7, Dialect::MySql), 7..9);
+        assert_eq!(span_at("SELECT 1 -- note", 16, Dialect::MySql), 7..8);
     }
 
     #[test]
@@ -164,11 +184,11 @@ mod tests {
     fn pg_cases(l: &LivePg, schema: &str, var: &str) {
         let f = PgFixture::new(l, schema, "CREATE TABLE things (id int PRIMARY KEY);");
         let go = |s: &str| l.w.rt.block_on(check(&f.db, schema, s)).unwrap_or_else(|_| panic!("{var}: the check did not run for {s}"));
-        assert_eq!(go("SELCT ( FRO things").map(|e| (e.at, e.warn)), Some((0, false)), "{var}");
-        assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.at, e.warn)), Some((27, false)), "{var}: the end of input");
-        assert_eq!(go("CREATE TABLE (id int)").map(|e| (e.at, e.warn)), Some((13, false)), "{var}: DDL");
-        assert_eq!(go("SELECT nope FROM things").map(|e| (e.at, e.warn)), Some((7, true)), "{var}");
-        assert_eq!(go("SELECT * FROM nothings").map(|e| (e.at, e.warn)), Some((14, true)), "{var}");
+        assert_eq!(go("SELCT ( FRO things").map(|e| (e.span.start, e.warn)), Some((0, false)), "{var}");
+        assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((27, false)), "{var}: the end of input");
+        assert_eq!(go("CREATE TABLE (id int)").map(|e| (e.span.start, e.warn)), Some((13, false)), "{var}: DDL");
+        assert_eq!(go("SELECT nope FROM things").map(|e| (e.span.start, e.warn)), Some((7, true)), "{var}");
+        assert_eq!(go("SELECT * FROM nothings").map(|e| (e.span.start, e.warn)), Some((14, true)), "{var}");
         assert_eq!(go("SELECT 'a'::text + 1").map(|e| e.warn), Some(false), "{var}: a missing operator is an error");
         for ok in ["SELECT id FROM things", "CREATE TABLE made (id int)", "INSERT INTO things VALUES (1)", "BEGIN", "ANALYZE things"] {
             assert_eq!(go(ok), None, "{var}: {ok}");
@@ -202,11 +222,11 @@ mod tests {
             l.sql(&format!("CREATE TABLE `{}`.things (id int PRIMARY KEY)", f.name));
             let go = |s: &str| l.w.rt.block_on(check(&l.db, &f.name, s)).unwrap_or_else(|_| panic!("{var}: the check did not run for {s}"));
             let e = go("SELCT ( FRO things").unwrap_or_else(|| panic!("{var}: no syntax error"));
-            assert_eq!((e.at, e.warn, e.msg.as_str()), (0, false, "Syntax error near 'SELCT ( FRO things'"), "{var}");
-            assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.at, e.warn)), Some((27, false)), "{var}: the end of input");
-            assert_eq!(go("SELECT id\nFROM things\nWHER id = 1").map(|e| e.at), Some(27), "{var}: a later line");
-            assert_eq!(go("SELECT nope FROM things").map(|e| (e.at, e.warn)), Some((7, true)), "{var}");
-            assert_eq!(go("SELECT * FROM nothings").map(|e| (e.at, e.warn)), Some((14, true)), "{var}");
+            assert_eq!((e.span.start, e.warn, e.msg.as_str()), (0, false, "Syntax error near 'SELCT ( FRO things'"), "{var}");
+            assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((27, false)), "{var}: the end of input");
+            assert_eq!(go("SELECT id\nFROM things\nWHER id = 1").map(|e| e.span.start), Some(27), "{var}: a later line");
+            assert_eq!(go("SELECT nope FROM things").map(|e| (e.span.start, e.warn)), Some((7, true)), "{var}");
+            assert_eq!(go("SELECT * FROM nothings").map(|e| (e.span.start, e.warn)), Some((14, true)), "{var}");
             for ok in ["SELECT id FROM things", "CREATE TABLE made (id int)", "INSERT INTO things VALUES (1)", "USE mysql"] {
                 assert_eq!(go(ok), None, "{var}: {ok}");
             }

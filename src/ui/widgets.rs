@@ -1388,3 +1388,11 @@ pub(crate) fn paint_eye_off(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     paint_eye(p, c, color);
     p.line_segment([c + egui::vec2(-6.0, 5.0), c + egui::vec2(6.0, -5.0)], s);
 }
+
+/// A zigzag under text from `x` at baseline `y`, the mark of a problem in an editor.
+pub(crate) fn wavy_line(p: &egui::Painter, x: std::ops::RangeInclusive<f32>, y: f32, color: Color32) {
+    let (x0, x1) = (*x.start(), *x.end());
+    let xs = (0..).map(|i| x0 + i as f32 * 2.5).take_while(|&v| v < x1).chain([x1]);
+    let pts = xs.enumerate().map(|(i, v)| egui::pos2(v, y + if i % 2 == 0 { 1.0 } else { -1.0 })).collect();
+    p.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
+}
