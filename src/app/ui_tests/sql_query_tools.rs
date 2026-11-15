@@ -33,7 +33,7 @@ fn stop_replaces_run_statement_only_while_a_run_is_in_flight() {
 
 #[test]
 fn history_and_library_sit_in_the_toolbar_with_labels() {
-    let Some(mut ui) = query_demo() else { return };
+    let Some(ui) = query_demo() else { return };
     let run = ui.h.get_by_label("Format").rect();
     let (history, library) = (ui.h.get_by_label("History").rect(), ui.h.get_by_label_contains("Library").rect());
     assert!((history.center().y - run.center().y).abs() < 6.0, "History is not on the toolbar row");

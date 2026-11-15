@@ -969,7 +969,7 @@ impl App {
                 }
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let info = s.caret_info(dialect);
-                if let Some((r, _, _)) = info.stmt.filter(|p| p.2 > 1) {
+                if let Some((r, _, _)) = info.stmt.as_ref().filter(|p| p.2 > 1) {
                     let at = |b: usize| s.query[..b].chars().count();
                     let (a, z) = (g.pos_from_cursor(CCursor::new(at(r.start))), g.pos_from_cursor(CCursor::new(at(r.end))));
                     let band_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), gp.y + a.top()), egui::pos2(rect.right(), gp.y + z.bottom()));
