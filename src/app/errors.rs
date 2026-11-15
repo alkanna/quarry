@@ -162,7 +162,7 @@ fn paint_kind(p: &egui::Painter, c: egui::Pos2, k: ErrKind, color: Color32) {
             p.line_segment([pt(3.5, 0.0), pt(3.5, 2.5)], s);
         }
         ErrKind::Timeout => paint_clock(p, c, color),
-        ErrKind::Lost | ErrKind::Unreachable | ErrKind::Tunnel | ErrKind::CloudSql => {
+        ErrKind::Lost | ErrKind::Unreachable | ErrKind::Tunnel | ErrKind::Proxy | ErrKind::CloudSql => {
             p.rect_stroke(egui::Rect::from_min_max(pt(-5.0, -3.0), pt(5.0, 4.0)), 2.0, s, egui::StrokeKind::Middle);
             p.line_segment([pt(-2.5, -3.0), pt(-2.5, -7.0)], s);
             p.line_segment([pt(2.5, -3.0), pt(2.5, -7.0)], s);
@@ -673,6 +673,7 @@ impl App {
         let raw = raw.clone();
         let (name, uri) = (c.meta.name.clone(), c.masked_uri.clone());
         let ssh = c.meta.ssh.is_some();
+        let proxy = c.meta.proxy.is_some();
         // The latest logged error of this connection; after Clear, one built by the same rule.
         let e = match self.errors.iter().rev().find(|e| e.conn == Some(id) && e.raw == raw) {
             Some(e) => e.clone(),
@@ -689,6 +690,9 @@ impl App {
         if ssh {
             steps.push("Opened the SSH tunnel".into());
         }
+        if proxy {
+            steps.push("Reached the SOCKS5 proxy".into());
+        }
         steps.push(format!("Found {host}"));
         steps.push("Opened a connection".into());
         if tls {
@@ -700,10 +704,10 @@ impl App {
         steps.push("Listed the databases".into());
         let low = raw.to_lowercase();
         let failed = match e.ex.kind {
-            ErrKind::Tunnel | ErrKind::CloudSql => 0,
-            ErrKind::Unreachable if low.contains("lookup") || low.contains("servname") || low.contains("not known") => usize::from(ssh),
-            ErrKind::Unreachable | ErrKind::Lost => usize::from(ssh) + 1,
-            ErrKind::Tls => usize::from(ssh) + 2,
+            ErrKind::Tunnel | ErrKind::Proxy | ErrKind::CloudSql => 0,
+            ErrKind::Unreachable if low.contains("lookup") || low.contains("servname") || low.contains("not known") => usize::from(ssh || proxy),
+            ErrKind::Unreachable | ErrKind::Lost => usize::from(ssh || proxy) + 1,
+            ErrKind::Tls => usize::from(ssh || proxy) + 2,
             ErrKind::SignIn => steps.iter().position(|s| s.starts_with("Signed in")).unwrap_or(steps.len() - 1),
             _ => steps.len() - 1,
         };
@@ -711,6 +715,7 @@ impl App {
             ErrKind::SignIn => &["The password was changed, or was saved for another user.", "The user is defined in another database than the auth source.", "On Atlas, the database user exists in this project and its IP is allowed."],
             ErrKind::Unreachable | ErrKind::Lost => &["The host name and port are right.", "A VPN is needed to reach this network.", "The server only accepts connections through an SSH tunnel."],
             ErrKind::Tls => &["The CA file in the connection's TLS settings signs this server's certificate.", "The host name matches the certificate."],
+            ErrKind::Proxy => &["The proxy host and port are right, and the proxy is running.", "The proxy user and password are right, if it asks for one.", "The proxy is allowed to connect to the database host and port."],
             ErrKind::Tunnel => &["The SSH host, port, user and key are right.", "The SSH server's host key has not changed."],
             ErrKind::CloudSql => &["IAM sign-in has Application Default Credentials (`gcloud auth application-default login`); a password sign-in has gcloud signed in (`gcloud auth login`) or those credentials.", "The account may connect to the instance (Cloud SQL Client role).", "The instance name is project:region:instance, and its IP kind (public, private or PSC) is reachable from here."],
             ErrKind::Privilege => &["The user may sign in but not list databases. Name a database in the connection string."],

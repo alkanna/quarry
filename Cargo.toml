@@ -11,6 +11,8 @@ eframe = { version = "0.37", features = ["persistence"] }
 # Only for its bundled monochrome icon font, used for toolbar icons; eframe already depends on it.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 mongodb = { version = "3", features = ["socks5-proxy"] }
+# The SOCKS5 client for SQL connections; mongodb already builds it for its own proxy option.
+fast-socks5 = "0.10"
 # MySQL and MariaDB. Postgres and SQLite are one feature each when they come. Runtime queries only, no macros.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "mysql-rsa", "postgres"] }
 # Executor::describe sits behind the drivers' offline feature since sqlx 0.9; enabling it here avoids the macros crate.

@@ -707,9 +707,6 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let sess = PgSession::new(adv, super::advanced::system_zone_name())?;
     let (timeout, ms) = adv.timeouts(timeout);
-    if net.cloud_sql.is_some() && net.ssh.is_some() {
-        return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
-    }
     if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
         return Err(super::pg::cert::VERIFY_CA_NO_CA.into());
     }
@@ -736,15 +733,9 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         let port = p.port;
         (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
     } else {
-        let tunnel = match &net.ssh {
-            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), false).await?),
-            None => None,
-        };
-        match tunnel {
-            Some(t) => {
-                let port = t.port;
-                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
-            }
+        let way = super::worker::open_carrier(net, &a, false, timeout).await?;
+        match way.as_ref().and_then(crate::db::Way::tunnel).map(|t| t.port) {
+            Some(port) => (way, "127.0.0.1".to_string(), port, a.ssl_mode),
             None => (None, a.host.clone(), a.port, a.ssl_mode),
         }
     };
@@ -753,7 +744,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // PostgreSQL to the relay.
     let mut client_cert = client_cert;
     let sent_cert = client_cert.is_some();
-    let relay = match super::pg::tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+    let relay = match super::pg::tls::needed(mode, way.as_ref().is_some_and(crate::db::Way::is_forwarded), !a.ssl_ca.trim().is_empty()) {
         true => Some(super::pg::tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
     };
@@ -844,7 +835,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             Some(r) => r.explain(m),
             None => m,
         },
-    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg::cert::CERT_ALERT) } else { m })?;
+    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg::cert::CERT_ALERT) } else { m }).map_err(|m| crate::db::Way::blame_proxy(way.as_ref(), m))?;
     let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     pools.relay = relay;
     let db = Db {

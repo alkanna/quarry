@@ -4287,6 +4287,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "fast-socks5",
  "flate2",
  "futures-util",
  "hmac",

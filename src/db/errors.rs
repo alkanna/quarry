@@ -8,6 +8,8 @@ pub enum ErrKind {
     SignIn,
     Unreachable,
     Tunnel,
+    /// The user's SOCKS5 proxy refused, could not be reached, or could not reach the server.
+    Proxy,
     /// The Cloud SQL proxy or gcloud failed, or Cloud SQL refused an IAM sign-in.
     CloudSql,
     Tls,
@@ -275,6 +277,9 @@ pub fn classify(raw: &str) -> ErrKind {
     // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
     if ["cloud sql proxy", "cloud sql:", "cloud sql iam"].iter().any(|p| low.starts_with(p)) {
         ErrKind::CloudSql
+    } else if low.starts_with("the socks5 proxy") || low.starts_with("could not find the socks5 proxy") {
+        // Before SignIn: a refused proxy login says "authentication", and the cause is the proxy, not the database.
+        ErrKind::Proxy
     } else if client_cert_problem(raw).is_some() {
         // Before SignIn: the server refuses a missing certificate with 28000, and a password is not the cause.
         ErrKind::Tls
@@ -347,6 +352,18 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.title = format!("Could not reach {host}");
             ex.hint = if low.contains("lookup") || low.contains("servname") || low.contains("service not known") { "The host name could not be found. Check its spelling, or whether it only resolves on a VPN.".into() } else { "No answer in time. The host may be down, or only reachable through a VPN or an SSH tunnel.".into() };
             ex.fixes = vec![Fix::Retry, Fix::EditConn];
+        }
+        ErrKind::Proxy => {
+            (ex.title, ex.hint) = if low.contains("refused the login") {
+                ("The SOCKS5 proxy refused the login".into(), "The proxy is there, but it did not accept the user name and password on the connection's Proxy tab. Check them, or clear them if the proxy takes none.".to_string())
+            } else if low.contains("did not answer") || low.contains("could not be reached") || low.contains("could not find") {
+                ("The SOCKS5 proxy could not be reached".into(), format!("Check the host and port on the connection's Proxy tab, and that the proxy is running. {said}"))
+            } else if low.contains(" could not reach ") {
+                ("The SOCKS5 proxy could not reach the server".into(), format!("The proxy answered but could not connect to {host}. Check the host and port, and that the proxy's network can reach them. {said}"))
+            } else {
+                ("The SOCKS5 proxy failed".into(), said.clone())
+            };
+            ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Tunnel => {
             ex.title = "The SSH tunnel could not be opened".into();
@@ -491,7 +508,7 @@ fn name_mismatch(raw: &str) -> Option<(String, String)> {
     let way = if raw.contains(MYSQL_NAME_CHECKED) {
         "MySQL checks the host name in Verify CA too, so connect by one of its names, or choose Required to encrypt without checking the certificate."
     } else if asked == "127.0.0.1" || asked == "::1" {
-        "Through an SSH tunnel on Windows, MySQL checks the tunnel's own name 127.0.0.1. Choose Required there, which encrypts without checking the certificate."
+        "Through an SSH tunnel or a SOCKS5 proxy on Windows, MySQL checks the local forwarder's own name 127.0.0.1. Choose Required there, which encrypts without checking the certificate."
     } else {
         "Connect by one of its names, or choose verify-ca (Verify CA) to check only that a trusted CA signed it."
     };
@@ -636,6 +653,20 @@ mod tests {
     }
 
     #[test]
+    fn socks5_proxy_failures_have_their_own_kind_and_hint() {
+        let t = |raw: &str| (classify(raw), explain(raw, &cx()).title);
+        let login = "The SOCKS5 proxy 10.0.0.1:1080 refused the login: Authentication failed `rejected`";
+        assert_eq!(t(login), (ErrKind::Proxy, "The SOCKS5 proxy refused the login".to_string()));
+        assert_eq!(t("The SOCKS5 proxy p:1080 could not reach db:3306: Error with reply: Connection refused.").1, "The SOCKS5 proxy could not reach the server");
+        assert_eq!(t("The SOCKS5 proxy p:1080 did not answer in time.").1, "The SOCKS5 proxy could not be reached");
+        assert_eq!(t("The SOCKS5 proxy p:1080 could not be reached: Connection refused (os error 111)").0, ErrKind::Proxy);
+        assert_eq!(t("Could not find the SOCKS5 proxy p:1080: failed to lookup address information").0, ErrKind::Proxy);
+        assert_eq!(explain(login, &cx()).fixes, vec![Fix::EditConn, Fix::Retry]);
+        // A database error that merely mentions a proxy is not one.
+        assert_eq!(classify("error returned from database: 1045 (28000): Access denied for user 'app'"), ErrKind::SignIn);
+    }
+
+    #[test]
     fn a_certificate_for_another_host_names_its_hosts() {
         let raw = "error communicating with database: invalid peer certificate: certificate not valid for name \"10.0.0.5\"; certificate is only valid for DnsName(\"db.example.test\") or DnsName(\"mysql.example.test\")";
         let e = explain(raw, &ErrCtx::default());
@@ -651,7 +682,7 @@ mod tests {
         assert_eq!(mysql_name_note(raw.to_string(), false), raw);
         assert_eq!(mysql_name_note("other".into(), true), "other");
         let tunnel = raw.replace("10.0.0.5", "127.0.0.1");
-        assert!(explain(&tunnel, &ErrCtx::default()).hint.contains("SSH tunnel on Windows"));
+        assert!(explain(&tunnel, &ErrCtx::default()).hint.contains("SSH tunnel or a SOCKS5 proxy on Windows"));
         // An untrusted chain keeps its own wording.
         assert_eq!(explain("error communicating with database: invalid peer certificate: UnknownIssuer", &ErrCtx::default()).title, "The server's certificate is not trusted");
     }

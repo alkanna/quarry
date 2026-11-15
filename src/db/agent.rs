@@ -5,6 +5,7 @@
 //! connection's rules before anything is turned into text, and the audit log's writer thread.
 
 use super::*;
+use super::pct::decode;
 use crate::agents::audit::{Audit, Entry};
 use crate::agents::config::{Limits, Scope};
 use crate::agents::link::{self, ClientInfo, Listener, Token, ToolErr};
@@ -959,34 +960,14 @@ fn userinfo(uri: &str) -> Option<(&str, &str)> {
     info.split_once(':')
 }
 
-fn pct_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16);
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 impl Redact {
     /// `extra` holds other secrets the runner gets, such as a proxy password.
     pub fn new(uri: &str, extra: &[String]) -> Redact {
-        let mut v = vec![uri.to_string(), pct_decode(uri)];
+        let mut v = vec![uri.to_string(), decode(uri)];
         if let Some((user, pass)) = userinfo(uri)
             && !pass.is_empty()
         {
-            for (u, p) in [(user.to_string(), pass.to_string()), (pct_decode(user), pct_decode(pass))] {
+            for (u, p) in [(user.to_string(), pass.to_string()), (decode(user), decode(pass))] {
                 v.push(format!("{u}:{p}"));
                 if p.chars().count() >= REDACT_MIN {
                     v.push(p);

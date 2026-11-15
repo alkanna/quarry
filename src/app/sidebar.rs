@@ -549,6 +549,7 @@ impl App {
                             db::ErrKind::Unreachable => "Server not reachable",
                             db::ErrKind::Tls => "TLS failed",
                             db::ErrKind::Tunnel => "SSH tunnel failed",
+                            db::ErrKind::Proxy => "SOCKS5 proxy failed",
                             db::ErrKind::CloudSql => "Cloud SQL proxy failed",
                             db::ErrKind::Lost => "Connection lost",
                             db::ErrKind::Privilege => "Not allowed to list databases",

@@ -10,6 +10,7 @@ pub mod exec;
 mod relay;
 pub mod structure;
 pub mod write;
+use crate::db::pct::{decode, encode};
 pub mod ddl;
 pub mod create;
 pub mod tableops;
@@ -596,8 +597,8 @@ impl Addr {
         let scheme = if self.scheme.is_empty() { "mysql" } else { &self.scheme };
         let auth = match (self.user.is_empty(), self.password.is_empty()) {
             (true, true) => String::new(),
-            (_, true) => format!("{}@", encode(&self.user)),
-            _ => format!("{}:{}@", encode(&self.user), encode(&self.password)),
+            (_, true) => format!("{}@", encode(&self.user, "")),
+            _ => format!("{}:{}@", encode(&self.user, ""), encode(&self.password, "")),
         };
         let port = if self.port == 0 { Addr::default_port(scheme) } else { self.port };
         let pg = self.engine() == Engine::Postgres;
@@ -606,48 +607,16 @@ impl Addr {
             q.push(if pg { format!("sslmode={}", self.ssl_mode.pg_name()) } else { format!("ssl-mode={}", self.ssl_mode.param()) });
         }
         if !self.ssl_ca.is_empty() {
-            q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca)));
+            q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca, "")));
         }
         for (k, mk, v) in [("sslcert", "ssl-cert", &self.ssl_cert), ("sslkey", "ssl-key", &self.ssl_key)] {
             if !v.is_empty() {
-                q.push(format!("{}={}", if pg { k } else { mk }, encode(v)));
+                q.push(format!("{}={}", if pg { k } else { mk }, encode(v, "")));
             }
         }
         let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
-        format!("{scheme}://{auth}{}:{port}/{}{q}", self.host.trim(), encode(&self.database))
+        format!("{scheme}://{auth}{}:{port}/{}{q}", self.host.trim(), encode(&self.database, ""))
     }
-}
-
-fn encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-fn decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = (b[i] == b'%' && i + 2 < b.len()).then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())).flatten();
-        match hex {
-            Some(v) => {
-                out.push(v);
-                i += 3;
-            }
-            None => {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// One column of a table, as the shell's editor types need it.

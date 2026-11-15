@@ -1060,8 +1060,7 @@ pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &N
         o.socks5_proxy = Some(Socks5Proxy::builder().host("127.0.0.1".to_string()).port(t.port).build());
     } else if let Some(p) = &net.proxy {
         // The original's proxyHost/proxyPort/proxyUsername/proxyPassword; port 1080 when unset.
-        let auth = (!p.user.is_empty()).then(|| (p.user.clone(), p.password.clone().unwrap_or_default()));
-        o.socks5_proxy = Some(Socks5Proxy::builder().host(p.host.clone()).port(if p.port == 0 { 1080 } else { p.port }).authentication(auth).build());
+        o.socks5_proxy = Some(Socks5Proxy::builder().host(p.host.clone()).port(p.port()).authentication(p.auth()).build());
     }
     let client = Client::with_options(o).map_err(e)?;
     let mut dbs = client.list_database_names().await.map_err(e)?;
