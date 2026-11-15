@@ -158,8 +158,9 @@ fn enum_values(full: &str) -> Vec<String> {
 /// and DECIMAL, dates and JSON as the server's own text so nothing is rounded.
 fn sql_ts_type(c: &sql::TableCol) -> String {
     use sql::value::Kind;
-    let t = match Kind::from_column_type(&c.full_type) {
+    let t = match c.kind {
         Kind::Int | Kind::UInt | Kind::Float | Kind::Year => "number".to_string(),
+        Kind::Bool => "boolean".to_string(),
         Kind::Binary | Kind::Bit | Kind::Geometry => "Uint8Array".to_string(),
         Kind::Enum => {
             let v = enum_values(&c.full_type);
@@ -609,7 +610,7 @@ mod tests {
 
     #[test]
     fn sql_declarations_from_columns() {
-        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable };
+        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable, kind: sql::value::Kind::from_column_type(full_type) };
         let tables = vec![
             sql::TableCols { name: "orders".into(), cols: vec![col("id", "int unsigned", false), col("status", "enum('pending','paid','it''s')", false), col("total", "decimal(10,2)", false), col("note", "varchar(20)", true), col("created_at", "datetime", false), col("meta", "json", true), col("blob", "blob", true)] },
             sql::TableCols { name: "order_items".into(), cols: vec![col("qty", "smallint", false)] },
@@ -632,8 +633,18 @@ mod tests {
     }
 
     #[test]
+    fn postgres_columns_are_typed_by_their_kind() {
+        use sql::value::Kind;
+        let col = |name: &str, full_type: &str, kind: Kind| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable: false, kind };
+        let tables = vec![sql::TableCols { name: "events".into(), cols: vec![col("ok", "boolean", Kind::Bool), col("body", "bytea", Kind::Binary), col("tags", "integer[]", Kind::Array), col("n", "bigint", Kind::Int), col("mood", "mood", Kind::Enum)] }];
+        let g = sql_globals(&tables, &[], |p| p.to_string(), &[]);
+        // Arrays and enums arrive as the server's text, so they are strings in the script.
+        assert!(g.contains("interface Events {\n  ok: boolean;\n  body: Uint8Array;\n  tags: string;\n  n: number;\n  mood: string;\n}"), "{g}");
+    }
+
+    #[test]
     fn attached_declarations() {
-        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable };
+        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable, kind: sql::value::Kind::from_column_type(full_type) };
         let tables = vec![sql::TableCols { name: "orders".into(), cols: vec![col("id", "int", false), col("note", "text", true)] }, sql::TableCols { name: "my-table".into(), cols: Vec::new() }];
         let colls = ["users", "trips", "my-coll", "class"].map(String::from);
         let schemas = HashMap::from([("users".to_string(), "{ name?: string }".to_string())]);

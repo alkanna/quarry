@@ -275,7 +275,12 @@ async function run() {
             // The schema is the attachment's own, so each PostgreSQL attachment of this tab on `db` asks for its tables.
             let schemas: Vec<String> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.conn == conn && a.db == db).map(|a| a.schema.clone()).collect()).unwrap_or_default();
             for s in schemas {
-                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), if s.is_empty() { PG_SCHEMA.into() } else { s });
+                let s = if s.is_empty() { PG_SCHEMA.to_string() } else { s };
+                // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
+                if self.sql_schema_asked.insert((conn, ns_key(db, &s))) {
+                    self.worker.sql_schema(conn, sql.at(db), s.clone());
+                }
+                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
             }
             return;
         }
@@ -370,9 +375,9 @@ async function run() {
                 let c = self.conn(a.conn)?;
                 let pg = c.meta.engine == db::sql::Engine::Postgres;
                 let names: Vec<String> = if pg { a.tables.clone() } else { c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default() };
-                // Columns of a PostgreSQL attachment are not read yet, so its tables are typed loosely.
+                // A PostgreSQL schema is cached per schema of its database; until it arrives the tables are typed loosely.
                 let typed = if pg {
-                    AttTyped::Sql(None)
+                    AttTyped::Sql(self.sql_schema.get(&(a.conn, ns_key(&a.db, if a.schema.is_empty() { PG_SCHEMA } else { &a.schema }))).cloned())
                 } else if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
                 Some(AttachedInfo { name: a.name.clone(), names, typed })
             })
@@ -608,7 +613,7 @@ pub(super) fn attached_decls(items: &[AttachedInfo], main_sql: bool) -> String {
     let tables: Vec<Vec<db::sql::TableCols>> = items
         .iter()
         .map(|i| match &i.typed {
-            AttTyped::Sql(Some(s)) => s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable }).collect() }).collect(),
+            AttTyped::Sql(Some(s)) => s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable, kind: c.kind }).collect() }).collect(),
             _ => i.names.iter().map(|n| db::sql::TableCols { name: n.clone(), cols: Vec::new() }).collect(),
         })
         .collect();

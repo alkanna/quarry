@@ -482,10 +482,16 @@ impl App {
             self.sql_columns_ask(true);
         }
         for a in self.tabs[self.cur].shell.attached.clone() {
-            // A PostgreSQL attachment lists its tables through its own request and is typed loosely.
-            if let Some(db) = self.conn(a.conn).filter(|c| c.meta.engine != db::sql::Engine::Postgres).and_then(|c| c.sql.clone()) {
-                self.sql_schema_asked.insert((a.conn, a.db.clone()));
-                self.worker.sql_schema(a.conn, db, a.db);
+            if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
+                // A PostgreSQL schema is read on a session of its own database and cached under that database and schema.
+                let (key, space, db) = if db.dialect == db::sql::Dialect::Postgres {
+                    let s = if a.schema.is_empty() { super::shell_attach::PG_SCHEMA.to_string() } else { a.schema.clone() };
+                    (ns_key(&a.db, &s), s, db.at(&a.db))
+                } else {
+                    (a.db.clone(), a.db.clone(), db)
+                };
+                self.sql_schema_asked.insert((a.conn, key));
+                self.worker.sql_schema(a.conn, db, space);
             }
         }
         self.req += 1;

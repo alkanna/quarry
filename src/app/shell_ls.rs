@@ -373,7 +373,7 @@ impl App {
             let extra = attached_decls(&attached, sql);
             if sql {
                 // Tables with no known columns yet still get a global, typed loosely.
-                let tables: Vec<db::sql::TableCols> = sql_cols.as_deref().map(|s| s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable }).collect() }).collect()).unwrap_or_else(|| colls.iter().map(|c| db::sql::TableCols { name: c.clone(), cols: Vec::new() }).collect());
+                let tables: Vec<db::sql::TableCols> = sql_cols.as_deref().map(|s| s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable, kind: c.kind }).collect() }).collect()).unwrap_or_else(|| colls.iter().map(|c| db::sql::TableCols { name: c.clone(), cols: Vec::new() }).collect());
                 return db::sql_globals(&tables, &names, package_ident, &JS_RESERVED) + &extra;
             }
             let schemas = known.iter().map(|(c, f)| (c.clone(), ts_type(f))).collect();
