@@ -73,7 +73,7 @@ fn copy_as_sql_is_in_the_run_menu() {
     let mut copied = false;
     for _ in 0..4 {
         ui.h.step();
-        copied |= ui.h.ctx.output(|o| o.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t.starts_with("SELECT"))));
+        copied |= ui.h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t.starts_with("SELECT")));
     }
     assert!(copied, "Copy as SQL copied no SELECT");
 }

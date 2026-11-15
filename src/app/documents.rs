@@ -321,7 +321,6 @@ impl App {
         let mut typed = Typed::default();
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
-        let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 4.0;
         // The bar is the filter's frame: it reads the filter's focus and hover from the last frame.
         let fid = query_id("QUERY");
         let focused = ui.memory(|m| m.has_focus(fid));
