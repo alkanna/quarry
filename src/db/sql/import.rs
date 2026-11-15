@@ -476,9 +476,21 @@ mod tests {
         format!("it's \"quoted\", ok\\; DROP TABLE big; -- {i}\nsecond line \\' \\N \u{1F600} `x`")
     }
 
+    // One test per server so both imports run at once: in turn they were the longest live test.
     #[test]
-    fn live_import_50k_rows_then_undo_removes_exactly_them() {
-        every_server(|l, var| {
+    fn live_import_50k_rows_then_undo_removes_exactly_them_mysql() {
+        import_50k_then_undo(ENVS[0]);
+    }
+
+    #[test]
+    fn live_import_50k_rows_then_undo_removes_exactly_them_mariadb() {
+        import_50k_then_undo(ENVS[1]);
+    }
+
+    fn import_50k_then_undo(var: &str) {
+        let Some(l) = live(var) else { return };
+        let l = &l;
+        {
             l.sql("CREATE DATABASE IF NOT EXISTS quarry_ie_import CHARACTER SET utf8mb4");
             l.sql("DROP TABLE IF EXISTS quarry_ie_import.big");
             l.sql("CREATE TABLE quarry_ie_import.big (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(40) NOT NULL, qty INT, price DECIMAL(10,2), note TEXT, seen DATETIME NULL) DEFAULT CHARSET=utf8mb4");
@@ -513,7 +525,7 @@ mod tests {
             res.unwrap_or_else(|x| panic!("{var}: {x}"));
             assert_eq!(l.count("quarry_ie_import.big"), 3, "{var}");
             assert_eq!(l.one("SELECT GROUP_CONCAT(name ORDER BY id) FROM quarry_ie_import.big"), "old1,old2,old3");
-        });
+        }
     }
 
     #[test]
