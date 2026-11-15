@@ -222,3 +222,22 @@ fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
     };
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(1, Some(_)))), "the form opened on a locked connection");
 }
+
+#[test]
+fn the_server_windows_show_database_sizes_and_postgresql_counters() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_server = Some(sql::server::SqlServerWin::demo(3, "overview"));
+    }) else {
+        return;
+    };
+    ui.show("DATABASE SIZES");
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_pg_demo();
+        a.pg_server = Some(sql::pg_server::PgServerWin::demo(3, "server"));
+    }) else {
+        return;
+    };
+    ui.click("Counters");
+    ui.show("Counted since the statistics were reset on 2026-11-01 04:00 UTC.");
+}

@@ -377,6 +377,8 @@ pub enum Answer {
     Vars(Res<Variables>),
     Status(Res<Snap>),
     Overview(Res<Overview>),
+    /// Each schema with its data and index bytes, largest first.
+    Sizes(Res<Vec<(String, Option<u64>)>>),
     Locks(Res<locks::Locks>),
     /// A KILL: whether it was of the whole connection, and the server's answer.
     Kill { whole: bool, res: Res<String> },
@@ -493,6 +495,16 @@ async fn overview(db: &Db) -> Res<Overview> {
     Ok(Overview { snap, vars, tls, replica })
 }
 
+/// MariaDB opens every table to fill these columns, so the Overview reads them on their own, far less often than its counters.
+async fn sizes(db: &Db) -> Res<Vec<(String, Option<u64>)>> {
+    db.mysql_only()?;
+    let mut c = db.acquire().await?;
+    let q = "SELECT TABLE_SCHEMA AS s, CAST(SUM(COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS CHAR) AS b FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN ('information_schema', 'performance_schema') GROUP BY TABLE_SCHEMA";
+    let mut v: Vec<(String, Option<u64>)> = rows(&mut c, q).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "s")?, text(r, "b").and_then(|b| b.parse().ok())))).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(v)
+}
+
 async fn status(db: &Db) -> Res<Snap> {
     db.mysql_only()?;
     let mut c = db.acquire().await?;
@@ -598,6 +610,10 @@ impl Worker {
 
     pub fn sql_server_overview(&self, db: Db, req: u64) {
         self.spawn(async move { Msg::SqlServer { req, ans: Answer::Overview(overview(&db).await) } });
+    }
+
+    pub fn sql_server_sizes(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::SqlServer { req, ans: Answer::Sizes(sizes(&db).await) } });
     }
 
     pub fn sql_server_status(&self, db: Db, req: u64) {
@@ -808,6 +824,9 @@ mod tests {
             let st = l.w.rt.block_on(status(&l.db)).unwrap();
             assert!(st.num("Questions").is_some_and(|q| q > 0.0) && st.num("Uptime").is_some_and(|u| u > 0.0) && st.vals.len() > 100);
             let ov = l.w.rt.block_on(overview(&l.db)).unwrap();
+            let sz = l.w.rt.block_on(sizes(&l.db)).unwrap();
+            assert!(sz.iter().any(|(n, b)| n == "mysql" && b.is_some_and(|b| b > 0)), "{sz:?}");
+            assert!(sz.windows(2).all(|w| w[0].1 >= w[1].1), "not largest first: {sz:?}");
             assert!(ov.vars.get("max_connections").is_some_and(|v| v.parse::<u32>().is_ok()) && ov.vars.contains_key("version") && ov.vars.contains_key("datadir"));
             let m = metrics(&ov.snap, &ov.vars, None);
             assert!(m.connected.is_some() && m.max_connections.is_some() && m.hit.is_some() && m.pool_size.is_some());

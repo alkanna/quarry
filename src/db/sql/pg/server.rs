@@ -624,6 +624,42 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
     res
 }
 
+/// One database's totals from pg_stat_database, counted since `reset` (or since the server started when it was never reset).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Counters {
+    pub db: String,
+    pub sessions: Option<u64>,
+    pub commits: Option<u64>,
+    pub rollbacks: Option<u64>,
+    pub reads: Option<u64>,
+    pub hits: Option<u64>,
+    pub inserted: Option<u64>,
+    pub updated: Option<u64>,
+    pub deleted: Option<u64>,
+    pub conflicts: Option<u64>,
+    pub deadlocks: Option<u64>,
+    pub temp_bytes: Option<u64>,
+    pub reset: String,
+}
+
+impl Counters {
+    /// Share of block reads served from shared buffers; None before the database read anything.
+    pub fn hit(&self) -> Option<f64> {
+        let (h, r) = (self.hits? as f64, self.reads? as f64);
+        (h + r > 0.0).then(|| h / (h + r))
+    }
+}
+
+/// Databases with the most transactions first. The shared row (datname NULL) holds only the shared catalogs, so it is left out.
+const COUNTERS: &str = "SELECT datname::text, numbackends::text, xact_commit::text, xact_rollback::text, blks_read::text, blks_hit::text, tup_inserted::text, \
+tup_updated::text, tup_deleted::text, conflicts::text, deadlocks::text, temp_bytes::text, COALESCE(to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC', '') \
+FROM pg_stat_database WHERE datname IS NOT NULL ORDER BY xact_commit + xact_rollback DESC, datname";
+
+async fn counters(db: &Db) -> Res<Vec<Counters>> {
+    let list = read(db, async |c| rows(c, COUNTERS).await).await?;
+    Ok(list.iter().map(|r| Counters { db: txt(r, 0), sessions: num_at(r, 1), commits: num_at(r, 2), rollbacks: num_at(r, 3), reads: num_at(r, 4), hits: num_at(r, 5), inserted: num_at(r, 6), updated: num_at(r, 7), deleted: num_at(r, 8), conflicts: num_at(r, 9), deadlocks: num_at(r, 10), temp_bytes: num_at(r, 11), reset: txt(r, 12) }).collect())
+}
+
 /// What the PostgreSQL Server window asked for and got.
 // ponytail: one per Server window read, so the copy is cheap; boxing the large variant would change every match on it.
 #[allow(clippy::large_enum_variant)]
@@ -631,6 +667,7 @@ pub enum Answer {
     Overview(Res<Overview>),
     Sizes(Res<Sizes>),
     Settings(Res<Settings>),
+    Counters(Res<Vec<Counters>>),
     Activity(Res<Activity>),
     /// How a Cancel or Terminate ended.
     Signal(Res<String>),
@@ -645,6 +682,10 @@ impl Worker {
 
     pub fn pg_server_sizes(&self, db: Db, req: u64) {
         self.spawn(async move { Msg::PgServer { req, ans: Answer::Sizes(sizes(&db).await) } });
+    }
+
+    pub fn pg_server_counters(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::PgServer { req, ans: Answer::Counters(counters(&db).await) } });
     }
 
     pub fn pg_server_settings(&self, db: Db, req: u64) {

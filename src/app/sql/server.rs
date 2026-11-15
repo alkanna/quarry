@@ -137,6 +137,12 @@ pub(in crate::app) struct SqlServerWin {
     ov: Option<db::Res<(Instant, Overview)>>,
     /// The sample before the latest and the seconds between them, for per second values.
     ov_prev: Option<(f64, Snap)>,
+    sz_req: u64,
+    sz_wait: bool,
+    /// The last sizes that came in; a failed read keeps them and says why.
+    sizes: Option<Vec<(String, Option<u64>)>>,
+    sizes_err: Option<String>,
+    sizes_at: Option<Instant>,
     st_req: u64,
     st_wait: bool,
     st: Option<db::Res<(Instant, Snap)>>,
@@ -197,6 +203,8 @@ impl SqlServerWin {
         let replica = Replica { channel: String::new(), source: "db-prod-0.internal:3306".into(), io: "Yes".into(), sql: "Yes".into(), behind: Some(0), gtid: "3e11fa47-71ca:1-88412".into(), error: String::new() };
         s.ov = Some(Ok((Instant::now(), Overview { snap: sample(0), vars: ovars, tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(), replica: Ok(vec![replica]) })));
         s.ov_prev = Some((2.5, sample(1)));
+        let gb = |g: f64| Some((g * 1024.0 * 1024.0 * 1024.0) as u64);
+        (s.sizes, s.sizes_at) = (Some(vec![("shop".into(), gb(42.6)), ("analytics".into(), gb(11.3)), ("mysql".into(), gb(0.01))]), Some(Instant::now()));
         s.st = Some(Ok((Instant::now(), sample(0))));
         s.set_lower();
         s.st_prev = Some((2.5, sample(1)));
@@ -360,6 +368,11 @@ impl App {
             }
             SqlServerTab::Overview | SqlServerTab::Status => {
                 let overview = s.tab == SqlServerTab::Overview;
+                if overview && !s.sz_wait && (s.refresh || s.sizes_at.is_none_or(|t| now.duration_since(t) >= super::pg_server::SIZES_EVERY)) {
+                    self.req += 1;
+                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.req, true, Some(now));
+                    self.worker.sql_server_sizes(db.clone(), self.req);
+                }
                 let (auto, empty, wait) = if overview { (true, s.ov.is_none(), s.ov_wait) } else { (s.st_auto, s.st.is_none(), s.st_wait) };
                 if auto {
                     ctx.request_repaint_after(POLL);
@@ -464,6 +477,13 @@ impl App {
                     s.uptime = v.uptime.or(s.uptime);
                 }
                 s.vars = Some(r);
+            }
+            Answer::Sizes(r) if req == s.sz_req => {
+                s.sz_wait = false;
+                match r {
+                    Ok(v) => (s.sizes, s.sizes_err) = (Some(v), None),
+                    Err(e) => s.sizes_err = Some(e),
+                }
             }
             Answer::Overview(r) if req == s.ov_req => {
                 s.ov_wait = false;
@@ -867,6 +887,12 @@ fn overview_view(ui: &mut egui::Ui, s: &mut SqlServerWin) {
         ui.spacing_mut().item_spacing.y = 0.0;
         kv_rows(ui, w, &server);
         let ui = &mut cols[1];
+        caption(ui, "DATABASE SIZES");
+        ui.add_space(4.0);
+        let w = ui.available_width();
+        ui.spacing_mut().item_spacing.y = 0.0;
+        super::pg_server::size_bars(ui, w, s.sizes.as_deref(), s.sizes_err.as_deref());
+        ui.add_space(16.0);
         caption(ui, "REPLICATION");
         ui.add_space(4.0);
         match &o.replica {

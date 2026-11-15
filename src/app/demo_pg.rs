@@ -4,7 +4,7 @@
 //! Cloud SQL `cloudsql` (the browser over recorded acme-* instances), `cloudsql-form` (the form after Use) and
 //! `cloudsql-missing` (the browser when no proxy is found), `cloudsql-adc` (Use on an IAM instance without Application Default
 //! Credentials). gcloud never runs in the demo. The Server window opens on `server` (Overview), `server-settings`,
-//! `server-activity`, `server-locks`, `server-confirm` (Terminate armed), `server-locked` (a read-only connection) and
+//! `server-activity`, `server-locks`, `server-counters`, `server-confirm` (Terminate armed), `server-locked` (a read-only connection) and
 //! `server-limited` (a role without pg_read_all_stats). Roles: `roles` (the Roles and privileges window on its object matrix,
 //! a cell editor open and one grant staged) and `roles-role` (its Roles tab on app_writer).
 
@@ -179,7 +179,7 @@ impl App {
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
             "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
             "cloudsql" | "cloudsql-form" | "cloudsql-missing" | "cloudsql-adc" => self.pg_cloud_demo(which),
-            "server" | "server-settings" | "server-activity" | "server-locks" | "server-confirm" | "server-locked" | "server-limited" => {
+            "server" | "server-settings" | "server-activity" | "server-locks" | "server-counters" | "server-confirm" | "server-locked" | "server-limited" => {
                 if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == CONN) {
                     c.writable = which != "server-locked";
                 }

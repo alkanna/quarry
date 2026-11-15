@@ -4,12 +4,12 @@
 
 use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, prev_of, retry_after, tile, up_text, PAD, POLL};
 use crate::app::*;
-use db::sql::pg::server::{carry_blockers, chains, metrics, Activity, Answer, Overview, Role, Session, Setting, Settings, Sizes, Target};
+use db::sql::pg::server::{carry_blockers, chains, metrics, Activity, Answer, Counters, Overview, Role, Session, Setting, Settings, Sizes, Target};
 use std::collections::HashMap;
 use std::time::Instant;
 
 /// Database sizes walk the data directory, so the Overview asks for them this often and not on every poll.
-const SIZES_EVERY: Duration = Duration::from_secs(30);
+pub(in crate::app) const SIZES_EVERY: Duration = Duration::from_secs(30);
 /// Each pg_blocking_pids call takes every lock manager partition lock, so blockers are asked this often; the polls between
 /// keep the last ones for sessions that still wait.
 const BLOCKERS_EVERY: Duration = Duration::from_secs(5);
@@ -23,6 +23,7 @@ pub(in crate::app) enum PgTab {
     Settings,
     Activity,
     Locks,
+    Counters,
 }
 
 /// A Cancel or Terminate waiting for its second click, with the row as the list showed it.
@@ -58,6 +59,9 @@ pub(in crate::app) struct PgServerWin {
     set_req: u64,
     set_wait: bool,
     settings: Option<db::Res<Settings>>,
+    cnt_req: u64,
+    cnt_wait: bool,
+    counters: Option<db::Res<Vec<Counters>>>,
     set_filter: String,
     changed_only: bool,
     set_sel: Option<String>,
@@ -93,6 +97,7 @@ impl PgServerWin {
         s.tab = match which {
             "server-settings" => PgTab::Settings,
             "server-locks" => PgTab::Locks,
+            "server-counters" => PgTab::Counters,
             "server" => PgTab::Overview,
             _ => PgTab::Activity,
         };
@@ -143,6 +148,12 @@ impl PgServerWin {
         rows.sort_by(|a, b| a.name.cmp(&b.name));
         s.settings = Some(Ok(Settings { rows, user: "reporting".into(), database: "analytics".into() }));
         s.set_sel = Some("max_connections".into());
+        let cnt = |db: &str, n: [u64; 10]| Counters { db: db.into(), sessions: Some(n[0]), commits: Some(n[1]), rollbacks: Some(n[2]), reads: Some(n[3]), hits: Some(n[4]), inserted: Some(n[5]), updated: Some(n[6]), deleted: Some(n[7]), deadlocks: Some(n[8]), conflicts: Some(0), temp_bytes: Some(n[9]), reset: "2026-11-01 04:00 UTC".into() };
+        s.counters = Some(Ok(vec![
+            cnt("shop", [34, 18_204_311, 4_120, 2_310_544, 912_004_118, 3_401_220, 1_288_419, 40_118, 2, 734_003_200]),
+            cnt("analytics", [6, 2_481_007, 311, 48_220_931, 401_118_220, 12_004, 2_104, 88, 0, 18_253_611_008]),
+            cnt("postgres", [1, 40_112, 3, 1_204, 2_210_871, 0, 0, 0, 0, 0]),
+        ]));
         let limited = which == "server-limited";
         let sess = |pid: u64, user: &str, client: &str, db: &str, app: &str, state: &str, query: &str, xact: Option<f64>| {
             let mut x = Session::new(pid, user, client, db, app, state, query, "client backend");
@@ -239,6 +250,10 @@ impl PgServerWin {
                     Ok(v) => (self.sizes, self.sizes_err) = (Some(v), None),
                     Err(e) => self.sizes_err = Some(e),
                 }
+            }
+            Answer::Counters(r) if req == self.cnt_req => {
+                self.cnt_wait = false;
+                self.counters = Some(r);
             }
             Answer::Settings(r) if req == self.set_req => {
                 self.set_wait = false;
@@ -469,6 +484,14 @@ impl App {
                 (s.set_req, s.set_wait, s.refresh) = (self.req, true, false);
                 self.worker.pg_server_settings(db.clone(), self.req);
             }
+            PgTab::Counters => {
+                if s.cnt_wait || !(s.refresh || s.counters.is_none()) {
+                    return;
+                }
+                self.req += 1;
+                (s.cnt_req, s.cnt_wait, s.refresh) = (self.req, true, false);
+                self.worker.pg_server_counters(db.clone(), self.req);
+            }
             PgTab::Activity | PgTab::Locks => {
                 if s.auto {
                     ctx.request_repaint_after(POLL);
@@ -529,7 +552,7 @@ impl App {
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
-            const TABS: [(PgTab, &str); 4] = [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks")];
+            const TABS: [(PgTab, &str); 5] = [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks"), (PgTab::Counters, "Counters")];
             let labels = TABS.map(|t| t.1);
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
             let picked = dialog_head(ui, &Head::new("Server").sub(subtitle(&s, &name, product.trim())).glyph(glyphs::server).tabs(&labels, active));
@@ -540,6 +563,8 @@ impl App {
                     PgTab::Overview => s.ov_next = None,
                     PgTab::Activity | PgTab::Locks => s.act_next = None,
                     PgTab::Settings => {}
+                    // The counters only grow, so each visit reads them again.
+                    PgTab::Counters => s.refresh = true,
                 }
                 // Locks is about the blockers, so it asks for them at once.
                 if tab == PgTab::Locks {
@@ -557,6 +582,7 @@ impl App {
                         PgTab::Settings => settings_view(ui, &mut s, max),
                         PgTab::Activity => activity_view(ui, &mut s, max, &name, &mut acts),
                         PgTab::Locks => locks_view(ui, &mut s, max, &name, &mut acts),
+                        PgTab::Counters => counters_view(ui, &mut s, max),
                     }
                 }
             });
@@ -694,7 +720,7 @@ fn overview_view(ui: &mut egui::Ui, s: &mut PgServerWin) {
 }
 
 /// The size bars, or why they could not be read; a failure after a good read keeps the last values and says so under them.
-fn size_bars(ui: &mut egui::Ui, w: f32, sizes: Option<&[(String, Option<u64>)]>, err: Option<&str>) {
+pub(in crate::app) fn size_bars(ui: &mut egui::Ui, w: f32, sizes: Option<&[(String, Option<u64>)]>, err: Option<&str>) {
     let note = |ui: &mut egui::Ui, t: String| {
         ui.label(RichText::new(t).size(TXT_SMALL).color(MUTED()));
     };
@@ -762,6 +788,48 @@ fn replication(ui: &mut egui::Ui, w: f32, role: Option<&Role>) {
             kv_rows(ui, w, &[("Role", "replica".into(), BRIGHT()), ("Primary", if from.is_empty() { hidden.clone() } else { from.clone() }, if from.is_empty() { MUTED() } else { BRIGHT() }), ("Receiver", if status.is_empty() { hidden } else { status.clone() }, if status == "streaming" { SUCCESS() } else { MUTED() }), ("Replay lag", lag, C_NUMBER())]);
         }
     }
+}
+
+/// pg_stat_database per database: what each one did since its counters were reset.
+fn counters_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
+    let v = match &s.counters {
+        None => return spin(ui),
+        Some(Err(e)) => {
+            if error_row(ui, format!("Could not read the counters: {e}")) {
+                s.refresh = true;
+            }
+            return;
+        }
+        Some(Ok(v)) => v,
+    };
+    let int = |n: Option<u64>| n.map(|n| group(&n.to_string())).unwrap_or_default();
+    let w = ui.available_width();
+    let cols: [(&str, f32, bool); 10] = [("Database", 0.16, false), ("Sessions", 0.08, true), ("Commits", 0.11, true), ("Rollbacks", 0.09, true), ("Cache hit", 0.08, true), ("Inserted", 0.1, true), ("Updated", 0.1, true), ("Deleted", 0.1, true), ("Deadlocks", 0.08, true), ("Temp files", 0.1, true)];
+    let cols = cols.map(|(n, f, r)| (n, w * f, r));
+    header(ui, &cols);
+    let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+    egui::ScrollArea::vertical().id_salt("pg-counters").max_height(max_h.max(120.0)).auto_shrink([false, true]).show_rows(ui, ROW_H, v.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for i in range {
+            let c = &v[i];
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });
+            let cells = [c.db.clone(), int(c.sessions), int(c.commits), int(c.rollbacks), c.hit().map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_default(), int(c.inserted), int(c.updated), int(c.deleted), int(c.deadlocks), c.temp_bytes.map(|b| human_bytes(b as usize)).unwrap_or_default()];
+            let mut x = rect.left();
+            for (j, t) in cells.iter().enumerate() {
+                let color = if j == 0 { BRIGHT() } else if j == 8 && c.deadlocks.is_some_and(|d| d > 0) { WARNING() } else { C_NUMBER() };
+                paint_cell(ui, rect, x, cols[j].1, t, color, true, cols[j].2);
+                x += cols[j].1;
+            }
+        }
+    });
+    ui.spacing_mut().item_spacing.y = gap;
+    let reset = v.iter().map(|c| c.reset.as_str()).find(|r| !r.is_empty());
+    ui.add_space(8.0);
+    ui.label(RichText::new(match reset {
+        Some(r) => format!("Counted since the statistics were reset on {r}."),
+        None => "Counted since the server started.".into(),
+    }).size(TXT_SMALL).color(MUTED()));
 }
 
 fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
