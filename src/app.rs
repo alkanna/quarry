@@ -38,6 +38,7 @@ mod indexes;
 mod library;
 mod log;
 mod mem;
+mod window_buttons;
 mod modals;
 mod mongo_create;
 mod palette;
@@ -477,6 +478,7 @@ impl App {
         let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
         // Screenshot runs stay off the real menu bar.
         let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
+        window_buttons::install(cc, demo);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
             (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);

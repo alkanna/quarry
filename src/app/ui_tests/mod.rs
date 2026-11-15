@@ -61,6 +61,7 @@ mod sql_view;
 mod sql_viewdef;
 mod tabs;
 mod vim;
+mod win_buttons;
 
 use super::*;
 use egui_kittest::Harness;
