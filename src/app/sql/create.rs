@@ -2,7 +2,12 @@
 //! statement previews, and the typed confirmations for drops. The statements come from `db::sql::create`.
 
 use crate::app::*;
+use crate::app::sql::new_keys::{KeyEnv, NewKeys, PgFk};
 use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TableSpec, TYPES};
+use db::sql::ddl::{IdxCol, IndexDef, IndexKind};
+use db::sql::pg::create::{Check, NewIndex, Unique};
+use db::sql::structure::CheckConstraint;
+use db::sql::Dialect;
 
 pub(in crate::app) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
 pub(in crate::app) const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
@@ -36,9 +41,39 @@ pub(in crate::app) struct NewTable {
     pub(in crate::app) engine: String,
     pub(in crate::app) collation: String,
     pub(in crate::app) cols: Vec<ColumnSpec>,
+    /// The UNIQUE keys, CHECKs, foreign keys and indexes, collected the way the PostgreSQL dialog does.
+    pub(in crate::app) keys: NewKeys,
+    pub(in crate::app) comment: String,
     pub(in crate::app) meta: Option<Meta>,
     pub(in crate::app) load_err: Option<String>,
     pub(in crate::app) show_sql: bool,
+}
+
+impl NewTable {
+    /// What the form says, with the keys written the way the statement takes them. A key that points at the table itself follows
+    /// the name typed.
+    pub(in crate::app) fn spec(&self) -> TableSpec {
+        let cols = |v: &[String]| v.iter().map(|n| IdxCol { name: n.clone(), prefix: None, desc: false }).collect::<Vec<_>>();
+        let uniques = self.keys.uniques.iter().map(|u| IndexDef { name: u.name.clone(), kind: IndexKind::Unique, cols: cols(&u.cols), ..Default::default() });
+        let indexes = self.keys.indexes.iter().map(|x| IndexDef { name: x.name.clone(), kind: if x.unique { IndexKind::Unique } else { x.kind }, cols: cols(&x.cols), ..Default::default() });
+        let checks = self.keys.checks.iter().map(|c| CheckConstraint { name: c.name.clone(), expr: c.expr.trim().to_string(), ..Default::default() }).collect();
+        let fks = self.keys.fks.iter().map(|k| {
+            let mut key = k.key.clone();
+            if k.own {
+                (key.ref_db, key.ref_table) = (self.schema.clone(), self.name.clone());
+            }
+            key.db = self.schema.clone();
+            key
+        }).collect();
+        TableSpec { schema: self.schema.clone(), name: self.name.clone(), engine: self.engine.clone(), collation: self.collation.clone(), columns: self.cols.clone(), fks, checks, indexes: uniques.chain(indexes).collect(), comment: self.comment.clone() }
+    }
+
+    /// A column was renamed from `from`; the picks of the keys follow, unless another column still has that name.
+    fn col_renamed(&mut self, from: &str, to: &str) {
+        if !from.is_empty() && !self.cols.iter().any(|c| c.name == from) {
+            self.keys.renamed(from, to);
+        }
+    }
 }
 
 pub(in crate::app) struct DropForm {
@@ -121,7 +156,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.sql_new_table(conn, schema));
         }
         self.ask_meta(conn, &schema);
-        self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], meta: None, load_err: None, show_sql: false })));
+        self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], keys: NewKeys::default(), comment: String::new(), meta: None, load_err: None, show_sql: false })));
     }
 
     pub(in crate::app) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
@@ -337,7 +372,7 @@ impl App {
         ui.set_width(940.0);
         let writable = self.conn_writable(f.conn);
         let d = self.conn(f.conn).and_then(|c| c.sql.as_ref().map(|s| s.dialect)).unwrap_or_default();
-        let bs = self.sql_mode(f.conn).bs;
+        let mode = self.sql_mode(f.conn);
         dialog_head(ui, &Head::new("New table").sub(format!("in {} on {}", f.schema, self.conn_name(f.conn))).glyph(glyphs::table));
         dialog_body(ui, |ui| {
         card_frame().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
@@ -387,15 +422,44 @@ impl App {
                 });
             });
         });
-        ui.add_space(16.0);
+        ui.add_space(10.0);
+        form_grid(ui, "newtable-comment", |ui| {
+            form_label(ui, "Comment");
+            ui.add(egui::TextEdit::singleline(&mut f.comment).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Table comment"));
+            ui.end_row();
+        });
+        ui.add_space(6.0);
         card_caption(ui, "Columns", "change them later in Structure");
         self.column_grid(ui, f);
+        card_caption(ui, "Keys, checks and indexes", "");
+        let cols: Vec<String> = f.cols.iter().map(|c| c.name.clone()).filter(|n| !n.is_empty()).collect();
+        self.constraint_list(ui, &mut f.keys, &KeyEnv { conn: f.conn, database: &f.schema, schema: &f.schema, name: &f.name, d }, &cols);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if add_chip(ui, "Unique").clicked() {
+                f.keys.uniques.push(Unique::default());
+            }
+            if add_chip(ui, "Check").clicked() {
+                f.keys.checks.push(Check::default());
+            }
+            if add_chip(ui, "Foreign key").clicked() {
+                f.keys.fks.push(PgFk::new(&f.schema, Dialect::MySql));
+            }
+            if add_chip(ui, "Index").clicked() {
+                f.keys.indexes.push(NewIndex::default());
+            }
+        });
         if let Some(e) = &f.load_err {
             field_note(ui, &format!("Could not read the server's engines and collations: {e}"), ALERT());
         }
         });
-        let built = f.meta.as_ref().map(|m| create::create_table_sql(d, bs, &TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() }, m));
-        if f.show_sql || matches!(&built, Some(Err(_))) && !f.name.is_empty() {
+        let spec = f.spec();
+        let built = f.meta.as_ref().map(|m| create::create_table_sql(d, mode, &spec, m));
+        // The keys' own problems: the parent not read yet or one that does not fit, an engine that cannot hold a key, a CHECK the
+        // server would ignore. Each is said before the server's "cannot add a foreign key constraint".
+        let version = self.conn(f.conn).and_then(|c| c.sql.as_ref()).map_or_else(|| "8.4.0".to_string(), |s| s.version.clone());
+        let problem = f.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, db::sql::ddl::fk_whole_key_default(d, &version), Some(&spec.engine)).or_else(|| create::spec_problem(d, &version, &spec).map(|e| (e, false)));
+        if f.show_sql || (matches!(&built, Some(Err(_))) || problem.is_some()) && !f.name.is_empty() {
             dialog_pane(ui, |ui| {
                 if f.show_sql {
                     match &built {
@@ -408,9 +472,12 @@ impl App {
                 if let Some(Err(e)) = &built && !f.name.is_empty() {
                     field_note(ui, e.as_str(), ALERT());
                 }
+                if let Some((e, loading)) = &problem && !f.name.is_empty() {
+                    field_note(ui, e.as_str(), if *loading { FAINT() } else { ALERT() });
+                }
             });
         }
-        let ok = writable && matches!(built, Some(Ok(_)));
+        let ok = writable && matches!(built, Some(Ok(_))) && problem.is_none();
         let keys: Vec<String> = f.cols.iter().filter(|c| c.pk).map(|c| c.name.clone()).collect();
         let summary = format!("{}{}", plural(f.cols.len() as u64, "column"), if keys.is_empty() { String::new() } else { format!("  ·  primary key {}", keys.join(", ")) });
         dialog_foot(ui, |ui| {
@@ -431,13 +498,14 @@ impl App {
     fn sql_create_table_run(&mut self, f: &NewTable) {
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let Some(meta) = f.meta.clone() else { return };
-        let spec = TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() };
-        self.worker.sql_create_table(f.conn, sql, spec, meta, !self.conn_writable(f.conn));
+        self.worker.sql_create_table(f.conn, sql, f.spec(), meta, !self.conn_writable(f.conn));
     }
 
     /// The editable column list: name with a key toggle, type with its length, Null, and an Extra menu.
     fn column_grid(&mut self, ui: &mut egui::Ui, f: &mut NewTable) {
         let mut remove = None;
+        // The names before this frame's typing, so a renamed column takes its picks in the keys with it.
+        let names: Vec<String> = f.cols.iter().map(|c| c.name.clone()).collect();
         let mut add = false;
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -526,8 +594,17 @@ impl App {
             let n = f.cols.len() + 1;
             f.cols.push(ColumnSpec { name: format!("column_{n}"), ..Default::default() });
         }
+        for (i, from) in names.iter().enumerate() {
+            if f.cols[i].name != *from {
+                let to = f.cols[i].name.clone();
+                f.col_renamed(from, &to);
+            }
+        }
         if let Some(i) = remove {
-            f.cols.remove(i);
+            let gone = f.cols.remove(i).name;
+            if !f.cols.iter().any(|c| c.name == gone) {
+                f.keys.forget(&gone);
+            }
         }
     }
 
@@ -643,7 +720,7 @@ impl App {
                     col("reason", "VARCHAR", "255", true),
                     ColumnSpec { default: DefaultKind::Now, ..col("created_at", "DATETIME", "", false) },
                 ];
-                Modal::SqlNewTable(Box::new(NewTable { conn: 3, schema: "shop".into(), name: "refunds".into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), cols, meta: Some(meta), load_err: None, show_sql: false }))
+                Modal::SqlNewTable(Box::new(NewTable { conn: 3, schema: "shop".into(), name: "refunds".into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), cols, keys: NewKeys::default(), comment: String::new(), meta: Some(meta), load_err: None, show_sql: false }))
             }
             _ => Modal::SqlDrop(Box::new(DropForm {
                 conn: 3,

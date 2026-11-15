@@ -348,7 +348,7 @@ fn a_table_is_built_with_a_unique_a_check_a_key_to_another_schema_and_an_index()
         ui.click_last("parent_t");
         ui.click("Foreign key 1 Column 1");
         ui.click_last("ref");
-        ui.wait("the parent's columns", |a| matches!(&a.modal, Some(Modal::PgNewTable(f)) if f.fks.first().is_some_and(|k| k.parent.is_some())));
+        ui.wait("the parent's columns", |a| matches!(&a.modal, Some(Modal::PgNewTable(f)) if f.keys.fks.first().is_some_and(|k| k.parent.is_some())));
         ui.click("Foreign key 1 Referenced column 1");
         ui.click_last("pid");
         ui.click("Add Index");

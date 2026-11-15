@@ -5,7 +5,8 @@
 //! switched to READ WRITE, like the row writes.
 
 use super::se;
-use super::ddl::{self, Mode};
+use super::ddl::{self, IndexDef, Mode};
+use super::structure::{CheckConstraint, Column, ForeignKey, Index, IndexCol, Status, Structure};
 use super::value::lit;
 use super::worker::{database_names, text, text_at};
 use super::write::{writer_conn, SqlUndo};
@@ -296,13 +297,57 @@ impl ColumnSpec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,
     pub engine: String,
     pub collation: String,
     pub columns: Vec<ColumnSpec>,
+    /// Written between the columns of the CREATE TABLE, since MySQL DDL is not transactional and a table made first and altered
+    /// after could be left half made. An empty name lets the server name it.
+    pub fks: Vec<ForeignKey>,
+    pub checks: Vec<CheckConstraint>,
+    /// Secondary indexes and UNIQUE keys; the primary key comes from the columns marked `pk`.
+    pub indexes: Vec<IndexDef>,
+    pub comment: String,
+}
+
+impl TableSpec {
+    /// The table as the structure editor would read it once made, as far as a foreign key check needs it: the columns with the types
+    /// as typed (text ones in the table's collation) and the keys.
+    pub fn as_structure(&self) -> Structure {
+        let col = |c: &ColumnSpec| Column {
+            name: c.name.clone(),
+            full_type: type_text(c).map(|t| t.0).unwrap_or_else(|_| c.ty.clone()),
+            nullable: c.nullable && !c.pk,
+            collation: ddl::is_text(&c.ty.to_ascii_uppercase()).then(|| self.collation.clone()),
+            ..Default::default()
+        };
+        let key = |name: &str, unique: bool, cols: Vec<IndexCol>| Index { name: name.into(), unique, cols, kind: "BTREE".into(), ..Default::default() };
+        let mut indexes = Vec::new();
+        let pk: Vec<IndexCol> = self.columns.iter().filter(|c| c.pk).map(|c| IndexCol { name: c.name.clone(), ..Default::default() }).collect();
+        if !pk.is_empty() {
+            indexes.push(key("PRIMARY", true, pk));
+        }
+        for ix in &self.indexes {
+            let cols = ix.cols.iter().map(|c| IndexCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc, ..Default::default() }).collect();
+            indexes.push(key(&ix.name, ix.kind == ddl::IndexKind::Unique, cols));
+        }
+        Structure { columns: self.columns.iter().map(col).collect(), indexes, status: Status { engine: self.engine.clone(), collation: self.collation.clone(), ..Default::default() }, ..Default::default() }
+    }
+}
+
+/// What the server this spec is for would refuse or ignore before the statement is even read: a foreign key on a table that is not
+/// InnoDB, and a CHECK on a server that parses one and never enforces it.
+pub fn spec_problem(d: Dialect, version: &str, spec: &TableSpec) -> Option<String> {
+    if !spec.fks.is_empty() && !spec.engine.eq_ignore_ascii_case("InnoDB") {
+        return Some(format!("{} cannot hold a foreign key. Only InnoDB tables can.", if spec.engine.is_empty() { "This engine" } else { spec.engine.as_str() }));
+    }
+    if !spec.checks.is_empty() && !d.enforces_checks(version) {
+        return Some(format!("This server ({}) parses a CHECK and ignores it. A CHECK needs MySQL 8.0.16 or newer, or MariaDB 10.2.1.", version.trim()));
+    }
+    None
 }
 
 fn digits(s: &str) -> Option<u32> {
@@ -369,7 +414,8 @@ fn default_text(bs: bool, c: &ColumnSpec, def: &TypeDef) -> Res<String> {
 }
 
 /// The CREATE TABLE statement, or the first thing wrong with the form.
-pub fn create_table_sql(d: Dialect, bs: bool, spec: &TableSpec, meta: &Meta) -> Res<String> {
+pub fn create_table_sql(d: Dialect, m: Mode, spec: &TableSpec, meta: &Meta) -> Res<String> {
+    let bs = m.bs;
     check_existing("database", &spec.schema)?;
     not_system(&spec.schema, meta.fold_case)?;
     check_name("table", &spec.name, true)?;
@@ -415,7 +461,32 @@ pub fn create_table_sql(d: Dialect, bs: bool, spec: &TableSpec, meta: &Meta) -> 
     if !keys.is_empty() {
         lines.push(format!("  PRIMARY KEY ({})", keys.join(", ")));
     }
-    Ok(format!("CREATE TABLE {} (\n{}\n) ENGINE={engine} DEFAULT CHARSET={cs} COLLATE={co}", d.qualified(&spec.schema, &spec.name), lines.join(",\n")))
+    let has = |n: &str| spec.columns.iter().any(|c| c.name.eq_ignore_ascii_case(n));
+    let kind_of = |n: &str| spec.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)).map(|c| type_text(c).map(|t| t.0).unwrap_or_default()).unwrap_or_default();
+    for ix in &spec.indexes {
+        if let Some(c) = ix.cols.iter().find(|c| !has(&c.name)) {
+            return Err(format!("Index {} uses {}, which the table does not have.", if ix.name.is_empty() { "(unnamed)" } else { &ix.name }, c.name));
+        }
+        let cols: Vec<(String, String)> = ix.cols.iter().map(|c| (c.name.clone(), kind_of(&c.name))).collect();
+        if let Some(why) = ddl::index_problem(ix.kind, &cols) {
+            return Err(why);
+        }
+        lines.push(format!("  {}", ddl::index_clause(d, m, ix)?));
+    }
+    for k in &spec.fks {
+        if let Some(c) = k.cols.iter().find(|c| !has(c)) {
+            return Err(format!("Foreign key {} uses {}, which the table does not have.", if k.name.is_empty() { "(unnamed)" } else { &k.name }, c));
+        }
+        lines.push(format!("  {}", ddl::fk_clause(d, &ForeignKey { db: spec.schema.clone(), ..k.clone() })?));
+    }
+    for k in &spec.checks {
+        lines.push(format!("  {}", ddl::check_clause(d, m, k)?));
+    }
+    if spec.comment.chars().count() > 2048 {
+        return Err("A table comment is at most 2048 characters.".into());
+    }
+    let comment = if spec.comment.is_empty() { String::new() } else { format!(" COMMENT={}", lit(&spec.comment, bs)) };
+    Ok(format!("CREATE TABLE {} (\n{}\n) ENGINE={engine} DEFAULT CHARSET={cs} COLLATE={co}{comment}", d.qualified(&spec.schema, &spec.name), lines.join(",\n")))
 }
 
 /// How a statement is shown in a preview: with its closing semicolon.
@@ -779,7 +850,10 @@ impl Worker {
                 let out = async {
                     let mut meta = meta;
                     meta.fold_case = folds_case(&mut c).await?;
-                    let sql = create_table_sql(db.dialect, m.bs, &spec, &meta)?;
+                    if let Some(why) = spec_problem(db.dialect, &db.version, &spec) {
+                        return Err(why);
+                    }
+                    let sql = create_table_sql(db.dialect, m, &spec, &meta)?;
                     ddl::exec(&mut c, &sql).await?;
                     // The table exists from here on, so a failed read back only costs the stored spelling.
                     name = stored_name(&table_names(&mut c, db.dialect, &spec.schema).await.unwrap_or_default(), &spec.name);
@@ -889,7 +963,7 @@ mod tests {
     }
 
     fn spec(name: &str, columns: Vec<ColumnSpec>) -> TableSpec {
-        TableSpec { schema: "shop".into(), name: name.into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), columns }
+        TableSpec { schema: "shop".into(), name: name.into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), columns, ..Default::default() }
     }
 
     fn col(name: &str, ty: &str, len: &str) -> ColumnSpec {
@@ -928,7 +1002,7 @@ mod tests {
         }
         for name in ["", "a\nb", "a\rb", "tab\tx", "nul\0x", " lead", "trail ", "a/b", "a.b", "a\\b", &"x".repeat(65)] {
             assert!(create_db_sql(Dialect::MySql, name, "utf8mb4", "utf8mb4_bin", &m).is_err(), "{name:?}");
-            assert!(create_table_sql(Dialect::MySql, true, &spec(name, vec![ColumnSpec::id()]), &m).is_err(), "{name:?}");
+            assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &spec(name, vec![ColumnSpec::id()]), &m).is_err(), "{name:?}");
         }
         // Only an empty name or a control character stops a drop: the rest are names that exist.
         for name in ["", "a\nb", "a\rb", "tab\tx", "nul\0x"] {
@@ -967,7 +1041,7 @@ mod tests {
         // A new table may still go into an existing database with such a name.
         let mut s = spec("t", vec![ColumnSpec::id()]);
         s.schema = "x.y".into();
-        assert!(create_table_sql(d, true, &s, &meta()).unwrap().starts_with("CREATE TABLE `x.y`.`t`"));
+        assert!(create_table_sql(d, Mode::DEFAULT, &s, &meta()).unwrap().starts_with("CREATE TABLE `x.y`.`t`"));
     }
 
     #[test]
@@ -1021,14 +1095,14 @@ mod tests {
         assert!(create_db_sql(Dialect::MySql, "a", "UTF8MB4", "UTF8MB4_BIN", &m).unwrap().contains("CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"));
         let mut s = spec("t", vec![ColumnSpec::id()]);
         s.engine = "InnoDB; DROP".into();
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).is_err());
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).is_err());
         s.engine = "innodb".into();
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).unwrap().contains("ENGINE=InnoDB "));
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).unwrap().contains("ENGINE=InnoDB "));
         s.engine = "Memory".into();
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).is_err());
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).is_err());
         // A form whose lists have not arrived builds nothing.
         s.engine = "InnoDB".into();
-        assert!(create_table_sql(Dialect::MySql, true, &s, &Meta::default()).is_err());
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &Meta::default()).is_err());
     }
 
     #[test]
@@ -1036,12 +1110,78 @@ mod tests {
         let amount = ColumnSpec { nullable: false, ..col("amount", "DECIMAL", "10,2") };
         let at = ColumnSpec { nullable: false, default: DefaultKind::Now, ..col("created_at", "DATETIME", "") };
         let s = spec("refunds", vec![ColumnSpec::id(), amount, col("reason", "VARCHAR", "255"), at]);
-        let sql = create_table_sql(Dialect::MySql, true, &s, &meta()).unwrap();
+        let sql = create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &meta()).unwrap();
         assert_eq!(
             sql,
             "CREATE TABLE `shop`.`refunds` (\n  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n  `amount` DECIMAL(10,2) NOT NULL,\n  `reason` VARCHAR(255) NULL,\n  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
         );
         one_statement(&sql);
+    }
+
+    #[test]
+    fn keys_checks_indexes_and_a_comment_are_written_between_the_columns() {
+        use crate::db::sql::ddl::{IdxCol, IndexKind};
+        let ic = |n: &str| IdxCol { name: n.into(), prefix: None, desc: false };
+        let customer = ColumnSpec { nullable: false, unsigned: true, ..col("customer_id", "INT", "") };
+        let mut s = spec("orders", vec![ColumnSpec::id(), customer, col("note", "VARCHAR", "100")]);
+        s.indexes = vec![
+            IndexDef { name: "idx_note".into(), kind: IndexKind::Index, cols: vec![ic("note")], ..Default::default() },
+            IndexDef { name: String::new(), kind: IndexKind::Unique, cols: vec![ic("customer_id"), ic("note")], ..Default::default() },
+            IndexDef { name: "ft_note".into(), kind: IndexKind::Fulltext, cols: vec![ic("note")], ..Default::default() },
+        ];
+        s.fks = vec![ForeignKey { name: "fk_orders_customer".into(), cols: vec!["customer_id".into()], ref_db: "shop".into(), ref_table: "customers".into(), ref_cols: vec!["id".into()], on_update: "RESTRICT".into(), on_delete: "CASCADE".into(), ..Default::default() }];
+        s.checks = vec![CheckConstraint { name: String::new(), expr: "customer_id > 0".into(), ..Default::default() }, CheckConstraint { name: "chk_note".into(), expr: "CHAR_LENGTH(note) < 90".into(), ..Default::default() }];
+        s.comment = "it's an order".into();
+        let sql = create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &meta()).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE TABLE `shop`.`orders` (\n  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n  `customer_id` INT UNSIGNED NOT NULL,\n  `note` VARCHAR(100) NULL,\n  PRIMARY KEY (`id`),\n  INDEX `idx_note` (`note`),\n  UNIQUE INDEX (`customer_id`, `note`),\n  FULLTEXT INDEX `ft_note` (`note`),\n  CONSTRAINT `fk_orders_customer`\n    FOREIGN KEY (`customer_id`)\n    REFERENCES `customers` (`id`)\n    ON UPDATE RESTRICT ON DELETE CASCADE,\n  CHECK (customer_id > 0),\n  CONSTRAINT `chk_note` CHECK (CHAR_LENGTH(note) < 90)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='it''s an order'"
+        );
+        one_statement(&sql);
+        // A key in another database names it, and one to the table itself does not need a second table.
+        s.fks[0].ref_db = "other".into();
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &meta()).unwrap().contains("REFERENCES `other`.`customers` (`id`)"));
+        // What the table does not have, what a kind cannot hold, and text that is not one expression are refused before the server.
+        let mut bad = s.clone();
+        bad.indexes[0].cols = vec![ic("nope")];
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).unwrap_err().contains("does not have"));
+        bad = s.clone();
+        bad.indexes[2].cols = vec![ic("customer_id")];
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).unwrap_err().contains("FULLTEXT"));
+        bad = s.clone();
+        bad.fks[0].cols = vec!["nope".into()];
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).unwrap_err().contains("does not have"));
+        bad = s.clone();
+        bad.checks[0].expr = "1); DROP TABLE t; --".into();
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).is_err());
+        bad = s.clone();
+        bad.fks[0].on_delete = "CASCADE; DROP".into();
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).is_err());
+        bad = s.clone();
+        bad.indexes.clear();
+        bad.indexes.push(IndexDef { name: "i".into(), kind: IndexKind::Index, cols: Vec::new(), ..Default::default() });
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &bad, &meta()).is_err());
+    }
+
+    #[test]
+    fn a_foreign_key_needs_innodb_and_a_check_needs_a_server_that_enforces_it() {
+        let mut s = spec("orders", vec![ColumnSpec::id(), col("c", "INT", "")]);
+        s.fks = vec![ForeignKey { name: "fk".into(), cols: vec!["c".into()], ref_table: "p".into(), ref_cols: vec!["id".into()], on_update: "RESTRICT".into(), on_delete: "RESTRICT".into(), ..Default::default() }];
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &s).is_none());
+        s.engine = "MyISAM".into();
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &s).unwrap().contains("Only InnoDB"));
+        s.engine = "InnoDB".into();
+        s.fks.clear();
+        s.checks = vec![CheckConstraint { name: "c".into(), expr: "c > 0".into(), ..Default::default() }];
+        assert!(spec_problem(Dialect::MySql, "5.7.44", &s).unwrap().contains("ignores"));
+        assert!(spec_problem(Dialect::MariaDb, "10.1.0-MariaDB", &s).is_some());
+        assert!(spec_problem(Dialect::MariaDb, "11.4.0-MariaDB", &s).is_none());
+        // the new table as the key check sees it: a primary key to point at, and text in the table's collation
+        let mut t = spec("t", vec![ColumnSpec::id(), col("name", "VARCHAR", "20")]);
+        t.collation = "utf8mb4_bin".into();
+        let st = t.as_structure();
+        assert_eq!((st.columns[0].full_type.as_str(), st.columns[1].collation.as_deref(), st.columns[0].collation.clone()), ("INT UNSIGNED", Some("utf8mb4_bin"), None));
+        assert!(st.indexes.iter().any(|i| i.unique && i.cols.len() == 1 && i.cols[0].name == "id"));
     }
 
     #[test]
@@ -1055,7 +1195,7 @@ mod tests {
                 if name.contains(['.', '/', '\\']) {
                     s.name = "t".into();
                 }
-                let sql = create_table_sql(Dialect::MySql, bs, &s, &m).unwrap_or_else(|err| panic!("{name}: {err}"));
+                let sql = create_table_sql(Dialect::MySql, Mode { bs, ansi: false }, &s, &m).unwrap_or_else(|err| panic!("{name}: {err}"));
                 let q = Dialect::MySql.quote_ident(name);
                 assert!(sql.contains(&format!("  {q} VARCHAR(20) NULL DEFAULT '")), "{sql}");
                 assert_eq!(lex::count_with(&sql, crate::db::sql::Dialect::MySql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
@@ -1064,22 +1204,22 @@ mod tests {
         // The literal doubles quotes always and backslashes only where the server reads them as escapes.
         let c = ColumnSpec { default: DefaultKind::Value, default_text: "a'b\\c".into(), ..col("v", "VARCHAR", "9") };
         let s = spec("t", vec![ColumnSpec::id(), c]);
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).unwrap().contains("DEFAULT 'a''b\\\\c'"));
-        assert!(create_table_sql(Dialect::MySql, false, &s, &m).unwrap().contains("DEFAULT 'a''b\\c'"));
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).unwrap().contains("DEFAULT 'a''b\\\\c'"));
+        assert!(create_table_sql(Dialect::MySql, Mode { bs: false, ansi: false }, &s, &m).unwrap().contains("DEFAULT 'a''b\\c'"));
         // Control characters in any name are refused, not quoted.
         let s = spec("t", vec![ColumnSpec { name: "a\nb".into(), ..ColumnSpec::id() }]);
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).is_err());
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).is_err());
         let s = spec("t\n2", vec![ColumnSpec::id()]);
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).is_err());
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).is_err());
         // A column may hold a dot or a slash, a table may not.
         let s = spec("t", vec![ColumnSpec { name: "a.b/c".into(), ..ColumnSpec::id() }]);
-        assert!(create_table_sql(Dialect::MySql, true, &s, &m).unwrap().contains("`a.b/c` INT UNSIGNED"));
+        assert!(create_table_sql(Dialect::MySql, Mode::DEFAULT, &s, &m).unwrap().contains("`a.b/c` INT UNSIGNED"));
     }
 
     #[test]
     fn types_lengths_and_defaults_are_checked() {
         let m = meta();
-        let build = |c: ColumnSpec| create_table_sql(Dialect::MySql, true, &spec("t", vec![c]), &m);
+        let build = |c: ColumnSpec| create_table_sql(Dialect::MySql, Mode::DEFAULT, &spec("t", vec![c]), &m);
         assert!(build(col("a", "VARCHAR", "")).is_err());
         assert!(build(col("a", "VARCHAR", "0")).is_err());
         assert!(build(col("a", "VARCHAR", "65536")).is_err());
@@ -1116,7 +1256,7 @@ mod tests {
     #[test]
     fn keys_and_auto_increment_rules() {
         let m = meta();
-        let build = |cols: Vec<ColumnSpec>| create_table_sql(Dialect::MySql, true, &spec("t", cols), &m);
+        let build = |cols: Vec<ColumnSpec>| create_table_sql(Dialect::MySql, Mode::DEFAULT, &spec("t", cols), &m);
         assert!(build(vec![]).is_err());
         // Names clash without regard to case, as the server compares them.
         assert!(build(vec![col("A", "INT", ""), col("a", "INT", "")]).is_err());
@@ -1252,7 +1392,7 @@ mod tests {
     }
 
     fn table_spec(schema: &str, name: &str, co: &str, engine: &str, columns: Vec<ColumnSpec>) -> TableSpec {
-        TableSpec { schema: schema.into(), name: name.into(), engine: engine.into(), collation: co.into(), columns }
+        TableSpec { schema: schema.into(), name: name.into(), engine: engine.into(), collation: co.into(), columns, ..Default::default() }
     }
 
     fn text_default(name: &str, value: &str) -> ColumnSpec {
@@ -1508,7 +1648,7 @@ mod tests {
             let amount = ColumnSpec { nullable: false, ..col("amount", "DECIMAL", "10,2") };
             let at = ColumnSpec { nullable: false, default: DefaultKind::Now, ..col("created at", "DATETIME", "") };
             let note = ColumnSpec { default: DefaultKind::Value, default_text: "it's `x` \\ ok".into(), ..col("no`te", "VARCHAR", "40") };
-            let s = TableSpec { schema: schema.clone(), name: "re`funds".into(), engine: m.server_engine.clone(), collation: co.clone(), columns: vec![ColumnSpec::id(), amount, note, at] };
+            let s = TableSpec { schema: schema.clone(), name: "re`funds".into(), engine: m.server_engine.clone(), collation: co.clone(), columns: vec![ColumnSpec::id(), amount, note, at], ..Default::default() };
             l.w.sql_create_table(1, l.db.clone(), s.clone(), m.clone(), false);
             let (what, res, undo, _) = l.ddl();
             assert_eq!(what, Ddl::CreatedTable);
@@ -1547,6 +1687,49 @@ mod tests {
             l.w.sql_create_table(1, l.db.clone(), bad, m, false);
             let (_, res, undo, _) = l.ddl();
             assert!(res.is_err() && undo.is_none());
+            l.exec(&format!("DROP DATABASE `{schema}`"));
+        });
+    }
+
+    /// A child table is made with its foreign key, CHECK, indexes and comment in the one CREATE TABLE, and the structure read finds each.
+    #[test]
+    fn live_a_table_is_made_with_a_foreign_key_a_check_indexes_and_a_comment() {
+        use crate::db::sql::ddl::{IdxCol, IndexKind};
+        each(|l| {
+            let schema = unique("qcd_k");
+            let (m, co) = l.utf8mb4();
+            let m = Meta { schema_collation: None, ..m };
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            let parent = table_spec(&schema, "customers", &co, "InnoDB", vec![ColumnSpec::id(), col("code", "VARCHAR", "20")]);
+            l.w.sql_create_table(1, l.db.clone(), parent, m.clone(), false);
+            let (_, res, ..) = l.ddl();
+            assert!(res.is_ok(), "{}: {res:?}", l.label);
+            let ic = |n: &str| IdxCol { name: n.into(), prefix: None, desc: false };
+            let customer = ColumnSpec { nullable: false, unsigned: true, ..col("customer_id", "INT", "") };
+            let mut child = table_spec(&schema, "orders", &co, "InnoDB", vec![ColumnSpec::id(), customer, col("note", "VARCHAR", "100")]);
+            child.fks = vec![ForeignKey { name: "fk_orders_customer".into(), db: schema.clone(), cols: vec!["customer_id".into()], ref_db: schema.clone(), ref_table: "customers".into(), ref_cols: vec!["id".into()], on_update: "RESTRICT".into(), on_delete: "CASCADE".into(), ..Default::default() }];
+            let checks = l.db.dialect.enforces_checks(&l.db.version);
+            if checks {
+                child.checks = vec![CheckConstraint { name: "chk_note".into(), expr: "CHAR_LENGTH(note) < 90".into(), ..Default::default() }];
+            }
+            child.indexes = vec![IndexDef { name: "idx_note".into(), kind: IndexKind::Index, cols: vec![ic("note")], ..Default::default() }, IndexDef { name: "uq_cust_note".into(), kind: IndexKind::Unique, cols: vec![ic("customer_id"), ic("note")], ..Default::default() }];
+            child.comment = "it's \\ an order".into();
+            l.w.sql_create_table(1, l.db.clone(), child.clone(), m.clone(), false);
+            let (_, res, ..) = l.ddl();
+            assert!(res.is_ok(), "{}: {res:?}", l.label);
+            l.w.sql_structure(2, l.db.clone(), schema.clone(), "orders".into());
+            let Msg::SqlStructure { res, .. } = l.next() else { panic!("expected SqlStructure") };
+            let st = res.unwrap();
+            let fk = &st.foreign_keys[0];
+            assert_eq!((fk.name.as_str(), fk.cols.clone(), fk.ref_table.as_str(), fk.ref_cols.clone(), fk.on_delete.as_str()), ("fk_orders_customer", vec!["customer_id".to_string()], "customers", vec!["id".to_string()], "CASCADE"), "{}", l.label);
+            assert!(st.indexes.iter().any(|i| i.name == "idx_note" && !i.unique) && st.indexes.iter().any(|i| i.name == "uq_cust_note" && i.unique && i.cols.len() == 2), "{}: {:?}", l.label, st.indexes);
+            assert_eq!(st.status.comment, "it's \\ an order", "{}", l.label);
+            assert_eq!(st.checks.iter().any(|k| k.name == "chk_note"), checks, "{}", l.label);
+            // A table that is not InnoDB is refused before anything is sent, and nothing is left behind.
+            let myisam = TableSpec { name: "memo".into(), engine: "MyISAM".into(), ..child };
+            l.w.sql_create_table(1, l.db.clone(), myisam, m, false);
+            let (_, res, undo, _) = l.ddl();
+            assert!(res.unwrap_err().contains("InnoDB") && undo.is_none() && !l.exists_table(&schema, "memo"), "{}", l.label);
             l.exec(&format!("DROP DATABASE `{schema}`"));
         });
     }
@@ -1609,7 +1792,7 @@ mod tests {
             assert!(!l.exists_db(&name));
             l.exec(&format!("CREATE DATABASE `{name}`"));
             l.exec(&format!("CREATE TABLE `{name}`.t (a INT)"));
-            let s = TableSpec { schema: name.clone(), name: "t2".into(), engine: m.server_engine.clone(), collation: co, columns: vec![ColumnSpec::id()] };
+            let s = TableSpec { schema: name.clone(), name: "t2".into(), engine: m.server_engine.clone(), collation: co, columns: vec![ColumnSpec::id()], ..Default::default() };
             l.w.sql_create_table(1, l.db.clone(), s, m, true);
             assert!(l.ddl().1.unwrap_err().contains("locked"));
             for (table, view, trunc) in [("t", false, false), ("t", false, true), ("", false, false)] {

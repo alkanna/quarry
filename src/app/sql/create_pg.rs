@@ -4,11 +4,12 @@
 //! and a table is built from the structure editor's column model.
 
 use crate::app::sql::create::{list_and, plural, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
+use crate::app::sql::new_keys::{KeyEnv, NewKeys, PgFk};
 use crate::app::*;
 use db::sql::create::{Ddl, DropInfo};
 use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
 use db::sql::ddl::{self, ColDef, Dv};
-use db::sql::structure::{ForeignKey, Structure};
+use db::sql::Dialect;
 
 pub(in crate::app) struct PgNewDb {
     conn: u64,
@@ -36,38 +37,15 @@ pub(in crate::app) struct PgCol {
     unique: bool,
 }
 
-/// A foreign key of the builder, with the parent's structure as the server gave it, read on a request of its own like the Add
-/// relation dialog's. `key.cols` and `key.ref_cols` are kept the same length, one pair per line, empty until picked.
-#[derive(Clone)]
-pub(in crate::app) struct PgFk {
-    key: ForeignKey,
-    /// The key points at the table being made, which follows the name typed.
-    own: bool,
-    pub(in crate::app) parent: Option<Structure>,
-    /// The schema and table `parent` was asked for, and the request that carries the answer.
-    asked: (String, String),
-    req: u64,
-    err: Option<String>,
-}
-
-impl PgFk {
-    fn new(schema: &str) -> Self {
-        let key = ForeignKey { ref_db: schema.to_string(), cols: vec![String::new()], ref_cols: vec![String::new()], on_update: "NO ACTION".into(), on_delete: "NO ACTION".into(), ..Default::default() };
-        PgFk { key, own: false, parent: None, asked: Default::default(), req: 0, err: None }
-    }
-}
-
 pub(in crate::app) struct PgNewTable {
     conn: u64,
     database: String,
     schema: String,
     name: String,
     cols: Vec<PgCol>,
-    /// The UNIQUE constraints over several columns; one over a single column is also its column's Unique box.
-    uniques: Vec<Unique>,
-    checks: Vec<Check>,
-    pub(in crate::app) fks: Vec<PgFk>,
-    indexes: Vec<NewIndex>,
+    /// The UNIQUE constraints over several columns (one over a single column is also its column's Unique box), the CHECKs, the
+    /// foreign keys and the indexes.
+    pub(in crate::app) keys: NewKeys,
     comment: String,
     show_sql: bool,
     focused: bool,
@@ -78,12 +56,9 @@ pub(in crate::app) struct PgNewTable {
 /// The types the picker offers. The type box takes any other name, and the server checks it before anything is made.
 const TYPES: [&str; 17] = ["integer", "bigint", "smallint", "text", "varchar(255)", "numeric(10,2)", "boolean", "date", "timestamp", "timestamptz", "time", "uuid", "jsonb", "json", "real", "double precision", "bytea"];
 
-/// The actions of a key, PostgreSQL's default first.
-const FK_ACTIONS: [&str; 5] = ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"];
-
 impl PgNewTable {
     fn new(conn: u64, database: String, schema: String) -> Self {
-        PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], uniques: Vec::new(), checks: Vec::new(), fks: Vec::new(), indexes: Vec::new(), comment: String::new(), show_sql: false, focused: false, built: None }
+        PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], keys: NewKeys::default(), comment: String::new(), show_sql: false, focused: false, built: None }
     }
 
     /// Builds the statements again only when the spec changed since the last frame.
@@ -100,6 +75,7 @@ impl PgNewTable {
         let cols: Vec<ColDef> = self.cols.iter().map(|c| ColDef { nullable: c.def.nullable && !c.pk && !c.def.auto_increment, ..c.def.clone() }).collect();
         let marked = self.cols.iter().filter(|c| c.unique).map(|c| Unique { name: String::new(), cols: vec![c.def.name.clone()] });
         let fks = self
+            .keys
             .fks
             .iter()
             .map(|k| {
@@ -112,121 +88,34 @@ impl PgNewTable {
                 key
             })
             .collect();
-        TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: marked.chain(self.uniques.iter().cloned()).collect(), checks: self.checks.clone(), fks, indexes: self.indexes.clone(), comment: self.comment.clone() }
+        TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: marked.chain(self.keys.uniques.iter().cloned()).collect(), checks: self.keys.checks.clone(), fks, indexes: self.keys.indexes.clone(), comment: self.comment.clone() }
     }
 
     /// The first thing stopping a key that the statements cannot see: a part not picked, a parent not read yet or one that does not
     /// fit. The second value is true while a parent is still loading, which is not a mistake to point at.
     fn key_problem(&self, spec: &TableSpec) -> Option<(String, bool)> {
-        let own = spec.as_structure();
-        for (i, (k, key)) in self.fks.iter().zip(&spec.fks).enumerate() {
-            let n = i + 1;
-            if key.ref_table.is_empty() {
-                return Some((format!("Pick the table foreign key {n} points at."), false));
-            }
-            if key.cols.iter().chain(&key.ref_cols).any(|c| c.is_empty()) {
-                return Some((format!("Pick both columns of every line of foreign key {n}."), false));
-            }
-            if k.own {
-                continue;
-            }
-            if let Some(e) = &k.err {
-                return Some((format!("Could not read {}: {e}", key.ref_table), false));
-            }
-            match &k.parent {
-                None => return Some((format!("Reading {}...", key.ref_table), true)),
-                Some(p) => {
-                    if let Some(why) = ddl::fk_problem(&own, &spec.name, p, key, false) {
-                        return Some((format!("Foreign key {n}: {why}"), false));
-                    }
-                }
-            }
-        }
-        None
+        self.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, false, None)
     }
 
-    /// Every pick of a column by name in the UNIQUEs, the indexes and the keys (the parent side only when the key points at this
-    /// table), so a rename or a removal reaches all of them.
-    fn picks_mut(&mut self) -> impl Iterator<Item = &mut String> {
-        let lists = self.uniques.iter_mut().map(|u| &mut u.cols).chain(self.indexes.iter_mut().map(|i| &mut i.cols));
-        let keys = self.fks.iter_mut().flat_map(|k| {
-            let own = k.own;
-            k.key.cols.iter_mut().chain(k.key.ref_cols.iter_mut().filter(move |_| own))
-        });
-        lists.flat_map(|v| v.iter_mut()).chain(keys)
-    }
-
-    /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its. An
-    /// emptied name is a removal, because an empty pick on a key line means nothing picked.
+    /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its.
     fn col_renamed(&mut self, from: &str, to: &str) {
         if from.is_empty() || self.cols.iter().any(|c| c.def.name == from) {
             return;
         }
-        if to.is_empty() {
-            return self.forget_col(from);
-        }
-        self.picks_mut().filter(|p| *p == from).for_each(|p| *p = to.to_string());
-    }
-
-    /// Takes a removed column out of every list. A UNIQUE or index pick list hides a name it does not offer, so a stale one could
-    /// neither be seen nor removed and a new column of that name would silently take its place. A key line is kept and left unpicked.
-    fn forget_col(&mut self, name: &str) {
-        for v in self.uniques.iter_mut().map(|u| &mut u.cols).chain(self.indexes.iter_mut().map(|i| &mut i.cols)) {
-            v.retain(|c| c != name);
-        }
-        self.picks_mut().filter(|p| *p == name).for_each(String::clear);
+        self.keys.renamed(from, to);
     }
 
     fn remove_col(&mut self, i: usize) {
         let gone = self.cols.remove(i).def.name;
         if !self.cols.iter().any(|c| c.def.name == gone) {
-            self.forget_col(&gone);
+            self.keys.forget(&gone);
         }
-    }
-
-    /// The answer to a parent's structure read, when it is for one of this dialog's keys.
-    pub(in crate::app) fn parent_loaded(&mut self, req: u64, res: &db::Res<Structure>) -> bool {
-        let Some(k) = self.fks.iter_mut().find(|k| k.req == req && req != 0) else { return false };
-        match res {
-            Ok(s) => (k.parent, k.err) = (Some(s.clone()), None),
-            Err(e) => (k.parent, k.err) = (None, Some(e.clone())),
-        }
-        true
     }
 }
 
 /// The first column of a new table: an integer identity primary key, which is what most tables want.
 fn id_col() -> PgCol {
     PgCol { def: ColDef { auto_increment: true, nullable: false, ..ColDef::new("id", "integer") }, pk: true, unique: false }
-}
-
-/// Picks columns in key order, one toggle per column of the table: a click adds a column at the end or takes it out, and a picked
-/// one shows its place in the key. `label` names the row for the screen reader.
-fn cols_pick(ui: &mut egui::Ui, label: &str, all: &[String], picked: &mut Vec<String>) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for c in all {
-            let at = picked.iter().position(|p| p == c);
-            let text = match at {
-                Some(i) => format!("{} {c}", i + 1),
-                None => c.clone(),
-            };
-            let r = ui.selectable_label(at.is_some(), RichText::new(text).monospace().size(TXT_SMALL));
-            // The row's own name in front, so a screen reader and a test tell its column from the same name elsewhere on the page.
-            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, at.is_some(), format!("{label} {c}")));
-            if r.clicked() {
-                match at {
-                    Some(i) => {
-                        picked.remove(i);
-                    }
-                    None => picked.push(c.clone()),
-                }
-            }
-        }
-        if all.is_empty() {
-            ui.label(RichText::new("Name the columns first").size(TXT_SMALL).color(FAINT()));
-        }
-    });
 }
 
 /// A combo over plain strings, with `none` as the first item standing for no pick.
@@ -244,10 +133,6 @@ fn str_pick(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, label
         }
     });
     r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, label));
-}
-
-fn name_field(ui: &mut egui::Ui, text: &mut String, label: String) {
-    ui.add(egui::TextEdit::singleline(text).font(egui::TextStyle::Monospace).desired_width(150.0).hint_text("server names it")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, &label));
 }
 
 fn editor_label(ui: &mut egui::Ui, text: &mut String, width: f32, label: &str) -> egui::Response {
@@ -583,20 +468,21 @@ impl App {
         });
         ui.add_space(16.0);
         card_caption(ui, "Keys, checks and indexes", "");
-        self.pg_constraint_list(ui, f);
+        let cols: Vec<String> = f.cols.iter().map(|c| c.def.name.clone()).filter(|n| !n.is_empty()).collect();
+        self.constraint_list(ui, &mut f.keys, &KeyEnv { conn: f.conn, database: &f.database, schema: &f.schema, name: &f.name, d: Dialect::Postgres }, &cols);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if add_chip(ui, "Unique").clicked() {
-                f.uniques.push(Unique::default());
+                f.keys.uniques.push(Unique::default());
             }
             if add_chip(ui, "Check").clicked() {
-                f.checks.push(Check::default());
+                f.keys.checks.push(Check::default());
             }
             if add_chip(ui, "Foreign key").clicked() {
-                f.fks.push(PgFk::new(&f.schema));
+                f.keys.fks.push(PgFk::new(&f.schema, Dialect::Postgres));
             }
             if add_chip(ui, "Index").clicked() {
-                f.indexes.push(NewIndex::default());
+                f.keys.indexes.push(NewIndex::default());
             }
         });
         f.refresh_built();
@@ -741,189 +627,6 @@ impl App {
         }
         if let Some(i) = remove {
             f.remove_col(i);
-        }
-    }
-
-    /// The UNIQUE constraints over several columns, the CHECKs, the foreign keys and the indexes of the new table, one row each with its
-    /// name (empty lets the server name it), what it holds, and a remove button. A foreign key's parent is read when it is picked.
-    fn pg_constraint_list(&mut self, ui: &mut egui::Ui, f: &mut PgNewTable) {
-        if f.uniques.is_empty() && f.checks.is_empty() && f.fks.is_empty() && f.indexes.is_empty() {
-            ui.label(RichText::new("None yet. A column's Unique box is a single-column UNIQUE; add one over several columns, a CHECK, a foreign key or an index here.").size(TXT_SMALL).color(FAINT()));
-            return;
-        }
-        let cols: Vec<String> = f.cols.iter().map(|c| c.def.name.clone()).filter(|n| !n.is_empty()).collect();
-        let schemas: Vec<String> = self.conn(f.conn).and_then(|c| c.pg.get(&f.database)).map(|p| p.schemas.iter().filter(|s| !s.system || s.name == f.schema).map(|s| s.name.clone()).collect()).unwrap_or_else(|| vec![f.schema.clone()]);
-        // The tables of each schema a key points at, loading the list the first time it is asked.
-        let mut tables: HashMap<String, Option<Vec<String>>> = HashMap::new();
-        for k in &f.fks {
-            if !tables.contains_key(&k.key.ref_db) {
-                let t = self.fk_tables(f.conn, &f.database, &k.key.ref_db);
-                tables.insert(k.key.ref_db.clone(), t);
-            }
-        }
-        let (mut drop_u, mut drop_c, mut drop_f, mut drop_i) = (None, None, None, None);
-        let this = format!("{} (this table)", if f.name.is_empty() { "new table" } else { f.name.as_str() });
-        card_frame().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().id_salt("pg-newtable-keys").max_height(230.0).auto_shrink([false, true]).show(ui, |ui| {
-                egui::Grid::new("pg-newtable-keys-grid").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
-                    let remove = |ui: &mut egui::Ui, what: &str| ui.add(quiet_button(RichText::new("remove").size(TXT_CAPTION).color(FAINT()))).on_hover_text(format!("Remove this {what}")).clicked();
-                    for (i, u) in f.uniques.iter_mut().enumerate() {
-                        let n = i + 1;
-                        caption(ui, "UNIQUE");
-                        ui.horizontal(|ui| {
-                            name_field(ui, &mut u.name, format!("Unique name {n}"));
-                            cols_pick(ui, &format!("Unique columns {n}"), &cols, &mut u.cols);
-                        });
-                        if remove(ui, "constraint") {
-                            drop_u = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                    for (i, c) in f.checks.iter_mut().enumerate() {
-                        let n = i + 1;
-                        caption(ui, "CHECK");
-                        ui.horizontal(|ui| {
-                            name_field(ui, &mut c.name, format!("Check name {n}"));
-                            ui.add(egui::TextEdit::singleline(&mut c.expr).font(egui::TextStyle::Monospace).desired_width(330.0).hint_text("price >= 0")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, format!("Check expression {n}")));
-                        });
-                        if remove(ui, "check") {
-                            drop_c = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                    for (i, k) in f.fks.iter_mut().enumerate() {
-                        let n = i + 1;
-                        caption(ui, "FOREIGN KEY");
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                name_field(ui, &mut k.key.name, format!("Foreign key name {n}"));
-                                let before = (k.key.ref_db.clone(), k.key.ref_table.clone(), k.own);
-                                let r = egui::ComboBox::from_id_salt(("pg-newtable-fk-schema", i)).width(110.0).selected_text(k.key.ref_db.as_str()).show_ui(ui, |ui| {
-                                    menu_look(ui);
-                                    for s in &schemas {
-                                        ui.selectable_value(&mut k.key.ref_db, s.clone(), s.as_str());
-                                    }
-                                });
-                                r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Referenced schema {n}")));
-                                let list = tables.get(&k.key.ref_db).cloned().flatten();
-                                let shown = if k.own { this.clone() } else if !k.key.ref_table.is_empty() { k.key.ref_table.clone() } else if list.is_none() { "Loading tables...".into() } else { "Pick a table".into() };
-                                let r = egui::ComboBox::from_id_salt(("pg-newtable-fk-table", i)).width(160.0).selected_text(shown).show_ui(ui, |ui| {
-                                    menu_look(ui);
-                                    if k.key.ref_db == f.schema && ui.selectable_label(k.own, this.as_str()).clicked() {
-                                        (k.own, k.key.ref_table) = (true, String::new());
-                                    }
-                                    for t in list.iter().flatten() {
-                                        if ui.selectable_label(!k.own && k.key.ref_table == *t, t.as_str()).clicked() {
-                                            (k.own, k.key.ref_table) = (false, t.clone());
-                                        }
-                                    }
-                                });
-                                r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Referenced table {n}")));
-                                if k.key.ref_db != before.0 {
-                                    (k.own, k.key.ref_table) = (false, String::new());
-                                }
-                                if (k.key.ref_db.clone(), k.key.ref_table.clone(), k.own) != before {
-                                    k.key.ref_cols.iter_mut().for_each(String::clear);
-                                }
-                            });
-                            let parent_cols: Vec<String> = if k.own { cols.clone() } else { k.parent.as_ref().map(|p| p.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default() };
-                            let lines = k.key.cols.len();
-                            let mut cut = None;
-                            for j in 0..lines {
-                                ui.horizontal(|ui| {
-                                    for (side, list, label) in [(0, &cols, "Column"), (1, &parent_cols, "Referenced column")] {
-                                        let v = if side == 0 { &mut k.key.cols[j] } else { &mut k.key.ref_cols[j] };
-                                        let r = egui::ComboBox::from_id_salt(("pg-newtable-fk-col", i, j, side)).width(150.0).selected_text(if v.is_empty() { "Column".to_string() } else { v.clone() }).show_ui(ui, |ui| {
-                                            menu_look(ui);
-                                            for c in list {
-                                                ui.selectable_value(v, c.clone(), c.as_str());
-                                            }
-                                        });
-                                        r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Foreign key {n} {label} {}", j + 1)));
-                                        if side == 0 {
-                                            ui.label(RichText::new("to").color(MUTED()));
-                                        }
-                                    }
-                                    if lines > 1 && quiet(ui, "Remove").clicked() {
-                                        cut = Some(j);
-                                    }
-                                });
-                            }
-                            if let Some(j) = cut {
-                                k.key.cols.remove(j);
-                                k.key.ref_cols.remove(j);
-                            }
-                            ui.horizontal(|ui| {
-                                if quiet_enabled(ui, k.key.cols.len() < cols.len().min(16), "+ Column").on_hover_text("Add another column to a composite key").clicked() {
-                                    k.key.cols.push(String::new());
-                                    k.key.ref_cols.push(String::new());
-                                }
-                                for (label, v) in [("On delete", &mut k.key.on_delete), ("On update", &mut k.key.on_update)] {
-                                    ui.label(RichText::new(label).size(TXT_SMALL).color(MUTED()));
-                                    let r = egui::ComboBox::from_id_salt(("pg-newtable-fk-act", i, label)).width(100.0).selected_text(v.as_str()).show_ui(ui, |ui| {
-                                        menu_look(ui);
-                                        for a in FK_ACTIONS {
-                                            ui.selectable_value(v, a.to_string(), a);
-                                        }
-                                    });
-                                    r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Foreign key {n} {label}")));
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut k.key.match_full, "Match full").on_hover_text("A key with several columns must be all NULL or all set. The default lets any NULL column skip the check.");
-                                ui.checkbox(&mut k.key.deferrable, "Deferrable").on_hover_text("Lets a transaction postpone the check to its end.");
-                                ui.add_enabled(k.key.deferrable, egui::Checkbox::new(&mut k.key.deferred, "Initially deferred"));
-                                if !k.key.deferrable {
-                                    k.key.deferred = false;
-                                }
-                            });
-                        });
-                        if remove(ui, "foreign key") {
-                            drop_f = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                    for (i, x) in f.indexes.iter_mut().enumerate() {
-                        let n = i + 1;
-                        caption(ui, "INDEX");
-                        ui.horizontal(|ui| {
-                            name_field(ui, &mut x.name, format!("Index name {n}"));
-                            cols_pick(ui, &format!("Index columns {n}"), &cols, &mut x.cols);
-                            ui.checkbox(&mut x.unique, "Unique").widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, format!("Unique index {n}")));
-                        });
-                        if remove(ui, "index") {
-                            drop_i = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                });
-            });
-        });
-        if let Some(i) = drop_u {
-            f.uniques.remove(i);
-        }
-        if let Some(i) = drop_c {
-            f.checks.remove(i);
-        }
-        if let Some(i) = drop_f {
-            f.fks.remove(i);
-        }
-        if let Some(i) = drop_i {
-            f.indexes.remove(i);
-        }
-        // Each key's parent, read once per pick on a request of its own.
-        for k in f.fks.iter_mut() {
-            let want = (k.key.ref_db.clone(), k.key.ref_table.clone());
-            if k.own || want.1.is_empty() || want == k.asked {
-                continue;
-            }
-            (k.asked, k.parent, k.err) = (want.clone(), None, None);
-            if let Some(sql) = self.pg_session(f.conn) {
-                self.req += 1;
-                k.req = self.req;
-                self.worker.sql_structure(self.req, sql.at(&f.database), want.0, want.1);
-            }
         }
     }
 
@@ -1127,26 +830,26 @@ mod tests {
         let col = |n: &str| PgCol { def: ColDef::new(n, "integer"), pk: false, unique: false };
         t.cols.extend([col("price"), col("qty")]);
         let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        t.uniques = vec![Unique { name: String::new(), cols: v(&["price", "qty"]) }];
-        t.indexes = vec![NewIndex { name: String::new(), cols: v(&["qty", "price"]), unique: false }];
-        let mut other = PgFk::new("public");
+        t.keys.uniques = vec![Unique { name: String::new(), cols: v(&["price", "qty"]) }];
+        t.keys.indexes = vec![NewIndex { name: String::new(), cols: v(&["qty", "price"]), unique: false, ..Default::default() }];
+        let mut other = PgFk::new("public", Dialect::Postgres);
         (other.key.ref_table, other.key.cols, other.key.ref_cols) = ("parent".into(), v(&["price"]), v(&["price"]));
-        let mut own = PgFk::new("public");
+        let mut own = PgFk::new("public", Dialect::Postgres);
         own.own = true;
         (own.key.cols, own.key.ref_cols) = (v(&["qty"]), v(&["price"]));
-        t.fks = vec![other, own];
+        t.keys.fks = vec![other, own];
 
         t.cols[1].def.name = "cost".into();
         t.col_renamed("price", "cost");
-        assert_eq!(t.uniques[0].cols, v(&["cost", "qty"]));
-        assert_eq!(t.indexes[0].cols, v(&["qty", "cost"]));
-        assert_eq!((t.fks[0].key.cols.clone(), t.fks[0].key.ref_cols.clone()), (v(&["cost"]), v(&["price"])), "another table's column keeps its name");
-        assert_eq!(t.fks[1].key.ref_cols, v(&["cost"]), "a key on this table follows the rename on both sides");
+        assert_eq!(t.keys.uniques[0].cols, v(&["cost", "qty"]));
+        assert_eq!(t.keys.indexes[0].cols, v(&["qty", "cost"]));
+        assert_eq!((t.keys.fks[0].key.cols.clone(), t.keys.fks[0].key.ref_cols.clone()), (v(&["cost"]), v(&["price"])), "another table's column keeps its name");
+        assert_eq!(t.keys.fks[1].key.ref_cols, v(&["cost"]), "a key on this table follows the rename on both sides");
 
         t.remove_col(1);
-        assert_eq!(t.uniques[0].cols, v(&["qty"]));
-        assert_eq!(t.indexes[0].cols, v(&["qty"]));
-        assert_eq!((t.fks[0].key.cols.clone(), t.fks[1].key.ref_cols.clone()), (v(&[""]), v(&[""])), "the key lines stay, unpicked");
+        assert_eq!(t.keys.uniques[0].cols, v(&["qty"]));
+        assert_eq!(t.keys.indexes[0].cols, v(&["qty"]));
+        assert_eq!((t.keys.fks[0].key.cols.clone(), t.keys.fks[1].key.ref_cols.clone()), (v(&[""]), v(&[""])), "the key lines stay, unpicked");
         // A new column of the old name does not slip into the lists.
         t.cols.push(col("cost"));
         let spec = t.spec();
@@ -1155,9 +858,9 @@ mod tests {
         // Two columns of one name: renaming one leaves the picks to the other.
         t.cols.push(col("cost"));
         t.cols[3].def.name = "x".into();
-        t.indexes[0].cols = v(&["cost"]);
+        t.keys.indexes[0].cols = v(&["cost"]);
         t.col_renamed("cost", "x");
-        assert_eq!(t.indexes[0].cols, v(&["cost"]));
+        assert_eq!(t.keys.indexes[0].cols, v(&["cost"]));
     }
 
     #[test]

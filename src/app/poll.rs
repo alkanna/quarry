@@ -40,7 +40,7 @@ impl App {
                         continue;
                     }
                     // So does the New table dialog, for the parent of each of its foreign keys.
-                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() && f.parent_loaded(req, &res) {
+                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() && f.keys.parent_loaded(req, &res) {
                         continue;
                     }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {

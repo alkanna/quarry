@@ -115,7 +115,8 @@ pub(in crate::db::sql) fn index_cols(d: Dialect, ix: &IndexDef) -> Result<String
     Ok(parts.join(", "))
 }
 
-pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
+/// The index as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. A name left empty lets the server name it.
+pub(in crate::db::sql) fn index_clause(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
     if ix.functional {
         return Err(format!("Index {} has an expression part, which this editor cannot write.", ix.name));
     }
@@ -125,9 +126,11 @@ pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Resul
     }
     let comment = if ix.comment.is_empty() { String::new() } else { format!(" COMMENT {}", lit(&ix.comment, m.bs)) };
     if ix.kind == IndexKind::Primary {
-        return Ok(format!("ADD PRIMARY KEY ({cols}){comment}"));
+        return Ok(format!("PRIMARY KEY ({cols}){comment}"));
     }
-    check_ident(&ix.name, "An index")?;
+    if !ix.name.is_empty() {
+        check_ident(&ix.name, "An index")?;
+    }
     let kind = match ix.kind {
         IndexKind::Unique => "UNIQUE ",
         IndexKind::Fulltext => "FULLTEXT ",
@@ -141,11 +144,22 @@ pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Resul
         // PostgreSQL has no hidden indexes
         (true, Dialect::Postgres) => "",
     };
-    Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
+    let name = if ix.name.is_empty() { String::new() } else { format!("{} ", d.quote_ident(&ix.name)) };
+    Ok(format!("{kind}INDEX {name}({cols}){comment}{hidden}"))
 }
 
-pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
-    check_ident(&k.name, "A foreign key")?;
+pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
+    if ix.kind != IndexKind::Primary {
+        check_ident(&ix.name, "An index")?;
+    }
+    index_clause(d, m, ix).map(|b| format!("ADD {b}"))
+}
+
+/// The key as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. A name left empty lets the server name it.
+pub(in crate::db::sql) fn fk_clause(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+    if !k.name.is_empty() {
+        check_ident(&k.name, "A foreign key")?;
+    }
     check_ident(&k.ref_table, "The referenced table")?;
     if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
         return Err("Pick the same number of columns on both sides.".into());
@@ -153,12 +167,21 @@ pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, S
     let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
     let names = |v: &[String]| v.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
     let target = if k.ref_db.is_empty() || k.ref_db == k.db { d.quote_ident(&k.ref_table) } else { d.qualified(&k.ref_db, &k.ref_table) };
-    Ok(format!("ADD CONSTRAINT {}\n    FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", d.quote_ident(&k.name), names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
+    let name = if k.name.is_empty() { String::new() } else { format!("CONSTRAINT {}\n    ", d.quote_ident(&k.name)) };
+    Ok(format!("{name}FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
 }
 
-/// ADD CONSTRAINT .. CHECK. The expression stays one expression, since the server runs it on every row written later.
-pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
-    check_ident(&k.name, "A check constraint")?;
+pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+    check_ident(&k.name, "A foreign key")?;
+    fk_clause(d, k).map(|b| format!("ADD {b}"))
+}
+
+/// The CHECK as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. The expression stays one expression,
+/// since the server runs it on every row written later. A name left empty lets the server name it.
+pub(in crate::db::sql) fn check_clause(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
+    if !k.name.is_empty() {
+        check_ident(&k.name, "A check constraint")?;
+    }
     check_expr_of("CHECK expression", &k.expr, m)?;
     if k.not_valid || k.no_inherit {
         return Err("Only PostgreSQL has NOT VALID and NO INHERIT.".into());
@@ -166,7 +189,13 @@ pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) ->
     if k.not_enforced && d == Dialect::MariaDb {
         return Err("MariaDB has no NOT ENFORCED for a CHECK.".into());
     }
-    Ok(format!("ADD CONSTRAINT {} CHECK ({}){}", d.quote_ident(&k.name), k.expr.trim(), if k.not_enforced { " NOT ENFORCED" } else { "" }))
+    let name = if k.name.is_empty() { String::new() } else { format!("CONSTRAINT {} ", d.quote_ident(&k.name)) };
+    Ok(format!("{name}CHECK ({}){}", k.expr.trim(), if k.not_enforced { " NOT ENFORCED" } else { "" }))
+}
+
+pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
+    check_ident(&k.name, "A check constraint")?;
+    check_clause(d, m, k).map(|b| format!("ADD {b}"))
 }
 
 pub(in crate::db::sql) fn drop_index(d: Dialect, name: &str) -> String {

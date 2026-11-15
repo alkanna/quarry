@@ -332,6 +332,8 @@ pub struct NewIndex {
     pub name: String,
     pub cols: Vec<String>,
     pub unique: bool,
+    /// MySQL's FULLTEXT and SPATIAL kinds, for the dialog it shares with this one. PostgreSQL never reads it.
+    pub kind: crate::db::sql::ddl::IndexKind,
 }
 
 /// What the New table dialog collects. A column is the structure editor's `ColDef`, so its type, default and identity are written
@@ -1452,7 +1454,7 @@ mod tests {
     #[test]
     fn indexes_come_after_the_table_and_names_are_not_given_twice() {
         let mut s = spec();
-        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["customer".into(), "price".into()], unique: false }, NewIndex { name: "by code".into(), cols: vec!["Code".into()], unique: true }];
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["customer".into(), "price".into()], unique: false, ..Default::default() }, NewIndex { name: "by code".into(), cols: vec!["Code".into()], unique: true, ..Default::default() }];
         s.comment = "c".into();
         let all = create_table_stmts(&s).unwrap();
         assert_eq!(all[1], "CREATE INDEX ON \"app\".\"orders\" (\"customer\", \"price\")");
@@ -1469,7 +1471,7 @@ mod tests {
     fn the_spec_reads_as_a_structure_for_the_key_checks() {
         let mut s = spec();
         s.uniques = vec![Unique { name: "u".into(), cols: vec!["customer".into(), "Code".into()] }];
-        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["price".into()], unique: true }];
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["price".into()], unique: true, ..Default::default() }];
         let st = s.as_structure();
         assert!(st.is_pg() && st.columns.len() == 4 && !st.columns[0].nullable && st.columns[1].nullable);
         assert_eq!(st.indexes.iter().map(|i| i.cols.len()).collect::<Vec<_>>(), [1, 2], "the key and the UNIQUE, not the index made after the table");

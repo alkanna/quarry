@@ -11,6 +11,7 @@ pub(super) mod dump;
 pub(super) mod edit;
 pub(super) mod explain;
 pub(super) mod import;
+pub(super) mod new_keys;
 pub(super) mod ns;
 pub(super) mod pg_roles;
 pub(super) mod pg_server;

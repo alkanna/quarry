@@ -31,6 +31,7 @@ mod live_rel;
 
 pub use fk::*;
 pub use my::alter;
+pub(in crate::db::sql) use my::{check_clause, fk_clause, index_clause};
 pub use sim::*;
 pub use trig::*;
 pub use worker::*;
