@@ -297,12 +297,10 @@ impl App {
             HeadAct::Sort(next) => {
                 let sql = t.sql.is_some();
                 let t = self.tm().unwrap();
+                t.sort_txt = sort_text(sql.then_some(dialect), c, next);
+                // Only Mongo keeps an applied sort besides the text; ran_sort reads the text, so it comes after.
                 if !sql {
                     t.query.sort = mongo_sort(c, next);
-                }
-                t.sort_txt = sort_text(sql.then_some(dialect), c, next);
-                // Only Mongo keeps an applied sort besides the text.
-                if !sql {
                     t.ran_sort();
                 }
                 t.page = 0;
@@ -478,7 +476,7 @@ fn mongo_sort(c: &str, next: Option<i64>) -> Option<Document> {
 /// The sort bar text of a header click: a quoted column and direction for SQL (`dialect` is Some), the sort document as shell text for Mongo.
 fn sort_text(dialect: Option<db::sql::Dialect>, c: &str, next: Option<i64>) -> String {
     match dialect {
-        Some(d) => next.map(|n| format!("{} {}", d.quote_ident(c), if n > 0 { "ASC" } else { "DESC" })).unwrap_or_default(),
+        Some(d) => next.map(|n| super::sql::bar::order_text(&[(c.to_string(), n < 0)], d)).unwrap_or_default(),
         None => mongo_sort(c, next).map(|s| db::shell_text(&Bson::Document(s))).unwrap_or_default(),
     }
 }

@@ -205,7 +205,7 @@ pub(in crate::app) fn group_names(s: &SqlTab) -> Vec<String> {
     split_top(&s.bar.c.group).iter().filter_map(|g| plain_ident(g, None)).collect()
 }
 
-fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
+pub(in crate::app) fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
     keys.iter().map(|(c, desc)| format!("{} {}", d.quote_ident(c), if *desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")
 }
 

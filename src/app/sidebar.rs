@@ -784,7 +784,7 @@ impl App {
                     let mut row = |ui: &mut egui::Ui, coll: &String| {
                             let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
                             let is_view = is_view_of(coll);
-                            let info = node_info(sql, is_view, est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)));
+                            let info = node_info(sql, is_view, || est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)));
                             let busy = pending.contains(&coll);
                             let mut glyph_at = egui::Rect::NOTHING;
                             let mut cut = false;
@@ -1242,9 +1242,10 @@ struct NodeInfo {
     est: Option<u64>,
 }
 
-/// `est` is the estimate known for the node, kept only where the engine shows one.
-fn node_info(sql: bool, is_view: bool, est: Option<u64>) -> NodeInfo {
-    NodeInfo { kind: if is_view { "View" } else if sql { "Table" } else { "Collection" }, table_glyph: sql && !is_view, est: if sql && !is_view { est } else { None } }
+/// `est` looks up the node's estimate; it runs only where the engine shows one, since rows draw every frame.
+fn node_info(sql: bool, is_view: bool, est: impl FnOnce() -> Option<u64>) -> NodeInfo {
+    let table = sql && !is_view;
+    NodeInfo { kind: if is_view { "View" } else if sql { "Table" } else { "Collection" }, table_glyph: table, est: if table { est() } else { None } }
 }
 
 /// A row estimate in few characters: 842, 4.4k, 1.2M. Under 10,000 it is exact, so it never rounds up a count.
@@ -1280,13 +1281,13 @@ mod tests {
 
     #[test]
     fn node_info_follows_the_engine() {
-        let t = node_info(true, false, Some(7));
+        let t = node_info(true, false, || Some(7));
         assert_eq!((t.kind, t.table_glyph, t.est), ("Table", true, Some(7)));
-        let v = node_info(true, true, Some(7));
+        let v = node_info(true, true, || Some(7));
         assert_eq!((v.kind, v.table_glyph, v.est), ("View", false, None));
-        let c = node_info(false, false, Some(7));
+        let c = node_info(false, false, || Some(7));
         assert_eq!((c.kind, c.table_glyph, c.est), ("Collection", false, None));
-        assert_eq!(node_info(false, true, None).kind, "View");
+        assert_eq!(node_info(false, true, || None).kind, "View");
     }
 
     #[test]
