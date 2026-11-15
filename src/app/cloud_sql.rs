@@ -659,12 +659,16 @@ impl App {
         let mut act = None;
         let r = banded(egui::Id::unique(("quarry-layer", "cloud-sql"))).show(ctx, |ui| {
             ui.set_width(BROWSER_W + 40.0);
-            let sub = if b.change { "PostgreSQL and MySQL instances your gcloud account can reach. Use puts one in the open form." } else { "PostgreSQL and MySQL instances your gcloud account can reach. Use fills a new connection." };
+            let sub = if b.change { "Instances your gcloud account can reach. Use puts one in the open form." } else { "Instances your gcloud account can reach. Use fills a new connection." };
             let account = self.cloud.account();
             dialog_head_with(ui, &Head::new("Add from Cloud SQL").sub(sub).glyph(glyphs::server), |ui| {
+                // Stacked, so a long address does not run into the context line beside it
                 if let Some(a) = account {
-                    ui.label(RichText::new(a).monospace().size(TXT_SMALL).color(TEXT()));
-                    ui.label(RichText::new("gcloud account").size(TXT_SMALL).color(FAINT()));
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(RichText::new("gcloud account").size(TXT_SMALL).color(FAINT()));
+                        ui.label(RichText::new(a).monospace().size(TXT_SMALL).color(TEXT()));
+                    });
                 }
             });
             let mut bd = body_begin(ui);
