@@ -25,10 +25,13 @@ PGBOUNCER = postgres://postgres:quarry@$(ADDR):$(call P,56432)/postgres
 MYSQL = mysql://root:quarry@$(ADDR):$(call P,53306)
 MARIADB = mariadb://root:quarry@$(ADDR):$(call P,53307)
 MONGO = mongodb://$(ADDR):$(call P,57017)/?directConnection=true
+# A SOCKS5 proxy that asks for quarry:quarry. It reaches the other servers through the host's published ports, as
+# host.docker.internal (the tests' QUARRY_TEST_SOCKS_TARGET default).
+SOCKS = quarry:quarry@$(ADDR):$(call P,51080)
 # The live tests mostly wait on the servers, so they run on 32 threads, which takes PostgreSQL and MySQL past their default
 # connection limits. Not 500 for MySQL: a test proves SET GLOBAL max_connections = 500 was refused. The servers hold only
 # test data, so they skip flushing to disk.
-LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)'
+LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)' QUARRY_TEST_SOCKS='$(SOCKS)'
 
 PG_FAST = -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=500
 MY_FAST = --innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --max-connections=400
@@ -131,6 +134,7 @@ servers-up:
 	@$(call UP,$(N)-mysql,-p $(call P,53306):3306 -e MYSQL_ROOT_PASSWORD=quarry mysql:8.4 $(MY_FAST))
 	@$(call UP,$(N)-mariadb,-p $(call P,53307):3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4 $(MY_FAST))
 	@$(call UP,$(N)-mongo,-p $(call P,57017):27017 mongo:8 --replSet rs0)
+	@$(call UP,$(N)-socks,--add-host host.docker.internal:host-gateway -p $(call P,51080):1080 -e PROXY_USER=quarry -e PROXY_PASSWORD=quarry serjs/go-socks5-proxy)
 	@$(DOCKER) network create $(N)-pgb >/dev/null 2>&1 || true
 	@$(call UP,$(N)-pgb-pg,--network $(N)-pgb -e POSTGRES_PASSWORD=quarry postgres:18 $(PG_FAST))
 	@$(call UP,$(N)-pgbouncer,--network $(N)-pgb -p $(call P,56432):5432 -e DB_HOST=$(N)-pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer)
@@ -146,7 +150,7 @@ servers-up:
 
 # -v also removes their anonymous data volumes, which would otherwise pile up unused.
 servers-down:
-	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-pgbouncer $(N)-pgb-pg
+	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-socks $(N)-pgbouncer $(N)-pgb-pg
 	-$(DOCKER) network rm $(N)-pgb
 
 servers-status:

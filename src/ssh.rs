@@ -10,8 +10,8 @@ use russh::keys::{self, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, P
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Default, Debug)]
 pub enum SshAuth {
@@ -210,29 +210,89 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
     };
     authenticate(&mut h, conf, secrets).await?;
     let fingerprint = seen.lock().unwrap().clone().unwrap_or_default();
+    let session = Arc::new(h);
+    // Without `to` the local end is a SOCKS5 gateway and each client names its own destination.
+    let fixed = to.is_some();
+    serve(fixed, want_socket, fingerprint, move |s| {
+        let (session, to) = (session.clone(), to.clone());
+        async move {
+            let _ = match to {
+                Some((host, port)) => forward(s, &session, host, port, &[], &[]).await,
+                None => socks5(s, session).await,
+            };
+        }
+    })
+    .await
+}
+
+/// Opens a forwarder to `to` through a user-run SOCKS5 proxy, shaped like `open`'s fixed forward so a client that cannot
+/// speak SOCKS5 can use it. One dial is made first so a wrong proxy or a refused destination fails here, with the
+/// proxy's reason, and not as a closed connection on the first query.
+pub async fn socks_forward(p: &crate::db::Proxy, to: (String, u16), want_socket: bool, timeout: std::time::Duration) -> Result<Tunnel, String> {
+    let port = if p.port == 0 { 1080 } else { p.port };
+    let name = format!("{}:{port}", p.host);
+    // Resolved once here, so the blocking lookup of a host name never runs inside the accept loop's tasks.
+    let addr = tokio::net::lookup_host((p.host.as_str(), port)).await.map_err(|e| format!("Could not find the SOCKS5 proxy {name}: {e}"))?.next().ok_or_else(|| format!("Could not find the SOCKS5 proxy {name}"))?;
+    let (user, password) = (p.user.clone(), p.password.clone().unwrap_or_default());
+    let dial = move |to: (String, u16)| {
+        let (user, password) = (user.clone(), password.clone());
+        async move {
+            let mut conf = fast_socks5::client::Config::default();
+            conf.set_connect_timeout(timeout.as_secs().max(1));
+            let r = if user.is_empty() {
+                fast_socks5::client::Socks5Stream::connect(addr, to.0, to.1, conf).await
+            } else {
+                fast_socks5::client::Socks5Stream::connect_with_password(addr, to.0, to.1, user, password, conf).await
+            };
+            r.map_err(|e| e.to_string())
+        }
+    };
+    match tokio::time::timeout(timeout, dial(to.clone())).await {
+        Err(_) => return Err(format!("The SOCKS5 proxy {name} did not answer in time.")),
+        Ok(Err(e)) => return Err(format!("The SOCKS5 proxy {name} refused the connection to {}:{}: {e}", to.0, to.1)),
+        Ok(Ok(first)) => drop(first),
+    }
+    serve(true, want_socket, String::new(), move |mut s| {
+        let (dial, to) = (dial.clone(), to.clone());
+        async move {
+            if let Ok(mut up) = dial(to).await {
+                let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+            }
+        }
+    })
+    .await
+}
+
+/// The local end that SSH and SOCKS5 forwarding share: a socket for a fixed destination where the platform has one,
+/// and always a localhost port. `dial` is the only part that differs; it gets each accepted connection and ends it.
+async fn serve<D, F>(fixed: bool, want_socket: bool, fingerprint: String, dial: D) -> Result<Tunnel, String>
+where
+    D: Fn(Box<dyn Local>) -> F + Send + Sync + 'static,
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let local = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let session = Arc::new(h);
     // Without the socket the caller dials the port as before, so a long or unwritable TMPDIR costs only the name check.
     #[cfg(unix)]
-    let unix = if want_socket && to.is_some() { private_socket().ok() } else { None };
+    let unix = if want_socket && fixed { private_socket().ok() } else { None };
     #[cfg(unix)]
     let socket = unix.as_ref().map(|(_, p)| p.clone());
     #[cfg(not(unix))]
     let socket = {
-        let _ = want_socket;
+        let _ = (want_socket, fixed);
         None
     };
-    // Both accept loops run in this one task, so aborting it on drop stops both and lets the session go.
+    let dial = Arc::new(dial);
+    // Both accept loops run in this one task, so aborting it on drop stops both and lets the upstream go.
     let task = tokio::spawn(async move {
         #[cfg(unix)]
         let by_socket = {
-            let (s, to) = (session.clone(), to.clone());
+            let dial = dial.clone();
             async move {
-                let (Some((l, _)), Some((host, port))) = (unix, to) else { return };
+                let Some((l, _)) = unix else { return };
                 while let Ok((stream, _)) = l.accept().await {
-                    let (s, host) = (s.clone(), host.clone());
-                    tokio::spawn(async move { forward(stream, &s, host, port, &[], &[]).await });
+                    let dial = dial.clone();
+                    tokio::spawn(async move { dial(Box::new(stream)).await });
                 }
             }
         };
@@ -240,20 +300,18 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
         let by_socket = async {};
         let by_port = async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let s = session.clone();
-                let to = to.clone();
-                tokio::spawn(async move {
-                    let _ = match to {
-                        Some((host, port)) => forward(stream, &s, host, port, &[], &[]).await,
-                        None => socks5(stream, s).await,
-                    };
-                });
+                let dial = dial.clone();
+                tokio::spawn(async move { dial(Box::new(stream)).await });
             }
         };
         tokio::join!(by_socket, by_port);
     });
     Ok(Tunnel { port: local, socket, fingerprint, task })
 }
+
+/// What a client of the local end looks like, so one accept loop can serve a socket and a port.
+trait Local: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Local for T {}
 
 /// A socket in a fresh folder only this user may open, so no other local user can ride the tunnel through it.
 #[cfg(unix)]
@@ -273,7 +331,7 @@ fn private_socket() -> Result<(tokio::net::UnixListener, std::path::PathBuf), St
 }
 
 /// A minimal SOCKS5 server (CONNECT only, no authentication, local use only).
-async fn socks5(mut s: TcpStream, ssh: Arc<Session>) -> std::io::Result<()> {
+async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, ssh: Arc<Session>) -> std::io::Result<()> {
     let mut head = [0u8; 2];
     s.read_exact(&mut head).await?;
     if head[0] != 5 {
@@ -316,7 +374,7 @@ async fn socks5(mut s: TcpStream, ssh: Arc<Session>) -> std::io::Result<()> {
 
 /// Opens a direct-tcpip channel to `host:port` and copies bytes both ways. `opened` and `failed` are
 /// written to the client first, which lets SOCKS5 answer its handshake while a plain forward sends nothing.
-async fn forward<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut s: S, ssh: &Session, host: String, port: u16, opened: &[u8], failed: &[u8]) -> std::io::Result<()> {
+async fn forward<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, ssh: &Session, host: String, port: u16, opened: &[u8], failed: &[u8]) -> std::io::Result<()> {
     match ssh.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await {
         Ok(ch) => {
             s.write_all(opened).await?;
@@ -343,5 +401,95 @@ mod tests {
     fn home_paths() {
         assert!(!expand_home("~/.ssh/id_rsa").starts_with('~'));
         assert_eq!(expand_home("/k"), "/k");
+    }
+
+    /// A SOCKS5 server in this process that connects to whatever it is asked for, with or without a password.
+    async fn socks_server(login: Option<(&str, &str)>) -> u16 {
+        use fast_socks5::server::{Authentication, Config, SimpleUserPassword, Socks5Socket};
+        async fn run<A: Authentication + 'static>(l: TcpListener, conf: Config<A>)
+        where
+            A::Item: Send,
+        {
+            let conf = Arc::new(conf);
+            while let Ok((s, _)) = l.accept().await {
+                let conf = conf.clone();
+                tokio::spawn(async move {
+                    let _ = Socks5Socket::new(s, conf).upgrade_to_socks5().await;
+                });
+            }
+        }
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        match login {
+            Some((username, password)) => {
+                let conf = Config::<fast_socks5::server::DenyAuthentication>::default().with_authentication(SimpleUserPassword { username: username.into(), password: password.into() });
+                tokio::spawn(run(l, conf));
+            }
+            None => {
+                tokio::spawn(run(l, Config::<fast_socks5::server::DenyAuthentication>::default()));
+            }
+        }
+        port
+    }
+
+    async fn echo_server() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    fn proxy(port: u16, user: &str, password: Option<&str>) -> crate::db::Proxy {
+        crate::db::Proxy { host: "127.0.0.1".into(), port, user: user.into(), password: password.map(Into::into) }
+    }
+
+    async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(mut s: S) {
+        s.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        s.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socks_forward_carries_bytes_without_a_password() {
+        let (server, echo) = (socks_server(None).await, echo_server().await);
+        let t = socks_forward(&proxy(server, "", None), ("127.0.0.1".into(), echo), true, std::time::Duration::from_secs(5)).await.unwrap();
+        assert!(t.fingerprint.is_empty());
+        round_trip(tokio::net::TcpStream::connect(("127.0.0.1", t.port)).await.unwrap()).await;
+        #[cfg(unix)]
+        round_trip(tokio::net::UnixStream::connect(t.socket.as_ref().expect("a socket was asked for")).await.unwrap()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socks_forward_sends_the_password_and_reports_a_refusal() {
+        let (server, echo) = (socks_server(Some(("app", "s3cret"))).await, echo_server().await);
+        let wait = std::time::Duration::from_secs(5);
+        let to = ("127.0.0.1".to_string(), echo);
+        let t = socks_forward(&proxy(server, "app", Some("s3cret")), to.clone(), false, wait).await.unwrap();
+        assert!(t.socket.is_none());
+        round_trip(tokio::net::TcpStream::connect(("127.0.0.1", t.port)).await.unwrap()).await;
+        let wrong = socks_forward(&proxy(server, "app", Some("nope")), to.clone(), false, wait).await.err().expect("a wrong password is refused");
+        assert!(wrong.contains("SOCKS5 proxy"), "{wrong}");
+        assert!(socks_forward(&proxy(server, "", None), to, false, wait).await.is_err(), "the server wants a login");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn socks_forward_fails_at_open_when_the_destination_is_unreachable() {
+        let server = socks_server(None).await;
+        // A port nothing listens on, found by binding and dropping.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
+        let r = socks_forward(&proxy(server, "", None), ("127.0.0.1".into(), closed), false, std::time::Duration::from_secs(5)).await;
+        assert!(r.err().expect("refused").contains("refused the connection"));
     }
 }

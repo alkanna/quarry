@@ -710,6 +710,12 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
+    if net.cloud_sql.is_some() && net.proxy.is_some() {
+        return Err("Cloud SQL and a SOCKS5 proxy cannot be used together".into());
+    }
+    if net.ssh.is_some() && net.proxy.is_some() {
+        return Err("An SSH tunnel and a SOCKS5 proxy cannot be used together".into());
+    }
     if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
         return Err(super::pg::cert::VERIFY_CA_NO_CA.into());
     }
@@ -736,16 +742,19 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         let port = p.port;
         (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
     } else {
-        let tunnel = match &net.ssh {
-            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), false).await?),
-            None => None,
-        };
-        match tunnel {
-            Some(t) => {
+        let target = (a.host.clone(), a.port);
+        match (&net.ssh, &net.proxy) {
+            (Some((conf, secrets)), _) => {
+                let t = crate::ssh::open(conf, secrets, timeout, Some(target), false).await?;
                 let port = t.port;
                 (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
             }
-            None => (None, a.host.clone(), a.port, a.ssl_mode),
+            (None, Some(p)) => {
+                let t = crate::ssh::socks_forward(p, target, false, timeout).await?;
+                let port = t.port;
+                (Some(crate::db::Way::Proxy(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
+            }
+            _ => (None, a.host.clone(), a.port, a.ssl_mode),
         }
     };
     // sqlx 0.8 checks the host name in verify-ca too, through a tunnel it would check 127.0.0.1, and it trusts the web
@@ -753,7 +762,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // PostgreSQL to the relay.
     let mut client_cert = client_cert;
     let sent_cert = client_cert.is_some();
-    let relay = match super::pg::tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+    let relay = match super::pg::tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_) | crate::db::Way::Proxy(_))), !a.ssl_ca.trim().is_empty()) {
         true => Some(super::pg::tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
     };

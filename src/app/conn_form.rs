@@ -30,10 +30,10 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
     if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
 }
 
-/// The tabs of the connection form: Mongo reaches its servers through a proxy, SQL engines through TLS settings and, where
-/// the engine has them, session settings.
+/// The tabs of the connection form: both engine families can go through SSH or a SOCKS5 proxy, SQL engines also have TLS
+/// settings and, where the engine has them, session settings.
 fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
-    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] }
+    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] }
 }
 
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
@@ -629,8 +629,11 @@ fn ssh_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
 
 fn proxy_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "SOCKS5 PROXY", |ui| {
-        ui.add_enabled(!f.ssh_on, egui::Checkbox::new(&mut f.proxy_on, "Connect through a SOCKS5 proxy"));
-        if f.ssh_on {
+        let cloud = f.cloud_on().is_some();
+        ui.add_enabled(!f.ssh_on && !cloud, egui::Checkbox::new(&mut f.proxy_on, "Connect through a SOCKS5 proxy"));
+        if cloud {
+            ui.label(RichText::new("Not used with Cloud SQL: its proxy carries the connection.").size(TXT_SMALL).color(FAINT()));
+        } else if f.ssh_on {
             ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(TXT_SMALL).color(FAINT()));
         } else if f.proxy_on {
             egui::Grid::new("px").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -693,7 +696,7 @@ impl App {
         let tabs = conn_tabs(f.engine);
         let labels: Vec<&str> = tabs.iter().map(|t| t.1).collect();
         let cloud_on = f.cloud_on().is_some();
-        let dims: Vec<bool> = tabs.iter().map(|(t, _)| cloud_on && matches!(t, ConnTab::Ssh | ConnTab::Tls)).collect();
+        let dims: Vec<bool> = tabs.iter().map(|(t, _)| cloud_on && matches!(t, ConnTab::Ssh | ConnTab::Proxy | ConnTab::Tls)).collect();
         let active = tabs.iter().position(|(t, _)| *t == f.tab).unwrap_or(0);
         let head = Head::new(if f.id.is_some() { "Edit connection" } else { "New connection" }).sub("Stored in the Keychain  ·  opens read-only").glyph(glyphs::plug).tabs(&labels, active).dim(&dims);
         if let Some(i) = dialog_head(ui, &head) {
@@ -800,7 +803,7 @@ impl App {
             let address_ok = if let Some(c) = f.cloud_on() {
                 crate::cloudsql::valid_instance(&c.instance) && !f.addr.user.trim().is_empty()
             } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
-            let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
+            let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_active() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
             test |= ui.add_enabled(valid, egui::Button::new("Test")).clicked();
             if ui.button("Cancel").clicked() {
@@ -852,7 +855,7 @@ impl App {
                         vec![
                             set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
                             set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
-                            set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on && !f.engine.is_sql() { &f.proxy_pwd } else { "" }),
+                            set_secret(id, "proxy-password", if f.proxy_active() { &f.proxy_pwd } else { "" }),
                             set_secret(id, "pg-key-passphrase", if f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty() { &f.pg_key_pass } else { "" }),
                         ]
                     };
@@ -862,7 +865,7 @@ impl App {
                         name: f.name.trim().into(),
                         tag: clean_tag(&f.tag).into(),
                         ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
-                        proxy: (f.proxy_on && !f.ssh_on && !f.engine.is_sql()).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                        proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
                         cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
                         advanced: f.advanced().unwrap_or_default(),
                     };

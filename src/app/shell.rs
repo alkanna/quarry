@@ -506,6 +506,8 @@ impl App {
             Some(db::Way::Ssh(t)) => return serde_json::json!({ "host": "127.0.0.1", "port": t.port }),
             // The Cloud SQL proxy is plain TCP and only serves PostgreSQL, which the shell reaches through the app, not SOCKS.
             Some(db::Way::CloudSql(_)) => return serde_json::Value::Null,
+            // A SQL connection's own proxy is dialed by the app, and the shell reaches SQL through the app's relay.
+            Some(db::Way::Proxy(_)) => return serde_json::Value::Null,
             None => {}
         }
         match &c.meta.proxy {

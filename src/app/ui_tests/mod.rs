@@ -28,6 +28,7 @@ mod library_save;
 mod mongo_create;
 mod mongo_edit;
 mod conn_paste;
+mod conn_proxy;
 mod pg_roles;
 mod pg_server;
 mod rail;

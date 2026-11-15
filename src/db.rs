@@ -385,6 +385,9 @@ pub struct Net {
 /// What a connection keeps alive while it is open. Dropping it closes the tunnel or stops the proxy.
 pub enum Way {
     Ssh(crate::ssh::Tunnel),
+    /// A SQL connection through the user's SOCKS5 proxy, reached by a local forwarder. Never read, held for its drop.
+    #[allow(dead_code)]
+    Proxy(crate::ssh::Tunnel),
     CloudSql(crate::cloudsql::CloudProxy),
 }
 

@@ -173,6 +173,12 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
+    if net.cloud_sql.is_some() && net.proxy.is_some() {
+        return Err("Cloud SQL and a SOCKS5 proxy cannot be used together".into());
+    }
+    if net.ssh.is_some() && net.proxy.is_some() {
+        return Err("An SSH tunnel and a SOCKS5 proxy cannot be used together".into());
+    }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
     // Held until the connection is dropped, which ends the proxy.
@@ -180,10 +186,12 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         Some(conf) => Some(crate::cloudsql::open_found(conf, &net.tools, timeout).await?),
         None => None,
     };
-    let tunnel = match &net.ssh {
-        // The socket only matters when sqlx checks the certificate's name.
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity)).await?),
-        None => None,
+    // The socket only matters when sqlx checks the certificate's name.
+    let named = matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity);
+    let tunnel = match (&net.ssh, &net.proxy) {
+        (Some((conf, secrets)), _) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), named).await?),
+        (None, Some(p)) => Some(crate::ssh::socks_forward(p, (a.host.clone(), a.port), named, timeout).await?),
+        _ => None,
     };
     // sqlx checks the certificate against the host it is given. Through the tunnel's socket that stays the name typed;
     // Windows has only the tunnel's port, so there the name checked is 127.0.0.1.
@@ -243,7 +251,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
-    Ok((db, dbs, tunnel.map(crate::db::Way::Ssh).or(cloud.map(crate::db::Way::CloudSql)), ti))
+    Ok((db, dbs, tunnel.map(if net.ssh.is_some() { crate::db::Way::Ssh } else { crate::db::Way::Proxy }).or(cloud.map(crate::db::Way::CloudSql)), ti))
 }
 
 /// The databases the login can see, sorted. Text protocol, because SHOW is not preparable on every old server.
@@ -751,6 +759,7 @@ impl Worker {
                 }
                 let via = match &t {
                     Some(crate::db::Way::Ssh(t)) => format!(" through SSH (host key {})", t.fingerprint),
+                    Some(crate::db::Way::Proxy(_)) => " through the SOCKS5 proxy".to_string(),
                     Some(crate::db::Way::CloudSql(p)) => format!(" through the Cloud SQL proxy (credentials: {})", if p.gcloud_account { "gcloud account" } else { "Application Default Credentials" }),
                     None => String::new(),
                 };
