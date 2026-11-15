@@ -707,15 +707,6 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let sess = PgSession::new(adv, super::advanced::system_zone_name())?;
     let (timeout, ms) = adv.timeouts(timeout);
-    if net.cloud_sql.is_some() && net.ssh.is_some() {
-        return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
-    }
-    if net.cloud_sql.is_some() && net.proxy.is_some() {
-        return Err("Cloud SQL and a SOCKS5 proxy cannot be used together".into());
-    }
-    if net.ssh.is_some() && net.proxy.is_some() {
-        return Err("An SSH tunnel and a SOCKS5 proxy cannot be used together".into());
-    }
     if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
         return Err(super::pg::cert::VERIFY_CA_NO_CA.into());
     }
@@ -853,7 +844,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             Some(r) => r.explain(m),
             None => m,
         },
-    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg::cert::CERT_ALERT) } else { m })?;
+    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg::cert::CERT_ALERT) } else { m }).map_err(|m| crate::db::Way::blame_proxy(way.as_ref(), m))?;
     let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     pools.relay = relay;
     let db = Db {

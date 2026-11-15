@@ -22,35 +22,7 @@ pub struct MongoUri {
 const SRV: &str = "mongodb+srv://";
 const PLAIN: &str = "mongodb://";
 
-/// Unreserved characters, plus `extra`, stay as they are; every other byte becomes %XX.
-fn encode(s: &str, extra: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) || extra.as_bytes().contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-fn decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = |c: u8| (c as char).to_digit(16);
-        if b[i] == b'%' && i + 2 < b.len() && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+use super::pct::{decode, encode};
 
 impl MongoUri {
     /// None when the text is not a `mongodb://` or `mongodb+srv://` string.
@@ -127,13 +99,18 @@ impl MongoUri {
         self.hosts = if v.is_empty() { Vec::new() } else { v.split(',').map(|h| h.trim().to_string()).collect() };
     }
 
-    /// An SRV address names one host and has no port, so turning it on keeps the first host without its port.
+    /// An SRV address names one host and has no port, so turning it on keeps the first host without its port, and drops
+    /// directConnection, which SRV refuses. Turning it off keeps TLS on, which SRV implied and a plain address does not.
     pub fn set_srv(&mut self, on: bool) {
         if on && !self.srv {
             self.hosts.truncate(1);
             if let Some(h) = self.hosts.first_mut() && let Some((name, _)) = h.rsplit_once(':') && !h.ends_with(']') {
                 *h = name.to_string();
             }
+            self.set_opt("directConnection", None);
+        }
+        if !on && self.srv && self.opt("tls").or_else(|| self.opt("ssl")).is_none() {
+            self.set_opt("tls", Some("true"));
         }
         self.srv = on;
     }
@@ -175,27 +152,37 @@ impl MongoUri {
         match self.opt("tls").or_else(|| self.opt("ssl")).map(|v| v.to_ascii_lowercase()).as_deref() {
             Some("true") => true,
             Some("false") => false,
-            _ => self.srv || ["tlsCAFile", "tlsCertificateKeyFile", "tlsAllowInvalidCertificates"].iter().any(|k| self.opt(k).is_some()),
+            _ => self.srv || ["tlsCAFile", "tlsCertificateKeyFile", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"].iter().any(|k| self.opt(k).is_some()),
         }
     }
 
-    /// Turning TLS off also drops the files and the invalid-certificate flag, which the driver refuses beside tls=false.
+    /// Turning TLS off drops every other tls option and the ssl alias, which the driver refuses beside tls=false.
     pub fn set_tls(&mut self, on: bool) {
         self.set_opt("ssl", None);
         if !on {
-            for k in ["tlsCAFile", "tlsCertificateKeyFile", "tlsAllowInvalidCertificates"] {
-                self.set_opt(k, None);
+            let keys: Vec<String> = self.query.iter().flatten().map(|(k, _)| k.clone()).filter(|k| k.len() >= 3 && k[..3].eq_ignore_ascii_case("tls")).collect();
+            for k in keys {
+                self.set_opt(&k, None);
             }
         }
         self.set_opt("tls", Some(if on { "true" } else { "false" }));
     }
 
+    /// Any of the three options that skip certificate checks; tlsInsecure skips the name check too.
     pub fn allow_invalid(&self) -> bool {
-        self.opt("tlsAllowInvalidCertificates").is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        ["tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"].iter().any(|k| self.opt(k).is_some_and(|v| v.eq_ignore_ascii_case("true")))
     }
 
+    /// Off removes all three options. On adds tlsAllowInvalidCertificates unless tlsInsecure already says so, because the
+    /// driver refuses the two together.
     pub fn set_allow_invalid(&mut self, on: bool) {
-        self.set_opt("tlsAllowInvalidCertificates", on.then_some("true"));
+        if !on {
+            for k in ["tlsInsecure", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames"] {
+                self.set_opt(k, None);
+            }
+        } else if !self.opt("tlsInsecure").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+            self.set_opt("tlsAllowInvalidCertificates", Some("true"));
+        }
     }
 }
 
@@ -311,7 +298,50 @@ mod tests {
         m.set_srv(true);
         assert_eq!(m.to_string(), "mongodb+srv://a/db?x=1");
         m.set_srv(false);
-        assert_eq!(m.to_string(), "mongodb://a/db?x=1");
+        assert_eq!(m.to_string(), "mongodb://a/db?x=1&tls=true");
+    }
+
+    #[test]
+    fn srv_drops_direct_connection_and_leaving_it_keeps_tls() {
+        let mut m = MongoUri::parse("mongodb://a:1/?directConnection=true&w=1").unwrap();
+        m.set_srv(true);
+        assert_eq!(m.to_string(), "mongodb+srv://a/?w=1");
+        m.set_srv(false);
+        assert_eq!(m.to_string(), "mongodb://a/?w=1&tls=true");
+        // An explicit choice is not overridden.
+        let mut m = MongoUri::parse("mongodb+srv://a/?tls=false").unwrap();
+        m.set_srv(false);
+        assert_eq!(m.to_string(), "mongodb://a/?tls=false");
+        let mut m = MongoUri::parse("mongodb+srv://a/?ssl=false").unwrap();
+        m.set_srv(false);
+        assert_eq!(m.to_string(), "mongodb://a/?ssl=false");
+    }
+
+    #[test]
+    fn tls_off_drops_every_tls_option_and_the_ssl_alias() {
+        let mut m = MongoUri::parse("mongodb://h/?ssl=true&tlsInsecure=true&TLSAllowInvalidHostnames=true&tlsCertificateKeyFilePassword=x&tlsCAFile=%2Fca&w=1").unwrap();
+        m.set_tls(false);
+        assert_eq!(m.to_string(), "mongodb://h/?w=1&tls=false");
+    }
+
+    #[test]
+    fn invalid_certificates_count_every_flag_the_driver_has() {
+        let mut m = MongoUri::parse("mongodb://h/?tlsInsecure=true").unwrap();
+        assert!(m.tls_on() && m.allow_invalid());
+        // Already on through tlsInsecure, and the driver refuses both together.
+        m.set_allow_invalid(true);
+        assert_eq!(m.to_string(), "mongodb://h/?tlsInsecure=true");
+        m.set_allow_invalid(false);
+        assert_eq!(m.to_string(), "mongodb://h/");
+        let mut m = MongoUri::parse("mongodb://h/?tlsAllowInvalidHostnames=true&tlsAllowInvalidCertificates=true&tlsInsecure=false").unwrap();
+        assert!(m.tls_on() && m.allow_invalid());
+        m.set_allow_invalid(false);
+        assert!(!m.allow_invalid());
+        assert_eq!(m.to_string(), "mongodb://h/");
+        assert!(MongoUri::parse("mongodb://h/?tlsAllowInvalidHostnames=true").unwrap().tls_on());
+        let mut m = MongoUri::parse("mongodb://h/?tls=true").unwrap();
+        m.set_allow_invalid(true);
+        assert_eq!(m.to_string(), "mongodb://h/?tls=true&tlsAllowInvalidCertificates=true");
     }
 
     #[test]

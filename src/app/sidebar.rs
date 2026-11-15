@@ -547,6 +547,7 @@ impl App {
                             db::ErrKind::SignIn => "Sign-in failed",
                             db::ErrKind::Unreachable => "Server not reachable",
                             db::ErrKind::Tls => "TLS failed",
+                            db::ErrKind::Tunnel if db::is_socks_failure(&e.to_lowercase()) => "SOCKS5 proxy failed",
                             db::ErrKind::Tunnel => "SSH tunnel failed",
                             db::ErrKind::CloudSql => "Cloud SQL proxy failed",
                             db::ErrKind::Lost => "Connection lost",

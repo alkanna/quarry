@@ -959,25 +959,7 @@ fn userinfo(uri: &str) -> Option<(&str, &str)> {
     info.split_once(':')
 }
 
-fn pct_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16);
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+use super::pct::decode as pct_decode;
 
 impl Redact {
     /// `extra` holds other secrets the runner gets, such as a proxy password.

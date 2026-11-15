@@ -30,8 +30,8 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
     if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
 }
 
-/// The tabs of the connection form: both engine families can go through SSH or a SOCKS5 proxy, SQL engines also have TLS
-/// settings and, where the engine has them, session settings.
+/// The tabs of the connection form: both engine families have SSH, Proxy and TLS, and the SQL engines also have session
+/// settings under Advanced.
 fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
     if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Proxy, "Proxy")] }
 }
@@ -58,6 +58,16 @@ fn named_field(ui: &mut egui::Ui, name: &str, text: &mut String, hint: &str, sec
     r.changed()
 }
 
+/// A switch with its label beside it, named for the accessibility tree and the UI tests.
+fn mongo_toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) {
+    ui.horizontal(|ui| {
+        let t = toggle(ui, on);
+        let now = *on;
+        t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, now, label));
+        ui.label(RichText::new(label).color(TEXT()));
+    });
+}
+
 const READ_PREFERENCES: [&str; 5] = ["primary", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"];
 
 /// The MongoDB address as fields, a view over `f.uri`: each frame parses it and an edit is written back through the
@@ -72,7 +82,7 @@ fn mongo_rows(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) {
     };
     form_label(ui, "SRV");
     let mut srv = m.srv;
-    ui.checkbox(&mut srv, "mongodb+srv:// address (one DNS name, TLS on)");
+    mongo_toggle(ui, &mut srv, "mongodb+srv:// address (one DNS name, TLS on)");
     if srv != m.srv {
         m.set_srv(srv);
     }
@@ -144,7 +154,7 @@ fn mongo_tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
         egui::Grid::new("mongo-tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "TLS");
             let mut on = m.tls_on();
-            ui.checkbox(&mut on, "Encrypt the connection");
+            mongo_toggle(ui, &mut on, "Encrypt the connection");
             if on != m.tls_on() {
                 m.set_tls(on);
             }
@@ -162,7 +172,7 @@ fn mongo_tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
             }
             form_label(ui, "Certificates");
             let mut invalid = m.allow_invalid();
-            ui.checkbox(&mut invalid, "Allow invalid certificates");
+            mongo_toggle(ui, &mut invalid, "Allow invalid certificates");
             if invalid != m.allow_invalid() {
                 m.set_allow_invalid(invalid);
             }

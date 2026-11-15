@@ -1110,7 +1110,7 @@ pub(super) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document
         .collect()
 }
 
-/// The tabs of the connection form. Both engine families have Proxy; TLS and Advanced are SQL only.
+/// The tabs of the connection form. Both engine families have SSH, Proxy and TLS; Advanced is SQL only.
 #[derive(Default, Clone, Copy, PartialEq)]
 pub(super) enum ConnTab {
     #[default]

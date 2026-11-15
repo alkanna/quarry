@@ -167,9 +167,6 @@ async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(D
 async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::db::Way>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let a = Addr::parse(uri).ok_or("Not a SQL address")?;
-    if a.engine() == super::Engine::Postgres {
-        return super::pg::open(a, timeout, net, adv, info).await;
-    }
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
@@ -178,6 +175,9 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     }
     if net.ssh.is_some() && net.proxy.is_some() {
         return Err("An SSH tunnel and a SOCKS5 proxy cannot be used together".into());
+    }
+    if a.engine() == super::Engine::Postgres {
+        return super::pg::open(a, timeout, net, adv, info).await;
     }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
@@ -229,7 +229,8 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let _ = c.close().await;
         r.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))
     };
-    tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
+    let way = tunnel.map(if net.ssh.is_some() { crate::db::Way::Ssh } else { crate::db::Way::Proxy }).or(cloud.map(crate::db::Way::CloudSql));
+    tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| crate::db::Way::blame_proxy(way.as_ref(), m))?;
     let mut pool_opts = MySqlPoolOptions::new().max_connections(4).acquire_timeout(timeout);
     if let Some(idle) = adv.idle_timeout() {
         pool_opts = pool_opts.idle_timeout(idle);
@@ -251,7 +252,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
-    Ok((db, dbs, tunnel.map(if net.ssh.is_some() { crate::db::Way::Ssh } else { crate::db::Way::Proxy }).or(cloud.map(crate::db::Way::CloudSql)), ti))
+    Ok((db, dbs, way, ti))
 }
 
 /// The databases the login can see, sorted. Text protocol, because SHOW is not preparable on every old server.

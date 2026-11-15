@@ -19,6 +19,7 @@ mod import;
 mod js_ls;
 mod log;
 pub mod mongo_uri;
+pub(crate) mod pct;
 mod shell;
 pub mod sql;
 pub mod collopts;
@@ -386,10 +387,20 @@ pub struct Net {
 /// What a connection keeps alive while it is open. Dropping it closes the tunnel or stops the proxy.
 pub enum Way {
     Ssh(crate::ssh::Tunnel),
-    /// A SQL connection through the user's SOCKS5 proxy, reached by a local forwarder. Never read, held for its drop.
-    #[allow(dead_code)]
+    /// A SQL connection through the user's SOCKS5 proxy, reached by a local forwarder.
     Proxy(crate::ssh::Tunnel),
     CloudSql(crate::cloudsql::CloudProxy),
+}
+
+impl Way {
+    /// A failed connect through a SOCKS5 proxy reads as a closed connection to the client, so the proxy's own reason for
+    /// the last failed dial replaces the client's wording when there is one.
+    pub fn blame_proxy(way: Option<&Way>, err: String) -> String {
+        match way {
+            Some(Way::Proxy(t)) => t.dial_error().unwrap_or(err),
+            _ => err,
+        }
+    }
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Debug)]
