@@ -9,7 +9,7 @@ fn sql(uri: &str, s: &str) -> String {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let pool = sqlx::PgPool::connect(uri).await.unwrap();
-        let rows = sqlx::raw_sql(s).fetch_all(&pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(&pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
         pool.close().await;
         rows.first().and_then(|r| sqlx::Row::try_get::<String, _>(r, 0).ok()).unwrap_or_default()
     })

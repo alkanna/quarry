@@ -17,7 +17,7 @@ pub use crate::db::sql::server::one_line;
 
 /// Rows of one statement of Quarry's own over the simple protocol, so every value arrives as text.
 async fn rows(c: &mut sqlx::PgConnection, sql: &str) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    c.fetch_all(sql).await
+    c.fetch_all(sqlx::AssertSqlSafe(sql)).await
 }
 
 fn txt<R: Cells>(r: &R, i: usize) -> String {
@@ -544,7 +544,7 @@ fn signal_begin(db: &Db) -> String {
 
 /// Runs the check-and-signal statement in a transaction opened by `begin`.
 async fn send_signal(c: &mut sqlx::PgConnection, begin: String, sql: &str, params: &[Param]) -> Result<Vec<SqlRow>, sqlx::Error> {
-    let mut tx = c.begin_with(begin).await?;
+    let mut tx = c.begin_with(sqlx::AssertSqlSafe(begin)).await?;
     let rows = bound_pg(sql, params).fetch_all(&mut *tx).await.map(SqlRow::wrap_pg)?;
     tx.commit().await?;
     Ok(rows)

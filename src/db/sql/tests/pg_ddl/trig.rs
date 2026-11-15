@@ -447,7 +447,7 @@ impl<'a> Role<'a> {
 
 impl Drop for Role<'_> {
     fn drop(&mut self) {
-        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&self.cleanup()).execute(&self.t.pool).await });
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(self.cleanup())).execute(&self.t.pool).await });
     }
 }
 
@@ -580,7 +580,7 @@ impl<'a> Extra<'a> {
 
 impl Drop for Extra<'_> {
     fn drop(&mut self) {
-        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.name)).execute(&self.t.pool).await });
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", self.name))).execute(&self.t.pool).await });
     }
 }
 
@@ -651,7 +651,7 @@ impl<'a> Owner<'a> {
 
 impl Drop for Owner<'_> {
     fn drop(&mut self) {
-        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&self.cleanup()).execute(&self.t.pool).await });
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(self.cleanup())).execute(&self.t.pool).await });
     }
 }
 

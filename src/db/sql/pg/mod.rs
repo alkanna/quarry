@@ -546,7 +546,7 @@ const POOLED: &str = "This server sits behind a connection pooler that gives eac
 /// has to come from the same backend.
 async fn pooler_check(c: &mut sqlx::PgConnection, locals: &str) -> Result<(), String> {
     let sql = format!("BEGIN READ ONLY; {locals}; SELECT pg_backend_pid()::text, current_setting('standard_conforming_strings')");
-    let rows = c.fetch_all(sql.as_str()).await.map_err(|x| format!("{POOLED} ({})", e(x)))?;
+    let rows = c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await.map_err(|x| format!("{POOLED} ({})", e(x)))?;
     let row = rows.first().ok_or("The server did not report its session settings")?;
     scs_check(row.cell(1))?;
     let first = row.cell(0).map(<[u8]>::to_vec);
@@ -595,7 +595,7 @@ pub(super) async fn apply_session(c: &mut sqlx::PgConnection, adv: &PgSession) -
 async fn set_config_all(c: &mut sqlx::PgConnection, settings: &[(String, String)], local: bool) -> Result<(), sqlx::Error> {
     let values = (0..settings.len()).map(|i| format!("(${}::text, ${}::text)", 2 * i + 1, 2 * i + 2)).collect::<Vec<_>>().join(", ");
     let sql = format!("SELECT set_config(s.n, s.v, {local}) FROM (VALUES {values}) AS s(n, v)");
-    let mut q = sqlx::query(&sql).persistent(false);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).persistent(false);
     for (name, value) in settings {
         q = q.bind(name.as_str()).bind(value.as_str());
     }
@@ -1408,7 +1408,7 @@ mod tests {
                 // default are all what the server hands every session.
                 let server_default = |name: &str| l.one(&format!("SHOW {name}"));
                 for name in ["statement_timeout", "default_transaction_read_only", "bytea_output", "IntervalStyle", "application_name"] {
-                    let rows = l.w.rt.block_on(c.fetch_all(format!("SHOW {name}").as_str())).unwrap();
+                    let rows = l.w.rt.block_on(c.fetch_all(sqlx::AssertSqlSafe(format!("SHOW {name}")))).unwrap();
                     assert_eq!(String::from_utf8_lossy(rows[0].cell(0).unwrap()), server_default(name), "{var} {name}");
                 }
                 assert_eq!(p.locals(), locals_for(30_000));
@@ -1468,15 +1468,15 @@ mod tests {
                 // second one is what the refusal reads.
                 let schema = format!("t5_flip_{}", var.to_ascii_lowercase());
                 let mut raw = l.w.rt.block_on(sqlx::PgConnection::connect(&l.uri)).unwrap();
-                l.w.rt.block_on(raw.execute(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; CREATE FUNCTION {schema}.pg_backend_pid() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT (random() * 1000000000)::int'").as_str())).unwrap();
+                l.w.rt.block_on(raw.execute(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; CREATE FUNCTION {schema}.pg_backend_pid() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT (random() * 1000000000)::int'")))).unwrap();
                 // An unqualified call finds the stand-in before pg_catalog's own.
-                l.w.rt.block_on(raw.execute(format!("SET search_path = {schema}, pg_catalog").as_str())).unwrap();
+                l.w.rt.block_on(raw.execute(sqlx::AssertSqlSafe(format!("SET search_path = {schema}, pg_catalog")))).unwrap();
                 let err = l.w.rt.block_on(pooler_check(&mut raw, "SET LOCAL statement_timeout = 0")).unwrap_err();
                 assert!(err.contains("statement pooling"), "{var}: {err}");
                 // Without the stand-in the same connection passes.
                 l.w.rt.block_on(raw.execute("SET search_path = pg_catalog")).unwrap();
                 assert!(l.w.rt.block_on(pooler_check(&mut raw, "SET LOCAL statement_timeout = 0")).is_ok(), "{var}");
-                l.w.rt.block_on(raw.execute(format!("DROP SCHEMA {schema} CASCADE").as_str())).unwrap();
+                l.w.rt.block_on(raw.execute(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))).unwrap();
             });
         }
     }

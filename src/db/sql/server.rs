@@ -385,7 +385,7 @@ pub enum Answer {
 /// Text-protocol rows from one statement. A plain function, because inside a spawned block the executor
 /// lifetimes of a borrowed connection do not infer.
 async fn rows(c: &mut sqlx::MySqlConnection, q: &str) -> Result<Vec<sqlx::mysql::MySqlRow>, sqlx::Error> {
-    c.fetch_all(q).await
+    c.fetch_all(sqlx::AssertSqlSafe(q)).await
 }
 
 async fn uptime(c: &mut sqlx::MySqlConnection) -> Option<u64> {
@@ -580,7 +580,7 @@ async fn kill_on(c: &mut sqlx::MySqlConnection, d: Dialect, t: &KillTarget, whol
         return Err("That connection is now running something else, so nothing was killed. Refresh and try again.".into());
     }
     let q = if whole { d.kill_connection(t.id) } else { d.cancel(t.id) };
-    c.execute(q.as_str()).await.map(|_| if whole { "Ended the connection" } else { "Stopped the statement" }.to_string()).map_err(|x| kill_error(&x))
+    c.execute(sqlx::AssertSqlSafe(q.as_str())).await.map(|_| if whole { "Ended the connection" } else { "Stopped the statement" }.to_string()).map_err(|x| kill_error(&x))
 }
 
 impl Worker {

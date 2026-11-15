@@ -29,7 +29,7 @@ fn at(uri: &str, database: &str) -> sqlx::postgres::PgConnectOptions {
 
 /// A plain function, because inside a spawned block the executor lifetimes of a borrowed connection do not infer.
 async fn exec(c: &mut sqlx::PgConnection, sql: &str) -> Result<(), sqlx::Error> {
-    sqlx::Executor::execute(c, sql).await.map(|_| ())
+    sqlx::Executor::execute(c, sqlx::AssertSqlSafe(sql)).await.map(|_| ())
 }
 
 /// Runs `sql` on a plain connection of its own and sends back how it ended and whether the connection still answered after.
@@ -231,7 +231,7 @@ fn live_quarrys_own_sessions_are_refused() {
         assert!(ours.len() >= 2 && ours.iter().all(|r| r.pid == me.pid || is_own(&a.server, r.pid, &r.backend_start)), "{ours:?}");
         // Another saved connection to the same server, here under another login, sees the first one's sessions as Quarry's.
         let role = unique_name("q_srv_other");
-        l.w.rt.block_on(sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'other-pw'; GRANT pg_read_all_stats TO {role}")).execute(&l.pool)).unwrap();
+        l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD 'other-pw'; GRANT pg_read_all_stats TO {role}"))).execute(&l.pool)).unwrap();
         let other = live_pg_at(l.uri.replacen("postgres:quarry@", &format!("{role}:other-pw@"), 1));
         let seen = l.w.rt.block_on(activity(&other.db, true)).unwrap();
         assert_eq!(seen.server, a.server);
@@ -244,7 +244,7 @@ fn live_quarrys_own_sessions_are_refused() {
         drop(c);
         drop(other);
         std::thread::sleep(Duration::from_millis(200));
-        let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; DROP ROLE {role}")).execute(&l.pool));
+        let _ = l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; DROP ROLE {role}"))).execute(&l.pool));
     }
 }
 
@@ -266,7 +266,7 @@ fn live_behind_a_pooler_sessions_named_like_quarry_are_its_own() {
         let r = l.w.rt.block_on(signal(&l.db, &tgt(l, &s), false, false));
         if pooled {
             assert!(r.unwrap_err().contains("Quarry's own"));
-            let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%{tag}%' AND pid <> pg_backend_pid()")).execute(&l.pool));
+            let _ = l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%{tag}%' AND pid <> pg_backend_pid()"))).execute(&l.pool));
         } else {
             r.unwrap();
         }
@@ -290,7 +290,7 @@ fn live_the_signal_runs_in_a_read_only_transaction() {
         let rows = l.w.rt.block_on(async {
             let Conn::Pg(mut c) = l.db.acquire_conn().await.unwrap() else { panic!() };
             // The transaction is read-only for real: a write in it is refused.
-            let mut probe = c.begin_with(begin.clone()).await.unwrap();
+            let mut probe = c.begin_with(sqlx::AssertSqlSafe(begin.clone())).await.unwrap();
             let w = sqlx::Executor::execute(&mut *probe, "CREATE TEMP TABLE q_srv_ro_probe (a int)").await.unwrap_err();
             assert_eq!(crate::db::sql::exec::sql_state(&w).as_deref(), Some("25006"), "{w}");
             probe.rollback().await.unwrap();
@@ -393,7 +393,7 @@ fn live_locks_show_the_chain_and_terminate_frees_it() {
         for rx in [b_rx, c_rx, d_rx] {
             assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap().0.is_ok());
         }
-        let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&_pool));
+        let _ = l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&_pool));
     });
 }
 
@@ -403,7 +403,7 @@ fn live_a_role_without_pg_read_all_stats_sees_others_as_insufficient_privilege()
         let Some(l) = live_pg(var) else { continue };
         let tag = unique_name("q_srv_priv");
         let role = unique_name("q_srv_low");
-        l.w.rt.block_on(sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'low-pw'")).execute(&l.pool)).unwrap();
+        l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD 'low-pw'"))).execute(&l.pool)).unwrap();
         let uri = l.uri.replacen("postgres:quarry@", &format!("{role}:low-pw@"), 1);
         let low = live_pg_at(uri);
         let rx = sleeper(&l, &tag);
@@ -423,7 +423,7 @@ fn live_a_role_without_pg_read_all_stats_sees_others_as_insufficient_privilege()
             assert!(err.contains("pg_read_all_stats"), "{err}");
         }
         // With pg_read_all_stats it sees the row, and the server refuses to signal a superuser's session.
-        l.w.rt.block_on(sqlx::raw_sql(&format!("GRANT pg_read_all_stats TO {role}")).execute(&l.pool)).unwrap();
+        l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT pg_read_all_stats TO {role}"))).execute(&l.pool)).unwrap();
         let a = l.w.rt.block_on(activity(&low.db, true)).unwrap();
         let seen = a.rows.iter().find(|r| r.pid == theirs.pid).unwrap();
         assert!(a.read_all && !seen.hidden && !seen.signal, "{seen:?}");
@@ -434,7 +434,7 @@ fn live_a_role_without_pg_read_all_stats_sees_others_as_insufficient_privilege()
         let _ = rx.recv_timeout(Duration::from_secs(10));
         drop(low);
         std::thread::sleep(Duration::from_millis(200));
-        let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; DROP ROLE {role}")).execute(&l.pool));
+        let _ = l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; DROP ROLE {role}"))).execute(&l.pool));
     }
 }
 

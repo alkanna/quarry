@@ -53,14 +53,14 @@ impl Drop for Tidy<'_> {
     fn drop(&mut self) {
         for d in self.dbs.borrow().iter() {
             // A template database is refused by DROP until it is a plain one again, and a database whose undo was refused may have closed to connections.
-            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER DATABASE {} IS_TEMPLATE false", ident(d))).execute(&self.l.pool).await });
-            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", ident(d))).execute(&self.l.pool).await });
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER DATABASE {} IS_TEMPLATE false", ident(d)))).execute(&self.l.pool).await });
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", ident(d)))).execute(&self.l.pool).await });
         }
         if !self.schemas.borrow().is_empty() {
             self.l.quarry_test();
             let pool = self.l.fixture_pool();
             for s in self.schemas.borrow().iter() {
-                let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", ident(s))).execute(&pool).await });
+                let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", ident(s)))).execute(&pool).await });
             }
         }
     }
@@ -133,7 +133,7 @@ fn in_db(l: &LivePg, name: &str, sql: &str) {
     let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(name);
     l.w.rt.block_on(async {
         let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
-        sqlx::raw_sql(sql).execute(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
         c.close().await.unwrap();
     });
 }
@@ -301,7 +301,7 @@ fn the_undo_of_a_database_create_sees_what_a_table_count_misses_and_the_database
         // Dropped and made again under the same name: another database, which this did not create.
         let name = tidy.db("again");
         let a = make_db(l, &name, None);
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE {} WITH (FORCE)", ident(&name))).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE {} WITH (FORCE)", ident(&name)))).execute(&l.pool).await.unwrap() });
         assert!(make_db_plain(l, &name));
         let u = undo_of(l, a.undo.unwrap());
         assert!(err(&u).contains("made again"), "{var}: {:?}", u.res);
@@ -311,7 +311,7 @@ fn the_undo_of_a_database_create_sees_what_a_table_count_misses_and_the_database
         let tpl = tidy.db("tpl");
         make_db(l, &tpl, None).res.unwrap();
         in_db(l, &tpl, "CREATE TABLE inherited (id int)");
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER DATABASE {} IS_TEMPLATE true", ident(&tpl))).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER DATABASE {} IS_TEMPLATE true", ident(&tpl)))).execute(&l.pool).await.unwrap() });
         let (kept, mine) = (tidy.db("kid"), tidy.db("kid2"));
         let a = make_db(l, &kept, Some(&tpl));
         a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -328,7 +328,7 @@ fn the_undo_of_a_database_create_sees_what_a_table_count_misses_and_the_database
 fn make_db_plain(l: &LivePg, name: &str) -> bool {
     let _turn = db_turn();
     for attempt in 0..8 {
-        match l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE {}", ident(name))).execute(&l.pool).await }) {
+        match l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {}", ident(name)))).execute(&l.pool).await }) {
             Ok(_) => return true,
             Err(x) if x.as_database_error().and_then(|d| d.code().map(|c| c.to_string())).as_deref() == Some("55006") && attempt < 7 => std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1))),
             Err(x) => panic!("{x}"),
@@ -693,7 +693,7 @@ fn the_undo_of_a_table_create_refuses_a_table_that_is_not_the_one_it_made() {
             let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database("quarry_test");
             l.w.rt.block_on(async { sqlx::PgConnection::connect_with(&o).await.unwrap() })
         };
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("BEGIN; LOCK TABLE {} IN ACCESS SHARE MODE", q("locked"))).execute(&mut holder).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("BEGIN; LOCK TABLE {} IN ACCESS SHARE MODE", q("locked")))).execute(&mut holder).await.unwrap() });
         let u = undo_of(l, a.undo.unwrap());
         assert!(err(&u).contains("locked by another session"), "{var}: {:?}", u.res);
         l.w.rt.block_on(async { sqlx::raw_sql("ROLLBACK").execute(&mut holder).await.unwrap() });
@@ -745,8 +745,8 @@ struct RoleGuard<'a> {
 
 impl Drop for RoleGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP OWNED BY {}", ident(&self.role))).execute(&self.pool).await });
-        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {}", ident(&self.role))).execute(&self.l.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP OWNED BY {}", ident(&self.role)))).execute(&self.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {}", ident(&self.role)))).execute(&self.l.pool).await });
     }
 }
 
@@ -757,7 +757,7 @@ fn the_undo_of_a_table_create_is_refused_when_the_role_cannot_lock_the_table() {
         let pool = l.fixture_pool();
         let role = uniq("role");
         let s = tidy.schema(&uniq("tl"));
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE {} LOGIN PASSWORD 'pw'", ident(&role))).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {} LOGIN PASSWORD 'pw'", ident(&role)))).execute(&l.pool).await.unwrap() });
         let _guard = RoleGuard { l, pool: pool.clone(), role: role.clone() };
         l.qsql(&pool, &format!("CREATE SCHEMA {} AUTHORIZATION {}", ident(&s), ident(&role)));
         let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap();
@@ -917,7 +917,7 @@ fn a_drop_waits_for_the_lock_and_says_whose_it_is() {
             let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database("quarry_test");
             l.w.rt.block_on(async { sqlx::PgConnection::connect_with(&o).await.unwrap() })
         };
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("BEGIN; LOCK TABLE {}.t IN ACCESS SHARE MODE", ident(&s))).execute(&mut holder).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("BEGIN; LOCK TABLE {}.t IN ACCESS SHARE MODE", ident(&s)))).execute(&mut holder).await.unwrap() });
         l.w.pg_drop_table(1, db.clone(), s.clone(), "t".into(), false, false, false);
         let why = err(&ans(l));
         assert!(why.contains("locked by another session"), "{var}: {why}");
@@ -1016,7 +1016,7 @@ fn one_in(l: &LivePg, name: &str, sql: &str) -> String {
     let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(name);
     l.w.rt.block_on(async {
         let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
-        let rows = sqlx::raw_sql(sql).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
         let v = crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default();
         c.close().await.unwrap();
         v
@@ -1123,7 +1123,7 @@ fn free(l: &LivePg, table: &str) -> bool {
     let mut c = foreign(l, "quarry_test");
     l.w.rt.block_on(async {
         sqlx::raw_sql("BEGIN").execute(&mut c).await.unwrap();
-        let got = sqlx::raw_sql(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE NOWAIT")).execute(&mut c).await.is_ok();
+        let got = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE NOWAIT"))).execute(&mut c).await.is_ok();
         let _ = sqlx::raw_sql("ROLLBACK").execute(&mut c).await;
         got
     })
@@ -1150,8 +1150,8 @@ fn a_table_is_built_with_a_two_column_unique_a_check_a_key_to_another_schema_and
         let idx = one("SELECT string_agg(indexrelid::regclass::text || ':' || indisunique::text, ',' ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indrelid = @T::regclass AND NOT indisprimary");
         assert!(idx.contains("orders_region_idx:false") && idx.contains("\"by price\":true"), "{var}: {idx}");
         // The rules hold: a negative price, a customer the parent does not have.
-        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (1, -1)")).execute(&pool)).is_err(), "{var}: the CHECK");
-        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (9, 1)")).execute(&pool)).is_err(), "{var}: the key");
+        assert!(l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO {t} (customer, price) VALUES (1, -1)"))).execute(&pool)).is_err(), "{var}: the CHECK");
+        assert!(l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO {t} (customer, price) VALUES (9, 1)"))).execute(&pool)).is_err(), "{var}: the key");
         // The transaction is over, so nothing of it holds the parent.
         assert!(free(l, &parent), "{var}: the parent is not locked after the create");
         let u = undo_of(l, a.undo.unwrap());
@@ -1232,7 +1232,7 @@ fn a_check_that_reaches_a_function_that_is_not_immutable_makes_nothing() {
         }
         let a = made(l, &db, with("pure(price)"));
         a.res.clone().unwrap_or_else(|x| panic!("{var}: an IMMUTABLE function: {x}"));
-        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (1, -1)")).execute(&pool)).is_err(), "{var}: the CHECK holds");
+        assert!(l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO {t} (customer, price) VALUES (1, -1)"))).execute(&pool)).is_err(), "{var}: the CHECK holds");
         assert_eq!(count(l, &pool, &format!("SELECT count(*)::text FROM {}.log", ident(&s))), "0", "{var}");
         undo_of(l, a.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: {x}"));
         // pg_sleep is a built-in, which pg_depend does not record, so the scan refuses it by name before the server is asked.
@@ -1259,7 +1259,7 @@ fn a_database_given_to_an_owner_whose_rights_the_role_does_not_inherit_has_no_un
         let a = ans(&rl);
         let said = a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
         assert!(a.undo.is_none() && said.contains("No undo") && said.contains(&them), "{var}: {said}");
-        assert!(rl.w.rt.block_on(sqlx::raw_sql(&format!("DROP DATABASE {}", ident(&name))).execute(&rl.pool)).is_err(), "{var}: the server refuses the drop the undo would run");
+        assert!(rl.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE {}", ident(&name)))).execute(&rl.pool)).is_err(), "{var}: the server refuses the drop the undo would run");
         // Its own databases keep their undo.
         let mine = tidy.db("nm");
         rl.w.pg_create_db(1, rl.db.clone(), mine.clone(), DbOpts::default(), false);
@@ -1281,14 +1281,14 @@ fn the_parent_of_a_new_key_is_locked_while_the_table_is_made_and_while_its_undo_
         let spec = orders(&s, vec![key_to(l, &db, &p, "customers", &["customer"], &["id"])]);
         // Another session writing to the parent holds ROW EXCLUSIVE, which the key's SHARE ROW EXCLUSIVE waits for: refused, nothing made.
         let mut other = foreign(l, "quarry_test");
-        l.w.rt.block_on(sqlx::raw_sql(&format!("BEGIN; LOCK TABLE {parent} IN ROW EXCLUSIVE MODE")).execute(&mut other)).unwrap();
+        l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("BEGIN; LOCK TABLE {parent} IN ROW EXCLUSIVE MODE"))).execute(&mut other)).unwrap();
         let why = err(&made(l, &db, spec.clone()));
         assert!(why.contains("locked by another session") && why.contains("customers"), "{var}: {why}");
         l.w.rt.block_on(sqlx::raw_sql("ROLLBACK").execute(&mut other)).unwrap();
         let a = made(l, &db, spec);
         a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
         // A reader of the parent holds ACCESS SHARE, and dropping the child's key needs ACCESS EXCLUSIVE there: the undo says whose lock it is.
-        l.w.rt.block_on(sqlx::raw_sql(&format!("BEGIN; SELECT count(*) FROM {parent}")).execute(&mut other)).unwrap();
+        l.w.rt.block_on(sqlx::raw_sql(sqlx::AssertSqlSafe(format!("BEGIN; SELECT count(*) FROM {parent}"))).execute(&mut other)).unwrap();
         let u = undo_of(l, a.undo.unwrap());
         let why = err(&u);
         assert!(why.starts_with("Not undone") && why.contains("customers") && why.contains("locked"), "{var}: {why}");

@@ -838,7 +838,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         let pool = db.my_pool()?;
         let sql = d.create_stmt(false, schema, table);
         let t = std::time::Instant::now();
-        let res = raw_sql(&sql).fetch_one(pool).await;
+        let res = raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_one(pool).await;
         db.note(schema, &sql, t, &res);
         res.map(|r| Some(SqlRow::My(r))).map_err(se)
     };

@@ -317,7 +317,7 @@ fn a_held_lock_fails_the_plan_on_the_lock_timeout() {
         // another session holds the table until the test lets go
         let tx = l.w.rt.block_on(async {
             let mut tx = t.pool.begin().await.unwrap();
-            sqlx::raw_sql(&format!("LOCK TABLE {}.t IN ACCESS SHARE MODE", t.schema)).execute(&mut *tx).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("LOCK TABLE {}.t IN ACCESS SHARE MODE", t.schema))).execute(&mut *tx).await.unwrap();
             tx
         });
         let started = std::time::Instant::now();

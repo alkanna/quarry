@@ -59,7 +59,7 @@ impl Drop for Held<'_> {
 pub(super) fn hold<'a>(t: &'a T<'a>, table: &str, mode: &str) -> Held<'a> {
     let tx = t.l.w.rt.block_on(async {
         let mut tx = t.pool.begin().await.unwrap();
-        sqlx::raw_sql(&format!("LOCK TABLE {}.{table} IN {mode} MODE", t.schema)).execute(&mut *tx).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("LOCK TABLE {}.{table} IN {mode} MODE", t.schema))).execute(&mut *tx).await.unwrap();
         tx
     });
     Held { t, tx: Some(tx) }
@@ -198,7 +198,7 @@ fn rows_that_point_at_nothing_refuse_the_key_and_are_shown() {
         assert!(t.plan(&[add_fk(nv.clone())]).unwrap().expect.unwrap().orphans.is_empty(), "{var}");
         let a = t.apply(&[add_fk(nv)]);
         assert!(fks(&t).contains("NOT VALID"), "{var}");
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("SET search_path = {}; INSERT INTO t VALUES (6, 99, 'a', 'new')", t.schema)).execute(&t.pool).await }).expect_err("a new row that points at nothing");
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path = {}; INSERT INTO t VALUES (6, 99, 'a', 'new')", t.schema))).execute(&t.pool).await }).expect_err("a new row that points at nothing");
         t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(fks(&t), "", "{var}");
     });
@@ -441,7 +441,7 @@ impl<'a> Role<'a> {
 
 impl Drop for Role<'_> {
     fn drop(&mut self) {
-        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&self.cleanup()).execute(&self.t.pool).await });
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(self.cleanup())).execute(&self.t.pool).await });
     }
 }
 
@@ -650,7 +650,7 @@ fn the_editor_refuses_the_pairs_of_types_the_server_refuses_and_only_those() {
         let col = |name: &str, ty: &str| Column { name: name.into(), full_type: ty.into(), ..Default::default() };
         for (child, parent) in [("text", "character(3)"), ("character(3)", "text"), ("character(3)", "character varying(9)"), ("integer", "numeric"), ("numeric", "integer"), ("integer", "bigint"), ("bigint", "smallint"), ("text", "integer"), ("uuid", "text")] {
             t.sql(&format!("DROP TABLE IF EXISTS {s}.a; DROP TABLE IF EXISTS {s}.b; CREATE TABLE {s}.b (y {parent} PRIMARY KEY); CREATE TABLE {s}.a (x {child})"));
-            let server = l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER TABLE {s}.a ADD FOREIGN KEY (x) REFERENCES {s}.b (y)")).execute(&t.pool).await });
+            let server = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE {s}.a ADD FOREIGN KEY (x) REFERENCES {s}.b (y)"))).execute(&t.pool).await });
             let editor = ddl::fk_pair_problem(Dialect::Postgres, "a", &col("x", child), "b", &col("y", parent));
             assert_eq!(editor.is_none(), server.is_ok(), "{var}: {child} to {parent}: the server says {:?}, the editor {editor:?}", server.err().map(|e| e.to_string()));
         }

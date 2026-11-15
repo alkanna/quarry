@@ -65,20 +65,20 @@ pub(super) async fn session(c: &mut sqlx::MySqlConnection, ms: u64, adv: &Setup)
     c.execute("SET SESSION autocommit = 1").await?;
     // A refused setting fails the connect with the server's words, since the user asked for it.
     for q in &adv.statements {
-        if let Err(err) = c.execute(q.as_str()).await {
+        if let Err(err) = c.execute(sqlx::AssertSqlSafe(q.as_str())).await {
             return Err(adv.failed(format!("{q}: {}", e(err))));
         }
     }
     // Old servers and proxies may lack the variable; a missing timeout is better than no connection, but a
     // missing read-only guard is not, so only that one fails the connect.
     let t = d.session_timeout(ms);
-    let _ = c.execute(t.as_str()).await;
+    let _ = c.execute(sqlx::AssertSqlSafe(t.as_str())).await;
     if adv.init.is_empty() {
         return Ok(());
     }
     // Prepared, so the server parses each one as exactly one statement whatever its quotes hide.
     for q in &adv.init {
-        if let Err(err) = sqlx::query(q).persistent(false).execute(&mut *c).await {
+        if let Err(err) = sqlx::query(sqlx::AssertSqlSafe(q.as_str())).persistent(false).execute(&mut *c).await {
             return Err(adv.failed(format!("Init command failed on {q:?}: {}", e(err))));
         }
     }
@@ -384,7 +384,7 @@ pub(super) async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<Sq
     let mut conn = pools.acquire(db.opts.database()).await?;
     let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
     let t = Instant::now();
-    let res = super::pg::read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
+    let res = super::pg::read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
     db.note(schema, &sql, t, &res);
     if res.is_err() {
         conn.close_on_drop();
@@ -554,9 +554,9 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         session(&mut c, 300, &db.setup).await.map_err(|x| db.setup.failed_text().unwrap_or_else(|| e(x)))?;
         // The init command may raise the statement limit, and this lookup must stay short.
         let t = d.session_timeout(300);
-        let _ = c.execute(t.as_str()).await;
+        let _ = c.execute(sqlx::AssertSqlSafe(t.as_str())).await;
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(p) = prefix {
             // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
             q = q.bind(format!("{}%", super::rules::like_bang(p)));
@@ -590,7 +590,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
         let short = super::pg::set_timeout("300");
         if est.is_none() && !leads {
             let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
-            match super::pg::read::in_read_only(pc, db, &short, async |c| c.fetch_all(sql.as_str()).await).await {
+            match super::pg::read::in_read_only(pc, db, &short, async |c| c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await).await {
                 Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL) => {}
                 // Too big to group, or too slow to tell.
                 _ => return Ok(None),
@@ -600,7 +600,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
         let pattern = prefix.map(|p| format!("{}%", super::rules::like_bang(p)));
         let t = Instant::now();
         let rows = super::pg::read::in_read_only(pc, db, &short, async |c| {
-            let mut q = sqlx::query(&sql).persistent(false);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).persistent(false);
             if let Some(p) = &pattern {
                 q = q.bind(p.as_str());
             }
@@ -911,8 +911,8 @@ mod tests {
             let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
             raw_sql("CREATE DATABASE IF NOT EXISTS quarry_test").execute(&p).await.unwrap();
             if !table.is_empty() {
-                raw_sql(&format!("DROP TABLE IF EXISTS quarry_test.{table}")).execute(&p).await.unwrap();
-                raw_sql(&format!("CREATE TABLE quarry_test.{table} ({ddl})")).execute(&p).await.unwrap();
+                raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS quarry_test.{table}"))).execute(&p).await.unwrap();
+                raw_sql(sqlx::AssertSqlSafe(format!("CREATE TABLE quarry_test.{table} ({ddl})"))).execute(&p).await.unwrap();
             }
             p
         });
@@ -928,7 +928,7 @@ mod tests {
     }
 
     fn exec(w: &Worker, p: &sqlx::MySqlPool, sql: &str) {
-        w.rt.block_on(async { raw_sql(sql).execute(p).await.unwrap() });
+        w.rt.block_on(async { raw_sql(sqlx::AssertSqlSafe(sql)).execute(p).await.unwrap() });
     }
 
     fn page_of(w: &Worker, rx: &Receiver<Msg>, db: &Db, table: &str, filter: &str, order: &str, limit: u64, offset: u64) -> (Vec<Col>, Vec<String>, Vec<Document>, u64) {

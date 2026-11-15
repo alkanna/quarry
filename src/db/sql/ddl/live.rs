@@ -25,7 +25,7 @@ struct Env {
 
 impl Env {
     fn exec(&self, sql: &str) {
-        self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) });
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) });
     }
 
     fn structure(&mut self) -> Structure {

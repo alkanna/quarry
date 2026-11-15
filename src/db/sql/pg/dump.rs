@@ -80,7 +80,7 @@ enum Arg<'a> {
 /// connection pooler in transaction mode cannot keep a prepared statement.
 async fn cat(c: &mut PgConnection, db: &Db, sql: &str, args: &[Arg<'_>]) -> Res<Vec<R>> {
     let t = Instant::now();
-    let mut query = sqlx::query(sql).persistent(false);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).persistent(false);
     for a in args {
         query = match a {
             Arg::T(s) => query.bind(s.to_string()),
@@ -285,7 +285,7 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
     let Conn::Pg(mut c) = conn else { return Err("Not a PostgreSQL connection".into()) };
     // One message, so behind a pooler the BEGIN and the settings land on the backend of the transaction.
     let begin = db.pg_begin("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", READ_SETTINGS);
-    if let Err(x) = c.execute(begin.as_str()).await {
+    if let Err(x) = c.execute(sqlx::AssertSqlSafe(begin.as_str())).await {
         let _ = c.execute("ROLLBACK").await;
         return Err(se(x));
     }
@@ -322,7 +322,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     if !locked.is_empty() {
         let sql = format!("LOCK TABLE {} IN ACCESS SHARE MODE", locked.join(", "));
         let t = Instant::now();
-        let res = c.execute(sql.as_str()).await;
+        let res = c.execute(sqlx::AssertSqlSafe(sql.as_str())).await;
         db.note(&database, &sql, t, &res);
         res.map_err(se)?;
     }
@@ -1170,7 +1170,7 @@ async fn write_rows(c: &mut PgConnection, db: &Db, plan: &DumpPlan, rel: &Rel, c
     let started = Instant::now();
     let (mut batch, mut n, mut rows) = (String::new(), 0usize, 0u64);
     let res: Res<()> = async {
-        let mut s = raw_sql(&sql).fetch(&mut *c);
+        let mut s = raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch(&mut *c);
         while let Some(row) = futures_util::StreamExt::next(&mut s).await {
             let row = row.map_err(se)?;
             if n > 0 {
@@ -1629,7 +1629,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     let mut locals = [crate::db::sql::pg::write_locals(), db.pg_run_locals(&schema).as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
     if !pooled {
         // A restore runs long, so no statement timeout; a lock timeout so one statement never waits for another session for ever.
-        c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", crate::db::sql::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
+        c.execute(sqlx::AssertSqlSafe(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", crate::db::sql::pg::WRITE_LOCK_SECS))).await.map_err(se)?;
     }
     let mut file = src.open_script().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = PgSplitter::new(false);
@@ -1800,7 +1800,7 @@ fn tx_effect(stmt: &str) -> Option<bool> {
 /// standard_conforming_strings or client_encoding the file switched, a BEGIN ATOMIC it misread), so a statement the
 /// progress and the pooler checks never saw would run. Unnamed, so no prepared statement stays on the connection.
 pub(in crate::db::sql) async fn run_text(c: &mut PgConnection, stmt: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(stmt).persistent(false).execute(&mut *c).await.map(|_| ())
+    sqlx::query(sqlx::AssertSqlSafe(stmt)).persistent(false).execute(&mut *c).await.map(|_| ())
 }
 
 /// One statement behind a pooler, in a transaction of its own that carries its settings, as a Custom Query run does.
