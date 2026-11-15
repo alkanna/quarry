@@ -282,9 +282,7 @@ async function run() {
             for s in schemas {
                 let s = pg_schema(&s).to_string();
                 // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
-                if self.sql_schema_asked.insert((conn, ns_key(db, &s))) {
-                    self.worker.sql_schema(conn, sql.at(db), s.clone());
-                }
+                self.ask_sql_schema(conn, sql.at(db), ns_key(db, &s), s.clone());
                 self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
             }
             return;
@@ -292,9 +290,7 @@ async function run() {
         if self.sql_asked.insert((conn, db.to_string())) {
             self.worker.sql_tables(conn, sql.clone(), db.to_string());
         }
-        if self.sql_schema_asked.insert((conn, db.to_string())) {
-            self.worker.sql_schema(conn, sql, db.to_string());
-        }
+        self.ask_sql_schema(conn, sql, db.to_string(), db.to_string());
     }
 
     /// Whether any target of the current tab's script can be written to: its own connection, or an
@@ -610,6 +606,11 @@ fn connection_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     })
 }
 
+/// A loaded schema as the language server's table types take it.
+pub(super) fn table_cols(s: &db::sql::schema::Schema) -> Vec<db::sql::TableCols> {
+    s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable, kind: c.kind }).collect() }).collect()
+}
+
 /// The declarations of every attachment, for the language server. `main_sql` says the tab has no
 /// SQL type aliases of its own to share.
 pub(super) fn attached_decls(items: &[AttachedInfo], main_sql: bool) -> String {
@@ -618,7 +619,7 @@ pub(super) fn attached_decls(items: &[AttachedInfo], main_sql: bool) -> String {
     let tables: Vec<Vec<db::sql::TableCols>> = items
         .iter()
         .map(|i| match &i.typed {
-            AttTyped::Sql(Some(s)) => s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable, kind: c.kind }).collect() }).collect(),
+            AttTyped::Sql(Some(s)) => table_cols(s),
             _ => i.names.iter().map(|n| db::sql::TableCols { name: n.clone(), cols: Vec::new() }).collect(),
         })
         .collect();

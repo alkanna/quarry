@@ -369,16 +369,13 @@ impl App {
                     refresh = Some(c.meta.id);
                     ui.close();
                 }
-                if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
-                    users = Some(c.meta.id);
-                    ui.close();
-                }
-                if c.meta.engine == db::sql::Engine::Postgres && c.status == Status::Ready && ui.button("Roles and privileges…").clicked() {
-                    users = Some(c.meta.id);
-                    ui.close();
-                }
-                if !c.meta.engine.is_sql() && c.status == Status::Ready && ui.button("Users and roles…").clicked() {
-                    users = Some(c.meta.id);
+                let (label, act) = match c.meta.engine {
+                    db::sql::Engine::MySql => ("Users and privileges…", SideAct::SqlUsers),
+                    db::sql::Engine::Postgres => ("Roles and privileges…", SideAct::SqlUsers),
+                    db::sql::Engine::Mongo => ("Users and roles…", SideAct::Users),
+                };
+                if c.status == Status::Ready && ui.button(label).clicked() {
+                    users = Some((c.meta.id, act));
                     ui.close();
                 }
                 ui.add_space(2.0);
@@ -399,9 +396,8 @@ impl App {
         if let Some(id) = edit {
             self.edit_conn(id);
         }
-        if let Some(id) = users {
-            let sql = self.conn(id).is_some_and(|c| c.meta.engine.is_sql());
-            self.side_act(id, if sql { SideAct::SqlUsers } else { SideAct::Users });
+        if let Some((id, act)) = users {
+            self.side_act(id, act);
         }
         if let Some(id) = refresh && !self.demo {
             self.connect(id);
@@ -987,11 +983,8 @@ impl App {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
             SideAct::NewShell(db) => {
-                let mut t = Tab::new(Sel { conn, db, ..Default::default() });
-                t.view = View::Shell;
-                self.tabs.push(t);
-                self.set_cur(self.tabs.len() - 1);
-                return self.reset_doc_state();
+                self.open_tab(Sel { conn, db, ..Default::default() }, Open::NewTab);
+                return self.set_view(View::Shell);
             }
             SideAct::Server if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) => return self.open_server(conn),
             SideAct::NewDb if self.conn(conn).is_some_and(|c| !c.meta.engine.is_sql()) => return self.mongo_new_db(conn),

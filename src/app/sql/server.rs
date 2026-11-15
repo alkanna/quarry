@@ -292,8 +292,6 @@ impl App {
                 s.tab = TABS[i].0;
                 // Ask for the new tab's data on the next frame instead of when the old tab's timer ends.
                 s.next = None;
-                // A visit of Overview reads the sizes again.
-                s.sizes_at = None;
             }
             let max = screen.height() - 380.0;
             dialog_pane(ui, |ui| {
@@ -370,7 +368,7 @@ impl App {
             }
             SqlServerTab::Overview | SqlServerTab::Status => {
                 let overview = s.tab == SqlServerTab::Overview;
-                // MariaDB opens every table to size it, so sizes are read once per visit of the tab and on Refresh, never on a timer.
+                // MariaDB opens every table to size it, so sizes are read once per window and on Refresh, never on a timer.
                 if overview && !s.sz_wait && (s.refresh || s.sizes_at.is_none()) {
                     self.req += 1;
                     (s.sz_req, s.sz_wait, s.sizes_at) = (self.req, true, Some(now));

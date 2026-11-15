@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 /// Database sizes walk the data directory, so the Overview asks for them this often and not on every poll.
-pub(in crate::app) const SIZES_EVERY: Duration = Duration::from_secs(30);
+const SIZES_EVERY: Duration = Duration::from_secs(30);
 /// Each pg_blocking_pids call takes every lock manager partition lock, so blockers are asked this often; the polls between
 /// keep the last ones for sessions that still wait.
 const BLOCKERS_EVERY: Duration = Duration::from_secs(5);

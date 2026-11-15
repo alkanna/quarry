@@ -501,11 +501,7 @@ pub fn metrics(cur: &Overview, prev: Option<&(f64, Overview)>) -> Metrics {
         Some((n, c, _)) if n > 0.0 => Some(c / n),
         _ => total(cur).filter(|t| *t > 0.0).and_then(|t| Some(cur.commits? / t)),
     };
-    let hit = match (cur.hits, cur.reads) {
-        (Some(h), Some(r)) if h + r > 0.0 => Some(h / (h + r)),
-        _ => None,
-    };
-    Metrics { tps, commit, hit }
+    Metrics { tps, commit, hit: hit_ratio(cur.hits, cur.reads) }
 }
 
 /// What the window read about the session it is about to signal, to check again on the connection that sends it.
@@ -644,9 +640,14 @@ pub struct Counters {
 impl Counters {
     /// Share of block reads served from shared buffers; None before the database read anything.
     pub fn hit(&self) -> Option<f64> {
-        let (h, r) = (self.hits? as f64, self.reads? as f64);
-        (h + r > 0.0).then(|| h / (h + r))
+        hit_ratio(self.hits.map(|h| h as f64), self.reads.map(|r| r as f64))
     }
+}
+
+/// Share of block reads served from shared buffers; None before anything was read.
+fn hit_ratio(hits: Option<f64>, reads: Option<f64>) -> Option<f64> {
+    let (h, r) = (hits?, reads?);
+    (h + r > 0.0).then(|| h / (h + r))
 }
 
 /// Databases with the most transactions first. The shared row (datname NULL) holds only the shared catalogs, so it is left out.

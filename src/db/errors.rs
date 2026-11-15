@@ -261,12 +261,12 @@ pub fn stopped(mut raw: String) -> String {
     raw
 }
 
-/// What went wrong, without the wording: cheap enough for a label drawn every frame.
 /// A SQL server saying the database itself is gone (MySQL 1049, PostgreSQL 3D000): only a reconnect reloads the database list.
 pub fn database_gone(raw: &str) -> bool {
     mysql_code(raw) == Some(1049) || pg_code(raw).as_deref() == Some("3D000")
 }
 
+/// What went wrong, without the wording: cheap enough for a label drawn every frame.
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
     let n = mongo_code(raw).map(|m| m.0).or(mysql_code(raw));
