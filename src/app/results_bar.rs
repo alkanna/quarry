@@ -12,7 +12,7 @@ pub(super) struct BarInfo {
     pub unit: &'static str,
     /// "~" when the total is an estimate.
     pub approx: &'static str,
-    pub ms: u64,
+    pub ms: u128,
     pub loading: bool,
     /// Plain facts after the time, such as a collection's size.
     pub stats: Vec<String>,
@@ -74,7 +74,7 @@ impl App {
                 .inner;
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Page size"));
             let (rc, _) = ui.allocate_exact_size(egui::vec2(10.0, BUTTON_H), Sense::hover());
-            super::fold::chevron(ui.painter(), rc.center(), 0.0, MUTED());
+            crate::ui::fold::chevron(ui.painter(), rc.center(), 0.0, MUTED());
             ui.label(mono(format!("{} ms", info.ms), SUCCESS()));
             for s in &info.stats {
                 ui.label(mono(s.clone(), FAINT()));
