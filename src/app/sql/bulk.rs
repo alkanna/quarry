@@ -67,6 +67,11 @@ fn plan_of(f: &BulkForm, d: db::sql::Dialect, bs: bool) -> Result<BulkPlan, Stri
 impl App {
     /// The More actions menu's Update matching and Delete all matching rows. They act on the WHERE of the page on screen.
     pub(in crate::app) fn open_bulk(&mut self, update: bool) {
+        self.open_bulk_with(update, None);
+    }
+
+    /// `col` starts the update with that column, as the column menu's Update values to does.
+    pub(in crate::app) fn open_bulk_with(&mut self, update: bool, col: Option<String>) {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
         if let Some(why) = self.sql_edit_block() {
@@ -76,7 +81,7 @@ impl App {
             return self.warn("Grouped rows are summaries, not table rows. Ungroup to change rows.");
         }
         if !self.sel_writable() {
-            return self.ask_unlock_then(move |a| a.open_bulk(update));
+            return self.ask_unlock_then(move |a| a.open_bulk_with(update, col));
         }
         let (sel, ran) = (t.sel.clone(), s.ran.clone());
         if self.sql_db_for(sel.conn, Some("Connect first.")).is_none() {
@@ -87,7 +92,7 @@ impl App {
         let req = self.req;
         self.worker.sql_bulk_prep(req, db, ns.clone(), sel.coll.clone(), ran.filter.clone());
         let capped = ran.limit.is_some() || ran.skip > 0;
-        self.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns, filter: ran.filter, capped, req, prep: None, pairs: Vec::new(), typed: String::new() })));
+        self.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns, filter: ran.filter, capped, req, prep: None, pairs: col.map(|col| vec![Pair { col, ..Default::default() }]).unwrap_or_default(), typed: String::new() })));
     }
 
     /// The count and columns are back. A failure closes the dialog and says why.
@@ -98,7 +103,14 @@ impl App {
         }
         match res {
             Ok(p) => {
-                if f.update && f.pairs.is_empty() && let Some(c) = settable(&p).first() {
+                // A column picked from its menu may be one the dialog cannot set, and another column must never stand in for it.
+                let ok = settable(&p);
+                if let Some(x) = f.pairs.iter().find(|x| !ok.iter().any(|c| c.name == x.col)) {
+                    let why = format!("{} cannot be changed here: it is part of the key, generated or a geometry.", x.col);
+                    self.modal = None;
+                    return self.warn(why);
+                }
+                if f.update && f.pairs.is_empty() && let Some(c) = ok.first() {
                     f.pairs.push(Pair { col: c.name.clone(), ..Default::default() });
                 }
                 f.prep = Some(p);

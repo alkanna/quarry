@@ -313,7 +313,7 @@ impl App {
         let mut remove = None;
         let mut edit = None;
         let mut refresh = None;
-        let mut sql_users = None;
+        let mut users = None;
         let mut manage = false;
         // The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
         let mongo_active = self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql());
@@ -369,12 +369,13 @@ impl App {
                     refresh = Some(c.meta.id);
                     ui.close();
                 }
-                if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
-                    sql_users = Some(c.meta.id);
-                    ui.close();
-                }
-                if c.meta.engine == db::sql::Engine::Postgres && c.status == Status::Ready && ui.button("Roles and privileges…").clicked() {
-                    sql_users = Some(c.meta.id);
+                let (label, act) = match c.meta.engine {
+                    db::sql::Engine::MySql => ("Users and privileges…", SideAct::SqlUsers),
+                    db::sql::Engine::Postgres => ("Roles and privileges…", SideAct::SqlUsers),
+                    db::sql::Engine::Mongo => ("Users and roles…", SideAct::Users),
+                };
+                if c.status == Status::Ready && ui.button(label).clicked() {
+                    users = Some((c.meta.id, act));
                     ui.close();
                 }
                 ui.add_space(2.0);
@@ -395,8 +396,8 @@ impl App {
         if let Some(id) = edit {
             self.edit_conn(id);
         }
-        if let Some(id) = sql_users {
-            self.side_act(id, SideAct::SqlUsers);
+        if let Some((id, act)) = users {
+            self.side_act(id, act);
         }
         if let Some(id) = refresh && !self.demo {
             self.connect(id);
@@ -620,6 +621,9 @@ impl App {
                         if ui.button(if engine == db::sql::Engine::Postgres { "Roles and privileges…" } else { "Users and privileges…" }).clicked() {
                             side.push(SideAct::SqlUsers);
                         }
+                        if ui.button("Server status…").clicked() {
+                            side.push(SideAct::Server);
+                        }
                         {
                             ui.separator();
                             if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
@@ -673,6 +677,9 @@ impl App {
                             }
                         }
                         return;
+                    }
+                    if ui.button("New shell").on_hover_text("Open a Shell on this database").clicked() {
+                        side.push(SideAct::NewShell(db_name.clone()));
                     }
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
@@ -975,6 +982,11 @@ impl App {
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
+            SideAct::NewShell(db) => {
+                self.open_tab(Sel { conn, db, ..Default::default() }, Open::NewTab);
+                return self.set_view(View::Shell);
+            }
+            SideAct::Server if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) => return self.open_server(conn),
             SideAct::NewDb if self.conn(conn).is_some_and(|c| !c.meta.engine.is_sql()) => return self.mongo_new_db(conn),
             SideAct::NewDb => return self.sql_new_db(conn),
             SideAct::SqlUsers => return self.open_sql_users(conn),
@@ -1056,7 +1068,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlImportPaste(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
+            SideAct::NewQuery(_) | SideAct::NewShell(_) | SideAct::SqlImport(..) | SideAct::SqlImportPaste(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlRename(..) | SideAct::SqlDuplicate(..) | SideAct::PgTruncate(..) | SideAct::NewSchema(_) | SideAct::DropSchema(..) | SideAct::SqlUsers | SideAct::NewView(_) | SideAct::EditView(..) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

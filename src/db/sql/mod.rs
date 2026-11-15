@@ -657,6 +657,8 @@ pub struct TableCol {
     /// COLUMN_TYPE, such as "enum('a','b')" or "decimal(10,2)".
     pub full_type: String,
     pub nullable: bool,
+    /// As the grid reads the column, which knows PostgreSQL types that `full_type` alone does not.
+    pub kind: value::Kind,
 }
 
 #[derive(Clone, PartialEq, Debug)]

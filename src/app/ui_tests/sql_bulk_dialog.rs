@@ -4,16 +4,21 @@
 
 use super::sql_structure::replace;
 use super::*;
-use crate::app::sql::bulk::BulkForm;
+use crate::app::sql::bulk::{BulkForm, Pair};
 use db::sql::bulk::BulkPrep;
 
 /// The dialog open on orders for the WHERE `filter`, with `count` rows counted on a table of `engine`.
 fn open(ui: &mut UiApp, update: bool, filter: &str, count: u64, engine: &str) {
+    open_on(ui, update, filter, count, engine, None);
+}
+
+/// `col` is the column the dialog was opened on from its menu.
+fn open_on(ui: &mut UiApp, update: bool, filter: &str, count: u64, engine: &str, col: Option<&str>) {
     let app = ui.h.state_mut();
     let sel = app.tabs[0].sel.clone();
     let s = app.tabs[0].sql.as_ref().expect("the orders tab");
     let prep = BulkPrep { count, cols: s.cols.to_vec(), pk: s.pk.clone(), engine: engine.into() };
-    app.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns: "shop".into(), filter: filter.into(), capped: false, req: 7, prep: None, pairs: Vec::new(), typed: String::new() })));
+    app.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns: "shop".into(), filter: filter.into(), capped: false, req: 7, prep: None, pairs: col.map(|c| vec![Pair { col: c.into(), ..Default::default() }]).unwrap_or_default(), typed: String::new() })));
     app.on_bulk_prep(7, Ok(prep));
     ui.settle();
 }
@@ -129,4 +134,20 @@ fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     ui.h.state_mut().open_bulk(false);
     assert!(ui.app().modal.is_none(), "grouped rows opened the dialog");
     assert!(ui.app().last_problem().contains("Grouped rows are summaries"), "no notice says why: {}", ui.app().last_problem());
+}
+
+#[test]
+fn update_values_from_a_column_menu_starts_on_that_column() {
+    let pair = |ui: &UiApp| match &ui.app().modal {
+        Some(Modal::SqlBulk(f)) => f.pairs.iter().map(|p| p.col.clone()).collect::<Vec<_>>(),
+        _ => panic!("the dialog is not open"),
+    };
+    let Some(mut ui) = demo() else { return };
+    open_on(&mut ui, true, "", 4410, "InnoDB", Some("note"));
+    assert_eq!(pair(&ui), ["note"], "the dialog did not start on the column of the menu");
+    // The primary key cannot be set, and no other column may stand in for it, so the dialog closes and says why.
+    let Some(mut ui) = demo() else { return };
+    open_on(&mut ui, true, "", 4410, "InnoDB", Some("id"));
+    assert!(ui.app().modal.is_none(), "the dialog stayed open on a column it cannot set");
+    assert!(ui.app().last_problem().contains("id cannot be changed here"), "no notice says why: {}", ui.app().last_problem());
 }

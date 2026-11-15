@@ -206,6 +206,9 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
                 }
             }).response.on_disabled_hover_text(why);
         });
+    }
+    // On SQL it opens the bulk update dialog, which counts the rows and keeps an undo.
+    if !agg {
         item(ui, "Update values to…", HeadAct::Update, acts);
     }
     ui.separator();
@@ -337,6 +340,7 @@ impl App {
                 let code = update_script(&t.sel.coll, db::Scope { filter: with_exists(t.query.filter.clone(), c), ..t.query.scope() }, Bson::Array(vec![Bson::Document(stage)]), &note);
                 self.open_in_shell(code);
             }
+            HeadAct::Update if t.sql.is_some() => self.open_bulk_with(true, Some(c.into())),
             HeadAct::Update => {
                 let note = format!("Replace null with the new value of {c}, then run.");
                 let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);

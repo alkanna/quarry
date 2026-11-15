@@ -82,6 +82,9 @@ fn live_every_read_answers() {
         assert!(matches!(o.role, Some(Role::Primary { ref standbys, visible: true }) if standbys.is_empty()), "{:?}", o.role);
         let sz = l.w.rt.block_on(sizes(&l.db)).unwrap();
         assert!(sz.iter().any(|(n, b)| n == "postgres" && b.is_some_and(|b| b > 0)), "{sz:?}");
+        let cn = l.w.rt.block_on(counters(&l.db)).unwrap();
+        let pg = cn.iter().find(|c| c.db == "postgres").unwrap_or_else(|| panic!("{cn:?}"));
+        assert!(pg.commits.is_some_and(|c| c > 0) && pg.hit().is_some_and(|h| h > 0.0 && h <= 1.0) && pg.deadlocks.is_some(), "{pg:?}");
         // The second sample gives a rate.
         std::thread::sleep(Duration::from_millis(300));
         let o2 = l.w.rt.block_on(overview(&l.db)).unwrap();

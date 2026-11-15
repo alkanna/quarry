@@ -55,3 +55,17 @@ fn an_open_mysql_database_shows_loading_then_a_failure_with_retry() {
         loading_then_failure_and_retry(var, "quarry_test", |_| Msg::Collections { conn: CONN, db: "quarry_test".into(), res: Err("listing refused".into()) });
     }
 }
+
+#[test]
+fn database_menus_open_a_mongo_shell_and_the_sql_server_window() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let conn = ui.app().tabs[0].sel.conn;
+    ui.h.state_mut().side_act(conn, SideAct::NewShell("shop".into()));
+    ui.settle();
+    let t = &ui.app().tabs[ui.app().cur];
+    assert!(t.view == View::Shell && t.sel.db == "shop" && t.sel.coll.is_empty(), "New shell did not open a Shell on shop");
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let conn = ui.app().tabs[0].sel.conn;
+    ui.h.state_mut().side_act(conn, SideAct::Server);
+    assert!(ui.app().sql_server.is_some(), "Server status on a SQL database opened nothing");
+}

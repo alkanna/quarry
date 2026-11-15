@@ -55,6 +55,14 @@ impl App {
         }
     }
 
+    /// Reads a schema's tables and columns for completion and shell types, once until a Refresh. `key` is the cache key
+    /// (`ns_key`), `space` the schema name the server reads, and `sql` a session on the right database.
+    pub(in crate::app) fn ask_sql_schema(&mut self, conn: u64, sql: db::sql::Db, key: String, space: String) {
+        if self.sql_schema_asked.insert((conn, key)) {
+            self.worker.sql_schema(conn, sql, space);
+        }
+    }
+
     /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
     /// under that name would never get its autocomplete and shell types back. A PostgreSQL database holds one cache per
     /// schema, all of them under keys that start with its name.

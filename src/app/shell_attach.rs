@@ -23,6 +23,11 @@ pub(super) struct Attached {
 /// The schema a PostgreSQL script starts in when none was picked, as a new database has it.
 pub(super) const PG_SCHEMA: &str = "public";
 
+/// The schema a PostgreSQL attachment runs in. Its columns are cached under this name too, so every user of it must agree.
+pub(super) fn pg_schema(schema: &str) -> &str {
+    if schema.is_empty() { PG_SCHEMA } else { schema }
+}
+
 /// The state of the Attach dialog.
 #[derive(Default)]
 pub(super) struct AttachForm {
@@ -275,16 +280,17 @@ async function run() {
             // The schema is the attachment's own, so each PostgreSQL attachment of this tab on `db` asks for its tables.
             let schemas: Vec<String> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.conn == conn && a.db == db).map(|a| a.schema.clone()).collect()).unwrap_or_default();
             for s in schemas {
-                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), if s.is_empty() { PG_SCHEMA.into() } else { s });
+                let s = pg_schema(&s).to_string();
+                // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
+                self.ask_sql_schema(conn, sql.at(db), ns_key(db, &s), s.clone());
+                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
             }
             return;
         }
         if self.sql_asked.insert((conn, db.to_string())) {
             self.worker.sql_tables(conn, sql.clone(), db.to_string());
         }
-        if self.sql_schema_asked.insert((conn, db.to_string())) {
-            self.worker.sql_schema(conn, sql, db.to_string());
-        }
+        self.ask_sql_schema(conn, sql, db.to_string(), db.to_string());
     }
 
     /// Whether any target of the current tab's script can be written to: its own connection, or an
@@ -344,7 +350,7 @@ async function run() {
                 // A PostgreSQL connection belongs to one database, so the database picks the pool and the schema is the search_path.
                 if pg {
                     sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": a.tables, "dialect": "postgres" }));
-                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: if a.schema.is_empty() { PG_SCHEMA.into() } else { a.schema.clone() }, read_only, conn_id: Default::default() }));
+                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: pg_schema(&a.schema).into(), read_only, conn_id: Default::default() }));
                     continue;
                 }
                 sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": list, "dialect": "mysql" }));
@@ -370,9 +376,9 @@ async function run() {
                 let c = self.conn(a.conn)?;
                 let pg = c.meta.engine == db::sql::Engine::Postgres;
                 let names: Vec<String> = if pg { a.tables.clone() } else { c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default() };
-                // Columns of a PostgreSQL attachment are not read yet, so its tables are typed loosely.
+                // A PostgreSQL schema is cached per schema of its database; until it arrives the tables are typed loosely.
                 let typed = if pg {
-                    AttTyped::Sql(None)
+                    AttTyped::Sql(self.sql_schema.get(&(a.conn, ns_key(&a.db, pg_schema(&a.schema)))).cloned())
                 } else if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
                 Some(AttachedInfo { name: a.name.clone(), names, typed })
             })
@@ -600,6 +606,11 @@ fn connection_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     })
 }
 
+/// A loaded schema as the language server's table types take it.
+pub(super) fn table_cols(s: &db::sql::schema::Schema) -> Vec<db::sql::TableCols> {
+    s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable, kind: c.kind }).collect() }).collect()
+}
+
 /// The declarations of every attachment, for the language server. `main_sql` says the tab has no
 /// SQL type aliases of its own to share.
 pub(super) fn attached_decls(items: &[AttachedInfo], main_sql: bool) -> String {
@@ -608,7 +619,7 @@ pub(super) fn attached_decls(items: &[AttachedInfo], main_sql: bool) -> String {
     let tables: Vec<Vec<db::sql::TableCols>> = items
         .iter()
         .map(|i| match &i.typed {
-            AttTyped::Sql(Some(s)) => s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable }).collect() }).collect(),
+            AttTyped::Sql(Some(s)) => table_cols(s),
             _ => i.names.iter().map(|n| db::sql::TableCols { name: n.clone(), cols: Vec::new() }).collect(),
         })
         .collect();
