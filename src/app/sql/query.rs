@@ -758,33 +758,7 @@ impl App {
         let selection = self.editor_selection(ui.ctx());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            // Stop takes the place of Run statement while a run is in flight, so the toolbar never shows a dead button.
-            if running {
-                stop = danger(ui, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
-            } else {
-                let (main, tip) = run_split(ui, "Run statement", "\u{2318}\u{21b5}", true);
-                run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
-                let tip = tip.on_hover_text("Choose what to run");
-                egui::Popup::menu(&tip).width(420.0).show(|ui| {
-                    menu_look(ui);
-                    if selection.is_some() && ui.add(egui::Button::new("Run selection")).on_hover_text("Run only the selected text").clicked() {
-                        run_sel = selection.clone();
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new("Explain")).on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked() {
-                        explain = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    run_pick = self.sql_statement_menu(ui);
-                });
-            }
-            ui.add_enabled_ui(!running, |ui| {
-                run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("\u{21e7}\u{2318}\u{21b5}").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
-            });
-            explain |= quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
-            save_view = quiet_enabled(ui, !running, "Save as view\u{2026}").on_hover_text("Create a view from the statement under the caret").clicked();
+            // The right side is laid out first, so a narrow window clips the tools and never History or Library.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The first one added sits at the right edge: the library, then the history beside it.
                 let button = picker_button(ui, &lib_pick, false, &mut pick_acts);
@@ -810,6 +784,37 @@ impl App {
                     });
                 })
                 .on_hover_text("History");
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                    // Stop takes the place of Run statement while a run is in flight, so the toolbar never shows a dead button.
+                    if running {
+                        stop = danger(ui, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
+                    } else {
+                        let (main, tip) = run_split(ui, "Run statement", "\u{2318}\u{21b5}", true);
+                        run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
+                        let tip = tip.on_hover_text("Choose what to run");
+                        egui::Popup::menu(&tip).width(420.0).show(|ui| {
+                            menu_look(ui);
+                            if selection.is_some() && ui.add(egui::Button::new("Run selection")).on_hover_text("Run only the selected text").clicked() {
+                                run_sel = selection.clone();
+                                ui.close();
+                            }
+                            if ui.add(egui::Button::new("Explain")).on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked() {
+                                explain = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            run_pick = self.sql_statement_menu(ui);
+                        });
+                    }
+                    ui.add_enabled_ui(!running, |ui| {
+                        run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("\u{21e7}\u{2318}\u{21b5}").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
+                    });
+                    explain |= quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
+                    format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+                    save_view = quiet_enabled(ui, !running, "Save as view\u{2026}").on_hover_text("Create a view from the statement under the caret").clicked();
+                });
             });
         });
         ui.add_space(8.0);
