@@ -268,6 +268,18 @@ impl Dialect {
         }
     }
 
+    /// INVISIBLE columns exist from MySQL 8.0.23 and MariaDB 10.3.3. PostgreSQL has none.
+    pub fn can_invisible_column(self, version: &str) -> bool {
+        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
+        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
+        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        match self {
+            Dialect::MySql => (at(0), at(1), at(2)) >= (8, 0, 23),
+            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 3, 3),
+            Dialect::Postgres => false,
+        }
+    }
+
     /// MySQL keeps and enforces a CHECK from 8.0.16 and parses and ignores it before. MariaDB enforces it from 10.2.1.
     pub fn enforces_checks(self, version: &str) -> bool {
         let v = version.strip_prefix("5.5.5-").unwrap_or(version);
@@ -558,6 +570,8 @@ mod tests {
         assert!(Dialect::MySql.can_rename_index("5.7.44-log"));
         assert!(!Dialect::MySql.can_rename_index("5.6.51"));
         assert!(Dialect::MariaDb.can_rename_index("10.11.6-MariaDB"));
+        assert!(Dialect::MySql.can_invisible_column("8.0.23") && Dialect::MySql.can_invisible_column("8.4.3") && !Dialect::MySql.can_invisible_column("8.0.22") && !Dialect::MySql.can_invisible_column("5.7.44-log"));
+        assert!(Dialect::MariaDb.can_invisible_column("10.3.3-MariaDB") && Dialect::MariaDb.can_invisible_column("11.4.0-MariaDB") && !Dialect::MariaDb.can_invisible_column("10.3.2-MariaDB") && !Dialect::MariaDb.can_invisible_column("5.5.5-10.2.44-MariaDB"));
         assert!(Dialect::MariaDb.can_rename_index("10.5.2-MariaDB"));
         assert!(!Dialect::MariaDb.can_rename_index("10.5.1-MariaDB"));
         assert!(!Dialect::MariaDb.can_rename_index("10.4.32-MariaDB"));

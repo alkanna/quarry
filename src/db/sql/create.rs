@@ -297,7 +297,7 @@ impl ColumnSpec {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,
@@ -339,10 +339,22 @@ impl TableSpec {
 }
 
 /// What the server this spec is for would refuse or ignore before the statement is even read: a foreign key on a table that is not
-/// InnoDB, and a CHECK on a server that parses one and never enforces it.
+/// InnoDB, a key over a TEXT or BLOB column with no prefix length, and a CHECK on a server that parses one and never enforces it.
+/// This is the one place the engine rule lives; the New table dialog shows its text.
 pub fn spec_problem(d: Dialect, version: &str, spec: &TableSpec) -> Option<String> {
     if !spec.fks.is_empty() && !spec.engine.eq_ignore_ascii_case("InnoDB") {
         return Some(format!("{} cannot hold a foreign key. Only InnoDB tables can.", if spec.engine.is_empty() { "This engine" } else { spec.engine.as_str() }));
+    }
+    // The pickers offer no prefix length, and the server answers error 1170 for a key over one of these without it.
+    let long = |n: &str| spec.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)).filter(|c| matches!(c.ty.to_ascii_uppercase().as_str(), "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB"));
+    let why = |what: String, c: &ColumnSpec| format!("{what} uses {}, a {} column, which MySQL can only index with a prefix length. Make the table first, then add the index in Structure with a prefix.", c.name, c.ty.to_ascii_uppercase());
+    if let Some(c) = spec.columns.iter().find(|c| c.pk && long(&c.name).is_some()) {
+        return Some(why("The primary key".into(), c));
+    }
+    for ix in spec.indexes.iter().filter(|i| matches!(i.kind, ddl::IndexKind::Index | ddl::IndexKind::Unique)) {
+        if let Some(c) = ix.cols.iter().filter(|c| c.prefix.is_none()).find_map(|c| long(&c.name)) {
+            return Some(why(format!("Index {}", if ix.name.is_empty() { "(unnamed)" } else { &ix.name }), c));
+        }
     }
     if !spec.checks.is_empty() && !d.enforces_checks(version) {
         return Some(format!("This server ({}) parses a CHECK and ignores it. A CHECK needs MySQL 8.0.16 or newer, or MariaDB 10.2.1.", version.trim()));
@@ -1176,6 +1188,20 @@ mod tests {
         assert!(spec_problem(Dialect::MySql, "5.7.44", &s).unwrap().contains("ignores"));
         assert!(spec_problem(Dialect::MariaDb, "10.1.0-MariaDB", &s).is_some());
         assert!(spec_problem(Dialect::MariaDb, "11.4.0-MariaDB", &s).is_none());
+        // a key over TEXT or BLOB with no prefix is the server's error 1170, so it is said before Create
+        let mut long = spec("notes", vec![ColumnSpec::id(), col("body", "TEXT", ""), col("raw", "BLOB", "")]);
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &long).is_none());
+        long.indexes = vec![IndexDef { name: "ix_body".into(), kind: ddl::IndexKind::Index, cols: vec![ddl::IdxCol { name: "body".into(), prefix: None, desc: false }], ..Default::default() }];
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &long).unwrap().contains("prefix length"));
+        long.indexes[0].kind = ddl::IndexKind::Unique;
+        long.indexes[0].cols[0].name = "RAW".into();
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &long).unwrap().contains("BLOB"));
+        long.indexes[0].kind = ddl::IndexKind::Fulltext;
+        long.indexes[0].cols[0].name = "body".into();
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &long).is_none(), "FULLTEXT takes TEXT");
+        long.indexes.clear();
+        long.columns[1].pk = true;
+        assert!(spec_problem(Dialect::MySql, "8.4.0", &long).unwrap().contains("primary key"));
         // the new table as the key check sees it: a primary key to point at, and text in the table's collation
         let mut t = spec("t", vec![ColumnSpec::id(), col("name", "VARCHAR", "20")]);
         t.collation = "utf8mb4_bin".into();

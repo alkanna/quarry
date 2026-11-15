@@ -655,10 +655,17 @@ impl App {
                     }
                 } else {
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.unsigned, "Unsigned"));
-                ui.checkbox(&mut f.def.nullable, "Allow NULL");
+                // MariaDB has no NULL or NOT NULL after a generated column and the column is always nullable, so the statement
+                // would silently drop a NOT NULL.
+                let maria_generated = dialect == Dialect::MariaDb && f.dmode == DMode::Generated;
+                if maria_generated {
+                    f.def.nullable = true;
+                }
+                ui.add_enabled(!maria_generated, egui::Checkbox::new(&mut f.def.nullable, "Allow NULL")).on_disabled_hover_text("A generated column on MariaDB always allows NULL.");
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.zerofill, "Zero fill"));
                 ui.add_enabled(ddl::is_integer(&t) && f.dmode != DMode::Generated, egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
-                ui.checkbox(&mut f.def.invisible, "Invisible").on_hover_text("Left out of SELECT * and of an INSERT that names no columns");
+                let can_hide = dialect.can_invisible_column(&version);
+                ui.add_enabled(can_hide, egui::Checkbox::new(&mut f.def.invisible, "Invisible")).on_hover_text("Left out of SELECT * and of an INSERT that names no columns").on_disabled_hover_text("Invisible columns need MySQL 8.0.23 or newer, or MariaDB 10.3.3.");
                 }
                 if f.dmode == DMode::Generated {
                     f.def.auto_increment = false;
@@ -681,7 +688,8 @@ impl App {
             if f.dmode == DMode::Generated {
                 form_label(ui, "Computed");
                 // PostgreSQL has virtual generated columns from 18.
-                let virtual_ok = !pg || version.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().is_ok_and(|v| v >= 18);
+                // A major of 0 is a server the structure could not read a version from, which the statement check then decides.
+                let virtual_ok = !pg || self.structure().is_none_or(|st| st.pg_major == 0 || st.pg_major >= 18);
                 if !virtual_ok {
                     f.stored = true;
                 }

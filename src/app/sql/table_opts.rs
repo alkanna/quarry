@@ -1,7 +1,7 @@
 //! The table options of a SQL table in Structure: comment, engine, default collation and the auto increment counter. Changes
 //! are staged like column and index edits (`alter.rs`); each one carries the value the structure read, which is what its undo writes.
 
-use crate::app::sql::alter::{restage, sql_block, BUSY_NOTE};
+use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::sql::create::pick;
 use crate::app::*;
 use db::sql::create::Meta;
@@ -20,8 +20,10 @@ pub(in crate::app) struct TableForm {
     engine: String,
     collation: String,
     auto: String,
-    /// The staged changes these go after.
+    /// The staged changes that are not table options, which these go after.
     rest: Vec<Change>,
+    /// Whether table options were already staged when the dialog opened, so clearing the fields back can still be staged.
+    had_staged: bool,
     pub(in crate::app) meta: Option<Meta>,
     pub(in crate::app) load_err: Option<String>,
     view: Option<TableView>,
@@ -31,6 +33,12 @@ pub(in crate::app) struct TableForm {
 struct TableView {
     key: [String; 4],
     changes_empty: bool,
+    /// The form did not parse, which is a mistake to point at and not a form left alone.
+    invalid: bool,
+    /// Nothing differs from the server any more, but options were staged before: staging then takes them back.
+    removes: bool,
+    /// Only the table options of the form. They replace the staged ones, so opening the dialog twice never stacks two.
+    new: Vec<Change>,
     all: Vec<Change>,
     text: Result<String, String>,
     warnings: Vec<String>,
@@ -46,8 +54,25 @@ impl App {
         }
         let s = &st.status;
         let was = (s.comment.clone(), s.engine.clone(), s.collation.clone(), s.auto_increment);
-        let auto = was.3.map(|n| n.to_string()).unwrap_or_default();
-        self.modal = Some(Modal::TableOpts(Box::new(TableForm { conn, schema, pg, comment: was.0.clone(), engine: was.1.clone(), collation: was.2.clone(), auto, was, rest: self.staged().to_vec(), meta: None, load_err: None, view: None })));
+        let mut auto = was.3.map(|n| n.to_string()).unwrap_or_default();
+        let (mut comment, mut engine, mut collation) = (was.0.clone(), was.1.clone(), was.2.clone());
+        // Start from what is staged, not from what the server holds, or a second visit would show the old values and stage them again.
+        let (mut rest, mut had_staged) = (Vec::new(), false);
+        for c in self.staged() {
+            match c {
+                Change::Table { opt, .. } => {
+                    had_staged = true;
+                    match opt {
+                        TableOpt::Comment(v) => comment = v.clone(),
+                        TableOpt::Engine(v) => engine = v.clone(),
+                        TableOpt::Collation(v) => collation = v.clone(),
+                        TableOpt::AutoIncrement(n) => auto = n.to_string(),
+                    }
+                }
+                c => rest.push(c.clone()),
+            }
+        }
+        self.modal = Some(Modal::TableOpts(Box::new(TableForm { conn, schema, pg, comment, engine, collation, auto, was, rest, had_staged, meta: None, load_err: None, view: None })));
     }
 
     /// One change for each field that differs from what the structure read.
@@ -84,15 +109,18 @@ impl App {
             Ok(c) => (c, None),
             Err(e) => (Vec::new(), Some(e)),
         };
+        let invalid = err.is_some();
+        let removes = !invalid && changes.is_empty() && f.had_staged;
         let mut all = f.rest.clone();
         all.extend(changes.clone());
         let text = match err {
             Some(e) => Err(e),
+            None if removes => Err("The staged table options are taken back.".to_string()),
             None if changes.is_empty() => Err("Nothing is changed yet.".to_string()),
             None => self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all)),
         };
         let warnings = self.structure().map(|st| ddl::warnings(st, &all)).unwrap_or_default();
-        TableView { key, changes_empty: changes.is_empty(), all, text, warnings }
+        TableView { key, changes_empty: changes.is_empty(), invalid, removes, new: changes, all, text, warnings }
     }
 
     pub(in crate::app) fn table_dialog(&mut self, ui: &mut egui::Ui, f: &mut TableForm, keep: &mut bool) {
@@ -164,14 +192,14 @@ impl App {
             f.view = Some(self.table_view(f));
         }
         let v = f.view.as_ref().unwrap();
-        let (text, changes_empty) = (&v.text, v.changes_empty);
+        let (text, changes_empty, invalid, removes) = (&v.text, v.changes_empty, v.invalid, v.removes);
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);
         match text {
             Ok(t) => sql_block(ui, "tableopts-sql", t, 110.0),
             Err(e) => {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if changes_empty { FAINT() } else { ALERT() }));
+                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if changes_empty && !invalid { FAINT() } else { ALERT() }));
             }
         }
         if !f.pg && f.collation != f.was.2 {
@@ -181,11 +209,12 @@ impl App {
             ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
         }
         let text_ok = text.is_ok();
+        let can_stage = text_ok || removes;
         let (mut stage, mut now) = (false, false);
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            stage = ui.add_enabled(text_ok, primary_button(ui, "Stage change", PRIMARY())).clicked();
+            stage = ui.add_enabled(can_stage, primary_button(ui, if removes { "Take back" } else { "Stage change" }, PRIMARY())).clicked();
             let busy = self.applying();
             now = ui.add_enabled(text_ok && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage these changes and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
@@ -194,8 +223,11 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            let all = f.view.take().map(|v| v.all).unwrap_or_default();
-            self.set_staged(restage(self.staged(), None, all, f.rest.len()));
+            let new = f.view.take().map(|v| v.new).unwrap_or_default();
+            // From the list as it is now (an Apply that finished meanwhile emptied it), with this dialog's options replacing the staged ones.
+            let mut staged: Vec<Change> = self.staged().iter().filter(|c| !matches!(c, Change::Table { .. })).cloned().collect();
+            staged.extend(new);
+            self.set_staged(staged);
             if now {
                 self.request_alter_apply();
             }

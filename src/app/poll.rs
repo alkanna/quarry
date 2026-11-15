@@ -39,8 +39,20 @@ impl App {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() && f.parent_loaded(req, res.clone()) {
                         continue;
                     }
-                    // So does the New table dialog, for the parent of each of its foreign keys.
-                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() && f.keys.parent_loaded(req, &res) {
+                    // So does the New table dialog, for the parent of each of its foreign keys. MySQL and PostgreSQL each have their own.
+                    let own_key = match self.modal.as_mut() {
+                        Some(Modal::PgNewTable(f)) => f.keys.parent_loaded(req, &res),
+                        Some(Modal::SqlNewTable(f)) => {
+                            let hit = f.keys.parent_loaded(req, &res);
+                            // The built statement and the key check hang on the parent, which the spec does not carry.
+                            if hit {
+                                f.built = None;
+                            }
+                            hit
+                        }
+                        _ => false,
+                    };
+                    if own_key {
                         continue;
                     }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {

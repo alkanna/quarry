@@ -17,7 +17,7 @@ pub(in crate::app) struct PgFk {
     pub(in crate::app) parent: Option<Structure>,
     /// The schema and table `parent` was asked for, and the request that carries the answer.
     asked: (String, String),
-    req: u64,
+    pub(in crate::app) req: u64,
     err: Option<String>,
 }
 
@@ -92,12 +92,10 @@ impl NewKeys {
 
     /// The first thing stopping a key that the statements cannot see: a part not picked, a parent not read yet or one that does not
     /// fit. The second value is true while a parent is still loading, which is not a mistake to point at. `own` is the table being
-    /// made as `fks` (the same keys, as the spec has them) would find it. With an `engine` (MySQL) the keys also need InnoDB on both
-    /// sides, which the server only says as "cannot add a foreign key constraint", and a key at the table itself is checked too.
+    /// made as `fks` (the same keys, as the spec has them) would find it. With an `engine` (MySQL) a parent must be InnoDB too, which the
+    /// server only says as "cannot add a foreign key constraint", and a key at the table itself is checked too. That the new table
+    /// itself is InnoDB is `create::spec_problem`'s rule, so it is said once.
     pub(in crate::app) fn key_problem(&self, fks: &[ForeignKey], own: &Structure, table: &str, whole_key: bool, engine: Option<&str>) -> Option<(String, bool)> {
-        if let Some(e) = engine.filter(|e| !fks.is_empty() && !e.eq_ignore_ascii_case("InnoDB")) {
-            return Some((format!("Foreign keys need an InnoDB table, and {} is not one.", if e.is_empty() { "this engine" } else { e }), false));
-        }
         for (i, (k, key)) in self.fks.iter().zip(fks).enumerate() {
             let n = i + 1;
             if key.ref_table.is_empty() {
@@ -400,14 +398,13 @@ mod tests {
     }
 
     #[test]
-    fn a_key_needs_an_innodb_table_on_both_sides_and_waits_for_its_parent() {
+    fn a_key_needs_an_innodb_parent_and_waits_for_it() {
         let own = Structure { columns: vec![Column { name: "c".into(), full_type: "int unsigned".into(), nullable: false, ..Default::default() }], ..Default::default() };
         let mut keys = NewKeys::default();
         keys.fks.push(PgFk::new("shop", Dialect::MySql));
         let key = ForeignKey { name: "f".into(), cols: vec!["c".into()], ref_db: "shop".into(), ref_table: "p".into(), ref_cols: vec!["id".into()], on_update: "RESTRICT".into(), on_delete: "RESTRICT".into(), ..Default::default() };
         let problem = |keys: &NewKeys, engine: &str| keys.key_problem(std::slice::from_ref(&key), &own, "t", false, Some(engine));
         assert_eq!(problem(&keys, "InnoDB").map(|p| p.1), Some(true), "the parent is still being read");
-        assert!(problem(&keys, "MyISAM").unwrap().0.contains("InnoDB table"));
         keys.fks[0].parent = Some(parent("MyISAM"));
         assert!(problem(&keys, "InnoDB").unwrap().0.contains("MyISAM table"));
         keys.fks[0].parent = Some(parent("InnoDB"));

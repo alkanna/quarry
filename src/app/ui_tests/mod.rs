@@ -50,6 +50,7 @@ mod sql_record;
 mod sql_relations;
 mod sql_routines;
 mod sql_structure;
+mod sql_table_opts;
 mod sql_suggest;
 mod sql_tableops;
 mod sql_triggers;

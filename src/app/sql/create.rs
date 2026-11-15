@@ -47,6 +47,19 @@ pub(in crate::app) struct NewTable {
     pub(in crate::app) meta: Option<Meta>,
     pub(in crate::app) load_err: Option<String>,
     pub(in crate::app) show_sql: bool,
+    /// The statement and the key check of the form as it was last built. They walk the spec and the parents, so they are made again
+    /// only when the form changed, or when a parent's structure arrived (the poll clears this then, since the spec does not carry it).
+    pub(in crate::app) built: Option<NewBuilt>,
+}
+
+/// What `NewTable` last built, with the form it came from.
+pub(in crate::app) struct NewBuilt {
+    spec: TableSpec,
+    version: String,
+    has_meta: bool,
+    /// None until the server's lists arrived.
+    sql: Option<db::Res<String>>,
+    problem: Option<(String, bool)>,
 }
 
 impl NewTable {
@@ -156,7 +169,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.sql_new_table(conn, schema));
         }
         self.ask_meta(conn, &schema);
-        self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], keys: NewKeys::default(), comment: String::new(), meta: None, load_err: None, show_sql: false })));
+        self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], keys: NewKeys::default(), comment: String::new(), meta: None, load_err: None, show_sql: false, built: None })));
     }
 
     pub(in crate::app) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
@@ -454,11 +467,18 @@ impl App {
         }
         });
         let spec = f.spec();
-        let built = f.meta.as_ref().map(|m| create::create_table_sql(d, mode, &spec, m));
-        // The keys' own problems: the parent not read yet or one that does not fit, an engine that cannot hold a key, a CHECK the
-        // server would ignore. Each is said before the server's "cannot add a foreign key constraint".
         let version = self.conn(f.conn).and_then(|c| c.sql.as_ref()).map_or_else(|| "8.4.0".to_string(), |s| s.version.clone());
-        let problem = f.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, db::sql::ddl::fk_whole_key_default(d, &version), Some(&spec.engine)).or_else(|| create::spec_problem(d, &version, &spec).map(|e| (e, false)));
+        let fresh = f.built.as_ref().is_some_and(|b| b.spec == spec && b.version == version && b.has_meta == f.meta.is_some());
+        if !fresh {
+            let sql = f.meta.as_ref().map(|m| create::create_table_sql(d, mode, &spec, m));
+            // The keys' own problems: a table that cannot hold a key, a key over a column without a prefix, a CHECK the server would
+            // ignore, a parent not read yet or one that does not fit. Each is said before the server's "cannot add a foreign key constraint".
+            let problem = create::spec_problem(d, &version, &spec).map(|e| (e, false)).or_else(|| f.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, db::sql::ddl::fk_whole_key_default(d, &version), Some(&spec.engine)));
+            f.built = Some(NewBuilt { spec, version, has_meta: f.meta.is_some(), sql, problem });
+        }
+        // Taken out for the frame so the foot can change the form, and put back after it.
+        let Some(b) = f.built.take() else { return };
+        let (built, problem) = (&b.sql, &b.problem);
         if f.show_sql || (matches!(&built, Some(Err(_))) || problem.is_some()) && !f.name.is_empty() {
             dialog_pane(ui, |ui| {
                 if f.show_sql {
@@ -493,6 +513,7 @@ impl App {
             }
             foot_note(ui, if writable { &summary } else { NOTE_TABLE });
         });
+        f.built = Some(b);
     }
 
     fn sql_create_table_run(&mut self, f: &NewTable) {
@@ -720,7 +741,7 @@ impl App {
                     col("reason", "VARCHAR", "255", true),
                     ColumnSpec { default: DefaultKind::Now, ..col("created_at", "DATETIME", "", false) },
                 ];
-                Modal::SqlNewTable(Box::new(NewTable { conn: 3, schema: "shop".into(), name: "refunds".into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), cols, keys: NewKeys::default(), comment: String::new(), meta: Some(meta), load_err: None, show_sql: false }))
+                Modal::SqlNewTable(Box::new(NewTable { conn: 3, schema: "shop".into(), name: "refunds".into(), engine: "InnoDB".into(), collation: "utf8mb4_0900_ai_ci".into(), cols, keys: NewKeys::default(), comment: String::new(), meta: Some(meta), load_err: None, show_sql: false, built: None }))
             }
             _ => Modal::SqlDrop(Box::new(DropForm {
                 conn: 3,

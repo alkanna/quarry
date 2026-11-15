@@ -1029,11 +1029,17 @@ fn table_options() {
 }
 
 #[test]
-fn the_engine_is_staged_alone() {
+fn the_engine_is_staged_beside_other_table_options_only() {
     let engine = opt(TableOpt::Engine("MyISAM".into()), TableOpt::Engine("InnoDB".into()));
-    let e = alter(M, "8.4.0", B, "orders", &[Change::Drop("note".into()), engine.clone()]).unwrap_err();
-    assert_eq!(e, "Apply or discard the other changes first; changing the engine rewrites the table.");
-    assert!(plan(M, "8.4.0", B, "orders", &table(), &[engine.clone(), opt(TableOpt::Comment("c".into()), TableOpt::Comment(String::new()))]).is_err());
+    let comment = opt(TableOpt::Comment("c".into()), TableOpt::Comment(String::new()));
+    for beside in [Change::Drop("note".into()), Change::DropIndex("idx_status".into())] {
+        let e = alter(M, "8.4.0", B, "orders", &[beside, engine.clone()]).unwrap_err();
+        assert_eq!(e, "Apply or discard the column, index, key and check changes first; changing the engine rewrites the table.");
+    }
+    // the options of one dialog go together, and the undo writes each back
+    let both = [engine.clone(), comment.clone()];
+    assert_eq!(alter(M, "8.4.0", B, "orders", &both).unwrap(), "ALTER TABLE `orders`\n  ENGINE = MyISAM,\n  COMMENT = 'c'");
+    assert!(plan(M, "8.4.0", B, "orders", &table(), &both).unwrap().undo.is_ok());
     let alone = plan(M, "8.4.0", B, "orders", &table(), std::slice::from_ref(&engine)).unwrap();
     assert!(alone.undo.is_ok());
     assert!(warnings(&table(), &[engine]).iter().any(|w| w.contains("rewrites the whole table")));

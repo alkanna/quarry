@@ -264,10 +264,10 @@ pub fn alter(d: Dialect, version: &str, m: Mode, table: &str, changes: &[Change]
     if changes.is_empty() {
         return Err("Nothing is staged.".into());
     }
-    // An engine change copies every row. Alone, the preview and the undo are one rewrite; beside other clauses a failure
-    // leaves no clear picture of what ran.
-    if changes.len() > 1 && changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Engine(_), .. })) {
-        return Err("Apply or discard the other changes first; changing the engine rewrites the table.".into());
+    // An engine change copies every row. Beside other table options it is still one rewrite with a plain undo, but beside a
+    // column, index, key or check change a failure leaves no clear picture of what ran.
+    if changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Engine(_), .. })) && changes.iter().any(|c| !matches!(c, Change::Table { .. })) {
+        return Err("Apply or discard the column, index, key and check changes first; changing the engine rewrites the table.".into());
     }
     // A column redefined in the same ALTER that names no collation takes the new default and has its values converted, which a
     // collation change on its own does not do. The editor leaves out a collation that is the table's own.
