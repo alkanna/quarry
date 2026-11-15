@@ -1401,6 +1401,8 @@ pub(super) struct UsersWin {
 
 pub(super) enum SideAct {
     NewColl(String, bool),
+    /// A Mongo Shell tab on the database.
+    NewShell(String),
     Refresh(String),
     Users,
     Server,

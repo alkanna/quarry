@@ -435,9 +435,9 @@ impl App {
             }
             Act::Fix(Fix::Refresh) => {
                 let Some(c) = conn else { return };
-                match (self.conn(c).and_then(|c| c.client.clone()), e.and_then(|e| e.sel.clone())) {
-                    (Some(client), Some(s)) => self.worker.collections(c, client, s.db),
-                    _ => self.connect(c),
+                // Reloading the one database's list keeps the connection, its tabs and an unlock; reconnecting is the fallback.
+                if !e.and_then(|e| e.sel.clone()).is_some_and(|s| self.refresh_db(c, &s.db)) {
+                    self.connect(c);
                 }
             }
             Act::Fix(Fix::Validator) => {
