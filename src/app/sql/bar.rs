@@ -1239,23 +1239,6 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     run
 }
 
-/// The note above grouped results, with the Ungroup link. Returns true on Ungroup.
-pub(in crate::app) fn grouped_note(ui: &mut egui::Ui, groups: u64, rows: u64) -> bool {
-    let mut ungroup = false;
-    egui::Frame::new().fill(tint(PRIMARY(), 14)).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 7, bottom: 7 }).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} groups from {} rows. Double-click a group to see its rows. Grouped results are read-only.", group(&groups.to_string()), group(&rows.to_string()))).size(TXT_SMALL).color(MUTED()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if quiet(ui, RichText::new("Ungroup").color(PRIMARY())).clicked() {
-                    ungroup = true;
-                }
-            });
-        });
-    });
-    ungroup
-}
-
 fn tcols(s: &SqlTab) -> &[Col] {
     if s.bar.table_cols.is_empty() { &s.cols } else { &s.bar.table_cols }
 }

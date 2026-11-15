@@ -195,7 +195,7 @@ fn delete_one_row() {
     every_engine("delete one row", |fx, ui| {
         let t = open_unlocked(fx, ui);
         ui.click("Select row 2");
-        ui.click("Delete");
+        ui.click("Delete…");
         fx.expect_unchanged(ui, &t, ORIGINAL);
         ui.click_last("Delete");
         fx.expect(ui, &t, "1:alpha:10,3:gamma:30");
@@ -208,7 +208,7 @@ fn delete_several_rows_asks_for_the_table_name() {
         let t = open_unlocked(fx, ui);
         ui.click("Select row 1");
         ui.click("Select row 3");
-        ui.click("Delete");
+        ui.click("Delete…");
         ui.fill("Confirmation", "not the table");
         assert!(ui.h.get_by_label("Confirm").accesskit_node().is_disabled(), "Confirm waits for the exact name");
         fx.expect_unchanged(ui, &t, ORIGINAL);
@@ -263,7 +263,7 @@ fn undo_a_delete() {
     every_engine("undo a delete", |fx, ui| {
         let t = open_unlocked(fx, ui);
         ui.click("Select row 2");
-        ui.click("Delete");
+        ui.click("Delete…");
         ui.click_last("Delete");
         fx.expect(ui, &t, "1:alpha:10,3:gamma:30");
         undo_last(ui, 1);
@@ -335,7 +335,7 @@ fn a_locked_connection_asks_before_any_write() {
         ui.double_click_cell("name", 1);
         stay(ui, fx, "double click");
         ui.click("Select row 2");
-        ui.click("Delete");
+        ui.click("Delete…");
         stay(ui, fx, "Delete");
         ui.click("+ Row");
         stay(ui, fx, "+ Row");
