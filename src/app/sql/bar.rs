@@ -908,6 +908,8 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) pick: &'a crate::app::library::picker::PickData,
     pub(in crate::app) qacts: Vec<QAct>,
     pub(in crate::app) pick_acts: Vec<crate::app::library::picker::PickAct>,
+    /// The ? button was clicked.
+    pub(in crate::app) help: bool,
 }
 
 /// Draws the bar and the clause chips. Returns true when the query should run.
@@ -944,7 +946,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
             // Run, the history and library icons, and the chip of a bound script when there is one.
-            let run_w = if side.pick.bound.is_some() { 440.0 } else { 172.0 };
+            let run_w = if side.pick.bound.is_some() { 470.0 } else { 202.0 };
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
@@ -1033,6 +1035,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 vsep(ui, 6.0);
                 picker_button(ui, side.pick, true, &mut side.pick_acts);
                 history_menu(ui, side.hist, &[], Some(d), &mut side.qacts);
+                side.help |= quiet(ui, "?").on_hover_text("Filter shortcuts and syntax").clicked();
             });
         });
     });

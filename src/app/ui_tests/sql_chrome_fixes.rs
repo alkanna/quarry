@@ -155,3 +155,30 @@ fn postgresql_info_offers_vacuum_analyze_and_reindex_with_a_confirm_for_the_slow
         assert!(ui.app().modal.is_none());
     }
 }
+
+#[test]
+fn the_question_mark_on_the_content_bar_opens_this_dialects_filter_help() {
+    let Some(mut ui) = demo_ui(App::load_pg_demo) else { return };
+    ui.click("?");
+    let Some(Modal::Text { title, body, .. }) = &ui.app().modal else { panic!("no help opened") };
+    assert_eq!(title, "Query help");
+    assert!(body.contains("ILIKE"), "{body}");
+}
+
+// The audit listed these keys as Query-only; Content is a Documents view, so the same handler serves it.
+#[test]
+fn arrows_and_page_keys_move_the_content_grid() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let size = ui.app().page_size();
+    let app = ui.h.state_mut();
+    let cur = app.cur;
+    app.tabs[cur].count = size * 2;
+    assert!(app.tabs[cur].docs.len() > 1, "the demo table has fewer than two rows");
+    ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+    ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+    assert_eq!(ui.app().t().and_then(|t| t.selected), Some((false, 1)));
+    ui.key(egui::Modifiers::NONE, egui::Key::PageDown);
+    assert_eq!(ui.app().t().map(|t| t.page), Some(1));
+    ui.key(egui::Modifiers::NONE, egui::Key::PageUp);
+    assert_eq!(ui.app().t().map(|t| t.page), Some(0));
+}
