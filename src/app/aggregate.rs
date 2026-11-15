@@ -273,7 +273,7 @@ impl App {
                 crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
-                let (main, tip) = run_split(ui, "Run", "⌘↵", true);
+                let (main, tip) = run_split(ui, "Run", "⌘↵", true, "Choose what to run");
                 run = main.on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || (!covered && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter)));
                 // Explain and Copy as code are ways to run or read the pipeline, so they live with Run.
                 egui::Popup::menu(&tip.on_hover_text("Run options")).show(|ui| {

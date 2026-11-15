@@ -318,17 +318,7 @@ impl App {
                 let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Min)));
                 right.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
-                    if main.on_hover_text("Enter").clicked() {
-                        run = true;
-                    }
-                    egui::Popup::menu(&tip).width(220.0).show(|ui| {
-                        menu_list(ui);
-                        if super::sql::bar::run_item(ui, "Run", "↵").clicked() {
-                            run = true;
-                            ui.close();
-                        }
-                        popover_divider(ui);
+                    run |= super::sql::bar::line_run(ui, dirty, |ui| {
                         if super::sql::bar::run_item(ui, "Explain", "⌘E").on_hover_text("Explain the query that ran").clicked() {
                             explain = true;
                             ui.close();

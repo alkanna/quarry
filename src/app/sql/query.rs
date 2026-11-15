@@ -772,7 +772,7 @@ impl App {
                     if running {
                         stop = danger(ui, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
                     } else {
-                        let (main, tip) = run_split(ui, "Run statement", "\u{2318}\u{21b5}", true);
+                        let (main, tip) = run_split(ui, "Run statement", "\u{2318}\u{21b5}", true, "Choose what to run");
                         run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
                         let tip = tip.on_hover_text("Choose what to run");
                         egui::Popup::menu(&tip).width(420.0).show(|ui| {

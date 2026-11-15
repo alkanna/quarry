@@ -429,33 +429,49 @@ pub(crate) fn danger_item(ui: &mut egui::Ui, text: impl Into<String>) -> egui::R
 /// a baseline there, so the triangle (from a fallback font) and the hint sat off center. Here
 /// each part is centered on its own.
 pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Response {
-    run_face(ui, text, keys, egui::CornerRadius::same(R_MD))
+    let (label, hint, w) = run_text(ui, text, keys, true);
+    run_face(ui, text, label, hint, w, egui::CornerRadius::same(R_MD), true)
 }
 
-/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip opens a menu of what to run.
-/// Returns the button, then the tip.
-pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool) -> (egui::Response, egui::Response) {
-    let w = run_w(ui, text, keys);
+/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip, named `tip_name`, opens a menu of what to
+/// run. A query line passes `loud` only while it holds a query the rows below did not come from; otherwise its Run is a quiet
+/// outlined button of the same size, so the line does not reflow. Returns the button, then the tip.
+pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool, tip_name: &str) -> (egui::Response, egui::Response) {
+    let (label, hint, w) = run_text(ui, text, keys, loud);
     split_row(ui, w, |ui| {
-        let main = run_face(ui, text, keys, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 });
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), if tip_on { Sense::click() } else { Sense::hover() });
+        let main = run_face(ui, text, label, hint, w, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, loud);
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
         let p = ui.painter();
-        let fill = if tip_on { [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)] } else { PRIMARY() };
-        p.rect_filled(rect, egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, fill);
-        p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 5.0)).y_range(), Stroke::new(1.0, tint(ON_PRIMARY(), 70)));
-        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, if tip_on { ON_PRIMARY() } else { tint(ON_PRIMARY(), 110) });
+        let corners = egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD };
+        if loud {
+            p.rect_filled(rect, corners, run_fill(state_of(&r)));
+            p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 5.0)).y_range(), Stroke::new(1.0, tint(ON_PRIMARY(), 70)));
+        } else {
+            // Over the button's right edge by a pixel, so the two outlines meet as one divider and not a double line.
+            p.rect(rect.with_min_x(rect.min.x - 1.0), corners, shade_fill(PANEL(), state_of(&r)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        }
+        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, if loud { ON_PRIMARY() } else { MUTED() });
         focus_ring(ui, &r, rect, R_MD as f32);
-        let enabled = ui.is_enabled() && tip_on;
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Choose what to run"));
-        (main, if tip_on { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r })
+        let enabled = ui.is_enabled();
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip_name));
+        (main, r.on_hover_cursor(egui::CursorIcon::PointingHand))
     })
 }
 
-/// Width of the button part of a split Run, laid out as `run_face` lays it.
-fn run_w(ui: &egui::Ui, text: &str, keys: &str) -> f32 {
-    let w = |s: &str, f| ui.painter().layout_job(egui::text::LayoutJob::single_section(s.to_string(), f)).size().x;
-    let content = 8.0 + 8.0 + w(text, ui_fmt(TXT_BODY, TEXT(), W_SEMIBOLD, 0.0)) + 10.0 + w(keys, mono_fmt(TXT_CAPTION, FAINT(), 400.0));
-    (content + 28.0).max(96.0)
+const RUN_TRI: f32 = 8.0;
+
+/// The label and key hint of a Run, laid out once for both its width and its face, and the width of the button part.
+fn run_text(ui: &egui::Ui, text: &str, keys: &str, loud: bool) -> (std::sync::Arc<egui::Galley>, std::sync::Arc<egui::Galley>, f32) {
+    let (ink, faint) = if loud { (ON_PRIMARY(), tint(ON_PRIMARY(), 170)) } else { (TEXT(), FAINT()) };
+    let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ink, W_SEMIBOLD, 0.0)));
+    let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, faint, 400.0)));
+    let w = (RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x + 28.0).max(96.0);
+    (label, hint, w)
+}
+
+/// The accent fill of a loud Run for its state.
+fn run_fill(state: usize) -> Color32 {
+    [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state]
 }
 
 /// Lays the button and the tip of a split Run left to right in one rect, so the tip stays on the right inside a right-to-left
@@ -467,65 +483,34 @@ fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) 
     add(&mut row)
 }
 
-/// The Run of a query line: on the accent while the line holds a query the rows below did not come from (`loud`), else a quiet
-/// outlined button of the same size, so the line does not reflow. The tip is named "Run options" and opens a menu of other ways
-/// to run or copy the query. Returns the button, then the tip.
-pub(crate) fn run_split_state(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool) -> (egui::Response, egui::Response) {
-    if loud {
-        let (main, tip) = run_split(ui, text, keys, true);
-        tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Run options"));
-        return (main, tip);
-    }
-    let w = run_w(ui, text, keys);
-    split_row(ui, w, |ui| {
-        const TRI: f32 = 8.0;
-        let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, TEXT(), W_SEMIBOLD, 0.0)));
-        let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, FAINT(), 400.0)));
-        let content = TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
-        let (rect, main) = ui.allocate_exact_size(egui::vec2((content + 28.0).max(96.0), 26.0), Sense::click());
-        let p = ui.painter();
-        p.rect(rect, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, shade_fill(PANEL(), state_of(&main)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-        let (cy, mut x) = (rect.center().y, rect.center().x - content / 2.0);
-        p.add(egui::Shape::convex_polygon(vec![egui::pos2(x, cy - TRI * 0.62), egui::pos2(x + TRI, cy), egui::pos2(x, cy + TRI * 0.62)], MUTED(), Stroke::NONE));
-        x += TRI + 8.0;
-        let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
-        p.galley(centered(&label, x), label.clone(), TEXT());
-        x += label.size().x + 10.0;
-        p.galley(centered(&hint, x), hint, FAINT());
-        focus_ring(ui, &main, rect, R_MD as f32);
-        let enabled = ui.is_enabled();
-        main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
-        let (rect, tip) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
-        let p = ui.painter();
-        // Over the button's right edge by a pixel, so the two outlines meet as one divider and not a double line.
-        p.rect(rect.with_min_x(rect.min.x - 1.0), egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, shade_fill(PANEL(), state_of(&tip)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, MUTED());
-        focus_ring(ui, &tip, rect, R_MD as f32);
-        tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Run options"));
-        (main.on_hover_cursor(egui::CursorIcon::PointingHand), tip.on_hover_cursor(egui::CursorIcon::PointingHand))
-    })
-}
-
-fn run_face(ui: &mut egui::Ui, text: &str, keys: &str, corners: egui::CornerRadius) -> egui::Response {
-    const TRI: f32 = 8.0;
-    let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ON_PRIMARY(), W_SEMIBOLD, 0.0)));
-    let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, tint(ON_PRIMARY(), 170), 400.0)));
-    let content = TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
-    let (rect, r) = ui.allocate_exact_size(egui::vec2((content + 28.0).max(96.0), 26.0), Sense::click());
-    let fill = [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)];
+/// The button part of a Run: on the accent when `loud`, else outlined on the panel.
+fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, hint: std::sync::Arc<egui::Galley>, w: f32, corners: egui::CornerRadius, loud: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 26.0), Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, corners, fill);
+    let (mark, ink) = if loud {
+        p.rect_filled(rect, corners, run_fill(state_of(&r)));
+        (ON_PRIMARY(), ON_PRIMARY())
+    } else {
+        p.rect(rect, corners, shade_fill(PANEL(), state_of(&r)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        (MUTED(), TEXT())
+    };
+    let (lw, content) = (label.size().x, RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x);
     let (cy, mut x) = (rect.center().y, rect.center().x - content / 2.0);
-    p.add(egui::Shape::convex_polygon(vec![egui::pos2(x, cy - TRI * 0.62), egui::pos2(x + TRI, cy), egui::pos2(x, cy + TRI * 0.62)], ON_PRIMARY(), Stroke::NONE));
-    x += TRI + 8.0;
+    play_mark(p, egui::pos2(x, cy), RUN_TRI, RUN_TRI * 0.62, mark);
+    x += RUN_TRI + 8.0;
     let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
-    p.galley(centered(&label, x), label.clone(), ON_PRIMARY());
-    x += label.size().x + 10.0;
-    p.galley(centered(&hint, x), hint, ON_PRIMARY());
+    p.galley(centered(&label, x), label, ink);
+    x += lw + 10.0;
+    p.galley(centered(&hint, x), hint, ink);
     focus_ring(ui, &r, rect, R_MD as f32);
     let enabled = ui.is_enabled();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A filled triangle pointing right, its left edge centered on `left`, `w` wide and `half_h` above and below its middle.
+pub(crate) fn play_mark(p: &egui::Painter, left: egui::Pos2, w: f32, half_h: f32, color: Color32) {
+    p.add(egui::Shape::convex_polygon(vec![left - egui::vec2(0.0, half_h), left + egui::vec2(w, 0.0), left + egui::vec2(0.0, half_h)], color, Stroke::NONE));
 }
 
 pub(crate) fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {

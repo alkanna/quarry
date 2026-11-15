@@ -1045,6 +1045,22 @@ pub(in crate::app) fn run_item(ui: &mut egui::Ui, label: &str, keys: &str) -> eg
     r
 }
 
+/// Run and its tip on a query line, and the menu the tip opens: Run, a divider, then what `more` adds. True on Run.
+pub(in crate::app) fn line_run(ui: &mut egui::Ui, dirty: bool, more: impl FnOnce(&mut egui::Ui)) -> bool {
+    let (main, tip) = run_split(ui, "Run", "↵", dirty, "Run options");
+    let mut run = main.on_hover_text("Enter").clicked();
+    egui::Popup::menu(&tip).width(220.0).show(|ui| {
+        menu_list(ui);
+        if run_item(ui, "Run", "↵").clicked() {
+            run = true;
+            ui.close();
+        }
+        popover_divider(ui);
+        more(ui);
+    });
+    run
+}
+
 /// The note under a query line whose text is not what the rows below came from. Returns true on its Run link.
 pub(in crate::app) fn stale_note(ui: &mut egui::Ui) -> bool {
     let mut run = false;
@@ -1123,17 +1139,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
             let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Min)));
             right.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
-                if main.on_hover_text("Enter").clicked() {
-                    run = true;
-                }
-                egui::Popup::menu(&tip).width(220.0).show(|ui| {
-                    menu_list(ui);
-                    if run_item(ui, "Run", "↵").clicked() {
-                        run = true;
-                        ui.close();
-                    }
-                    popover_divider(ui);
+                run |= line_run(ui, dirty, |ui| {
                     if run_item(ui, "Explain", "⌘E").on_hover_text("Explain the SELECT of the rows shown in a new Query tab").clicked() {
                         b.explain = true;
                         ui.close();
