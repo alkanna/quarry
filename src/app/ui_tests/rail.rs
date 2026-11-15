@@ -203,7 +203,7 @@ fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
     ui.show("Switch to c39");
     let rect = |ui: &UiApp, label: &str| ui.h.get_by_label_contains(label).rect();
     // The tiles scroll between the top of the rail and the Connect tile, which stays pinned above Settings.
-    let (top, bottom) = (rect(&ui, "Switch to c0").top() - 1.0, rect(&ui, "Connect").top());
+    let (top, bottom) = (rect(&ui, "Switch to c0").top() - 1.0, ui.h.get_by_label("Connect").rect().top());
     let settings = rect(&ui, "Settings (Cmd+,)");
     assert!(settings.bottom() <= 900.0, "Settings is off screen at {settings:?}");
     let first = rect(&ui, "Switch to c0");
@@ -221,7 +221,7 @@ fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
     assert!(last.top() >= top && last.bottom() <= bottom, "the last tile scrolled into view, at {last:?} between {top} and {bottom}");
     assert!(rect(&ui, "Switch to c0").bottom() < top, "the first tile scrolled out of view");
     assert_eq!(rect(&ui, "Settings (Cmd+,)"), settings, "Settings stays put");
-    assert_eq!(rect(&ui, "Connect").top(), bottom, "Connect stays put");
+    assert_eq!(ui.h.get_by_label("Connect").rect().top(), bottom, "Connect stays put");
     // And back up.
     for _ in 0..10 {
         ui.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 400.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown, modifiers: egui::Modifiers::NONE });
