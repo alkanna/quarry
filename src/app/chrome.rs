@@ -325,6 +325,7 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
+            let win = window_buttons::active(ui.ctx());
             ui.horizontal_centered(|ui| {
                 if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), sidebar_glyph, "Toggle sidebar", "Show or hide the sidebar").clicked() {
                     self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
@@ -339,6 +340,9 @@ impl App {
                     self.crumbs(ui, &s);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if win {
+                        ui.add_space(window_buttons::BUTTONS_W - 4.0);
+                    }
                     self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
                     let n = self.undo.len();
                     let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
@@ -361,6 +365,9 @@ impl App {
                     }
                 });
             });
+            if win {
+                window_buttons::window_buttons(ui, full);
+            }
         });
     }
 
