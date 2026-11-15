@@ -707,6 +707,22 @@ pub(crate) fn expand_button() -> impl egui::Widget {
     }
 }
 
+/// `rect` filled with `fill` at the top fading to about half its alpha at the bottom, the shade of the rail's app-icon tiles.
+/// egui has no gradient fill, so a white ramp texture is laid over the rect and `fill` tints it, which keeps the corners.
+pub(crate) fn gradient_rect(p: &egui::Painter, rect: egui::Rect, radius: f32, fill: Color32) {
+    let ctx = p.ctx();
+    let id = egui::Id::unique("gradient-ramp");
+    let tex = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).unwrap_or_else(|| {
+        let n = 32;
+        let px: Vec<Color32> = (0..n).map(|i| Color32::from_white_alpha((255.0 - 133.0 * i as f32 / (n - 1) as f32) as u8)).collect();
+        let tex = ctx.load_texture("gradient-ramp", egui::ColorImage::new([1, n], px), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+        tex
+    });
+    let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    p.add(egui::epaint::RectShape::filled(rect, radius, fill).with_texture(tex.id(), uv));
+}
+
 /// One line of text cut with an ellipsis at `w`.
 pub(crate) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);

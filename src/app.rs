@@ -854,6 +854,7 @@ impl eframe::App for App {
                 self.collection(ui);
             }
         });
+        self.page_corner(&ctx);
         self.auto_update(&ctx);
         // Before the modals, so one opened by a shortcut draws this frame, and an Esc that closes a
         // modal is not also taken as a second Esc by `keys`.
