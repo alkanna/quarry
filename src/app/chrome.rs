@@ -315,7 +315,8 @@ impl App {
         let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
         egui::Panel::top("top").exact_size(HEADER_H).show_separator_line(false).frame(frame).show(ui, |ui| {
             let full = ui.max_rect().expand2(egui::vec2(left as f32, 7.0));
-            ui.painter().hline(full.x_range(), full.bottom() - 0.5, Stroke::new(1.0, LINE()));
+            // Not over the rail, which shares the header's color, nor over the page's rounded corner, which draws its own edge.
+            ui.painter().hline(egui::Rangef::new(full.left() + RAIL_W + R_LG as f32, full.right()), full.bottom() - 0.5, Stroke::new(1.0, LINE()));
             // Registered before the widgets so they stay clickable; the empty header moves the window.
             let bar = ui.interact(full, egui::Id::unique("titlebar"), Sense::click_and_drag());
             if bar.drag_started_by(egui::PointerButton::Primary) {
@@ -569,10 +570,7 @@ impl App {
                         }
                         if let Some(c) = conn {
                             let (mark, _) = rail::engine_mark(c.meta.engine, &c.server.product);
-                            if let Some(tex) = rail::engine_logo(ui.ctx(), mark) {
-                                let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-                                p.image(tex.id(), egui::Rect::from_center_size(egui::pos2(rect.left() + 22.0, rect.center().y + 1.0), egui::vec2(16.0, 16.0)), uv, if active || hovered { rail::mark_color(mark) } else { tint(rail::mark_color(mark), 150) });
-                            }
+                            rail::logo(p, egui::pos2(rect.left() + 22.0, rect.center().y + 1.0), 16.0, mark, if active || hovered { rail::mark_color(mark) } else { tint(rail::mark_color(mark), 150) });
                         }
                         let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
                         let name = if active { BRIGHT() } else if hovered || st.lifted { TEXT() } else { MUTED() };

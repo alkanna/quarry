@@ -145,8 +145,8 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     assert!(ui.app().rail_open.contains(&1));
     ui.h.run_steps(2);
     let alpha = ui.rect_of("Switch to alpha");
-    // Open, the capsule slot (4 px, the 22 px caption, two member slots of 68 px and an 8 px margin) is 98 px taller than the closed tile's.
-    let grown = alpha0.top() + 98.0;
+    // Open, the shelf holds two member slots of 46 px where the closed folder holds one, so it is one slot taller.
+    let grown = alpha0.top() + 46.0;
     assert!(alpha.top() > alpha0.top() + 1.0 && alpha.top() < grown - 1.0, "alpha is on its way down: {alpha:?}");
     ui.click_at(alpha.center());
     assert_eq!(ui.app().active, Some(5), "the click picked alpha");

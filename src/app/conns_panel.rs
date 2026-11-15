@@ -45,6 +45,8 @@ pub(super) struct ConnsUi {
     pub(super) demo_picker: bool,
     /// The rail's connection tile menu drawn open, for QUARRY_TEST_RAIL=menu.
     pub(super) demo_tile_menu: Option<u64>,
+    /// The rail tile drawn as a drop target with a tile carried over it, for QUARRY_TEST_RAIL=drag.
+    pub(super) demo_rail_drop: Option<u64>,
 }
 
 /// One row of the panel or of the picker.

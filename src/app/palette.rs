@@ -2,7 +2,7 @@
 //! and the app's commands after ">". Matching and ranking are in `sidebar::jumps`.
 
 use super::*;
-use super::rail::{RailIcon, engine_logo, engine_mark, mark_color, paint_icon};
+use super::rail::{RailIcon, engine_mark, logo, mark_color, paint_icon};
 
 const PAL_W: f32 = 640.0;
 const LIST_MAX_H: f32 = 440.0;
@@ -870,8 +870,8 @@ fn paint_tile(ui: &egui::Ui, rect: egui::Rect, glyph: Glyph, mark: Option<&'stat
     let r = |w: f32, h: f32| egui::Rect::from_center_size(c, v(w, h));
     match glyph {
         Glyph::Engine => {
-            if let Some(tex) = mark.and_then(|m| engine_logo(ui.ctx(), m)) {
-                p.image(tex.id(), r(15.0, 15.0), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), color);
+            if let Some(m) = mark {
+                logo(p, c, 15.0, m, color);
             }
         }
         Glyph::Table | Glyph::View => {

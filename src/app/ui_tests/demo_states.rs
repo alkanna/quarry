@@ -7,7 +7,7 @@ use super::*;
 
 const CONNS: [&str; 7] = ["panel", "filter", "menu", "new", "edit", "drag", "picker"];
 const LIBRARY: [&str; 16] = ["panel", "all", "search", "empty", "menu", "folder-menu", "drag", "linked", "missing", "link", "save-linked", "conflict", "save", "picker", "picker-docs", "picker-shell"];
-const RAIL: [&str; 6] = ["1", "groups", "open", "tip", "connect", "menu"];
+const RAIL: [&str; 8] = ["1", "groups", "open", "tip", "connect", "menu", "status", "drag"];
 
 /// The demo as the app builds it for a switch: `load_demo`, then `then`, then a few frames.
 fn draw(then: impl FnOnce(&mut App)) -> Option<UiApp> {

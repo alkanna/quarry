@@ -71,7 +71,7 @@ fn statement_in(all: &[Range<usize>], text: &str, caret: usize, d: db::sql::Dial
     Some((r, i + 1, all.len()))
 }
 
-/// One marker per statement in the gutter, at its first line: a ring, or the accent with a play mark for the statement
+/// One marker per statement in the gutter, at its first line: a gray play mark, or the accent with a play mark for the statement
 /// under the caret. A click returns the text of the statement to run.
 fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, query: &str, stmts: &[Range<usize>], current: Option<usize>, busy: bool) -> Option<String> {
     // The galley row each logical line starts on.
@@ -101,7 +101,11 @@ fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, quer
             p.circle_filled(c, 6.0, if hot { shade(PRIMARY(), 0.10) } else { PRIMARY() });
             play_mark(p, c - egui::vec2(1.5, 0.0), 4.0, 2.5, ON_PRIMARY());
         } else {
-            p.circle_stroke(c, 4.0, Stroke::new(1.0, if hot { PRIMARY() } else { FAINT() }));
+            // A gray play mark, not a ring: a ring read as a radio button that selects the statement, not one that runs it.
+            if hot {
+                p.circle_filled(c, 7.0, HOVER());
+            }
+            play_mark(p, c - egui::vec2(2.5, 0.0), 6.0, 3.5, if hot { TEXT() } else { FAINT() });
         }
         if !busy {
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Run statement {}", i + 1));

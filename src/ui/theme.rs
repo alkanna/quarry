@@ -1119,6 +1119,9 @@ pub(crate) const R_LG: u8 = 10;
 pub(crate) const R_BAR: u8 = R_MD + 2;
 /// Vim's block caret, just off square like a terminal cursor.
 pub(crate) const R_CARET: u8 = 1;
+/// The rail's app-icon tiles, rounder than widgets so they read as icons; the rail's group shelves are a step rounder.
+pub(crate) const R_TILE: u8 = 12;
+pub(crate) const R_SHELF: u8 = 16;
 /// Padding inside the Vim mode badge, and its distance from the editor's corner.
 pub(crate) const VIM_BADGE_PAD: f32 = 6.0;
 
@@ -1146,7 +1149,9 @@ pub(crate) const TAB_STRIP_H: f32 = 46.0;
 
 pub(crate) const STATUS_H: f32 = 26.0;
 
-pub(crate) const RAIL_W: f32 = 76.0;
+pub(crate) const RAIL_W: f32 = 62.0;
+/// A connection's app-icon tile in the rail, and the Connect tile.
+pub(crate) const RAIL_TILE: f32 = 40.0;
 
 pub(crate) const TABLE_HEAD_H: f32 = 30.0;
 

@@ -16,11 +16,10 @@ pub(super) enum RailIcon {
 }
 
 impl App {
-    pub(super) fn rail(&mut self, ui: &mut egui::Ui) {
+    /// Returns the rail's top-right corner, where the page's rounded corner goes.
+    pub(super) fn rail(&mut self, ui: &mut egui::Ui) -> egui::Pos2 {
         let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 10 });
-        egui::Panel::left("rail").exact_size(RAIL_W).resizable(false).show_separator_line(false).frame(frame).show(ui, |ui| {
-            let full = ui.max_rect().expand2(egui::vec2(8.0, 10.0));
-            ui.painter().vline(full.right() - 0.5, full.y_range(), Stroke::new(1.0, LINE()));
+        let shown = egui::Panel::left("rail").exact_size(RAIL_W).resizable(false).show_separator_line(false).frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             self.conn_shortcuts(ui);
             self.connect_tile(ui);
@@ -30,31 +29,43 @@ impl App {
                 }
             });
         });
+        shown.response.rect.right_top()
+    }
+
+    /// Rounds the top-left corner of the page beside the rail, so the page reads as set into the header and the rail,
+    /// which share one color and no longer have a divider. Called after every panel has drawn, on the panels' own layer.
+    pub(super) fn page_corner(&self, ctx: &egui::Context, o: egui::Pos2) {
+        let r = R_LG as f32;
+        let c = o + egui::vec2(r, r);
+        let arc = |radius: f32| -> Vec<egui::Pos2> {
+            (0..=12).map(|i| c + egui::Vec2::angled(std::f32::consts::PI * (1.0 + i as f32 / 24.0)) * radius).collect()
+        };
+        let p = ctx.layer_painter(egui::LayerId::background());
+        // A quarter ring r wide whose inner edge is the corner's curve. Its outer half lands on the rail and the header,
+        // which are the same color, and a stroke keeps the curve antialiased where a filled concave path would not.
+        p.add(egui::Shape::line(arc(r * 1.5), Stroke::new(r, CHROME())));
+        // The header's bottom line stops where the curve starts, so the curve carries it on.
+        p.add(egui::Shape::line(arc(r - 0.5), Stroke::new(1.0, LINE())));
     }
 
     /// The pinned Connect tile and its popover: every saved connection under its group, open ones marked by their status
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, CONNECT_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
         let state = state_of(&r);
         let demo_open = std::mem::take(&mut self.conns_ui.demo_picker);
         if demo_open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
-        let boxed = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 4.0 + CONNECT_BOX / 2.0), egui::vec2(CONNECT_BOX, CONNECT_BOX));
+        let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
         let p = ui.painter();
-        p.rect_filled(boxed, R_MD, if open { SEL() } else { hover_fill(state) });
-        let edge = if open || state > 0 { BRIGHT() } else { FAINT() };
-        let corners = [boxed.left_top(), boxed.right_top(), boxed.right_bottom(), boxed.left_bottom(), boxed.left_top()];
-        p.extend(egui::Shape::dashed_line(&corners, Stroke::new(1.0, edge), 3.0, 3.0));
+        p.rect_filled(boxed, R_TILE, if open { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
         // The plus is painted: the glyph comes from a fallback font and sits off center.
-        paint_plus(p, boxed.center(), 5.0, if open || state > 0 { BRIGHT() } else { MUTED() });
-        let label = p.layout_no_wrap("Connect".into(), FontId::proportional(TXT_CAPTION), MUTED());
-        p.galley(egui::pos2(rect.center().x - label.size().x / 2.0, boxed.bottom() + 4.0), label, MUTED());
-        focus_ring(ui, &r, boxed, R_MD as f32);
+        paint_plus(p, boxed.center(), 6.0, if open || state > 0 { BRIGHT() } else { MUTED() });
+        focus_ring(ui, &r, boxed, R_TILE as f32);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connect"));
-        let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Connect");
         let mut pick = None;
         let mut new = false;
         let mut cloud = false;
@@ -145,11 +156,8 @@ impl App {
         if self.rail_order.is_empty() {
             return;
         }
-        let (cap, _) = ui.allocate_exact_size(egui::vec2(TILE_W, 12.0), Sense::hover());
-        let g = ui.painter().layout_no_wrap("OPEN".into(), FontId::proportional(TXT_SECTION), FAINT());
-        ui.painter().galley(cap.center() - g.size() / 2.0, g, FAINT());
         // Leaves room for the Connect tile and the Settings button, which stay pinned below the scrolling tiles.
-        let room = (ui.available_height() - 36.0 - CONNECT_H - 8.0).max(SLOT);
+        let room = (ui.available_height() - 36.0 - RAIL_TILE - 8.0).max(SLOT);
         let items = rail_items(&self.rail_order, &self.groups);
         let ctx = ui.ctx().clone();
         // How far open each folder is drawn. Its slot grows with it, so the reorder engine moves the tiles below smoothly.
@@ -164,7 +172,7 @@ impl App {
             .iter()
             .zip(&opens)
             .map(|(it, e)| match it {
-                RailItem::Folder { members, .. } => SLOT + (capsule_h(members.len()) - SLOT) * e,
+                RailItem::Folder { members, .. } => shelf_h(members.len(), *e) + 8.0,
                 RailItem::Conn(_) => SLOT,
             })
             .collect();
@@ -189,7 +197,7 @@ impl App {
             ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(6.0, 0.0)));
             outer = dnd::reorder(ui, egui::Id::unique("rail-tiles"), dnd::Items::vertical(&sizes).keys(&keys).into(&into), |ui, k, st| {
                 let slot = ui.max_rect();
-                let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(TILE_W, TILE_H));
+                let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(TILE_W, RAIL_TILE));
                 match &items[k] {
                     RailItem::Conn(id) => {
                         dnd::carry(ui.ctx(), st, || DragItem::Conn(*id));
@@ -204,24 +212,22 @@ impl App {
                         let anchor = folder_anchor(&self.rail_order, members);
                         let worst = folder_status(g.members.iter().filter_map(|m| self.conn(*m)).map(|c| &c.status));
                         let holds_active = self.active.is_some_and(|a| members.contains(&a));
-                        let mut tip = format!("{} \u{b7} {} connection{}, {} open", g.name, g.members.len(), if g.members.len() == 1 { "" } else { "s" }, members.len());
-                        if holds_active {
-                            tip.push_str(" \u{b7} holds the active connection");
-                        }
                         let e = opens[k];
-                        // The tile shrinks to the capsule's caption as the folder opens.
-                        let tile = egui::Rect::from_min_size(tile.min, egui::vec2(TILE_W, TILE_H + (CAP_H - TILE_H) * e));
                         let full = members.len() as f32 * MEMBER_SLOT;
-                        if e > 0.0 {
-                            let span = egui::Rect::from_min_max(tile.min, egui::pos2(tile.right(), tile.bottom() + full * e)).expand2(egui::vec2(3.0, 3.0));
-                            ui.painter().rect_filled(span, R_LG, tint(color, 36));
-                            ui.painter().rect_stroke(span, R_LG, Stroke::new(1.0, tint(color, 140)), egui::StrokeKind::Inside);
-                        }
-                        let (r, rect) = folder_tile(ui, tile, &g.name, color, members.len(), &tip, (!open_now).then_some(worst).flatten(), holds_active && !open_now);
+                        // The shelf grows from one tile to all the members as the folder opens; the folder's own button
+                        // shrinks from the name row and the folder tile to the name row alone.
+                        let top = slot.min + egui::vec2(0.0, 2.0);
+                        let shelf = egui::Rect::from_min_size(top - egui::vec2(3.0, 0.0), egui::vec2(TILE_W + 6.0, shelf_h(members.len(), e)));
+                        let tile = egui::Rect::from_min_size(top, egui::vec2(TILE_W, CAP_H + MEMBER_SLOT * (1.0 - e)));
+                        // The preview shows only while the folder is not fully open.
+                        let marks: Vec<&'static str> = if e < 1.0 { members.iter().filter_map(|m| self.conn(*m)).map(|c| engine_mark(c.meta.engine, &c.server.product).0).take(4).collect() } else { Vec::new() };
+                        let r = folder_tile(ui, tile, shelf, &g.name, color, &marks, (!open_now).then_some(worst).flatten(), holds_active && !open_now, e);
+                        let r = r.on_hover_ui(|ui| self.folder_tip(ui, g, members));
+                        let tile = egui::Rect::from_min_size(top, egui::vec2(TILE_W, CAP_H));
                         if st.lifted {
                             if open_now {
                                 for (i, m) in members.iter().enumerate() {
-                                    let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 4.0 + i as f32 * MEMBER_SLOT), egui::vec2(TILE_W, TILE_H));
+                                    let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT), egui::vec2(TILE_W, RAIL_TILE));
                                     self.conn_tile(ui, at, *m, true, None, &mut pick, &mut act, &mut drops);
                                 }
                             }
@@ -245,7 +251,7 @@ impl App {
                         });
                         if !st.busy {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
-                            tile_drop(ui, &r, rect, top, &self.groups, &mut drops);
+                            tile_drop(ui, &r, r.rect, top, &self.groups, &self.rail_order, &mut drops);
                         }
                         if e > 0.0 && e < 1.0 {
                             // Opening or closing: the members slide out from under the tile as the capsule grows, and
@@ -258,7 +264,7 @@ impl App {
                             child.disable();
                             child.set_opacity(e);
                             for (i, m) in members.iter().enumerate() {
-                                let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 4.0 + i as f32 * MEMBER_SLOT - (1.0 - e) * full), egui::vec2(TILE_W, TILE_H));
+                                let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT - (1.0 - e) * full), egui::vec2(TILE_W, RAIL_TILE));
                                 self.conn_tile(&mut child, at, *m, true, None, &mut pick, &mut act, &mut drops);
                             }
                         } else if open_now {
@@ -279,7 +285,7 @@ impl App {
                                     {
                                         ghost_tile(ui, p, c);
                                     }
-                                    let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 4.0), egui::vec2(TILE_W, TILE_H));
+                                    let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 2.0), egui::vec2(TILE_W, RAIL_TILE));
                                     let target = (!mst.busy).then_some(DropOn::Member { id: m, gid: *gid });
                                     self.conn_tile(ui, at, m, mst.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
                                 })
@@ -355,6 +361,30 @@ impl App {
         self.rail_open.retain(|g| groups.group(*g).is_some());
     }
 
+    /// A folder's tooltip: the group's name, how many of its connections are open, and one row per open member, then one
+    /// per failed member, which is what a red badge on the closed folder points at.
+    fn folder_tip(&self, ui: &mut egui::Ui, g: &groups::Group, open: &[u64]) {
+        ui.horizontal(|ui| {
+            ui.label(semibold(RichText::new(&g.name).color(BRIGHT())));
+            ui.label(RichText::new(format!("{} of {} open", open.len(), g.members.len())).size(TXT_CAPTION).color(FAINT()));
+        });
+        let failed = g.members.iter().filter_map(|m| self.conn(*m)).filter(|c| matches!(c.status, Status::Failed(_)));
+        for c in open.iter().filter_map(|m| self.conn(*m)).chain(failed) {
+            ui.horizontal(|ui| {
+                let mark = engine_mark(c.meta.engine, &c.server.product).0;
+                let (at, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                logo(ui.painter(), at.center(), 14.0, mark, mark_color(mark));
+                let active = self.active == Some(c.meta.id);
+                ui.label(RichText::new(&c.meta.name).color(if active { BRIGHT() } else { TEXT() }));
+                if let Status::Failed(why) = &c.status {
+                    ui.label(RichText::new("failed").size(TXT_MICRO).color(status_color(&c.status))).on_hover_text(why.as_str());
+                } else if !c.meta.tag.is_empty() {
+                    ui.label(RichText::new(&c.meta.tag).size(TXT_MICRO).color(tag_color(&c.meta.tag)));
+                }
+            });
+        }
+    }
+
     /// Opens or closes a folder in the rail, with its animation.
     fn toggle_rail_folder(&mut self, ctx: &egui::Context, gid: u64) {
         let open = !self.rail_open.remove(&gid);
@@ -377,9 +407,18 @@ impl App {
             *pick = Some(id);
         }
         if let Some(t) = target {
-            tile_drop(ui, &r, r.rect, t, &self.groups, drops);
+            tile_drop(ui, &r, r.rect, t, &self.groups, &self.rail_order, drops);
         }
         r.context_menu(|ui| tile_menu(ui, id, act));
+        // The picture of a drag over this tile, since a screenshot cannot hold one.
+        if self.conns_ui.demo_rail_drop == Some(id) {
+            drop_ring(ui.painter(), r.rect);
+            let at = r.rect.center() + egui::vec2(4.0, 2.0);
+            if let Some(c) = self.conn(1) {
+                ghost_tile(ui, at, c);
+            }
+            hint_card(ui.ctx(), at, "New group");
+        }
         // The picture of the menu, drawn beside its tile since a screenshot has no right click to open it with.
         if self.conns_ui.demo_tile_menu == Some(id) {
             egui::Area::new(egui::Id::unique("demo-tile-menu")).order(egui::Order::Foreground).fixed_pos(r.rect.right_top() + egui::vec2(8.0, 0.0)).show(ui.ctx(), |ui| {
@@ -630,19 +669,59 @@ fn resolve_drop(on: DropOn, zone: Zone, dragged: u64, groups: &Groups) -> Option
 }
 
 /// Marks `rect` while a connection is dragged over it and, on release, queues what the drop does.
-fn tile_drop(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: DropOn, groups: &Groups, out: &mut Vec<RailDrop>) {
+fn tile_drop(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: DropOn, groups: &Groups, order: &[u64], out: &mut Vec<RailDrop>) {
     let Some(item) = r.dnd_hover_payload::<DragItem>() else { return };
     let DragItem::Conn(dragged) = *item else { return };
     let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
     let Some((drop, mark)) = resolve_drop(on, zone_of(rect, pos.y), dragged, groups) else { return };
     let p = ui.painter();
     match mark {
-        Mark::Line { top } => crate::ui::dnd::drop_line(p, rect.x_range().expand(2.0), if top { rect.top() - 4.0 } else { rect.bottom() + 4.0 }),
-        Mark::Fill => crate::ui::dnd::drop_fill(p, rect),
+        Mark::Line { top } => {
+            let y = if top { rect.top() - 3.0 } else { rect.bottom() + 3.0 };
+            crate::ui::dnd::drop_line(p, rect.x_range().expand(2.0), y);
+            p.circle_filled(egui::pos2(rect.left() - 2.0, y), 3.0, PRIMARY());
+        }
+        Mark::Fill => drop_ring(p, rect),
+    }
+    if let Some(words) = drop_hint(drop, groups, order) {
+        hint_card(ui.ctx(), pos, &words);
     }
     if r.dnd_release_payload::<DragItem>().is_some() {
         out.push(drop);
     }
+}
+
+/// The mark of a drop onto a tile or a closed folder: a ring a step outside it, the way the active ring sits.
+fn drop_ring(p: &egui::Painter, rect: egui::Rect) {
+    p.rect(rect.expand(3.0), R_TILE + 3, tint(PRIMARY(), 36), Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Inside);
+}
+
+/// What a drop does, in a few words beside the pointer: None for a plain reorder, which the line already says. `order` is
+/// the rail's: a connection dragged in closed from the Connections panel has no tile to move, so it leaves no group.
+fn drop_hint(drop: RailDrop, groups: &Groups, order: &[u64]) -> Option<String> {
+    match drop {
+        RailDrop::Pair { .. } => Some("New group".into()),
+        RailDrop::Into { conn, gid, .. } => {
+            let g = groups.group(gid)?;
+            (!g.members.contains(&conn)).then(|| format!("Add to {}", g.name))
+        }
+        // Only a folded group's member leaves it by landing between tiles; an unfolded one is loose in the rail already.
+        RailDrop::Reorder { conn, .. } if order.contains(&conn) => groups.group_of(conn).filter(|g| g.fold_rail).map(|g| format!("Remove from {}", g.name)),
+        RailDrop::Reorder { .. } => None,
+    }
+}
+
+/// The hint card just above the pointer, clear of what is carried below and to the right of it: a rail tile, or a row
+/// dragged from the Connections panel, which is far wider. Painted on a tooltip layer without a widget, so it never
+/// covers the drop targets under the pointer.
+fn hint_card(ctx: &egui::Context, pointer: egui::Pos2, words: &str) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("rail-hint")));
+    let g = p.layout_job(egui::text::LayoutJob::single_section(words.to_string(), ui_fmt(TXT_CAPTION, BRIGHT(), W_MEDIUM, 0.0)));
+    let rect = egui::Rect::from_min_size(pointer + egui::vec2(10.0, -BUTTON_H - 8.0), egui::vec2(g.size().x + 20.0, BUTTON_H));
+    p.add(ctx.global_style().visuals.popup_shadow.as_shape(rect, R_MD));
+    p.rect(rect, R_MD, RAISED(), Stroke::new(1.0, RAISED_LINE()), egui::StrokeKind::Inside);
+    let at = egui::pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0 + optical_dy(&g));
+    p.galley(at, g, BRIGHT());
 }
 
 /// The status a closed folder shows for its members: a failed one, else one connecting, else ready. None when none is open
@@ -657,43 +736,97 @@ fn folder_status<'a>(st: impl Iterator<Item = &'a Status>) -> Option<&'a Status>
     st.filter(|s| rank(s) > 0).max_by_key(|s| rank(s))
 }
 
-/// The tile of a folded group. Closed, it is a folder glyph in the group color with the group's name and "N open" under it,
-/// the worst status of its members as a dot and a ring when it holds the active connection, which is otherwise out of sight.
-/// Open, it shrinks to the caption of the capsule that holds its members. Returns the click response and the tile's rect.
+/// A folded group: a shelf in the group's color under its name, holding either the members (open) or one app-folder tile
+/// that previews up to four of their logos (closed). `rect` is the button, the name row and, while closed, the folder tile;
+/// `shelf` is the tinted surface, which grows with `e` as the folder opens. The closed tile shows the worst status of the
+/// members and the active ring when it holds the active connection, which is otherwise out of sight.
 #[allow(clippy::too_many_arguments)]
-fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, n_open: usize, tip: &str, status: Option<&Status>, active: bool) -> (egui::Response, egui::Rect) {
+fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, shelf: egui::Rect, name: &str, color: Color32, marks: &[&'static str], status: Option<&Status>, active: bool, e: f32) -> egui::Response {
     let r = ui.interact(rect, ui.scope_id().with("folder-tile"), Sense::click());
     let state = state_of(&r);
-    // The rect eases between its two heights while the folder opens, so the layout follows the height, not the flag.
-    let compact = rect.height() < TILE_H - 12.0;
     let p = ui.painter();
-    let w = rect.width() - 6.0;
-    if compact {
-        if state > 0 {
-            p.rect_filled(rect, R_MD, tint(color, [0, 40, 64][state]));
+    p.rect_filled(shelf, R_SHELF, tint(color, [20, 36, 44][state]));
+    let head = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), CAP_H));
+    let g = p.layout_job({
+        let mut job = egui::text::LayoutJob::single_section(name.to_string(), ui_fmt(TXT_SECTION, color, W_SEMIBOLD, 0.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(shelf.width() - 6.0);
+        job
+    });
+    p.galley(head.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, color);
+    // The folder tile fades out as the members slide in under it.
+    if e < 1.0 {
+        let tile = icon_rect(egui::Rect::from_min_size(egui::pos2(rect.left(), head.bottom() + 2.0), egui::vec2(rect.width(), RAIL_TILE)));
+        let fade = |c: Color32| c.gamma_multiply(1.0 - e);
+        p.rect(tile, R_TILE, fade(tint(TEXT(), [18, 26, 32][state])), Stroke::new(1.0, fade(tile_edge())), egui::StrokeKind::Inside);
+        for (i, mark) in marks.iter().take(4).enumerate() {
+            let c = tile.center() + egui::vec2(if i % 2 == 0 { -8.0 } else { 8.0 }, if i < 2 { -8.0 } else { 8.0 });
+            let sq = egui::Rect::from_center_size(c, egui::vec2(14.0, 14.0));
+            gradient_rect(p, sq, R_SM as f32, fade(tint(mark_color(mark), tile_alpha(state))));
+            logo(p, sq.center(), 9.0, mark, fade(Color32::WHITE));
         }
-        let g = truncated(p, &name.to_uppercase(), FontId::proportional(TXT_SECTION), color, w);
-        p.galley(rect.center() - g.size() / 2.0, g, color);
-    } else {
-        p.rect_filled(rect, R_MD, tint(color, [28, 48, 68][state]));
-        p.rect_stroke(rect, R_MD, Stroke::new(1.0, tint(color, 150)), egui::StrokeKind::Inside);
-        glyphs::folder_filled(p, egui::pos2(rect.center().x, rect.top() + 20.0), color);
-        let g = truncated(p, name, FontId::proportional(TXT_CAPTION), if state > 0 { BRIGHT() } else { TEXT() }, w);
-        p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, rect.top() + 36.0), g, TEXT());
-        let g = p.layout_no_wrap(format!("{n_open} open"), FontId::proportional(TXT_CAPTION), FAINT());
-        p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, rect.top() + 49.0), g, FAINT());
-        if let Some(s) = status {
-            let dot = egui::pos2(rect.center().x + 14.0, rect.top() + 12.0);
-            p.circle_filled(dot, 4.5, CHROME());
-            p.circle_filled(dot, 3.0, status_color(s));
+        if e == 0.0 {
+            if let Some(s) = status {
+                status_mark(ui, tile, s);
+            }
+            if active {
+                active_mark(p, tile);
+            }
         }
     }
-    if active && !compact {
-        p.rect_stroke(rect, R_MD, Stroke::new(1.5, BRIGHT()), egui::StrokeKind::Outside);
-    }
-    focus_ring(ui, &r, rect, R_MD as f32);
+    focus_ring(ui, &r, rect, R_TILE as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} folder")));
-    (r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand), rect)
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The 40 px square of an app-icon tile, centered in its slot's column.
+fn icon_rect(slot: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(egui::pos2(slot.center().x, slot.top() + RAIL_TILE / 2.0), egui::vec2(RAIL_TILE, RAIL_TILE))
+}
+
+/// How strong a tile's engine color is at its top, by its state. Light themes need more of it to carry a light logo.
+fn tile_alpha(state: usize) -> u8 {
+    let base = if is_light() { 170 } else { 107 };
+    base + [0, 22, 30][state]
+}
+
+/// A tile's hairline edge: lighter than the tile on a dark theme, darker on a light one.
+fn tile_edge() -> Color32 {
+    if is_light() { tint(Color32::BLACK, 20) } else { tint(Color32::WHITE, 26) }
+}
+
+/// The engine's logo, `size` points wide, centered on `c` in `color`.
+pub(super) fn logo(p: &egui::Painter, c: egui::Pos2, size: f32, mark: &str, color: Color32) {
+    if let Some(tex) = engine_logo(p.ctx(), mark) {
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        p.image(tex.id(), egui::Rect::from_center_size(c, egui::vec2(size, size)), uv, color);
+    }
+}
+
+/// The active connection's marks: a bright ring a step outside the tile and a bar on the rail's own left edge. The bar is
+/// not the accent: a light theme's orange accent would read as the red of production.
+fn active_mark(p: &egui::Painter, tile: egui::Rect) {
+    p.rect_stroke(tile.expand(2.5), R_TILE + 2, Stroke::new(1.5, BRIGHT()), egui::StrokeKind::Middle);
+    let edge = tile.center().x - RAIL_W / 2.0;
+    p.rect_filled(egui::Rect::from_min_size(egui::pos2(edge, tile.center().y - 10.0), egui::vec2(3.0, 20.0)), 1, BRIGHT());
+}
+
+/// Nothing for a healthy connection. One connecting spins a ring around its logo, and a closed folder holding a failed
+/// one gets a red badge on its corner with a painted "!", since the glyph from a fallback font sits off center. A failed
+/// connection itself leaves the rail.
+fn status_mark(ui: &egui::Ui, tile: egui::Rect, s: &Status) {
+    match s {
+        Status::Connecting => egui::Spinner::new().size(30.0).color(WARNING()).paint_at(ui, egui::Rect::from_center_size(tile.center(), egui::vec2(30.0, 30.0))),
+        Status::Failed(_) => {
+            let p = ui.painter();
+            let c = tile.right_top() + egui::vec2(-2.0, 2.0);
+            p.circle_filled(c, 6.5, CHROME());
+            p.circle_filled(c, 5.0, ALERT());
+            let s = Stroke::new(1.4, Color32::WHITE);
+            p.line_segment([c + egui::vec2(0.0, -2.6), c + egui::vec2(0.0, 0.6)], s);
+            p.circle_filled(c + egui::vec2(0.0, 2.4), 0.8, Color32::WHITE);
+        }
+        _ => {}
+    }
 }
 
 /// The connection a folder's tile sits at: its first open member in rail order, which is not always the group's first.
@@ -717,33 +850,28 @@ fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
 fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
     let ctx = ui.ctx();
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("rail-ghost")));
-    let rect = egui::Rect::from_min_size(p + egui::vec2(10.0, 6.0), egui::vec2(36.0, 36.0));
-    painter.add(ui.visuals().popup_shadow.as_shape(rect, R_MD));
-    painter.rect(rect, R_MD, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+    let rect = egui::Rect::from_min_size(p + egui::vec2(10.0, 6.0), egui::vec2(RAIL_TILE, RAIL_TILE));
+    painter.add(ui.visuals().popup_shadow.as_shape(rect, R_TILE));
     let mark = engine_mark(c.meta.engine, &c.server.product).0;
-    if let Some(tex) = engine_logo(ctx, mark) {
-        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-        painter.image(tex.id(), egui::Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)), uv, mark_color(mark));
-    }
+    painter.rect_filled(rect, R_TILE, RAISED());
+    gradient_rect(&painter, rect, R_TILE as f32, tint(mark_color(mark), tile_alpha(1)));
+    painter.rect_stroke(rect, R_TILE, Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Inside);
+    logo(&painter, rect.center(), 22.0, mark, Color32::WHITE);
 }
 
-/// A connection or folder tile: the rail's width less its margins.
+/// A connection or folder tile's column: the rail's width less its margins. The tile itself is a `RAIL_TILE` square in it.
 const TILE_W: f32 = RAIL_W - 16.0;
-/// A tile is a 32 px logo over a name on two lines.
-const TILE_H: f32 = 64.0;
 /// A tile's slot in the rail list: the tile and the 8 px gap, half above and half below it.
-const SLOT: f32 = TILE_H + 8.0;
-/// A member's slot inside an open folder: a 4 px gap above its tile.
-const MEMBER_SLOT: f32 = TILE_H + 4.0;
-/// The height of an open folder's caption, which names the group above its members.
-const CAP_H: f32 = 22.0;
-/// The size of the dashed box of the Connect tile, and the tile with its label below.
-const CONNECT_BOX: f32 = 36.0;
-const CONNECT_H: f32 = CONNECT_BOX + 24.0;
+const SLOT: f32 = RAIL_TILE + 8.0;
+/// A member's slot on an open shelf: its tile and a 6 px gap.
+const MEMBER_SLOT: f32 = RAIL_TILE + 6.0;
+/// The name row at the top of a group's shelf.
+const CAP_H: f32 = 20.0;
 
-/// The slot of an open folder: its caption, its members and the capsule's margin.
-fn capsule_h(members: usize) -> f32 {
-    4.0 + CAP_H + members as f32 * MEMBER_SLOT + 8.0
+/// The height of a shelf with `rows` members, open by `e`: the name row, one tile closed or every member open, and 4 of
+/// padding at its bottom. Its slot in the rail adds 2 above it and 6 below.
+fn shelf_h(rows: usize, e: f32) -> f32 {
+    CAP_H + MEMBER_SLOT * (1.0 + (rows as f32 - 1.0) * e) + 4.0
 }
 
 /// The rail order once item `m.from` of `items` moves to `m.to`: each folder brings its open members in the order they
@@ -818,85 +946,49 @@ pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::Textu
     })
 }
 
-/// A connection's tile: a 32 px engine logo with a status dot, the name on two lines under it, a bar in the tag color on
-/// the left edge for a staging or production tag and, when active, a `SEL` fill with a bright marker on the rail's own edge.
-/// The marker is not the accent: a light theme's orange accent would read as the red of production.
+/// A connection's tile: an app icon in the engine's color with the logo in white, a dash in the tag color at its foot for a
+/// staging or production tag, a spinner or a red badge when it is connecting or failed, and the active marks. The name,
+/// host and state are in the tooltip.
 fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, tabs: impl FnOnce() -> usize) -> egui::Response {
+    let tile = icon_rect(rect);
     // Click only: the reorder engine senses the drag under it.
-    let r = ui.interact(rect, ui.scope_id().with(("tile", c.meta.id)), Sense::click());
+    let r = ui.interact(tile, ui.scope_id().with(("tile", c.meta.id)), Sense::click());
     let state = state_of(&r);
     let (mark, _) = engine_mark(c.meta.engine, &c.server.product);
-    let color = mark_color(mark);
-    let fill = if active { [SEL(), SEL_HOVER(), SEL_HOVER()][state] } else { hover_fill(state) };
     let p = ui.painter();
-    p.rect_filled(rect, R_MD, fill);
-    if active {
-        p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.left() - 8.0, rect.top() + 6.0), egui::vec2(3.0, rect.height() - 12.0)), 1, BRIGHT());
-    }
-    let logo = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 6.0 + 16.0), egui::vec2(32.0, 32.0));
-    p.rect_filled(logo, R_MD, tint(color, if active || state > 0 { 64 } else { 44 }));
-    if let Some(tex) = engine_logo(ui.ctx(), mark) {
-        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-        p.image(tex.id(), egui::Rect::from_center_size(logo.center(), egui::vec2(20.0, 20.0)), uv, if active || state > 0 { BRIGHT() } else { color });
-    }
+    gradient_rect(p, tile, R_TILE as f32, tint(mark_color(mark), tile_alpha(state)));
+    p.rect_stroke(tile, R_TILE, Stroke::new(1.0, tile_edge()), egui::StrokeKind::Inside);
+    // A connection that is not ready yet dims its logo under the spinner.
+    logo(p, tile.center(), 22.0, mark, if c.status == Status::Connecting { Color32::WHITE.gamma_multiply(0.45) } else { Color32::WHITE });
     if let Some(level) = tag_level(&c.meta.tag) {
-        p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.left() + 1.0, logo.top()), egui::vec2(2.0, 32.0)), 1, level);
+        p.rect_filled(egui::Rect::from_center_size(egui::pos2(tile.center().x, tile.bottom() - 4.0), egui::vec2(10.0, 2.0)), 1, level);
     }
-    // A ring in the rail's own color keeps the dot readable over the tinted logo.
-    let dot = logo.right_bottom() - egui::vec2(1.0, 1.0);
-    p.circle_filled(dot, 4.5, if active { SEL() } else { CHROME() });
-    p.circle_filled(dot, 3.0, status_color(&c.status));
-    let fg = if active || state > 0 { BRIGHT() } else { MUTED() };
-    let room = rect.width() - 4.0;
-    // The first line that fits is the galley drawn, so the split does not lay it out again.
-    let mut fitted = None;
-    let (first, second) = name_lines(&c.meta.name, |s| {
-        let g = p.layout_no_wrap(s.to_string(), FontId::proportional(TXT_CAPTION), fg);
-        let fits = g.size().x <= room;
-        if fits {
-            fitted = Some(g);
-        }
-        fits
-    });
-    for (i, line) in [first, second].iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-        let g = if i == 0 { fitted.take() } else { None }.unwrap_or_else(|| truncated(p, line, FontId::proportional(TXT_CAPTION), fg, room));
-        p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, logo.bottom() + 3.0 + i as f32 * 12.0), g, fg);
+    status_mark(ui, tile, &c.status);
+    if active {
+        active_mark(ui.painter(), tile);
     }
-    focus_ring(ui, &r, rect, R_MD as f32);
+    focus_ring(ui, &r, tile, R_TILE as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Switch to {}", c.meta.name)));
-    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
-    // The rail draws every tile each frame, so the tip and the tab count are worked out only for the tile under the pointer.
-    if !r.hovered() {
-        return r;
-    }
-    let (name, product, host) = conn_label(c);
-    let mut tip = name;
-    if !c.meta.tag.is_empty() {
-        tip += &format!("  ({})", c.meta.tag);
-    }
-    tip += &format!("\n{product}");
-    if !host.is_empty() {
-        tip += &format!(" \u{b7} {host}");
-    }
-    tip += if c.status == Status::Connecting { "\nConnecting" } else if c.writable { "\nWrites on" } else { "\nRead-only" };
-    let tabs = tabs();
-    tip += &format!(" \u{b7} {tabs} tab{}", if tabs == 1 { "" } else { "s" });
-    r.on_hover_text(tip)
+    // The tooltip and the tab count are worked out only when the tooltip shows.
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| conn_tip(ui, c, tabs()))
 }
 
-/// A tile's name on two lines, split at the last space or dash whose first line `fits`: "shop-prod" stacks as "shop-" over
-/// "prod" and "Local sample" as "Local" over "sample". A name with no such break is one line, cut with an ellipsis when it is
-/// too wide, as is a second line that is.
-fn name_lines(name: &str, mut fits: impl FnMut(&str) -> bool) -> (&str, &str) {
-    for (i, c) in name.char_indices().rev().filter(|(_, c)| *c == ' ' || *c == '-') {
-        // A dash stays at the end of the first line; a space goes.
-        let first = if c == '-' { &name[..=i] } else { name[..i].trim_end() };
-        let second = name[i + c.len_utf8()..].trim_start();
-        if !first.trim_end_matches('-').is_empty() && !second.is_empty() && fits(first) {
-            return (first, second);
+/// A connection's tooltip: its name and tag, product and host, and what it allows with how many tabs it has open.
+fn conn_tip(ui: &mut egui::Ui, c: &Conn, tabs: usize) {
+    let (name, product, host) = conn_label(c);
+    ui.horizontal(|ui| {
+        ui.label(semibold(RichText::new(name).color(BRIGHT())));
+        if !c.meta.tag.is_empty() {
+            ui.label(medium(RichText::new(&c.meta.tag).size(TXT_MICRO).color(tag_color(&c.meta.tag))));
         }
-    }
-    (name, "")
+    });
+    ui.label(RichText::new(if host.is_empty() { product } else { format!("{product} \u{b7} {host}") }).color(MUTED()));
+    let state = match c.status {
+        Status::Connecting => "Connecting",
+        _ if c.writable => "Writes on",
+        _ => "Read-only",
+    };
+    ui.label(RichText::new(format!("{state} \u{b7} {tabs} tab{}", if tabs == 1 { "" } else { "s" })).color(FAINT()));
 }
 
 /// A 28 px square icon button: a `HOVER` fill on hover, `PRESSED` while held, and an accent
@@ -1082,19 +1174,20 @@ mod tests {
     }
 
     #[test]
-    fn names_split_at_the_last_space_or_dash_that_fits() {
-        let any = |_: &str| true;
-        assert_eq!(name_lines("shop-prod", any), ("shop-", "prod"));
-        assert_eq!(name_lines("analytics-prod-eu", any), ("analytics-prod-", "eu"));
-        assert_eq!(name_lines("Local sample", any), ("Local", "sample"));
-        assert_eq!(name_lines("events", any), ("events", ""));
-        assert_eq!(name_lines("-x", any), ("-x", ""));
-        assert_eq!(name_lines("x-", any), ("x-", ""));
-        // The first line must fit, so the break moves left until it does.
-        let ten = |s: &str| s.chars().count() <= 10;
-        assert_eq!(name_lines("analytics-prod-eu", ten), ("analytics-", "prod-eu"));
-        assert_eq!(name_lines("my local sample db", ten), ("my local", "sample db"));
-        assert_eq!(name_lines("averyverylongname x", ten), ("averyverylongname x", ""));
+    fn drop_hints_say_what_the_drop_does() {
+        let g = groups_of(&[("Fleet", true, &[1, 2]), ("Loose", false, &[3])]);
+        let fleet = g.group_of(1).unwrap().id;
+        let order = [1, 2, 3, 4, 5];
+        assert_eq!(drop_hint(RailDrop::Pair { conn: 4, target: 5 }, &g, &order).as_deref(), Some("New group"));
+        assert_eq!(drop_hint(RailDrop::Into { conn: 4, gid: fleet, at: None }, &g, &order).as_deref(), Some("Add to Fleet"));
+        // A member moved inside its own folder, and a plain reorder, already show by their line.
+        assert_eq!(drop_hint(RailDrop::Into { conn: 2, gid: fleet, at: Some(0) }, &g, &order), None);
+        assert_eq!(drop_hint(RailDrop::Reorder { conn: 4, anchor: 5, after: true }, &g, &order), None);
+        assert_eq!(drop_hint(RailDrop::Reorder { conn: 1, anchor: 5, after: true }, &g, &order).as_deref(), Some("Remove from Fleet"));
+        // A group that does not fold leaves its members loose in the rail, so a reorder takes nothing out of it.
+        assert_eq!(drop_hint(RailDrop::Reorder { conn: 3, anchor: 5, after: true }, &g, &order), None);
+        // A closed member dragged in from the Connections panel has no tile, and the drop leaves its group alone.
+        assert_eq!(drop_hint(RailDrop::Reorder { conn: 1, anchor: 5, after: true }, &g, &[4, 5]), None);
     }
 
     #[test]

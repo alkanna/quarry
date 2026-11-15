@@ -5,7 +5,9 @@ use super::*;
 impl App {
     /// QUARRY_TEST_RAIL=<state>: the MySQL demo connection and a connecting one beside the Mongo demo. groups folds the two
     /// SQL connections into a Production folder, open shows it open, and tip is the closed folder, which a
-    /// QUARRY_TEST_POINTER over it shows the tooltip of. connect opens the Connect popover and menu draws the context menu of a tile. Apart from `load_demo` so a test can load each state.
+    /// QUARRY_TEST_POINTER over it shows the tooltip of. connect opens the Connect popover and menu draws the context menu of a tile.
+    /// status folds the MySQL demo with a failed connection, beside the connecting one, and drag draws the Mongo tile carried
+    /// over the MySQL one with its "New group" hint. Apart from `load_demo` so a test can load each state.
     pub(super) fn demo_rail(&mut self, state: &str) {
         // The SQL demo replaces the tabs, which the Mongo demo keeps.
         let tabs = std::mem::take(&mut self.tabs);
@@ -18,12 +20,17 @@ impl App {
             // The Connect popover over the rail, and the menu of the MySQL tile.
             "connect" => self.conns_ui.demo_picker = true,
             "menu" => self.conns_ui.demo_tile_menu = Some(3),
+            // The Mongo demo carried over the MySQL tile, which is about to make a new group.
+            "drag" => self.conns_ui.demo_rail_drop = Some(3),
+            // A failed connection leaves the rail, so it shows only as the worst status of a closed folder.
+            "status" => self.conns.push(Conn::new(ConnMeta { id: 5, name: "legacy".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Failed("Connection refused".into()))),
             _ => {}
         }
-        if matches!(state, "groups" | "open" | "tip") {
+        if matches!(state, "groups" | "open" | "tip" | "status") {
             let gid = self.groups.new_group("Production");
             let all = self.conn_ids();
-            for id in [3, 4] {
+            let members: &[u64] = if state == "status" { &[3, 5] } else { &[3, 4] };
+            for &id in members {
                 self.groups.place(id, Place::Into(gid, None), &all);
             }
             if state == "open" {

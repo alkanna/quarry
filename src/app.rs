@@ -832,7 +832,7 @@ impl eframe::App for App {
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         self.top_bar(ui);
         self.status_bar(ui);
-        self.rail(ui);
+        let corner = self.rail(ui);
         if !self.prefs.sidebar_hidden {
             self.sidebar(ui);
         }
@@ -854,6 +854,7 @@ impl eframe::App for App {
                 self.collection(ui);
             }
         });
+        self.page_corner(&ctx, corner);
         self.auto_update(&ctx);
         // Before the modals, so one opened by a shortcut draws this frame, and an Esc that closes a
         // modal is not also taken as a second Esc by `keys`.

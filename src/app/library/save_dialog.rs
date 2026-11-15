@@ -365,51 +365,59 @@ impl App {
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
             menu_look(ui);
             ui.set_min_width(260.0);
-            if !linked.is_empty() {
-                section_head(ui, "LINKED FOLDERS", None);
-            }
-            let pick = |ui: &mut egui::Ui, label: &str, depth: usize, on: bool| -> bool {
-                let (row, _) = pop_row(ui, 28.0);
-                let (p, rect) = (ui.painter(), row.rect);
-                let x = rect.left() + 6.0 + depth as f32 * 16.0;
-                galley_at(p, x, rect.center().y, p.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), TEXT()), TEXT());
-                if on {
-                    glyphs::check(p, egui::pos2(rect.right() - 12.0, rect.center().y), PRIMARY());
-                }
-                let label = label.to_string();
-                row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Folder {label}")));
-                row.clicked()
-            };
-            for (id, name, dirs) in &linked {
-                if pick(ui, name, 0, f.link == Some(*id) && f.dir.as_os_str().is_empty()) {
-                    (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), PathBuf::new(), None, None);
-                    ui.close();
-                }
-                for d in dirs {
-                    let label = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if pick(ui, &label, d.components().count(), f.link == Some(*id) && f.dir == *d) {
-                        (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), d.clone(), None, None);
-                        ui.close();
-                    }
-                }
-            }
-            if !linked.is_empty() {
-                section_head(ui, "IN QUARRY", None);
-            }
-            for (id, depth) in &rows {
-                if pick(ui, &name_of(*id), *depth, f.link.is_none() && f.new_folder.is_none() && f.folder == Some(*id)) {
-                    (f.folder, f.new_folder, f.link) = (Some(*id), None, None);
-                    ui.close();
-                }
-            }
-            if pick(ui, "No folder", 0, f.link.is_none() && f.new_folder.is_none() && f.folder.is_none()) {
-                (f.folder, f.new_folder, f.link) = (None, None, None);
-                ui.close();
-            }
-            if pick(ui, "New folder…", 0, false) {
-                (f.folder, f.new_folder, f.link) = (None, Some(String::new()), None);
-                ui.close();
-            }
+            // pop_row widens its hover fill by 6 on each side, past the text, for popovers padded inside the menu's
+            // margin. A combo box has only that margin, so the rows get the padding here or the fill meets the edge.
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| self.folder_items(ui, f, &rows, &linked));
         });
+    }
+
+    /// The rows of the Folder dropdown: linked folders and their subfolders, the folders Quarry keeps, No folder and New folder.
+    fn folder_items(&self, ui: &mut egui::Ui, f: &mut SaveForm, rows: &[(u64, usize)], linked: &[(u64, String, Vec<PathBuf>)]) {
+        let name_of = |id: u64| self.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
+        if !linked.is_empty() {
+            section_head(ui, "LINKED FOLDERS", None);
+        }
+        let pick = |ui: &mut egui::Ui, label: &str, depth: usize, on: bool| -> bool {
+            let (row, _) = pop_row(ui, 28.0);
+            let (p, rect) = (ui.painter(), row.rect);
+            let x = rect.left() + 6.0 + depth as f32 * 16.0;
+            galley_at(p, x, rect.center().y, p.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), TEXT()), TEXT());
+            if on {
+                glyphs::check(p, egui::pos2(rect.right() - 12.0, rect.center().y), PRIMARY());
+            }
+            let label = label.to_string();
+            row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Folder {label}")));
+            row.clicked()
+        };
+        for (id, name, dirs) in linked {
+            if pick(ui, name, 0, f.link == Some(*id) && f.dir.as_os_str().is_empty()) {
+                (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), PathBuf::new(), None, None);
+                ui.close();
+            }
+            for d in dirs {
+                let label = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if pick(ui, &label, d.components().count(), f.link == Some(*id) && f.dir == *d) {
+                    (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), d.clone(), None, None);
+                    ui.close();
+                }
+            }
+        }
+        if !linked.is_empty() {
+            section_head(ui, "IN QUARRY", None);
+        }
+        for (id, depth) in rows {
+            if pick(ui, &name_of(*id), *depth, f.link.is_none() && f.new_folder.is_none() && f.folder == Some(*id)) {
+                (f.folder, f.new_folder, f.link) = (Some(*id), None, None);
+                ui.close();
+            }
+        }
+        if pick(ui, "No folder", 0, f.link.is_none() && f.new_folder.is_none() && f.folder.is_none()) {
+            (f.folder, f.new_folder, f.link) = (None, None, None);
+            ui.close();
+        }
+        if pick(ui, "New folder…", 0, false) {
+            (f.folder, f.new_folder, f.link) = (None, Some(String::new()), None);
+            ui.close();
+        }
     }
 }
