@@ -391,7 +391,11 @@ impl App {
         let mut disconnect = None;
         let mut remove = None;
         let menu = egui::Rect::from_min_size(egui::pos2(rect.right() - 34.0, rect.top() + 8.0), egui::vec2(28.0, BUTTON_H));
-        ui.put(menu, |ui: &mut egui::Ui| {
+        // A child that reports nothing back: `put` would move the cursor up to under the button, and the filter below
+        // would then be laid over the lower half of the card.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(menu).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)));
+        {
+            let ui = &mut child;
             let r = dots_menu(ui, |ui| {
                 ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
                 if ui.button("Edit connection\u{2026}").clicked() {
@@ -426,8 +430,7 @@ impl App {
                 }
             });
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connection menu"));
-            r
-        });
+        }
         if let Some(id) = edit {
             self.edit_conn(id);
         }
