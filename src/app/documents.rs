@@ -450,8 +450,8 @@ impl App {
         ui.add_space(10.0);
         let t = self.t().unwrap();
         // The collection's data size and index count, which the header used to carry.
-        let stats = t.stats.map(|(_, size, nidx)| vec![human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]).unwrap_or_default();
-        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: "", ms: t.ms, loading: t.loading, stats, grouped: None };
+        let stats = t.stats.map(|(_, size, nidx)| [human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]);
+        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: false, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
         let out = self.results_bar(ui, &info, |app, ui| {
             dots_menu(ui, |ui| {
                 if ui.button("Export").on_hover_text("Export these documents").clicked() {

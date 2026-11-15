@@ -5,17 +5,17 @@ use super::*;
 use egui::containers::menu::MenuButton;
 
 /// What the left side of the bar says. `total` is the number of rows, documents or groups the query matches.
-pub(super) struct BarInfo {
+pub(super) struct BarInfo<'a> {
     pub page: u64,
     pub size: u64,
     pub total: u64,
     pub unit: &'static str,
-    /// "~" when the total is an estimate.
-    pub approx: &'static str,
+    /// Whether the total is an estimate.
+    pub approx: bool,
     pub ms: u128,
     pub loading: bool,
     /// Plain facts after the time, such as a collection's size.
-    pub stats: Vec<String>,
+    pub stats: &'a [String],
     /// Source rows of a grouped SQL answer, which adds the read-only note and Ungroup.
     pub grouped: Option<u64>,
 }
@@ -29,13 +29,14 @@ pub(super) struct BarOut {
 
 /// "1-50 of 4,410 rows". A hyphen, not a dash, so the text stays plain in every font. The last page is cut at the
 /// total, and an empty result has no range at all.
-pub(super) fn range_text(page: u64, size: u64, total: u64, unit: &str, approx: &str) -> String {
+pub(super) fn range_text(page: u64, size: u64, total: u64, unit: &str, approx: bool) -> String {
     if total == 0 {
         return format!("0 {unit}");
     }
     let first = page.saturating_mul(size).saturating_add(1).min(total);
     let last = first.saturating_add(size.max(1) - 1).min(total);
     let unit = if total == 1 { unit.strip_suffix('s').unwrap_or(unit) } else { unit };
+    let approx = if approx { "~" } else { "" };
     if first == last {
         format!("{first} of {approx}{} {unit}", group(&total.to_string()))
     } else {
@@ -59,7 +60,7 @@ fn stats_job(ms: u128, stats: &[String]) -> LayoutJob {
 
 impl App {
     /// Draws the bar. `right` adds the tools right to left, so its first item is the rightmost.
-    pub(super) fn results_bar(&mut self, ui: &mut egui::Ui, info: &BarInfo, right: impl FnOnce(&mut App, &mut egui::Ui)) -> BarOut {
+    pub(super) fn results_bar(&mut self, ui: &mut egui::Ui, info: &BarInfo<'_>, right: impl FnOnce(&mut App, &mut egui::Ui)) -> BarOut {
         let mut out = BarOut::default();
         let pages = info.total.div_ceil(info.size.max(1)).max(1);
         let mono = |s: String, c: Color32| RichText::new(s).font(FontId::monospace(TXT_SMALL)).color(c);
@@ -73,18 +74,17 @@ impl App {
                     // A painted down chevron right after the unit says the count opens a menu; a glyph would sit off center.
                     let down = egui::Atom::paint(egui::vec2(8.0, 16.0), |ui, a| chevron(ui.painter(), a.rect.center(), true, MUTED()));
                     MenuButton::from_button(egui::Button::new((text, down)).min_size(egui::vec2(0.0, BUTTON_H))).ui(ui, |ui| {
-                        menu_look(ui);
-                        for n in [db::PAGE_SIZE, 100, 200, db::PAGE_SIZE_MAX] {
-                            if ui.selectable_label(size == n, format!("{n} per page")).clicked() {
-                                size = n;
-                                ui.close();
-                            }
+                        menu_list(ui);
+                        let mut picked = Vec::new();
+                        for n in db::PAGE_SIZES {
+                            menu_act(ui, &mut picked, n, |ui| ui.selectable_label(size == n, format!("{n} per page")));
                         }
+                        size = picked.pop().unwrap_or(size);
                     })
                 })
                 .inner;
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Page size"));
-            ui.label(stats_job(info.ms, &info.stats));
+            ui.label(stats_job(info.ms, info.stats));
             if let Some(rows) = info.grouped {
                 ui.label(RichText::new(grouped_text(rows)).size(TXT_SMALL).color(MUTED())).on_hover_text("Double-click a group to see its rows");
                 if quiet(ui, RichText::new("Ungroup").color(PRIMARY())).clicked() {
@@ -118,24 +118,24 @@ mod tests {
 
     #[test]
     fn the_first_page_reads_one_to_fifty() {
-        assert_eq!(range_text(0, 50, 4410, "rows", ""), "1-50 of 4,410 rows");
+        assert_eq!(range_text(0, 50, 4410, "rows", false), "1-50 of 4,410 rows");
     }
 
     #[test]
     fn the_last_page_stops_at_the_total() {
-        assert_eq!(range_text(88, 50, 4410, "rows", ""), "4401-4410 of 4,410 rows");
-        assert_eq!(range_text(1, 50, 60, "docs", ""), "51-60 of 60 docs");
+        assert_eq!(range_text(88, 50, 4410, "rows", false), "4401-4410 of 4,410 rows");
+        assert_eq!(range_text(1, 50, 60, "docs", false), "51-60 of 60 docs");
     }
 
     #[test]
     fn a_single_row_and_an_empty_result_have_no_range() {
-        assert_eq!(range_text(0, 50, 1, "rows", ""), "1 of 1 row");
-        assert_eq!(range_text(0, 50, 0, "rows", ""), "0 rows");
+        assert_eq!(range_text(0, 50, 1, "rows", false), "1 of 1 row");
+        assert_eq!(range_text(0, 50, 0, "rows", false), "0 rows");
     }
 
     #[test]
     fn an_estimate_marks_the_total() {
-        assert_eq!(range_text(0, 50, 1_200_000, "rows", "~"), "1-50 of ~1,200,000 rows");
+        assert_eq!(range_text(0, 50, 1_200_000, "rows", true), "1-50 of ~1,200,000 rows");
     }
 
     #[test]
@@ -147,6 +147,6 @@ mod tests {
     #[test]
     fn the_grouped_note_counts_source_rows() {
         assert_eq!(grouped_text(1234), "from 1,234 rows, read-only");
-        assert_eq!(range_text(0, 50, 3, "groups", ""), "1-3 of 3 groups");
+        assert_eq!(range_text(0, 50, 3, "groups", false), "1-3 of 3 groups");
     }
 }

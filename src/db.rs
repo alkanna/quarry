@@ -48,6 +48,8 @@ pub const PREFIX_SCAN_MAX: u64 = 100_000;
 pub const PAGE_SIZE: u64 = 50; // paginationLimit in the original
 /// The most documents a Documents page can show, from the setting.
 pub const PAGE_SIZE_MAX: u64 = 500;
+/// The page sizes the results bar offers.
+pub const PAGE_SIZES: [u64; 4] = [PAGE_SIZE, 100, 200, PAGE_SIZE_MAX];
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Settings.connectionTimeout in the original
 pub const UNDO_MAX: usize = 50; // maxActionsLength
 pub const UNDO_MAX_AGE_S: u64 = 86_400; // maxActionsAge

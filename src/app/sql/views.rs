@@ -127,10 +127,10 @@ impl App {
             size: self.page_size(),
             total: t.count,
             unit: if grouped.is_some() { "groups" } else { "rows" },
-            approx: if t.sql.as_ref().is_some_and(|s| s.estimated) { "~" } else { "" },
+            approx: t.sql.as_ref().is_some_and(|s| s.estimated),
             ms: t.ms,
             loading: t.loading,
-            stats: Vec::new(),
+            stats: &[],
             grouped,
         };
         let out = self.results_bar(ui, &info, |app, ui| app.sql_row_tools(ui));
