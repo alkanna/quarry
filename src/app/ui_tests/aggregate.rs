@@ -61,3 +61,12 @@ fn a_stage_header_takes_the_focus_and_moves_by_keyboard_or_its_menu() {
     ui.click_contains("Move up");
     assert_eq!(ops(&ui), ["$group", "$sort", "$match"]);
 }
+
+#[test]
+fn the_aggregate_run_options_hold_explain_and_copy_as_code() {
+    let Some(mut ui) = demo_ui(three_stages) else { return };
+    assert!(ui.h.query_all_by_label("Explain").next().is_none(), "Explain is still a toolbar button");
+    ui.click("Choose what to run");
+    ui.show("Explain");
+    ui.show("Copy as code");
+}

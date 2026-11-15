@@ -11,6 +11,9 @@ use egui::text::{CCursor, CCursorRange};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
 
+/// Height of the editor's footer line.
+const FOOTER_H: f32 = 24.0;
+
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
 
@@ -57,6 +60,48 @@ pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialec
     let all = lex::split_statements(text, d);
     let i = all.iter().position(|(a, _)| *a == r)?;
     Some((r, i + 1, all.len()))
+}
+
+/// One marker per statement in the gutter, at its first line: a ring, or the accent with a play mark for the statement
+/// under the caret. A click returns the text of the statement to run.
+fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, query: &str, d: db::sql::Dialect, current: Option<usize>, busy: bool) -> Option<String> {
+    // The galley row each logical line starts on.
+    let mut line_rows = Vec::new();
+    let mut fresh = true;
+    for (i, row) in out.galley.rows.iter().enumerate() {
+        if fresh {
+            line_rows.push(i);
+        }
+        fresh = row.ends_with_newline;
+    }
+    let (gp, rect) = (out.galley_pos, out.response.rect);
+    let mut run = None;
+    for (i, (r, text)) in lex::split_statements(query, d).into_iter().enumerate() {
+        // A statement's range can open on the blank lines after the previous one, so its line is its first code.
+        let start = r.start + (query[r.start..].len() - query[r.start..].trim_start().len());
+        let line = query[..start].matches('\n').count();
+        let Some(row) = line_rows.get(line).and_then(|&ri| out.galley.rows.get(ri)) else { continue };
+        let c = egui::pos2(rect.left() + 12.0, gp.y + row.pos.y + row.height() / 2.0);
+        let hit = egui::Rect::from_center_size(c, egui::vec2(16.0, 16.0));
+        let resp = ui.interact(hit, out.response.id.with(("gutter-run", i)), if busy { Sense::hover() } else { Sense::click() });
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, !busy, format!("Run statement {} from the gutter", i + 1)));
+        let hot = resp.hovered() && !busy;
+        let p = ui.painter();
+        if current == Some(i + 1) {
+            p.circle_filled(c, 6.0, if hot { shade(PRIMARY(), 0.10) } else { PRIMARY() });
+            let t = 2.5;
+            p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(-t * 0.6, -t), c + egui::vec2(t, 0.0), c + egui::vec2(-t * 0.6, t)], ON_PRIMARY(), Stroke::NONE));
+        } else {
+            p.circle_stroke(c, 4.0, Stroke::new(1.0, if hot { PRIMARY() } else { FAINT() }));
+        }
+        if !busy {
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Run statement {}", i + 1));
+            if resp.clicked() {
+                run = Some(text.to_string());
+            }
+        }
+    }
+    run
 }
 
 /// A statement on one line for a menu, from its first word of code: a leading comment would color the whole line as one.
@@ -427,6 +472,15 @@ impl App {
         self.sql_run_text(text, explain);
     }
 
+    /// The text selected in the editor, if any, for Run selection.
+    fn editor_selection(&self, ctx: &egui::Context) -> Option<String> {
+        let q = &self.t()?.sql.as_ref()?.query;
+        let r = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur))?.cursor.char_range().filter(|r| r.primary != r.secondary)?;
+        let (p, q2) = (usize::from(r.primary.index), usize::from(r.secondary.index));
+        let (a, b) = (byte_at(q, p.min(q2)), byte_at(q, p.max(q2)));
+        Some(q[a..b].to_string()).filter(|t| !t.trim().is_empty())
+    }
+
     /// The statements of the script, one line each, for the Run button's tip. Returns the one picked.
     fn sql_statement_menu(&self, ui: &mut egui::Ui) -> Option<String> {
         let s = self.t()?.sql.as_ref()?;
@@ -690,9 +744,56 @@ impl App {
                 ui.add_space(4.0);
                 ui.add(egui::TextEdit::singleline(&mut pg_schema).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(&tab_schema).color(FAINT())).desired_width(100.0)).on_hover_text("The schema put first in search_path for this tab. Empty uses the schema this tab was opened in.");
             }
+        });
+        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+            // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
+            s.run_schema = pg_schema;
+        }
+        ui.add_space(4.0);
+        // A table's Query view gets these from the view tabs above it; a Query tab of its own has none.
+        if free {
+            self.script_banners(ui);
+        }
+        let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view, mut run_sel) = (false, false, false, false, false, None, false, None);
+        let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
+        let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
+        let selection = self.editor_selection(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Stop takes the place of Run statement while a run is in flight, so the toolbar never shows a dead button.
+            if running {
+                stop = danger(ui, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
+            } else {
+                let (main, tip) = run_split(ui, "Run statement", "\u{2318}\u{21b5}", true);
+                run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
+                let tip = tip.on_hover_text("Choose what to run");
+                egui::Popup::menu(&tip).width(420.0).show(|ui| {
+                    menu_look(ui);
+                    if selection.is_some() && ui.add(egui::Button::new("Run selection")).on_hover_text("Run only the selected text").clicked() {
+                        run_sel = selection.clone();
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Explain")).on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked() {
+                        explain = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    run_pick = self.sql_statement_menu(ui);
+                });
+            }
+            ui.add_enabled_ui(!running, |ui| {
+                run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("\u{21e7}\u{2318}\u{21b5}").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
+            });
+            explain |= quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
+            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+            save_view = quiet_enabled(ui, !running, "Save as view\u{2026}").on_hover_text("Create a view from the statement under the caret").clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // The first one added sits at the right edge: the history, then the library beside it.
-                icon_menu(ui, paint_clock, true, |ui| {
+                // The first one added sits at the right edge: the library, then the history beside it.
+                let button = picker_button(ui, &lib_pick, false, &mut pick_acts);
+                self.demo_open_library(ui.ctx(), &button);
+                self.demo_open_picker(ui.ctx(), &button, "picker");
+                ui.add_space(4.0);
+                sticky_menu(ui, "History".into(), |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
                     let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.as_slice()).unwrap_or_default();
@@ -711,50 +812,6 @@ impl App {
                     });
                 })
                 .on_hover_text("History");
-                ui.add_space(6.0);
-                let button = picker_button(ui, &lib_pick, false, &mut pick_acts);
-                self.demo_open_library(ui.ctx(), &button);
-                self.demo_open_picker(ui.ctx(), &button, "picker");
-            });
-        });
-        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
-            s.run_schema = pg_schema;
-        }
-        ui.add_space(4.0);
-        // A table's Query view gets these from the view tabs above it; a Query tab of its own has none.
-        if free {
-            self.script_banners(ui);
-        }
-        let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view) = (false, false, false, false, false, None, false);
-        let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
-        let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
-        let status = caret.map(|CaretInfo { line_col: (l, c), stmt, .. }| {
-            let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
-            format!("Ln {l}, Col {c}{n}")
-        });
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_enabled_ui(!running, |ui| {
-                let (main, tip) = run_split(ui, "Run statement", "⌘↵", many);
-                run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
-                let tip = if many { tip.on_hover_text("Choose the statement to run") } else { tip };
-                egui::Popup::menu(&tip).width(420.0).show(|ui| {
-                    menu_look(ui);
-                    run_pick = self.sql_statement_menu(ui);
-                });
-                run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("⇧⌘↵").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
-            });
-            stop = quiet_enabled(ui, running, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
-            let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
-            ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
-            explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
-            save_view = quiet_enabled(ui, !running, "Save as view…").on_hover_text("Create a view from the statement under the caret").clicked();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(s) = &status {
-                    ui.label(RichText::new(s).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
-                }
             });
         });
         ui.add_space(8.0);
@@ -785,7 +842,7 @@ impl App {
         if stop {
             self.sql_stop();
         }
-        if let Some(text) = run_pick {
+        if let Some(text) = run_pick.or(run_sel) {
             self.sql_run_text(text, false);
         }
         if run || run_all || explain {
@@ -866,6 +923,10 @@ impl App {
         let dialect = scope.dialect;
         let none = Fields::new();
         let values = self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none);
+        // The footer's words are worked out before the tab is borrowed for the editor.
+        let engine_db = self.conn(conn).map(|c| format!("{}  \u{b7}  {db}", super::super::sidebar::conn_label(c).1)).unwrap_or_default();
+        let saved_in = self.tabs.get(self.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
+        let mut gutter_run = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
@@ -915,13 +976,33 @@ impl App {
                     ui.painter().set(band, egui::Shape::rect_filled(band_rect, 0.0, tint(PRIMARY(), 22)));
                 }
                 paint_gutter(ui, &out, Some(info.line_col.0));
+                gutter_run = gutter_markers(ui, &out, &s.query, dialect, info.stmt.as_ref().map(|p| p.1), s.run_req != 0);
+            });
+            // Inside the frame, so the position reads as part of the editor and not of the toolbar.
+            ui.horizontal(|ui| {
+                ui.set_height(FOOTER_H);
+                let info = s.caret_info(dialect);
+                let place = info.stmt.as_ref().map_or(String::new(), |(_, i, n)| format!("statement {i} of {n}  \u{b7}  "));
+                let faint = |t: String| RichText::new(t).font(FontId::monospace(TXT_CAPTION)).color(FAINT());
+                ui.add_space(10.0);
+                ui.label(faint(format!("{place}Ln {}, Col {}  \u{b7}  {engine_db}", info.line_col.0, info.line_col.1)));
+                if let Some(t) = &saved_in {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        ui.label(faint(t.clone()));
+                    });
+                }
             });
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
         self.sql_serve(conn, &db, &schema, wants);
         let bar = splitter(ui);
-        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.response.rect.height(), lo, hi) {
+        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.response.rect.height() - FOOTER_H, lo, hi) {
             self.save_prefs();
+        }
+        // The same path as picking the statement from the Run menu.
+        if let Some(text) = gutter_run {
+            self.sql_run_text(text, false);
         }
     }
 
