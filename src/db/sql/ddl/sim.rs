@@ -270,6 +270,7 @@ impl Sim {
                 let i = self.check_at(name).ok_or_else(|| format!("Check constraint {name} is not on the table."))?;
                 Ok(vec![Change::AddCheck(self.checks.remove(i))])
             }
+            Change::Table { opt, was } => Ok(vec![Change::Table { opt: was.clone(), was: opt.clone() }]),
         }
     }
 }
@@ -594,6 +595,7 @@ pub(in crate::db::sql) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<S
                 add_exact(&mut checks, n);
                 None
             }
+            Change::Table { .. } => None,
         };
         if let Some(Pos::After(n)) = pos {
             add(&mut cols, n);
@@ -689,6 +691,8 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
                 }
             }
             Change::DropIndex(n) if n == "PRIMARY" || before.indexes.iter().any(|i| i.primary && i.name == *n) => out.push("Dropping the primary key makes the rows read-only here until the table has a key again.".into()),
+            Change::Table { opt: TableOpt::Engine(_), .. } => out.push("Changing the engine rewrites the whole table and blocks writes to it while it runs. Undo rewrites it again.".into()),
+            Change::Table { opt: TableOpt::AutoIncrement(_), .. } => out.push("The server never sets the counter below the largest id plus one, so a lower value is raised and an undo that lowers it again may not hold.".into()),
             _ => {}
         }
     }

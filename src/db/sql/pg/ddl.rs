@@ -13,7 +13,7 @@
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
-use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
+use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, TableOpt, ORPHAN_SAMPLE};
 use crate::db::sql::exec::{bound_pg, sql_state, Conn, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
 use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
@@ -663,6 +663,8 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
             let k = sim.check_at(n).map(|i| &sim.checks[i]).ok_or_else(|| format!("Check constraint {n} is not on the table."))?;
             vec![format!("{alter} DROP CONSTRAINT {}", q(&k.name))]
         }
+        Change::Table { opt: TableOpt::Comment(text), .. } => vec![comment_stmt(&format!("TABLE {t}"), text)?],
+        Change::Table { .. } => return Err("Only the table comment can be changed on PostgreSQL here.".into()),
         Change::SetFkDeferral { name, deferrable, deferred } => {
             let k = sim.fk_at(name).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
             if *deferred && !*deferrable {
@@ -1432,6 +1434,16 @@ mod tests {
 
     fn def(name: &str, ty: &str) -> ColDef {
         ColDef::new(name, ty)
+    }
+
+    #[test]
+    fn a_table_comment_is_written_and_undone_but_no_other_option() {
+        use crate::db::sql::ddl::TableOpt;
+        let set = Change::Table { opt: TableOpt::Comment("it's".into()), was: TableOpt::Comment("old".into()) };
+        let p = plan("t", &table(), &[set]).unwrap();
+        assert_eq!(p.steps, ["COMMENT ON TABLE \"public\".\"t\" IS 'it''s'"]);
+        assert_eq!(p.undo.unwrap().steps, ["COMMENT ON TABLE \"public\".\"t\" IS 'old'"]);
+        assert!(plan("t", &table(), &[Change::Table { opt: TableOpt::Engine("x".into()), was: TableOpt::Engine("y".into()) }]).is_err());
     }
 
     #[test]

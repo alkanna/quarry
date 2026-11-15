@@ -94,7 +94,7 @@ impl App {
     }
 
     /// Asks the server for what the dialogs list. The offline demo has no server, so its dialogs are filled directly.
-    fn ask_meta(&mut self, conn: u64, schema: &str) {
+    pub(in crate::app) fn ask_meta(&mut self, conn: u64, schema: &str) {
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
             self.worker.sql_create_meta(conn, sql, schema.to_string());
         }
@@ -151,6 +151,10 @@ impl App {
                     f.collation = m.starting_collation(m.schema_collation.as_deref());
                     f.meta = Some(m);
                 }
+                Err(e) => f.load_err = Some(e),
+            },
+            Some(Modal::TableOpts(f)) if f.conn == conn && f.schema == schema => match res {
+                Ok(m) => f.meta = Some(m),
                 Err(e) => f.load_err = Some(e),
             },
             _ => {}

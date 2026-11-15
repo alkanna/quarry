@@ -12,7 +12,8 @@ pub(super) fn shape(st: &Structure) -> Vec<String> {
     let cols = st.columns.iter().map(|c| format!("col {}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check));
     let idx = st.indexes.iter().map(|i| format!("idx {}|{}|{}|{}|{}|{}", i.name, i.unique, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), i.kind, i.comment, i.invisible));
     let checks = st.checks.iter().map(super::sim::check_line);
-    cols.chain(idx).chain(checks).collect()
+    let table = std::iter::once(format!("table {}|{}|{}|{:?}", st.status.comment, st.status.engine, st.status.collation, st.status.auto_increment));
+    cols.chain(idx).chain(checks).chain(table).collect()
 }
 
 struct Env {
@@ -185,6 +186,21 @@ fn live(var: &str) {
         assert_eq!(names(st), ["memo", "id", "qty", "name", "price", "created"]);
         assert!(st.indexes.iter().any(|i| i.name == "idx_qty") && !st.indexes.iter().any(|i| i.name == "idx_name"));
     });
+
+    // Table options. Each carries what the structure read, which is what the undo writes back.
+    e.fresh();
+    let was = e.structure().status;
+    let name_collation = col(&e.structure(), "name").collation;
+    let tbl = |o: TableOpt, w: TableOpt| vec![Change::Table { opt: o, was: w }];
+    e.round_trip_here("table comment", tbl(TableOpt::Comment("it's \\ new".into()), TableOpt::Comment(was.comment.clone())), |st| assert_eq!(st.status.comment, "it's \\ new"));
+    assert_eq!(was.auto_increment, Some(3), "the counter is read from SHOW CREATE TABLE, not the cached statistics");
+    e.round_trip_here("table auto increment", tbl(TableOpt::AutoIncrement(500), TableOpt::AutoIncrement(3)), |st| assert_eq!(st.status.auto_increment, Some(500)));
+    // DEFAULT CHARACTER SET .. COLLATE only changes what columns added later get: the columns already there keep their collation.
+    e.round_trip_here("table collation", tbl(TableOpt::Collation("latin1_swedish_ci".into()), TableOpt::Collation(was.collation.clone())), |st| {
+        assert_eq!(st.status.collation, "latin1_swedish_ci");
+        assert_eq!(col(st, "name").collation, name_collation);
+    });
+    e.round_trip_here("table engine", tbl(TableOpt::Engine("MyISAM".into()), TableOpt::Engine(was.engine.clone())), |st| assert!(st.status.engine.eq_ignore_ascii_case("MyISAM")));
 
     let hostile = "a`b";
     let junk = "'; DROP TABLE t; -- \\ \\' \" `";

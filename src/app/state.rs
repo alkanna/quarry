@@ -923,6 +923,8 @@ pub(super) enum Modal {
     IdxEdit(Box<IdxForm>),
     /// Add or edit a CHECK constraint of the open SQL table, with its ALTER preview.
     CheckEdit(Box<super::sql::checks::CheckForm>),
+    /// Change the comment, engine, collation or auto increment counter of the open SQL table.
+    TableOpts(Box<super::sql::table_opts::TableForm>),
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),

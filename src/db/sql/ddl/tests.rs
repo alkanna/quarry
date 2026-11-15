@@ -1001,3 +1001,47 @@ fn the_undo_of_a_check_change_puts_the_check_back_as_it_was() {
     assert!(snapshot(&t2, &[], &[], &[], &u.checks)[0].1.is_none());
     assert_eq!(checks_after(&t, &edit), ["chk_note", "chk_total"]);
 }
+
+fn opt(o: TableOpt, was: TableOpt) -> Change {
+    Change::Table { opt: o, was }
+}
+
+#[test]
+fn table_options() {
+    let t = table();
+    let comment = opt(TableOpt::Comment("it's new".into()), TableOpt::Comment("old".into()));
+    assert_eq!(alt(std::slice::from_ref(&comment)), "ALTER TABLE `orders`\n  COMMENT = 'it''s new'");
+    assert_eq!(alt(&[opt(TableOpt::Engine("MyISAM".into()), TableOpt::Engine("InnoDB".into()))]), "ALTER TABLE `orders`\n  ENGINE = MyISAM");
+    assert_eq!(alt(&[opt(TableOpt::Collation("latin1_swedish_ci".into()), TableOpt::Collation("utf8mb4_0900_ai_ci".into()))]), "ALTER TABLE `orders`\n  DEFAULT CHARACTER SET latin1 COLLATE latin1_swedish_ci");
+    assert_eq!(alt(&[opt(TableOpt::AutoIncrement(500), TableOpt::AutoIncrement(3))]), "ALTER TABLE `orders`\n  AUTO_INCREMENT = 500");
+    // an option joins the other clauses of the one ALTER
+    assert_eq!(alt(&[Change::Drop("note".into()), comment.clone()]), "ALTER TABLE `orders`\n  DROP COLUMN `note`,\n  COMMENT = 'it''s new'");
+    // names go into the statement bare, so anything but a name is refused
+    assert!(alter(M, "8.4.0", B, "orders", &[opt(TableOpt::Engine("x; DROP TABLE t".into()), TableOpt::Engine("InnoDB".into()))]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[opt(TableOpt::Collation("a b".into()), TableOpt::Collation("c".into()))]).is_err());
+    // the undo writes back what the structure read
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &[comment]).unwrap(), ["ALTER TABLE `orders`\n  COMMENT = 'old'"]);
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &[opt(TableOpt::AutoIncrement(500), TableOpt::AutoIncrement(3))]).unwrap(), ["ALTER TABLE `orders`\n  AUTO_INCREMENT = 3"]);
+    assert!(Change::Table { opt: TableOpt::AutoIncrement(5), was: TableOpt::AutoIncrement(1) }.describe().contains("auto increment"));
+}
+
+#[test]
+fn the_engine_is_staged_alone() {
+    let engine = opt(TableOpt::Engine("MyISAM".into()), TableOpt::Engine("InnoDB".into()));
+    let e = alter(M, "8.4.0", B, "orders", &[Change::Drop("note".into()), engine.clone()]).unwrap_err();
+    assert_eq!(e, "Apply or discard the other changes first; changing the engine rewrites the table.");
+    assert!(plan(M, "8.4.0", B, "orders", &table(), &[engine.clone(), opt(TableOpt::Comment("c".into()), TableOpt::Comment(String::new()))]).is_err());
+    let alone = plan(M, "8.4.0", B, "orders", &table(), std::slice::from_ref(&engine)).unwrap();
+    assert!(alone.undo.is_ok());
+    assert!(warnings(&table(), &[engine]).iter().any(|w| w.contains("rewrites the whole table")));
+}
+
+#[test]
+fn a_new_default_collation_is_not_staged_with_a_changed_column() {
+    let collate = opt(TableOpt::Collation("latin1_swedish_ci".into()), TableOpt::Collation("utf8mb4_0900_ai_ci".into()));
+    let change = Change::Modify { from: "note".into(), def: def("note", "TEXT"), pos: Pos::Keep };
+    // a text column redefined in the same ALTER would take the new collation and be converted, which the collation alone does not do
+    assert!(alter(M, "8.4.0", B, "orders", &[change, collate.clone()]).unwrap_err().contains("column changes first"));
+    // a column added or dropped beside it is not touched
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::Drop("note".into()), collate]).is_ok());
+}

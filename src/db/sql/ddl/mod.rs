@@ -246,6 +246,16 @@ impl IndexDef {
     }
 }
 
+/// A table option the Structure view changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TableOpt {
+    Comment(String),
+    Engine(String),
+    /// The collation the table gives to columns added later; the charset follows from its name.
+    Collation(String),
+    AutoIncrement(u64),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     Add { def: ColDef, pos: Pos },
@@ -267,6 +277,8 @@ pub enum Change {
     /// A table CHECK. Editing one is a drop and an add, staged together.
     AddCheck(CheckConstraint),
     DropCheck(String),
+    /// `was` is what the structure read held, which is also what the undo writes back, so the simulation keeps no table state.
+    Table { opt: TableOpt, was: TableOpt },
 }
 
 impl Change {
@@ -287,6 +299,13 @@ impl Change {
             Change::SetFkDeferral { name, .. } => format!("Change when foreign key {name} is checked"),
             Change::AddCheck(k) => format!("Add check {}", k.name),
             Change::DropCheck(n) => format!("Drop check {n}"),
+            Change::Table { opt, .. } => match opt {
+                TableOpt::Comment(_) => "Change the table comment".into(),
+                TableOpt::Engine(e) => format!("Change the engine to {e}"),
+                TableOpt::Collation(c) => format!("Change the default collation to {c}"),
+                // The server raises the value to the largest id plus one, so an undo that lowers it may not hold.
+                TableOpt::AutoIncrement(n) => format!("Set the next auto increment value to {n} (never below the largest id)"),
+            },
         }
     }
 }

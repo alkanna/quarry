@@ -20,6 +20,7 @@ pub(super) mod rel;
 pub(super) mod routines;
 pub(super) mod server;
 pub(super) mod structure;
+pub(super) mod table_opts;
 pub(super) mod tableops;
 pub(super) mod trig;
 pub(super) mod trig_pg;

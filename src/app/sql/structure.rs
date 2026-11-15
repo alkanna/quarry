@@ -80,6 +80,7 @@ pub(in crate::app) enum Act {
     NewCheck,
     EditCheck(usize),
     DropCheck(usize),
+    EditTable,
     Unstage(usize),
     Discard,
     Apply,
@@ -194,6 +195,7 @@ impl App {
             Act::NewCheck => self.open_check_form(None),
             Act::EditCheck(i) => self.open_check_form(Some(i)),
             Act::DropCheck(i) => self.stage_drop_check(i),
+            Act::EditTable => self.open_table_opts(),
             Act::Unstage(i) => self.unstage(i),
             Act::Discard => self.discard_staged(),
             Act::Apply => self.request_alter_apply(),
@@ -451,6 +453,32 @@ impl App {
                     acts.push(Act::EditCheck(r));
                 }
             }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                caption(ui, "TABLE");
+                right_group(ui, |ui| {
+                    if quiet_enabled(ui, editable, "Edit options").on_hover_text("Change the comment, engine, collation or auto increment counter").on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::EditTable);
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            let s = &d.status;
+            let none = |v: &str| if v.is_empty() { "none".to_string() } else { v.to_string() };
+            let mut rows = vec![("Comment", none(&s.comment))];
+            if d.pg_schema.is_none() {
+                rows.push(("Engine", none(&s.engine)));
+                rows.push(("Collation", none(&s.collation)));
+                rows.push(("Auto increment", s.auto_increment.map_or("none".to_string(), |n| n.to_string())));
+            }
+            egui::Grid::new("table-opts").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                for (k, v) in rows {
+                    ui.label(RichText::new(k).size(TXT_SMALL).color(FAINT()));
+                    ui.label(RichText::new(v).size(TXT_SMALL).color(TEXT()));
+                    ui.end_row();
+                }
+            });
         });
         self.hold_staged(staged, memo);
         self.keep(&ui.ctx().clone(), d, sel, acts);

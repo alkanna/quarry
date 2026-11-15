@@ -1,7 +1,7 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
 //! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
-use crate::db::sql::ddl::{check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
+use crate::db::sql::ddl::{check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, TableOpt, FK_ACTIONS};
 use crate::db::sql::structure::{CheckConstraint, ForeignKey};
 use crate::db::sql::value::lit;
 use crate::db::sql::Dialect;
@@ -156,6 +156,30 @@ pub(in crate::db::sql) fn drop_index(d: Dialect, name: &str) -> String {
     if name == "PRIMARY" { "DROP PRIMARY KEY".into() } else { format!("DROP INDEX {}", d.quote_ident(name)) }
 }
 
+/// An engine or collation name goes into the statement bare, so it is limited to the characters the server's own names use.
+fn table_word(what: &str, v: &str) -> Result<(), String> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(format!("{v:?} is not {what} name."));
+    }
+    Ok(())
+}
+
+fn table_opt(m: Mode, o: &TableOpt) -> Result<String, String> {
+    Ok(match o {
+        TableOpt::Comment(t) if t.chars().count() > 2048 => return Err("A table comment is at most 2048 characters.".into()),
+        TableOpt::Comment(t) => format!("COMMENT = {}", lit(t, m.bs)),
+        TableOpt::Engine(e) => {
+            table_word("an engine", e)?;
+            format!("ENGINE = {e}")
+        }
+        TableOpt::Collation(c) => {
+            table_word("a collation", c)?;
+            format!("DEFAULT CHARACTER SET {} COLLATE {c}", c.split('_').next().unwrap_or(c))
+        }
+        TableOpt::AutoIncrement(n) => format!("AUTO_INCREMENT = {n}"),
+    })
+}
+
 /// One clause of the ALTER, or two for a rename the server cannot do directly.
 pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Change) -> Result<Vec<String>, String> {
     Ok(match c {
@@ -176,6 +200,7 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
         Change::AddCheck(k) => vec![add_check(d, m, k)?],
         // MySQL has DROP CHECK from 8.0.16 and takes DROP CONSTRAINT only from 8.0.19. MariaDB drops a CHECK with DROP CONSTRAINT.
         Change::DropCheck(n) => vec![format!("DROP {} {}", d.drop_check_word(), d.quote_ident(n))],
+        Change::Table { opt, .. } => vec![table_opt(m, opt)?],
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
@@ -192,6 +217,16 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
 pub fn alter(d: Dialect, version: &str, m: Mode, table: &str, changes: &[Change]) -> Result<String, String> {
     if changes.is_empty() {
         return Err("Nothing is staged.".into());
+    }
+    // An engine change copies every row. Alone, the preview and the undo are one rewrite; beside other clauses a failure
+    // leaves no clear picture of what ran.
+    if changes.len() > 1 && changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Engine(_), .. })) {
+        return Err("Apply or discard the other changes first; changing the engine rewrites the table.".into());
+    }
+    // A column redefined in the same ALTER that names no collation takes the new default and has its values converted, which a
+    // collation change on its own does not do. The editor leaves out a collation that is the table's own.
+    if changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Collation(_), .. })) && changes.iter().any(|c| matches!(c, Change::Modify { .. })) {
+        return Err("Apply or discard the column changes first; a text column changed together with a new default collation would be converted to it.".into());
     }
     let can = d.can_rename_index(version);
     let mut lines = Vec::new();

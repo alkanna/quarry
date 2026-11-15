@@ -842,6 +842,15 @@ pub(super) fn json_check_pairs(rows: &[SqlRow]) -> Vec<(String, String)> {
     rows.iter().filter_map(|r| Some((text(r, "tbl")?, json_check_col(&text(r, "clause")?)?))).collect()
 }
 
+/// The next auto increment value that SHOW CREATE TABLE reports, 1 when it leaves the clause out. information_schema.TABLES keeps
+/// the counter cached on MySQL 8 for a day, which would make an edit of it start from a number the table has left behind.
+pub(super) fn create_auto(create: &str) -> u64 {
+    let Some((_, tail)) = create.split_once("\n) ") else { return 1 };
+    // The comment is the one option that holds free text.
+    let tail = tail.split("COMMENT=").next().unwrap_or(tail);
+    tail.split_once("AUTO_INCREMENT=").and_then(|(_, r)| r.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).unwrap_or(1)
+}
+
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view. PostgreSQL composes a table's text from what is read below.
@@ -879,6 +888,11 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         pg_deps: Vec::new(),
         usage: IndexUsage::default(),
     };
+    // The statistics read NULL for a table the server has just rebuilt, so whether there is a counter is told by the columns.
+    if d != Dialect::Postgres {
+        let counted = st.columns.iter().any(|c| c.extra.to_ascii_lowercase().contains("auto_increment"));
+        st.status.auto_increment = counted.then(|| create_auto(&st.create));
+    }
     extras(db, schema, table, &mut st).await?;
     usage(db, schema, table, &mut st).await;
     if d == Dialect::Postgres {
@@ -1074,6 +1088,13 @@ mod tests {
         // A literal followed by an operator is an expression.
         assert_eq!(n("'a'::text || 'b'::text"), (Some("'a'::text || 'b'::text".into()), true));
         assert_eq!(normalize_default(Dialect::Postgres, None, true, ""), (None, false));
+    }
+
+    #[test]
+    fn the_auto_increment_counter_is_read_from_the_create_text() {
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT\n) ENGINE=InnoDB AUTO_INCREMENT=500 DEFAULT CHARSET=utf8mb4"), 500);
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"), 1);
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AUTO_INCREMENT=9'"), 1);
     }
 
     #[test]
