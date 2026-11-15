@@ -31,8 +31,7 @@ impl App {
                     }
                 }
                 Msg::SqlStructure { req, res } => {
-                    if self.dup_wait.as_ref().is_some_and(|w| w.0 == req) {
-                        let (_, sel, index, value) = self.dup_wait.take().unwrap();
+                    if let Some((_, sel, index, value)) = self.dup_wait.take_if(|w| w.0 == req) {
                         self.sql_dup_index(sel, &index, value, res);
                         continue;
                     }

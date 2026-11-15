@@ -277,7 +277,7 @@ impl Relay {
         } else {
             fill(text, &args.iter().map(Arg::param).collect::<Vec<_>>(), self.backslash, self.ansi)?
         };
-        if lex::count_with(&stmt, self.dialect, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, self.dialect, !self.backslash, self.ansi) != 1 {
+        if !lex::one_statement(&stmt, self.dialect, self.ansi) {
             return Err("Send one statement per query".into());
         }
         if let Some(g) = gate {

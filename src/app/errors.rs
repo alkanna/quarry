@@ -302,18 +302,11 @@ impl App {
 
     pub(super) fn err_toast(&mut self, e: ErrEntry) {
         let mut acts: Vec<(String, Act)> = Vec::new();
-        let sql = e.conn.and_then(|c| self.conn(c)).map(|c| c.meta.engine.is_sql());
-        let pg = e.conn.is_some_and(|c| self.is_pg(c));
-        if let (Some((f, v)), Some(sel), Some(sql)) = (&e.ex.dup, &e.sel, sql) {
-            // A SQL error is placed in the tab that was open when it came back, which need not be the table it is about:
-            // the click reads that table's indexes and looks for the key's index there. MySQL 8.0.19+ also names the
-            // table, so a key of another table is told here. PostgreSQL names one column or a list; MySQL cuts the value
-            // at 64 bytes and prints binary bytes as \x escapes, so a long or binary value may not be the stored one.
-            let one = !sql
-                || (!sel.coll.is_empty()
-                    && db::dup_index(&e.raw).is_some_and(|(t, _)| t.is_none_or(|t| t.eq_ignore_ascii_case(&sel.coll)))
-                    && if pg { !f.contains([',', '(']) } else { v.len() <= 60 && !v.contains("\\x") });
-            if one {
+        // A SQL error is placed in the tab that was open when it came back, which need not be the table it is about, so
+        // the click reads that table's indexes and looks for the key's index there.
+        if let (Some(_), Some(sel), Some(c)) = (&e.ex.dup, &e.sel, e.conn.and_then(|c| self.conn(c))) {
+            let sql = c.meta.engine.is_sql();
+            if !sql || (!sel.coll.is_empty() && db::dup_filterable(&e.raw, &sel.coll).is_some()) {
                 acts.push((if sql { "Show the other row" } else { "Show the other document" }.into(), Act::ShowDup));
             }
         }
@@ -484,7 +477,7 @@ impl App {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };
                 if self.conn(sel.conn).is_some_and(|c| c.meta.engine.is_sql()) {
-                    let Some((_, index)) = db::dup_index(&e.raw) else { return };
+                    let Some(index) = db::dup_filterable(&e.raw, &sel.coll) else { return };
                     return self.sql_show_dup(sel, index, v);
                 }
                 self.open_collection(sel, Open::Here);

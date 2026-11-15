@@ -158,18 +158,14 @@ impl App {
         // A filter shows the group open whatever its fold, and opens it at once rather than animating.
         let open = !filter.is_empty() || !self.routines.folded.contains(&key);
         let gid = egui::Id::unique(("side-routines", &key));
-        let t = crate::ui::fold::openness(ui.ctx(), gid, open);
-        let cap = crate::app::sidebar::group_caption(ui, "ROUTINES", "Routines", shown.len(), t);
+        let cap = crate::app::sidebar::side_group(ui, gid, "ROUTINES", "Routines", shown.len(), open, |ui| self.routine_rows(ui, conn, db_name, schema, pg, writable, system, shown, acts));
         if cap.clicked() {
-            crate::ui::fold::start(ui.ctx(), gid, !open);
             acts.push(RAct::Fold(key.1.clone()));
         }
         cap.context_menu(|ui| {
             menu_look(ui);
             Self::routines_new_items(ui, db_name, schema, pg, writable, system, acts);
         });
-        let guess = shown.len() as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
-        crate::ui::fold::body(ui, gid, t, guess, open, |ui| self.routine_rows(ui, conn, db_name, schema, pg, writable, system, shown, acts));
     }
 
     /// The rows of the ROUTINES group, drawn inside its fold.
@@ -409,7 +405,7 @@ impl App {
         let Some(w) = self.routines.win.as_ref() else { return };
         let Some(detail) = w.detail.as_ref() else { return };
         let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
+        let bs = self.sql_bs_of(conn);
         let Some(script) = rt::run_script(w.dialect, &schema, detail, &w.args, bs) else { return };
         if !detail.read_only && !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.routine_run_script(conn, db, script));

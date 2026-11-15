@@ -876,33 +876,23 @@ impl App {
                                 }
                             });
                     };
-                    if !sql {
+                    if sql {
+                        // TABLES then VIEWS, each under a caption that folds it away. The list is sorted tables first.
+                        let (tables, views) = matches.split_at(matches_len - n_views);
+                        for (is_view, list) in [(false, tables), (true, views)] {
+                            if list.is_empty() {
+                                continue;
+                            }
+                            let (label, name) = if is_view { ("VIEWS", "Views") } else { ("TABLES", "Tables") };
+                            let gid = egui::Id::unique(("side-group", id, &ns, is_view));
+                            if side_group(ui, gid, label, name, list.len(), !group_hidden[is_view as usize], |ui| list.iter().for_each(|c| row(ui, c))).clicked() {
+                                folded.push((id, ns.clone(), is_view));
+                            }
+                        }
+                    } else {
                         for &coll in &matches {
                             row(ui, coll);
                         }
-                    }
-                    // TABLES then VIEWS, each under a caption that folds it away.
-                    for is_view in [false, true].into_iter().filter(|_| sql) {
-                        let list: Vec<&String> = matches.iter().copied().filter(|c| is_view_of(c) == is_view).collect();
-                        if list.is_empty() {
-                            continue;
-                        }
-                        let key = (id, ns.clone(), is_view);
-                        let gid = egui::Id::unique(("side-group", &key));
-                        let unfolded = !group_hidden[is_view as usize];
-                        let t = fold::openness(ui.ctx(), gid, unfolded);
-                        let n = if is_view { n_views } else { matches_len - n_views };
-                        let cap = group_caption(ui, if is_view { "VIEWS" } else { "TABLES" }, if is_view { "Views" } else { "Tables" }, n, t);
-                        if cap.clicked() {
-                            fold::start(ui.ctx(), gid, !unfolded);
-                            folded.push(key);
-                        }
-                        let guess = list.len() as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
-                        fold::body(ui, gid, t, guess, unfolded, |ui| {
-                            for coll in list {
-                                row(ui, coll);
-                            }
-                        });
                     }
                     if sql && (!pg || !picked.is_empty()) {
                         let sys = sql::ns::system_ns(pg, picked, db_name);
@@ -1074,9 +1064,22 @@ impl App {
     }
 }
 
+/// A sidebar group: its caption, then `rows` in a fold that animates when the caption is clicked. The caller flips its own
+/// open state on a click of the returned caption, which also takes a context menu.
+pub(in crate::app) fn side_group(ui: &mut egui::Ui, gid: egui::Id, label: &str, name: &str, n: usize, open: bool, rows: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    let t = fold::openness(ui.ctx(), gid, open);
+    let cap = group_caption(ui, label, name, n, t);
+    if cap.clicked() {
+        fold::start(ui.ctx(), gid, !open);
+    }
+    let guess = n as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
+    fold::body(ui, gid, t, guess, open, rows);
+    cap
+}
+
 /// The caption of a sidebar group (TABLES, VIEWS, ROUTINES), `t` open: a chevron that turns as the group folds, the label
 /// and the count, each centered on its ink, since box centering leaves all-caps text sitting high or low.
-pub(in crate::app) fn group_caption(ui: &mut egui::Ui, label: &str, name: &str, n: usize, t: f32) -> egui::Response {
+fn group_caption(ui: &mut egui::Ui, label: &str, name: &str, n: usize, t: f32) -> egui::Response {
     let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
     if state_of(&hr) > 0 {
         ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));

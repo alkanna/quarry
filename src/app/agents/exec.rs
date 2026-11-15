@@ -124,7 +124,7 @@ fn ns_label(call: &Call) -> String {
     match (call.ns(), call) {
         (Some(ns), _) => format!("{}.{}", ns.db, ns.coll),
         (None, Call::ListCollections { db, .. } | Call::RunCommand { db, .. }) => db.clone(),
-        (None, Call::QuerySql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. }) => db.clone(),
+        (None, Call::QuerySql { db: Some(db), .. } | Call::ExplainSql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. }) => db.clone(),
         _ => String::new(),
     }
 }
@@ -134,7 +134,7 @@ fn for_mongo(call: &Call) -> Option<bool> {
     use Call as C;
     match call {
         C::Find { .. } | C::Aggregate { .. } | C::Count { .. } | C::Explain { .. } | C::Insert { .. } | C::Update { .. } | C::Delete { .. } | C::AggregateInto { .. } | C::CreateCollection { .. } | C::DropCollection { .. } | C::RunCommand { .. } => Some(true),
-        C::SelectRows { .. } | C::QuerySql { .. } | C::SqlInsertRows { .. } | C::SqlUpdateRows { .. } | C::SqlDeleteRows { .. } | C::CreateTable { .. } | C::DropTable { .. } | C::RunSql { .. } => Some(false),
+        C::SelectRows { .. } | C::QuerySql { .. } | C::ExplainSql { .. } | C::SqlInsertRows { .. } | C::SqlUpdateRows { .. } | C::SqlDeleteRows { .. } | C::CreateTable { .. } | C::DropTable { .. } | C::RunSql { .. } => Some(false),
         _ => None,
     }
 }

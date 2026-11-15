@@ -79,8 +79,9 @@ pub enum Call {
     Count { ns: Ns, filter: Document },
     Explain { ns: Ns, filter: Document, sort: Option<Document>, pipeline: Option<Vec<Document>> },
     SelectRows { ns: Ns, columns: Vec<String>, wher: Vec<Cond>, order: Vec<(String, bool)>, limit: Option<u32>, offset: u64 },
-    /// `explain`: the explain_sql tool, which returns the statement's plan instead of its rows.
-    QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32>, explain: bool },
+    QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32> },
+    /// The plan of one read-only statement, with the same checks as QuerySql.
+    ExplainSql { conn: ConnRef, db: Option<String>, sql: String },
     Insert { ns: Ns, docs: Vec<Document> },
     Update { ns: Ns, filter: Document, update: Update, many: bool },
     Delete { ns: Ns, filter: Document, many: bool },
@@ -496,8 +497,8 @@ pub fn parse(tool: &str, args: &Value) -> Result<Call, ArgErr> {
             };
             Call::SelectRows { ns: a.ns("table")?, columns, wher: a.wher()?, order, limit: a.limit()?, offset: a.uint("offset")?.unwrap_or(0) }
         }
-        "query_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: a.limit()?, explain: false },
-        "explain_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: None, explain: true },
+        "query_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: a.limit()? },
+        "explain_sql" => Call::ExplainSql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")? },
         "insert" => {
             let docs = a.rows("documents")?.into_iter().map(|d| match Bson::try_from(Value::Object(d)) {
                 Ok(Bson::Document(d)) => Ok(d),
@@ -610,7 +611,7 @@ const USER_COMMANDS: [&str; 16] = ["createUser", "updateUser", "dropUser", "drop
 pub fn classify(c: &Call, dialect: Option<Dialect>) -> OpClass {
     match c {
         Call::ListConnections | Call::ListDatabases { .. } | Call::ListCollections { .. } | Call::Describe { .. } | Call::Find { .. } | Call::Aggregate { .. } | Call::Count { .. } | Call::Explain { .. } | Call::SelectRows { .. } => OpClass::ReadData,
-        Call::QuerySql { sql, .. } => match dialect {
+        Call::QuerySql { sql, .. } | Call::ExplainSql { sql, .. } => match dialect {
             Some(d) if read_only_check(sql, d).is_ok() => OpClass::ReadData,
             _ => OpClass::RunScripts,
         },
@@ -766,7 +767,7 @@ impl Call {
     pub fn conn(&self) -> Option<&ConnRef> {
         match self {
             Call::ListConnections => None,
-            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } => Some(conn),
+            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::ExplainSql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } => Some(conn),
             _ => self.ns().map(|n| &n.conn),
         }
     }
@@ -781,7 +782,7 @@ impl Call {
     /// Whether the call runs text Quarry does not parse into fields (SQL, scripts, commands), so field rules cannot
     /// guard it.
     pub fn is_free_text(&self) -> bool {
-        matches!(self, Call::QuerySql { .. } | Call::RunSql { .. } | Call::RunCommand { .. } | Call::RunShell { .. })
+        matches!(self, Call::QuerySql { .. } | Call::ExplainSql { .. } | Call::RunSql { .. } | Call::RunCommand { .. } | Call::RunShell { .. })
     }
 
     /// Every namespace the call reads or writes: its own, plus pipeline lookups and $out or $merge targets, so the
@@ -793,7 +794,7 @@ impl Call {
         }
         match self {
             Call::ListCollections { db, .. } => out.push(Target { db: db.clone(), coll: None }),
-            Call::QuerySql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. } => out.push(Target { db: db.clone(), coll: None }),
+            Call::QuerySql { db: Some(db), .. } | Call::ExplainSql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. } => out.push(Target { db: db.clone(), coll: None }),
             Call::RunCommand { db, command, .. } => {
                 out.push(Target { db: db.clone(), coll: None });
                 if let Some(Bson::String(c)) = command.iter().next().map(|(_, v)| v) {
@@ -1066,7 +1067,7 @@ mod tests {
     #[test]
     fn classes() {
         let ns = Ns { conn: ConnRef::Id(1), db: "d".into(), coll: "c".into() };
-        let q = |sql: &str| Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: sql.into(), limit: None, explain: false };
+        let q = |sql: &str| Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: sql.into(), limit: None };
         assert_eq!(classify(&q("SELECT 1"), Some(Dialect::MySql)), OpClass::ReadData);
         assert_eq!(classify(&q("SELECT 1"), Some(Dialect::Postgres)), OpClass::ReadData);
         assert_eq!(classify(&q("SELECT 1; DELETE FROM t"), Some(Dialect::MySql)), OpClass::RunScripts);

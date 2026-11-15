@@ -642,7 +642,7 @@ impl App {
     /// text 'null', so that one matches both.
     fn dup_filter(&self, conn: u64, col: &str, value: String) -> String {
         let d = self.dialect_of(conn);
-        let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
+        let bs = self.sql_bs_of(conn);
         let q = d.quote_ident(col);
         let eq = format!("{q} = {}", db::copy::sql_literal(d, Some(&Bson::String(value.clone())), false, bs));
         if d == db::sql::Dialect::Postgres && value == "null" { format!("({q} IS NULL OR {eq})") } else { eq }

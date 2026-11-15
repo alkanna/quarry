@@ -258,7 +258,12 @@ impl App {
 
     /// Whether the open connection's server reads backslash escapes in strings.
     pub(in crate::app) fn sql_bs(&self) -> bool {
-        self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).is_none_or(|d| d.backslash_escapes())
+        self.t().is_none_or(|t| self.sql_bs_of(t.sel.conn))
+    }
+
+    /// Whether connection `conn` reads backslashes in string literals as escapes.
+    pub(in crate::app) fn sql_bs_of(&self, conn: u64) -> bool {
+        self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|d| d.backslash_escapes())
     }
 
     /// Why the open table cannot be edited at all, if so.

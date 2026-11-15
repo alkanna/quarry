@@ -199,7 +199,7 @@ pub(in crate::db) async fn query_sql(db: &Db, schema: &str, sql: &str, limit: Op
 /// every detail and warning line goes through the value rules.
 pub(in crate::db) async fn explain_sql(db: &Db, schema: &str, sql: &str, rules: &Rules, limits: &Limits, h: &RunHandle) -> Res<Answer> {
     let d = db.dialect;
-    if super::lex::count_with(sql, d, true, false) != 1 || super::lex::count_with(sql, d, false, false) != 1 {
+    if !super::lex::one_statement(sql, d, false) {
         return Err("explain_sql explains one statement at a time.".into());
     }
     super::plan::explainable(sql, d)?;
@@ -232,11 +232,10 @@ pub(in crate::db) async fn explain_sql(db: &Db, schema: &str, sql: &str, rules: 
 
 /// An explain answer is one piece that cannot be paged, so one past the byte limit is refused whole.
 fn capped(a: Answer, limits: &Limits) -> Res<Answer> {
-    let n = a.value.to_string().len();
-    if n > limits.bytes as usize {
+    if a.bytes > limits.bytes as u64 {
         return Err(format!("The plan is longer than the {} byte limit for agent answers. Explain a smaller part of the statement.", limits.bytes));
     }
-    Ok(Answer { bytes: n as u64, ..a })
+    Ok(a)
 }
 
 /// `run_sql`: statements that may write, through the user's own script path. On a locked connection it runs read-only
