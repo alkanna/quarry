@@ -7,39 +7,28 @@ use super::*;
 /// The room the three take at the right of the header.
 pub(super) const BUTTONS_W: f32 = WIN_BUTTON_W * 3.0;
 
-fn flag() -> egui::Id {
-    egui::Id::unique("quarry-win-frame")
-}
-
-/// Whether the header draws the window buttons: the window's own title bar is gone.
-pub(super) fn active(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<bool>(flag())).unwrap_or(false)
-}
-
-/// Turns the window buttons on. Used once the frame is installed, and by tests and the demo switch.
-pub(super) fn enable(ctx: &egui::Context) {
-    ctx.data_mut(|d| d.insert_temp(flag(), true));
-}
-
-/// Replaces the native title bar on Windows. The demo's QUARRY_TEST_WINFRAME switch shows the buttons on any
-/// platform, for screenshots.
-pub(super) fn install(cc: &eframe::CreationContext<'_>, demo: bool) {
-    if demo && std::env::var("QUARRY_TEST_WINFRAME").is_ok() {
-        enable(&cc.egui_ctx);
-    }
-    #[cfg(windows)]
-    {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
-            RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
-            _ => None,
-        });
-        let ctx = cc.egui_ctx.clone();
-        match hwnd {
-            Some(h) if crate::win_frame::install(h, move || ctx.request_repaint()) => enable(&cc.egui_ctx),
-            _ => eprintln!("Quarry keeps the Windows title bar: the window could not be subclassed"),
+/// Replaces the native title bar on Windows. True when the header now draws the window buttons.
+#[cfg(windows)]
+pub(super) fn install(cc: &eframe::CreationContext<'_>) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
+        RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+        _ => None,
+    });
+    let ctx = cc.egui_ctx.clone();
+    match hwnd {
+        Some(h) if crate::win_frame::install(h, move || ctx.request_repaint()) => true,
+        _ => {
+            eprintln!("Quarry keeps the Windows title bar: the window could not be subclassed");
+            false
         }
     }
+}
+
+/// Other platforms keep their own title bar, or hide it under the header as macOS does.
+#[cfg(not(windows))]
+pub(super) fn install(_cc: &eframe::CreationContext<'_>) -> bool {
+    false
 }
 
 /// Paints the three buttons at the right of the header, whose height `full` spans, and publishes where Maximize is.

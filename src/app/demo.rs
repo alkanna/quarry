@@ -33,6 +33,8 @@ impl App {
     }
 
     pub(super) fn load_demo(&mut self) {
+        // QUARRY_TEST_WINFRAME shows the Windows window buttons on any platform, for screenshots.
+        self.win_buttons |= std::env::var("QUARRY_TEST_WINFRAME").is_ok();
         let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
         let status = ["paid", "shipped", "pending", "refunded"];
         let docs: Vec<Document> = (0..50)

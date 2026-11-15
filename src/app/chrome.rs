@@ -325,7 +325,7 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            let win = window_buttons::active(ui.ctx());
+            let win = self.win_buttons;
             ui.horizontal_centered(|ui| {
                 if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), sidebar_glyph, "Toggle sidebar", "Show or hide the sidebar").clicked() {
                     self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
