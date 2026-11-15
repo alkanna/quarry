@@ -550,9 +550,10 @@ impl App {
         self.tabs.get(i).is_some_and(|t| t.script.as_ref().is_some_and(|b| super::linked::bound_text(t).is_some_and(|x| x != b.base)))
     }
 
-    /// The connection the Library panel scopes to: the current tab's, else the active one.
+    /// The connection the Library panel scopes to: the one picked in the rail, like the rest of the sidebar, else the
+    /// current tab's.
     pub(in crate::app) fn lib_conn(&self) -> Option<u64> {
-        self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()).or(self.active.filter(|c| self.conn(*c).is_some()))
+        self.active.filter(|c| self.conn(*c).is_some()).or(self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()))
     }
 
     /// A SQL script with a password in it is saved as typed, since one with the password cut out would not run, and the
