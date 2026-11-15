@@ -6,13 +6,6 @@
 use super::*;
 use crate::db::sql::testing::{PGBOUNCER_ENV, PG_ENVS};
 
-fn form(app: &mut App) -> &mut ConnForm {
-    match app.modal.as_mut() {
-        Some(Modal::Conn(f)) => f,
-        _ => panic!("the connection form is not open"),
-    }
-}
-
 /// The picker row of a setting, then its value box.
 fn add_setting(ui: &mut UiApp, name: &str, value: &str) {
     // The picker may still be open from a search that found nothing to add; its filter is emptied for the next one.

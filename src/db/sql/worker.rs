@@ -163,6 +163,17 @@ async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(D
     open_full(uri, timeout, net, adv, false).await.map(|(db, dbs, t, _)| (db, dbs, t))
 }
 
+/// Opens the SSH tunnel or the SOCKS5 proxy forwarder to the address, whichever the connection has; None when it has neither.
+/// `named` also asks for the private socket, which matters only when sqlx checks the certificate's name.
+pub(super) async fn open_carrier(net: &Net, a: &Addr, named: bool, timeout: Duration) -> Res<Option<crate::db::Way>> {
+    let to = (a.host.clone(), a.port);
+    Ok(match (&net.ssh, &net.proxy) {
+        (Some((conf, secrets)), _) => Some(crate::db::Way::Ssh(crate::ssh::open(conf, secrets, timeout, Some(to), named).await?)),
+        (None, Some(p)) => Some(crate::db::Way::Proxy(crate::ssh::socks_forward(p, to, named, timeout).await?)),
+        _ => None,
+    })
+}
+
 /// `info` also reads what the form's Test button shows: the server's default sql_mode and its UTF-8 collations.
 async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::db::Way>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
@@ -188,14 +199,11 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     };
     // The socket only matters when sqlx checks the certificate's name.
     let named = matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity);
-    let tunnel = match (&net.ssh, &net.proxy) {
-        (Some((conf, secrets)), _) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), named).await?),
-        (None, Some(p)) => Some(crate::ssh::socks_forward(p, (a.host.clone(), a.port), named, timeout).await?),
-        _ => None,
-    };
+    let carrier = open_carrier(net, &a, named, timeout).await?;
+    let tunnel = carrier.as_ref().and_then(crate::db::Way::tunnel);
     // sqlx checks the certificate against the host it is given. Through the tunnel's socket that stays the name typed;
     // Windows has only the tunnel's port, so there the name checked is 127.0.0.1.
-    let (host, port) = match (&tunnel, &cloud) {
+    let (host, port) = match (tunnel, &cloud) {
         (Some(t), _) if t.socket.is_none() => ("127.0.0.1".to_string(), t.port),
         (_, Some(p)) => ("127.0.0.1".to_string(), p.port),
         _ => (a.host.clone(), a.port),
@@ -208,7 +216,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     if net.cloud_sql.as_ref().is_some_and(|c| c.iam) {
         o = o.enable_cleartext_plugin(true);
     }
-    if let Some(s) = tunnel.as_ref().and_then(|t| t.socket.as_ref()) {
+    if let Some(s) = tunnel.and_then(|t| t.socket.as_ref()) {
         o = o.socket(s);
     }
     if !a.password.is_empty() {
@@ -229,7 +237,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let _ = c.close().await;
         r.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))
     };
-    let way = tunnel.map(if net.ssh.is_some() { crate::db::Way::Ssh } else { crate::db::Way::Proxy }).or(cloud.map(crate::db::Way::CloudSql));
+    let way = carrier.or(cloud.map(crate::db::Way::CloudSql));
     tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| crate::db::Way::blame_proxy(way.as_ref(), m))?;
     let mut pool_opts = MySqlPoolOptions::new().max_connections(4).acquire_timeout(timeout);
     if let Some(idle) = adv.idle_timeout() {

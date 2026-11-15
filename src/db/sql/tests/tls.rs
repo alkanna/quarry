@@ -7,42 +7,18 @@
 //! the MySQL one as mysql.example.test and my.other.test. Commands in docs/sql/POSTGRES.md Verification.
 
 use crate::db::sql::{Addr, SslMode};
-use crate::db::{ErrCtx, Msg, Net, Worker, explain};
+use super::Live;
+use crate::db::{ErrCtx, Net, explain};
 use std::time::Duration;
 
-struct Live {
-    w: Worker,
-    rx: std::sync::mpsc::Receiver<Msg>,
-    dir: String,
-}
-
-impl Live {
-    fn new() -> Option<Live> {
-        let dir = std::env::var("QUARRY_TEST_TLS_DIR").ok()?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        Some(Live { w: Worker::new(tx, eframe::egui::Context::default()), rx, dir })
-    }
-
-    fn ca(&self, f: &str) -> String {
-        std::path::Path::new(&self.dir).join(f).display().to_string()
-    }
-
-    fn test(&self, a: &Addr, net: Net) -> Result<String, String> {
-        self.w.sql_test_with(0, a.to_uri(), Duration::from_secs(20), net, Default::default());
-        match self.rx.recv_timeout(Duration::from_secs(40)) {
-            Ok(Msg::Tested { res, .. }) => res,
-            _ => panic!("expected Tested"),
-        }
-    }
+fn ca(dir: &str, f: &str) -> String {
+    std::path::Path::new(dir).join(f).display().to_string()
 }
 
 fn ssh() -> Option<Net> {
-    let s = std::env::var("QUARRY_TEST_TLS_SSH").ok()?;
-    let (cred, hp) = s.rsplit_once('@')?;
-    let (user, pass) = cred.split_once(':')?;
-    let (host, port) = hp.rsplit_once(':')?;
-    let conf = crate::ssh::SshConf { host: host.into(), port: port.parse().ok()?, user: user.into(), auth: crate::ssh::SshAuth::Password, ..Default::default() };
-    Some(Net { ssh: Some((conf, crate::ssh::SshSecrets { password: Some(pass.into()), passphrase: None })), ..Default::default() })
+    let (user, pass, host, port) = super::creds("QUARRY_TEST_TLS_SSH")?;
+    let conf = crate::ssh::SshConf { host, port, user, auth: crate::ssh::SshAuth::Password, ..Default::default() };
+    Some(Net { ssh: Some((conf, crate::ssh::SshSecrets { password: Some(pass), passphrase: None })), ..Default::default() })
 }
 
 fn title(r: &Result<String, String>) -> String {
@@ -51,10 +27,11 @@ fn title(r: &Result<String, String>) -> String {
 
 /// Every case runs before the test fails, so one run shows the whole picture.
 fn check(var: &str, names: (&str, &str), ca_skips_name: bool) {
-    let Some(l) = Live::new() else { return };
+    let Ok(dir) = std::env::var("QUARRY_TEST_TLS_DIR") else { return };
+    let l = Live::new();
     let Ok(base) = std::env::var(var) else { return };
     let a = Addr::parse(&base).unwrap();
-    let with = |mode: SslMode, ca: &str| Addr { ssl_mode: mode, ssl_ca: l.ca(ca), ..a.clone() };
+    let with = |mode: SslMode, ca_file: &str| Addr { ssl_mode: mode, ssl_ca: ca(&dir, ca_file), ..a.clone() };
     let mut bad = Vec::new();
     let mut expect = |case: &str, r: Result<String, String>, want: &str| {
         let got = title(&r);

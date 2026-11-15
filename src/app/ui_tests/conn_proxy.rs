@@ -12,13 +12,6 @@ fn open_form(engine: db::sql::Engine, scheme: &str) -> UiApp {
     ui
 }
 
-fn form(app: &mut App) -> &mut ConnForm {
-    match app.modal.as_mut() {
-        Some(Modal::Conn(f)) => f,
-        _ => panic!("the connection form is not open"),
-    }
-}
-
 #[test]
 fn the_sql_forms_have_a_proxy_tab_that_sets_the_connections_proxy() {
     for (engine, scheme) in [(db::sql::Engine::MySql, "mysql"), (db::sql::Engine::Postgres, "postgres")] {

@@ -64,6 +64,14 @@ use super::*;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
+/// The open connection form, edited in place.
+fn form(app: &mut App) -> &mut ConnForm {
+    match app.modal.as_mut() {
+        Some(Modal::Conn(f)) => f,
+        _ => panic!("the connection form is not open"),
+    }
+}
+
 const LIMIT: Duration = Duration::from_secs(40);
 const CONN: u64 = 1;
 

@@ -393,6 +393,19 @@ pub enum Way {
 }
 
 impl Way {
+    /// The local forwarder of an SSH tunnel or a SOCKS5 proxy.
+    pub fn tunnel(&self) -> Option<&crate::ssh::Tunnel> {
+        match self {
+            Way::Ssh(t) | Way::Proxy(t) => Some(t),
+            Way::CloudSql(_) => None,
+        }
+    }
+
+    /// Whether the connection goes through a local forwarder, so the server's name is not what is dialed.
+    pub fn is_forwarded(&self) -> bool {
+        self.tunnel().is_some()
+    }
+
     /// A failed connect through a SOCKS5 proxy reads as a closed connection to the client, so the proxy's own reason for
     /// the last failed dial replaces the client's wording when there is one.
     pub fn blame_proxy(way: Option<&Way>, err: String) -> String {
@@ -411,6 +424,18 @@ pub struct Proxy {
     pub user: String,
     #[serde(skip)]
     pub password: Option<String>,
+}
+
+impl Proxy {
+    /// The port, 1080 when unset.
+    pub fn port(&self) -> u16 {
+        if self.port == 0 { 1080 } else { self.port }
+    }
+
+    /// The login to send, None when the proxy takes none.
+    pub fn auth(&self) -> Option<(String, String)> {
+        (!self.user.is_empty()).then(|| (self.user.clone(), self.password.clone().unwrap_or_default()))
+    }
 }
 
 pub fn short(b: &Bson) -> String {

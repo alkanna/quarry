@@ -19,6 +19,36 @@ mod views;
 
 use super::*;
 
+/// `user:password@host:port` from the environment variable `var`, as (user, password, host, port).
+fn creds(var: &str) -> Option<(String, String, String, u16)> {
+    let s = std::env::var(var).ok()?;
+    let (cred, hp) = s.rsplit_once('@')?;
+    let (user, pass) = cred.split_once(':')?;
+    let (host, port) = hp.rsplit_once(':')?;
+    Some((user.into(), pass.into(), host.into(), port.parse().ok()?))
+}
+
+/// A worker whose Test answers a live test reads.
+struct Live {
+    w: crate::db::Worker,
+    rx: std::sync::mpsc::Receiver<crate::db::Msg>,
+}
+
+impl Live {
+    fn new() -> Live {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Live { w: crate::db::Worker::new(tx, eframe::egui::Context::default()), rx }
+    }
+
+    fn test(&self, a: &Addr, net: crate::db::Net) -> Result<String, String> {
+        self.w.sql_test_with(0, a.to_uri(), std::time::Duration::from_secs(20), net, Default::default());
+        match self.rx.recv_timeout(std::time::Duration::from_secs(40)) {
+            Ok(crate::db::Msg::Tested { res, .. }) => res,
+            _ => panic!("expected Tested"),
+        }
+    }
+}
+
 #[test]
 fn engine_comes_from_the_scheme() {
     assert_eq!(Engine::from_uri("mongodb+srv://x"), Some(Engine::Mongo));

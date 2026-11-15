@@ -234,7 +234,7 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
     .await
 }
 
-/// The words for a SOCKS5 failure. They start with "The SOCKS5 proxy" so `db::explain` classifies them.
+/// The words for a SOCKS5 failure. They start with "The SOCKS5 proxy" so `db::classify` recognizes them.
 fn proxy_words(name: &str, to: &(String, u16), e: &fast_socks5::SocksError) -> String {
     use fast_socks5::SocksError as E;
     match e {
@@ -244,51 +244,68 @@ fn proxy_words(name: &str, to: &(String, u16), e: &fast_socks5::SocksError) -> S
     }
 }
 
+/// One proxy and the one destination it forwards to, shared by every connection the forwarder accepts.
+struct Via {
+    name: String,
+    to: (String, u16),
+    auth: Option<(String, String)>,
+    addrs: Vec<std::net::SocketAddr>,
+    timeout: std::time::Duration,
+    /// The address that last connected, tried first so a name that resolves to ::1 before 127.0.0.1 costs one failed dial.
+    last_ok: std::sync::atomic::AtomicUsize,
+}
+
+impl Via {
+    async fn dial(&self) -> Result<fast_socks5::client::Socks5Stream<tokio::net::TcpStream>, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let start = self.last_ok.load(Relaxed);
+        let mut last = String::new();
+        for k in 0..self.addrs.len() {
+            let i = (start + k) % self.addrs.len();
+            let mut conf = fast_socks5::client::Config::default();
+            conf.set_connect_timeout(self.timeout.as_secs().max(1));
+            let (host, port) = self.to.clone();
+            let dial = async {
+                match &self.auth {
+                    None => fast_socks5::client::Socks5Stream::connect(self.addrs[i], host, port, conf).await,
+                    Some((user, password)) => fast_socks5::client::Socks5Stream::connect_with_password(self.addrs[i], host, port, user.clone(), password.clone(), conf).await,
+                }
+            };
+            match tokio::time::timeout(self.timeout, dial).await {
+                Ok(Ok(s)) => {
+                    self.last_ok.store(i, Relaxed);
+                    return Ok(s);
+                }
+                // The proxy was not reached at this address, so the next one gets its turn.
+                Ok(Err(fast_socks5::SocksError::Io(e))) => last = format!("The SOCKS5 proxy {} could not be reached: {e}", self.name),
+                Err(_) => last = format!("The SOCKS5 proxy {} did not answer in time.", self.name),
+                // The proxy answered, and another address would give the same answer.
+                Ok(Err(e)) => return Err(proxy_words(&self.name, &self.to, &e)),
+            }
+        }
+        Err(last)
+    }
+}
+
 /// Opens a forwarder to `to` through a user-run SOCKS5 proxy, shaped like `open`'s fixed forward so a client that cannot
 /// speak SOCKS5 can use it. Nothing is dialed here, because a probe would open a real session to the database and MySQL
 /// counts it as a connect error against the proxy's address. A failing dial keeps the proxy's reason in `Tunnel::dial_error`.
 pub async fn socks_forward(p: &crate::db::Proxy, to: (String, u16), want_socket: bool, timeout: std::time::Duration) -> Result<Tunnel, String> {
-    let port = if p.port == 0 { 1080 } else { p.port };
+    let port = p.port();
     let name = format!("{}:{port}", p.host);
     // Resolved once here, so the blocking lookup of a host name never runs inside the accept loop's tasks. Every address
     // is kept: "localhost" may give ::1 first while the proxy listens on 127.0.0.1.
-    let addrs: Arc<Vec<std::net::SocketAddr>> = Arc::new(tokio::net::lookup_host((p.host.as_str(), port)).await.map_err(|e| format!("Could not find the SOCKS5 proxy {name}: {e}"))?.collect());
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((p.host.as_str(), port)).await.map_err(|e| format!("Could not find the SOCKS5 proxy {name}: {e}"))?.collect();
     if addrs.is_empty() {
         return Err(format!("Could not find the SOCKS5 proxy {name}"));
     }
-    let (user, password) = (p.user.clone(), p.password.clone().unwrap_or_default());
-    let dial = move |to: (String, u16)| {
-        let (user, password, addrs, name) = (user.clone(), password.clone(), addrs.clone(), name.clone());
-        async move {
-            let mut last = String::new();
-            for addr in addrs.iter().copied() {
-                let mut conf = fast_socks5::client::Config::default();
-                conf.set_connect_timeout(timeout.as_secs().max(1));
-                let dial = async {
-                    if user.is_empty() {
-                        fast_socks5::client::Socks5Stream::connect(addr, to.0.clone(), to.1, conf).await
-                    } else {
-                        fast_socks5::client::Socks5Stream::connect_with_password(addr, to.0.clone(), to.1, user.clone(), password.clone(), conf).await
-                    }
-                };
-                match tokio::time::timeout(timeout, dial).await {
-                    Ok(Ok(s)) => return Ok(s),
-                    // The proxy was not reached at this address, so the next one gets its turn.
-                    Ok(Err(fast_socks5::SocksError::Io(e))) => last = format!("The SOCKS5 proxy {name} could not be reached: {e}"),
-                    Err(_) => last = format!("The SOCKS5 proxy {name} did not answer in time."),
-                    // The proxy answered, and another address would give the same answer.
-                    Ok(Err(e)) => return Err(proxy_words(&name, &to, &e)),
-                }
-            }
-            Err(last)
-        }
-    };
+    let via = Arc::new(Via { name, to, auth: p.auth(), addrs, timeout, last_ok: Default::default() });
     let dial_error = Arc::new(Mutex::new(None));
     let note = dial_error.clone();
     serve(true, want_socket, String::new(), dial_error, move |mut s| {
-        let (dial, to, note) = (dial.clone(), to.clone(), note.clone());
+        let (via, note) = (via.clone(), note.clone());
         async move {
-            match dial(to).await {
+            match via.dial().await {
                 Ok(mut up) => {
                     *note.lock().unwrap() = None;
                     let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;

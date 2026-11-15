@@ -40,9 +40,7 @@ fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
 fn file_row(ui: &mut egui::Ui, label: &str, path: &mut String, hint: &str) {
     form_label(ui, label);
     ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(path).hint_text(hint).desired_width(280.0));
-        let name = format!("{label} field");
-        r.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, true, name.clone()));
+        named_field(ui, label, path, hint, false, 280.0);
         if ui.button("Choose…").clicked() && let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
             *path = p.display().to_string();
         }
@@ -69,126 +67,140 @@ fn mongo_toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) {
     });
 }
 
+/// Parses the MongoDB address once, runs `body` on it and writes it back only when `body` set the flag it is given. None
+/// when the text is not a mongodb:// address.
+fn with_mongo<T>(f: &mut ConnForm, body: impl FnOnce(&mut db::mongo_uri::MongoUri, &mut bool) -> T) -> Option<T> {
+    let mut m = db::mongo_uri::MongoUri::parse(&f.uri)?;
+    let mut dirty = false;
+    let r = body(&mut m, &mut dirty);
+    if dirty {
+        f.uri = m.to_string();
+    }
+    Some(r)
+}
+
 const READ_PREFERENCES: [&str; 5] = ["primary", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"];
 
 /// The MongoDB address as fields, a view over `f.uri`: each frame parses it and an edit is written back through the
 /// setters, which leave every option the form has no field for as it was.
 fn mongo_rows(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) {
-    use db::mongo_uri::MongoUri;
-    let Some(mut m) = MongoUri::parse(&f.uri) else {
+    let shown = with_mongo(f, |m, dirty| {
+        form_label(ui, "SRV");
+        let mut srv = m.srv;
+        mongo_toggle(ui, &mut srv, "mongodb+srv:// address (one DNS name, TLS on)");
+        if srv != m.srv {
+            m.set_srv(srv);
+            *dirty = true;
+        }
+        ui.end_row();
+        form_label(ui, "Hosts");
+        let mut hosts = m.hosts_text();
+        if named_field(ui, "Hosts", &mut hosts, if m.srv { "cluster0.abcde.mongodb.net" } else { "host1:27017,host2:27017" }, false, field_w) {
+            m.set_hosts(&hosts);
+            *dirty = true;
+        }
+        ui.end_row();
+        form_label(ui, "User");
+        let mut user = m.user();
+        if named_field(ui, "User", &mut user, "", false, 200.0) {
+            m.set_user(&user);
+            *dirty = true;
+        }
+        ui.end_row();
+        form_label(ui, "Password");
+        let mut pwd = m.password();
+        if named_field(ui, "Password", &mut pwd, "", true, 200.0) {
+            m.set_password(&pwd);
+            *dirty = true;
+        }
+        ui.end_row();
+        form_label(ui, "Database");
+        let mut name = m.database();
+        if named_field(ui, "Database", &mut name, "Optional", false, 200.0) {
+            m.set_database(&name);
+            *dirty = true;
+        }
+        ui.end_row();
+        for (label, key, hint) in [("Auth source", "authSource", "admin, or the database the user lives in"), ("Replica set", "replicaSet", "Optional")] {
+            form_label(ui, label);
+            let mut v = m.opt(key).unwrap_or_default();
+            if named_field(ui, label, &mut v, hint, false, 200.0) {
+                m.set_opt(key, (!v.is_empty()).then_some(v.as_str()));
+                *dirty = true;
+            }
+            ui.end_row();
+        }
+        form_label(ui, "Read preference");
+        let cur = m.opt("readPreference");
+        let mut pick = None;
+        egui::ComboBox::from_id_salt("mongo-readpref").width(200.0).selected_text(cur.clone().unwrap_or_else(|| "Default (primary)".into())).show_ui(ui, |ui| {
+            menu_look(ui);
+            if ui.selectable_label(cur.is_none(), "Default (primary)").clicked() {
+                pick = Some(None);
+            }
+            for p in READ_PREFERENCES {
+                if ui.selectable_label(cur.as_deref() == Some(p), p).clicked() {
+                    pick = Some(Some(p));
+                }
+            }
+        });
+        if let Some(p) = pick {
+            m.set_opt("readPreference", p);
+            *dirty = true;
+        }
+        ui.end_row();
+    });
+    if shown.is_none() {
         form_label(ui, "");
         ui.add(egui::Label::new(RichText::new("This is not a mongodb:// or mongodb+srv:// address, so only the URI above is edited.").size(TXT_SMALL).color(FAINT())).wrap());
         ui.end_row();
-        return;
-    };
-    form_label(ui, "SRV");
-    let mut srv = m.srv;
-    mongo_toggle(ui, &mut srv, "mongodb+srv:// address (one DNS name, TLS on)");
-    if srv != m.srv {
-        m.set_srv(srv);
-    }
-    ui.end_row();
-    form_label(ui, "Hosts");
-    let mut hosts = m.hosts_text();
-    if named_field(ui, "Hosts", &mut hosts, if m.srv { "cluster0.abcde.mongodb.net" } else { "host1:27017,host2:27017" }, false, field_w) {
-        m.set_hosts(&hosts);
-    }
-    ui.end_row();
-    form_label(ui, "User");
-    let mut user = m.user();
-    if named_field(ui, "User", &mut user, "", false, 200.0) {
-        m.set_user(&user);
-    }
-    ui.end_row();
-    form_label(ui, "Password");
-    let mut pwd = m.password();
-    if named_field(ui, "Password", &mut pwd, "", true, 200.0) {
-        m.set_password(&pwd);
-    }
-    ui.end_row();
-    form_label(ui, "Database");
-    let mut name = m.database();
-    if named_field(ui, "Database", &mut name, "Optional", false, 200.0) {
-        m.set_database(&name);
-    }
-    ui.end_row();
-    for (label, key, hint) in [("Auth source", "authSource", "admin, or the database the user lives in"), ("Replica set", "replicaSet", "Optional")] {
-        form_label(ui, label);
-        let mut v = m.opt(key).unwrap_or_default();
-        if named_field(ui, label, &mut v, hint, false, 200.0) {
-            m.set_opt(key, (!v.is_empty()).then_some(v.as_str()));
-        }
-        ui.end_row();
-    }
-    form_label(ui, "Read preference");
-    let cur = m.opt("readPreference");
-    let mut pick = None;
-    egui::ComboBox::from_id_salt("mongo-readpref").width(200.0).selected_text(cur.clone().unwrap_or_else(|| "Default (primary)".into())).show_ui(ui, |ui| {
-        menu_look(ui);
-        if ui.selectable_label(cur.is_none(), "Default (primary)").clicked() {
-            pick = Some(None);
-        }
-        for p in READ_PREFERENCES {
-            if ui.selectable_label(cur.as_deref() == Some(p), p).clicked() {
-                pick = Some(Some(p));
-            }
-        }
-    });
-    if let Some(p) = pick {
-        m.set_opt("readPreference", p);
-    }
-    ui.end_row();
-    let new = m.to_string();
-    if new != f.uri {
-        f.uri = new;
     }
 }
 
 /// The MongoDB TLS tab, a view over the same URI. The driver takes one PEM file holding the client certificate and key.
 fn mongo_tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
-    use db::mongo_uri::MongoUri;
     settings_section(ui, "TLS", |ui| {
-        let Some(mut m) = MongoUri::parse(&f.uri) else {
-            ui.add(egui::Label::new(RichText::new("This is not a mongodb:// or mongodb+srv:// address, so TLS is set in the URI on the Standard tab.").size(TXT_SMALL).color(FAINT())).wrap());
-            return;
-        };
-        egui::Grid::new("mongo-tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-            form_label(ui, "TLS");
+        let shown = with_mongo(f, |m, dirty| {
             let mut on = m.tls_on();
-            mongo_toggle(ui, &mut on, "Encrypt the connection");
-            if on != m.tls_on() {
-                m.set_tls(on);
-            }
-            ui.end_row();
-            if !on {
-                return;
-            }
-            for (label, key) in [("CA file", "tlsCAFile"), ("Client cert and key", "tlsCertificateKeyFile")] {
-                let before = m.opt(key).unwrap_or_default();
-                let mut path = before.clone();
-                file_row(ui, label, &mut path, "optional, PEM file");
-                if path != before {
-                    m.set_opt(key, (!path.is_empty()).then_some(path.as_str()));
+            egui::Grid::new("mongo-tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                form_label(ui, "TLS");
+                mongo_toggle(ui, &mut on, "Encrypt the connection");
+                if on != m.tls_on() {
+                    m.set_tls(on);
+                    *dirty = true;
                 }
-            }
-            form_label(ui, "Certificates");
-            let mut invalid = m.allow_invalid();
-            mongo_toggle(ui, &mut invalid, "Allow invalid certificates");
-            if invalid != m.allow_invalid() {
-                m.set_allow_invalid(invalid);
-            }
-            ui.end_row();
+                ui.end_row();
+                if !on {
+                    return;
+                }
+                for (label, key) in [("CA file", "tlsCAFile"), ("Client cert and key", "tlsCertificateKeyFile")] {
+                    let before = m.opt(key).unwrap_or_default();
+                    let mut path = before.clone();
+                    file_row(ui, label, &mut path, "optional, PEM file");
+                    if path != before {
+                        m.set_opt(key, (!path.is_empty()).then_some(path.as_str()));
+                        *dirty = true;
+                    }
+                }
+                form_label(ui, "Certificates");
+                let mut invalid = m.allow_invalid();
+                mongo_toggle(ui, &mut invalid, "Allow invalid certificates");
+                if invalid != m.allow_invalid() {
+                    m.set_allow_invalid(invalid);
+                    *dirty = true;
+                }
+                ui.end_row();
+            });
+            ui.add_space(6.0);
+            let note = if m.tls_on() {
+                "Without a CA file the public CAs are trusted. The client certificate and its private key are one PEM file, for X.509 sign-in. Allow invalid certificates skips every check and is for testing only."
+            } else {
+                "TLS is off. Turn it on to set a CA file or a client certificate. The Proxy and SSH tabs carry the connection as before."
+            };
+            ui.add(egui::Label::new(RichText::new(note).size(TXT_SMALL).color(FAINT())).wrap());
         });
-        ui.add_space(6.0);
-        let note = if m.tls_on() {
-            "Without a CA file the public CAs are trusted. The client certificate and its private key are one PEM file, for X.509 sign-in. Allow invalid certificates skips every check and is for testing only."
-        } else {
-            "TLS is off. Turn it on to set a CA file or a client certificate. The Proxy and SSH tabs carry the connection as before."
-        };
-        ui.add(egui::Label::new(RichText::new(note).size(TXT_SMALL).color(FAINT())).wrap());
-        let new = m.to_string();
-        if new != f.uri {
-            f.uri = new;
+        if shown.is_none() {
+            ui.add(egui::Label::new(RichText::new("This is not a mongodb:// or mongodb+srv:// address, so TLS is set in the URI on the Standard tab.").size(TXT_SMALL).color(FAINT())).wrap());
         }
     });
 }

@@ -22,6 +22,11 @@ pub struct MongoUri {
 const SRV: &str = "mongodb+srv://";
 const PLAIN: &str = "mongodb://";
 
+/// The options that imply TLS when the driver sees them without `tls`.
+const TLS_IMPLYING: [&str; 5] = ["tlsCAFile", "tlsCertificateKeyFile", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"];
+/// The options that skip certificate checks.
+const TLS_INVALID: [&str; 3] = ["tlsInsecure", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames"];
+
 use super::pct::{decode, encode};
 
 impl MongoUri {
@@ -109,10 +114,15 @@ impl MongoUri {
             }
             self.set_opt("directConnection", None);
         }
-        if !on && self.srv && self.opt("tls").or_else(|| self.opt("ssl")).is_none() {
+        if !on && self.srv && !self.has_opt("tls") && !self.has_opt("ssl") {
             self.set_opt("tls", Some("true"));
         }
         self.srv = on;
+    }
+
+    /// Whether an option is present, whatever its value.
+    pub fn has_opt(&self, key: &str) -> bool {
+        self.query.as_ref().is_some_and(|q| q.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)))
     }
 
     /// The decoded value of an option, matching the key ignoring case.
@@ -152,7 +162,7 @@ impl MongoUri {
         match self.opt("tls").or_else(|| self.opt("ssl")).map(|v| v.to_ascii_lowercase()).as_deref() {
             Some("true") => true,
             Some("false") => false,
-            _ => self.srv || ["tlsCAFile", "tlsCertificateKeyFile", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"].iter().any(|k| self.opt(k).is_some()),
+            _ => self.srv || TLS_IMPLYING.iter().any(|k| self.has_opt(k)),
         }
     }
 
@@ -160,7 +170,7 @@ impl MongoUri {
     pub fn set_tls(&mut self, on: bool) {
         self.set_opt("ssl", None);
         if !on {
-            let keys: Vec<String> = self.query.iter().flatten().map(|(k, _)| k.clone()).filter(|k| k.len() >= 3 && k[..3].eq_ignore_ascii_case("tls") && !k.eq_ignore_ascii_case("tls")).collect();
+            let keys: Vec<String> = self.query.iter().flatten().map(|(k, _)| k.clone()).filter(|k| k.to_ascii_lowercase().starts_with("tls") && !k.eq_ignore_ascii_case("tls")).collect();
             for k in keys {
                 self.set_opt(&k, None);
             }
@@ -170,14 +180,14 @@ impl MongoUri {
 
     /// Any of the three options that skip certificate checks; tlsInsecure skips the name check too.
     pub fn allow_invalid(&self) -> bool {
-        ["tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"].iter().any(|k| self.opt(k).is_some_and(|v| v.eq_ignore_ascii_case("true")))
+        TLS_INVALID.iter().any(|k| self.opt(k).is_some_and(|v| v.eq_ignore_ascii_case("true")))
     }
 
     /// Off removes all three options. On adds tlsAllowInvalidCertificates unless tlsInsecure already says so, because the
     /// driver refuses the two together.
     pub fn set_allow_invalid(&mut self, on: bool) {
         if !on {
-            for k in ["tlsInsecure", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames"] {
+            for k in TLS_INVALID {
                 self.set_opt(k, None);
             }
         } else if !self.opt("tlsInsecure").is_some_and(|v| v.eq_ignore_ascii_case("true")) {

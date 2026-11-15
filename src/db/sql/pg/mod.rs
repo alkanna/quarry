@@ -733,19 +733,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         let port = p.port;
         (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
     } else {
-        let target = (a.host.clone(), a.port);
-        match (&net.ssh, &net.proxy) {
-            (Some((conf, secrets)), _) => {
-                let t = crate::ssh::open(conf, secrets, timeout, Some(target), false).await?;
-                let port = t.port;
-                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
-            }
-            (None, Some(p)) => {
-                let t = crate::ssh::socks_forward(p, target, false, timeout).await?;
-                let port = t.port;
-                (Some(crate::db::Way::Proxy(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
-            }
-            _ => (None, a.host.clone(), a.port, a.ssl_mode),
+        let way = super::worker::open_carrier(net, &a, false, timeout).await?;
+        match way.as_ref().and_then(crate::db::Way::tunnel).map(|t| t.port) {
+            Some(port) => (way, "127.0.0.1".to_string(), port, a.ssl_mode),
+            None => (None, a.host.clone(), a.port, a.ssl_mode),
         }
     };
     // sqlx 0.8 checks the host name in verify-ca too, through a tunnel it would check 127.0.0.1, and it trusts the web
@@ -753,7 +744,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // PostgreSQL to the relay.
     let mut client_cert = client_cert;
     let sent_cert = client_cert.is_some();
-    let relay = match super::pg::tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_) | crate::db::Way::Proxy(_))), !a.ssl_ca.trim().is_empty()) {
+    let relay = match super::pg::tls::needed(mode, way.as_ref().is_some_and(crate::db::Way::is_forwarded), !a.ssl_ca.trim().is_empty()) {
         true => Some(super::pg::tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
     };

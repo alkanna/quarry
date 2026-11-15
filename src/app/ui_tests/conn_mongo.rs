@@ -14,13 +14,6 @@ fn open_form(uri: &str, tab: ConnTab) -> UiApp {
     ui
 }
 
-fn form(app: &mut App) -> &mut ConnForm {
-    match app.modal.as_mut() {
-        Some(Modal::Conn(f)) => f,
-        _ => panic!("the connection form is not open"),
-    }
-}
-
 fn value_of(ui: &mut UiApp, field: &str) -> String {
     ui.show(field);
     ui.h.get_by_label(field).value().unwrap_or_default().to_string()

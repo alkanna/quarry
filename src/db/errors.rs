@@ -8,6 +8,8 @@ pub enum ErrKind {
     SignIn,
     Unreachable,
     Tunnel,
+    /// The user's SOCKS5 proxy refused, could not be reached, or could not reach the server.
+    Proxy,
     /// The Cloud SQL proxy or gcloud failed, or Cloud SQL refused an IAM sign-in.
     CloudSql,
     Tls,
@@ -261,11 +263,6 @@ pub fn stopped(mut raw: String) -> String {
     raw
 }
 
-/// A failure of the user's SOCKS5 proxy, worded in `ssh::proxy_words` and `ssh::socks_forward`. It shares the tunnel kind.
-pub fn is_socks_failure(low: &str) -> bool {
-    low.starts_with("the socks5 proxy") || low.starts_with("could not find the socks5 proxy")
-}
-
 /// What went wrong, without the wording: cheap enough for a label drawn every frame.
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
@@ -275,9 +272,9 @@ pub fn classify(raw: &str) -> ErrKind {
     // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
     if ["cloud sql proxy", "cloud sql:", "cloud sql iam"].iter().any(|p| low.starts_with(p)) {
         ErrKind::CloudSql
-    } else if is_socks_failure(&low) {
+    } else if low.starts_with("the socks5 proxy") || low.starts_with("could not find the socks5 proxy") {
         // Before SignIn: a refused proxy login says "authentication", and the cause is the proxy, not the database.
-        ErrKind::Tunnel
+        ErrKind::Proxy
     } else if client_cert_problem(raw).is_some() {
         // Before SignIn: the server refuses a missing certificate with 28000, and a password is not the cause.
         ErrKind::Tls
@@ -351,7 +348,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.hint = if low.contains("lookup") || low.contains("servname") || low.contains("service not known") { "The host name could not be found. Check its spelling, or whether it only resolves on a VPN.".into() } else { "No answer in time. The host may be down, or only reachable through a VPN or an SSH tunnel.".into() };
             ex.fixes = vec![Fix::Retry, Fix::EditConn];
         }
-        ErrKind::Tunnel if is_socks_failure(&low) => {
+        ErrKind::Proxy => {
             (ex.title, ex.hint) = if low.contains("refused the login") {
                 ("The SOCKS5 proxy refused the login".into(), "The proxy is there, but it did not accept the user name and password on the connection's Proxy tab. Check them, or clear them if the proxy takes none.".to_string())
             } else if low.contains("did not answer") || low.contains("could not be reached") || low.contains("could not find") {
@@ -646,11 +643,11 @@ mod tests {
     fn socks5_proxy_failures_have_their_own_kind_and_hint() {
         let t = |raw: &str| (classify(raw), explain(raw, &cx()).title);
         let login = "The SOCKS5 proxy 10.0.0.1:1080 refused the login: Authentication failed `rejected`";
-        assert_eq!(t(login), (ErrKind::Tunnel, "The SOCKS5 proxy refused the login".to_string()));
+        assert_eq!(t(login), (ErrKind::Proxy, "The SOCKS5 proxy refused the login".to_string()));
         assert_eq!(t("The SOCKS5 proxy p:1080 could not reach db:3306: Error with reply: Connection refused.").1, "The SOCKS5 proxy could not reach the server");
         assert_eq!(t("The SOCKS5 proxy p:1080 did not answer in time.").1, "The SOCKS5 proxy could not be reached");
-        assert_eq!(t("The SOCKS5 proxy p:1080 could not be reached: Connection refused (os error 111)").0, ErrKind::Tunnel);
-        assert_eq!(t("Could not find the SOCKS5 proxy p:1080: failed to lookup address information").0, ErrKind::Tunnel);
+        assert_eq!(t("The SOCKS5 proxy p:1080 could not be reached: Connection refused (os error 111)").0, ErrKind::Proxy);
+        assert_eq!(t("Could not find the SOCKS5 proxy p:1080: failed to lookup address information").0, ErrKind::Proxy);
         assert_eq!(explain(login, &cx()).fixes, vec![Fix::EditConn, Fix::Retry]);
         // A database error that merely mentions a proxy is not one.
         assert_eq!(classify("error returned from database: 1045 (28000): Access denied for user 'app'"), ErrKind::SignIn);
