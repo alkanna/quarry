@@ -120,7 +120,6 @@ pub(super) fn tag_color(tag: &str) -> Color32 {
 
 /// The color that marks a connection as risky: red for production-like tags, amber for staging-like ones, none for
 /// the rest. Matches the same words as `tag_color`.
-#[allow(dead_code)] // used by the navigation workstreams that build on this commit
 pub(super) fn tag_level(tag: &str) -> Option<Color32> {
     let t = tag.trim().to_ascii_lowercase();
     match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
@@ -132,7 +131,6 @@ pub(super) fn tag_level(tag: &str) -> Option<Color32> {
 
 /// What a connection is called, what it runs and where it lives, for headers and pickers. The version is left out
 /// until the server has answered.
-#[allow(dead_code)] // used by the navigation workstreams that build on this commit
 pub(super) fn conn_label(c: &Conn) -> (String, String, String) {
     let (_, product) = super::rail::engine_mark(c.meta.engine, &c.server.product);
     let product = if c.server.version.is_empty() { product.to_string() } else { format!("{product} {}", c.server.version) };

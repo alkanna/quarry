@@ -287,7 +287,6 @@ pub(super) struct SavedStage {
 const RECENT_DBS: usize = 5;
 
 impl UiPrefs {
-    #[allow(dead_code)] // used by the navigation workstreams that build on this commit
     pub(super) fn recent_dbs(&self, conn: u64) -> &[String] {
         self.recent_dbs.get(&conn).map_or(&[], |v| v.as_slice())
     }
