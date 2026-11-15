@@ -131,7 +131,7 @@ const QUEUE: &str = r#"[
 ]"#;
 
 #[test]
-fn a_mysql_instance_fills_the_mysql_form_with_a_password_sign_in_even_when_iam_is_on() {
+fn a_mysql_instance_with_iam_on_fills_the_mysql_form_with_an_iam_sign_in() {
     let mut ui = bare();
     ui.h.state_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
@@ -143,13 +143,12 @@ fn a_mysql_instance_fills_the_mysql_form_with_a_password_sign_in_even_when_iam_i
     ui.click("Use acme-prod:europe-west1:queue");
     ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
-    // The instance has the IAM flag on, but IAM sign-in is not offered for MySQL, so the form asks for a password.
-    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:queue".into(), iam: false, ip: IpKind::Public, mysql: true }));
+    // MySQL cuts the IAM user at the @.
+    assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:queue".into(), iam: true, ip: IpKind::Public, mysql: true }));
     assert_eq!((f.name.as_str(), f.engine, f.addr.scheme.as_str(), f.addr.port), ("queue", db::sql::Engine::MySql, "mysql", 3306));
-    assert!(f.addr.user.is_empty(), "the IAM user was filled in for MySQL");
-    ui.show_contains("Not offered for MySQL instances");
-    assert!(ui.h.query_all_by_label("Sign in with IAM").next().is_none(), "MySQL shows the IAM switch");
-    ui.show("Password");
+    assert_eq!(f.addr.user, "jane");
+    ui.show("Sign in with IAM");
+    assert!(ui.h.query_all_by_label("Password").next().is_none(), "an IAM sign-in asks for a password");
 }
 
 /// An answer to a connect the user stopped, or one a newer connect replaced, changes nothing: dropping it is what stops
