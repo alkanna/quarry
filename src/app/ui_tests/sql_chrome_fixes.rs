@@ -139,7 +139,7 @@ fn truncate_asks_for_the_table_name_and_a_locked_connection_turns_every_button_o
 #[test]
 fn postgresql_info_offers_vacuum_analyze_and_reindex_with_a_confirm_for_the_slow_two() {
     let Some(mut ui) = demo_ui(pg_info) else { return };
-    for b in ["Vacuum", "Analyze", "Reindex"] {
+    for b in ["Vacuum", "Analyze", "Reindex", "Owner", "app_owner", "Tablespace", "Last vacuum", "Dead rows"] {
         ui.show(b);
     }
     assert!(ui.h.query_all_by_label("Optimize").next().is_none() && ui.h.query_all_by_label("Truncate...").next().is_none(), "MySQL's buttons show on PostgreSQL");

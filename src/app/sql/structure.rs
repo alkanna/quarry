@@ -673,6 +673,12 @@ impl App {
                 ("Data", bytes(s.data)),
                 ("Indexes", bytes(s.index)),
                 ("Total", bytes(s.total)),
+                ("Owner", if s.owner.is_empty() { none() } else { s.owner.clone() }),
+                ("Tablespace", if s.tablespace.is_empty() { "default".into() } else { s.tablespace.clone() }),
+                // A view has no sizes and no statistics row, so "never" would be wrong for it.
+                ("Last vacuum", if s.data.is_none() { none() } else if s.vacuumed.is_empty() { "never".into() } else { s.vacuumed.clone() }),
+                ("Last analyze", if s.data.is_none() { none() } else if s.analyzed.is_empty() { "never".into() } else { s.analyzed.clone() }),
+                ("Dead rows", s.dead_rows.map_or_else(none, |n| group(&n.to_string()))),
                 ("Comment", s.comment.clone()),
             ]
         } else {

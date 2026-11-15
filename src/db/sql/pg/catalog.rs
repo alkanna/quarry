@@ -198,14 +198,21 @@ pub const SEEN_TRIGGER: &str = concat!("SELECT ", seen_trig!(), " AS s FROM pg_t
 pub const SEEN_FUNCTION: &str = concat!("SELECT ", seen_func!("SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND NOT (o.tgrelid = to_regclass($2) AND o.tgname = $3)"), " AS s FROM pg_proc p WHERE p.oid = to_regprocedure($1)");
 
 /// Params: [schema, table]. The columns of the MySQL status, plus total_bytes (heap, TOAST and indexes) and kind (the
-/// relkind). The estimate is NULL while the planner has no count, and the caller counts then.
+/// relkind). The estimate is NULL while the planner has no count, and the caller counts then. owner, tablespace (NULL for
+/// the database default), the last vacuum and analyze (with " (auto)" when autovacuum did it) and dead_rows are
+/// PostgreSQL's own; a view has no statistics row, so those are NULL for it.
 pub const TABLE_STATUS: &str = "SELECT c.relname::text AS name, ''::text AS engine, ''::text AS row_format, \
+     pg_get_userbyid(c.relowner)::text AS owner, ts.spcname::text AS tablespace, \
+     CASE WHEN st.last_autovacuum > COALESCE(st.last_vacuum, '-infinity') THEN to_char(st.last_autovacuum, 'YYYY-MM-DD HH24:MI') || ' (auto)' ELSE to_char(st.last_vacuum, 'YYYY-MM-DD HH24:MI') END AS vacuumed, \
+     CASE WHEN st.last_autoanalyze > COALESCE(st.last_analyze, '-infinity') THEN to_char(st.last_autoanalyze, 'YYYY-MM-DD HH24:MI') || ' (auto)' ELSE to_char(st.last_analyze, 'YYYY-MM-DD HH24:MI') END AS analyzed, \
+     st.n_dead_tup AS dead_rows, \
      CASE WHEN c.reltuples > 0 THEN c.reltuples::bigint END AS row_estimate, NULL::bigint AS avg_row_bytes, \
      CASE WHEN c.relkind IN ('r', 'm', 'p') THEN pg_relation_size(c.oid) END AS data_bytes, \
      CASE WHEN c.relkind IN ('r', 'm', 'p') THEN pg_indexes_size(c.oid) END AS index_bytes, NULL::bigint AS free_bytes, NULL::bigint AS auto_increment, \
      NULL::text AS created, NULL::text AS updated, NULL::text AS collation, ''::text AS options, COALESCE(obj_description(c.oid, 'pg_class'), '') AS comment, \
      CASE WHEN c.relkind IN ('r', 'm', 'p') THEN pg_total_relation_size(c.oid) END AS total_bytes, c.relkind::text AS kind \
-     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace \
+     LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid WHERE n.nspname = $1 AND c.relname = $2";
 
 /// Params: [schema]. Columns: tbl, name, full_type, col_key, nullable, and pg_type, pg_cat, pg_typtype.
 pub const ALL_COLUMNS: &str = concat!(

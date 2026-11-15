@@ -480,7 +480,7 @@ fn orders_structure() -> Structure {
             ..Default::default()
         }],
         pg_schema: Some(SCHEMA.into()),
-        status: db::sql::structure::Status { engine: "heap".into(), rows: Some(ORDERS_ROWS), avg_row: Some(264), data: Some(318_767_104), index: Some(105_906_176), total: Some(424_673_280), comment: "Customer orders".into(), ..Default::default() },
+        status: db::sql::structure::Status { engine: "heap".into(), rows: Some(ORDERS_ROWS), avg_row: Some(264), data: Some(318_767_104), index: Some(105_906_176), total: Some(424_673_280), comment: "Customer orders".into(), owner: "app_owner".into(), vacuumed: "2026-11-14 03:12 (auto)".into(), analyzed: "2026-11-14 03:12 (auto)".into(), dead_rows: Some(1_284), ..Default::default() },
         ..Default::default()
     };
     st.create = db::sql::structure::pg_create_table(SCHEMA, "orders", &st);

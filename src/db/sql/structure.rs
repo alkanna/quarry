@@ -324,6 +324,12 @@ pub struct Status {
     pub comment: String,
     /// PostgreSQL's `pg_total_relation_size`: the heap, its TOAST table and the indexes.
     pub total: Option<u64>,
+    /// PostgreSQL only, empty elsewhere. An empty tablespace is the database default; an empty vacuum or analyze never ran.
+    pub owner: String,
+    pub tablespace: String,
+    pub vacuumed: String,
+    pub analyzed: String,
+    pub dead_rows: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -593,6 +599,11 @@ fn status(rows: &[SqlRow]) -> Status {
         updated: s(r, "updated"),
         comment: s(r, "comment"),
         total: num(r, "total_bytes"),
+        owner: s(r, "owner"),
+        tablespace: s(r, "tablespace"),
+        vacuumed: s(r, "vacuumed"),
+        analyzed: s(r, "analyzed"),
+        dead_rows: num(r, "dead_rows"),
     }
 }
 
