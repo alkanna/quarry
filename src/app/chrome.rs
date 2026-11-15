@@ -481,6 +481,8 @@ impl App {
         const TAB_MIN_W: f32 = 146.0;
         // Left of the name: the engine logo and its gap. Right: the close cross.
         const TAB_PAD_L: f32 = 38.0;
+        // Right of the text: the cross, and the gap where the second line is cut, with a pixel to spare for rounding.
+        const TAB_PAD_R: f32 = 34.0;
         const PLUS_W: f32 = 32.0;
         const LIST_W: f32 = 84.0;
         let n = self.tabs.len();
@@ -518,7 +520,7 @@ impl App {
         // Like a browser, tabs narrow down to TAB_MIN_W before the strip has to scroll.
         let full = ui.available_width();
         let cap = ((full - PLUS_W) / n.max(1) as f32).max(TAB_MIN_W);
-        let widths: Vec<f32> = titles.iter().map(|g| (g.0.size().x.max(g.1.size().x) + TAB_PAD_L + 30.0).clamp(TAB_MIN_W, 260.0).min(cap)).collect();
+        let widths: Vec<f32> = titles.iter().map(|g| (g.0.size().x.max(g.1.size().x) + TAB_PAD_L + TAB_PAD_R).clamp(TAB_MIN_W, 260.0).min(cap)).collect();
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.

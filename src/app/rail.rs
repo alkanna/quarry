@@ -849,10 +849,11 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
     let dot = logo.right_bottom() - egui::vec2(1.0, 1.0);
     p.circle_filled(dot, 4.5, if active { SEL() } else { CHROME() });
     p.circle_filled(dot, 3.0, status_color(&c.status));
-    let (first, second) = name_lines(&c.meta.name);
     let fg = if active || state > 0 { BRIGHT() } else { MUTED() };
+    let room = rect.width() - 4.0;
+    let (first, second) = name_lines(&c.meta.name, |s| p.layout_no_wrap(s.to_string(), FontId::proportional(TXT_CAPTION), fg).size().x <= room);
     for (i, line) in [first, second].iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-        let g = truncated(p, line, FontId::proportional(TXT_CAPTION), fg, rect.width() - 4.0);
+        let g = truncated(p, line, FontId::proportional(TXT_CAPTION), fg, room);
         p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, logo.bottom() + 3.0 + i as f32 * 12.0), g, fg);
     }
     focus_ring(ui, &r, rect, R_MD as f32);
@@ -871,13 +872,19 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
     r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A tile's name on two lines: split after the last dash, so "shop-prod" stacks as "shop-" over "prod", and a name without
-/// one is one line that is cut with an ellipsis when it is too wide.
-fn name_lines(name: &str) -> (&str, &str) {
-    match name.rfind('-') {
-        Some(i) if i > 0 && i + 1 < name.len() => (&name[..=i], &name[i + 1..]),
-        _ => (name, ""),
+/// A tile's name on two lines, split at the last space or dash whose first line `fits`: "shop-prod" stacks as "shop-" over
+/// "prod" and "Local sample" as "Local" over "sample". A name with no such break is one line, cut with an ellipsis when it is
+/// too wide, as is a second line that is.
+fn name_lines(name: &str, fits: impl Fn(&str) -> bool) -> (&str, &str) {
+    for (i, c) in name.char_indices().rev().filter(|(_, c)| *c == ' ' || *c == '-') {
+        // A dash stays at the end of the first line; a space goes.
+        let first = if c == '-' { &name[..=i] } else { name[..i].trim_end() };
+        let second = name[i + c.len_utf8()..].trim_start();
+        if !first.trim_end_matches('-').is_empty() && !second.is_empty() && fits(first) {
+            return (first, second);
+        }
     }
+    (name, "")
 }
 
 /// A 28 px square icon button: a `HOVER` fill on hover, `PRESSED` while held, and an accent
@@ -1063,12 +1070,19 @@ mod tests {
     }
 
     #[test]
-    fn names_split_after_the_last_dash() {
-        assert_eq!(name_lines("shop-prod"), ("shop-", "prod"));
-        assert_eq!(name_lines("analytics-prod-eu"), ("analytics-prod-", "eu"));
-        assert_eq!(name_lines("events"), ("events", ""));
-        assert_eq!(name_lines("-x"), ("-x", ""));
-        assert_eq!(name_lines("x-"), ("x-", ""));
+    fn names_split_at_the_last_space_or_dash_that_fits() {
+        let any = |_: &str| true;
+        assert_eq!(name_lines("shop-prod", any), ("shop-", "prod"));
+        assert_eq!(name_lines("analytics-prod-eu", any), ("analytics-prod-", "eu"));
+        assert_eq!(name_lines("Local sample", any), ("Local", "sample"));
+        assert_eq!(name_lines("events", any), ("events", ""));
+        assert_eq!(name_lines("-x", any), ("-x", ""));
+        assert_eq!(name_lines("x-", any), ("x-", ""));
+        // The first line must fit, so the break moves left until it does.
+        let ten = |s: &str| s.chars().count() <= 10;
+        assert_eq!(name_lines("analytics-prod-eu", ten), ("analytics-", "prod-eu"));
+        assert_eq!(name_lines("my local sample db", ten), ("my local", "sample db"));
+        assert_eq!(name_lines("averyverylongname x", ten), ("averyverylongname x", ""));
     }
 
     #[test]
