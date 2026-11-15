@@ -1,5 +1,6 @@
 //! The documents view: layout, row selection and actions on selected documents.
 
+use super::results_bar::BarInfo;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -197,41 +198,10 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() && t.view != View::Shell {
             return self.sql_query_view(ui);
         }
-        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
-        // What the collection holds: documents, data size and indexes. The whole collection's
-        // count, not the filter's, which the results line shows. Without statistics only an
-        // unfiltered count says what the collection holds.
-        let mut stats = Vec::new();
-        match t.stats {
-            Some((count, size, nidx)) => {
-                stats.push(format!("{} docs", group(&count.to_string())));
-                stats.push(human_bytes(size as usize));
-                stats.push(format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" }));
-            }
-            None if t.query.filter.is_empty() && t.query.limit.is_none() && t.query.skip == 0 => stats.push(format!("{} docs", group(&t.count.to_string()))),
-            None => {}
-        }
+        let (coll, view) = (t.sel.coll.clone(), t.view);
         let nidx = t.stats.map(|s| s.2);
         let sql = t.sql.is_some();
-        if sql {
-            stats.clear();
-            if t.filter_txt.is_empty() {
-                stats.push(format!("{} rows", group(&t.count.to_string())));
-            }
-        }
-        ui.horizontal(|ui| {
-            let heading = if coll.is_empty() { "Shell" } else { coll.as_str() };
-            ui.label(semibold(RichText::new(heading).size(TXT_HEADING).color(BRIGHT())));
-            ui.add_space(6.0);
-            ui.label(RichText::new(&db).font(FontId::monospace(TXT_SMALL)).color(FAINT()));
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CHIP_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for s in stats.iter().rev() {
-                    stat_chip(ui, s);
-                }
-            });
-        });
-        ui.add_space(4.0);
+        // The collection's name and place are in the tab and the breadcrumb, and its size is in the results bar.
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
@@ -249,13 +219,12 @@ impl App {
                     stat_chip(ui, &n.to_string());
                 }
             }
-            if sql && view == View::Documents {
-                right_group(ui, |ui| self.columns_menu(ui, false));
-            } else if !sql && matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
+            // Documents and the SQL Content view carry Table | JSON and Columns in their results bar.
+            if !sql && matches!(view, View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
                     if self.prefs.table {
-                        self.columns_menu(ui, view != View::Documents);
+                        self.columns_menu(ui, true);
                     }
                     let mut table = self.prefs.table;
                     segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
@@ -446,103 +415,74 @@ impl App {
         self.agent_notice(ui);
         ui.add_space(10.0);
         let t = self.t().unwrap();
-        let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
-        let pages = count.div_ceil(self.page_size()).max(1);
-        let mut go: Option<u64> = None;
-        ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(format!("{} docs", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
-            ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
-            if loading {
-                spin(ui);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                dots_menu(ui, |ui| {
-                    if ui.button("Open query in Shell").clicked() {
-                        let t = &self.tabs[self.cur];
-                        self.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
-                        ui.close();
-                    }
-                    let t = self.t().unwrap();
-                    let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
-                    if ui.button("Update matching…").clicked() {
-                        self.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
-                        ui.close();
-                    }
-                    ui.separator();
-                    if danger_item(ui, "Delete all matching documents…").clicked() {
-                        self.modal = Some(Modal::Typed {
-                            title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
-                            expect: coll.clone(),
-                            typed: String::new(),
-                            action: Danger::DeleteMatching(scope),
-                        });
-                        ui.close();
-                    }
-                    if danger_item(ui, "Drop collection…").clicked() {
-                        self.modal = Some(Modal::Typed {
-                            title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
-                            expect: coll,
-                            typed: String::new(),
-                            action: Danger::DropCollection,
-                        });
-                        ui.close();
-                    }
-                })
-                .on_hover_text("More actions");
-                if quiet(ui, "Export").on_hover_text("Export these documents").clicked() {
-                    self.export();
+        // The collection's data size and index count, which the header used to carry.
+        let stats = t.stats.map(|(_, size, nidx)| vec![human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]).unwrap_or_default();
+        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: "", ms: t.ms, loading: t.loading, stats, grouped: None };
+        let out = self.results_bar(ui, &info, |app, ui| {
+            dots_menu(ui, |ui| {
+                if ui.button("Export").on_hover_text("Export these documents").clicked() {
+                    app.export();
+                    ui.close();
                 }
-                if quiet(ui, "+ Insert").clicked() {
-                    let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
-                    if self.sel_writable() { open(self) } else { self.ask_unlock_then(open) }
+                if ui.button("Open query in Shell").clicked() {
+                    let t = &app.tabs[app.cur];
+                    app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
+                    ui.close();
                 }
-                vsep(ui, 4.0);
-                if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
-                    go = Some(page);
+                let t = app.t().unwrap();
+                let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
+                if ui.button("Update matching…").clicked() {
+                    app.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
+                    ui.close();
                 }
-                // The pager reads left to right, so it gets its own layout at last frame's width.
-                let id = ui.scope_id().with("pager-w");
-                let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(150.0);
-                let r = ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| pager(ui, page as usize, pages as usize));
-                if r.response.rect.width() != w {
-                    ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
-                    ui.ctx().request_repaint();
-                }
-                if let Some(p) = r.inner {
-                    go = Some(p as u64);
-                }
-                let mut size = self.page_size();
-                ui.scope(|ui| {
-                    quiet_look(ui);
-                    egui::ComboBox::from_id_salt("page-size").selected_text(format!("{size} / page")).show_ui(ui, |ui| {
-                        menu_look(ui);
-                        for n in [db::PAGE_SIZE, 100, 200, db::PAGE_SIZE_MAX] {
-                            ui.selectable_value(&mut size, n, format!("{n} per page"));
-                        }
+                ui.separator();
+                if danger_item(ui, "Delete all matching documents…").clicked() {
+                    app.modal = Some(Modal::Typed {
+                        title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
+                        expect: coll.clone(),
+                        typed: String::new(),
+                        action: Danger::DeleteMatching(scope),
                     });
-                });
-                // Remembered for every tab; the others reload when shown, see the top of this function.
-                if size != self.page_size() {
-                    self.prefs.page_size = size;
-                    self.save_prefs();
-                    go = Some(0);
+                    ui.close();
                 }
-                let pending = self.tab_drafts();
-                if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
-                    if !self.sel_writable() {
-                        self.ask_unlock();
-                    } else if self.prefs.confirm_save && !self.prefs.always_writable {
-                        self.modal = Some(Modal::SaveAll(pending));
-                    } else {
-                        for k in &pending {
-                            self.write_draft(k);
-                        }
+                if danger_item(ui, "Drop collection…").clicked() {
+                    app.modal = Some(Modal::Typed {
+                        title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
+                        expect: coll,
+                        typed: String::new(),
+                        action: Danger::DropCollection,
+                    });
+                    ui.close();
+                }
+            })
+            .on_hover_text("More actions");
+            if app.prefs.table {
+                app.columns_menu(ui, false);
+            }
+            let mut table = app.prefs.table;
+            segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
+            if table != app.prefs.table {
+                app.prefs.table = table;
+                app.save_prefs();
+            }
+            if quiet(ui, "+ Insert").clicked() {
+                let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
+                if app.sel_writable() { open(app) } else { app.ask_unlock_then(open) }
+            }
+            let pending = app.tab_drafts();
+            if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
+                if !app.sel_writable() {
+                    app.ask_unlock();
+                } else if app.prefs.confirm_save && !app.prefs.always_writable {
+                    app.modal = Some(Modal::SaveAll(pending));
+                } else {
+                    for k in &pending {
+                        app.write_draft(k);
                     }
                 }
-            });
+            }
         });
-        if let Some(p) = go {
+        if let Some(p) = out.go {
             self.tm().unwrap().page = p;
             self.reload();
         }

@@ -182,3 +182,28 @@ fn arrows_and_page_keys_move_the_content_grid() {
     ui.key(egui::Modifiers::NONE, egui::Key::PageUp);
     assert_eq!(ui.app().t().map(|t| t.page), Some(0));
 }
+
+// Duplicate and Delete belong to the floating selection bar, not to the results bar.
+#[test]
+fn the_results_bar_has_no_duplicate_or_delete_but_the_selection_bar_has() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.settle();
+    assert!(ui.h.query_all_by_label("Duplicate").next().is_none() && ui.h.query_all_by_label("Delete").next().is_none(), "the results bar still has row buttons");
+    assert!(ui.h.query_all_by_label("+ Row").next().is_some(), "+ Row is gone from the results bar");
+    ui.click("Select row 1");
+    ui.show("Duplicate");
+    assert!(ui.h.query_all_by_label("Delete…").next().is_some(), "the selection bar has no Delete");
+}
+
+// The count is the page-size control: a pick is remembered and starts again from the first page.
+#[test]
+fn the_page_size_menu_changes_the_size_and_goes_to_the_first_page() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let app = ui.h.state_mut();
+    let cur = app.cur;
+    app.tabs[cur].page = 1;
+    ui.click("Page size");
+    ui.click("200 per page");
+    assert_eq!(ui.app().prefs.page_size, 200);
+    assert_eq!(ui.app().t().map(|t| t.page), Some(0));
+}

@@ -743,20 +743,30 @@ impl App {
         }
     }
 
-    /// + Row, Duplicate and Delete in the results line.
+    /// The tools at the right of the results bar, added right to left: the more menu, Columns and + Row.
+    /// Duplicate and Delete live in the selection bar, which floats over the rows once any are checked.
     pub(in crate::app) fn sql_row_tools(&mut self, ui: &mut egui::Ui) {
         let n = self.t().map_or(0, |t| t.checked.len());
         let why = self.sql_edit_block();
-        let none = if n == 0 { "Check rows first" } else { "" };
-        // Every row the page's WHERE matches, beyond the page on screen. Drawn first, so it sits rightmost.
-        let mut bulk = None;
+        let view = self.sel_is_view();
+        // Every row the page's WHERE matches, beyond the page on screen.
+        let (mut bulk, mut import, mut export) = (None, false, false);
         dots_menu(ui, |ui| {
             menu_look(ui);
+            if ui.add_enabled(!view, egui::Button::new("Import…")).on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
+                import = true;
+                ui.close();
+            }
+            // Checked rows start the dialog on them; otherwise it starts on every row the WHERE matches.
+            if ui.button("Export…").on_hover_text("Write the checked rows, this page or every matching row to a file").clicked() {
+                export = true;
+                ui.close();
+            }
+            ui.separator();
             if ui.add_enabled(why.is_none(), egui::Button::new("Update matching…")).on_hover_text("Set columns on every row the WHERE matches").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
                 bulk = Some(true);
                 ui.close();
             }
-            ui.separator();
             if ui.add_enabled(why.is_none(), egui::Button::new(RichText::new("Delete all matching rows…").color(ALERT()))).on_disabled_hover_text(why.unwrap_or_default()).clicked() {
                 bulk = Some(false);
                 ui.close();
@@ -766,30 +776,18 @@ impl App {
         if let Some(update) = bulk {
             self.open_bulk(update);
         }
-        // Checked rows start the dialog on them; otherwise it starts on every row the WHERE matches.
-        if quiet(ui, "Export…").on_hover_text("Write the checked rows, this page or every matching row to a file").clicked() {
+        if export {
             let rows = self.checked_sql_rows();
             self.open_export(rows, n == 0);
         }
-        if quiet_enabled(ui, n > 0 && why.is_none(), "Delete").on_hover_text(why.unwrap_or(if n == 0 { none } else { "Delete the checked rows" })).on_disabled_hover_text(why.unwrap_or(none)).clicked() {
-            let rows = self.checked_sql_rows();
-            self.docs_act(&ui.ctx().clone(), DocsAct::Delete, rows);
+        if import && let Some(s) = self.t().map(|t| t.sel.clone()) {
+            let schema = self.sel_schema(&s);
+            self.open_sql_import(s.conn, s.db, schema, s.coll);
         }
-        if quiet_enabled(ui, n > 0 && why.is_none(), "Duplicate").on_hover_text("Insert copies of the checked rows").on_disabled_hover_text(why.unwrap_or(none)).clicked() {
-            let rows = self.checked_sql_rows();
-            self.docs_act(&ui.ctx().clone(), DocsAct::Duplicate, rows);
-        }
+        self.columns_menu(ui, false);
         if quiet_enabled(ui, why.is_none(), "+ Row").on_hover_text("Insert a row").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
             self.sql_new_row(None);
         }
-        let view = self.sel_is_view();
-        {
-            if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() && let Some(s) = self.t().map(|t| t.sel.clone()) {
-                let schema = self.sel_schema(&s);
-                self.open_sql_import(s.conn, s.db, schema, s.coll);
-            }
-        }
-        vsep(ui, 4.0);
     }
 
     fn checked_sql_rows(&self) -> Vec<Document> {

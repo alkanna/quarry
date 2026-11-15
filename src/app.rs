@@ -43,6 +43,7 @@ mod palette;
 mod poll;
 mod query;
 mod relations;
+mod results_bar;
 mod restore;
 mod run;
 mod schema;
