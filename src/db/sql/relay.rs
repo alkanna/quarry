@@ -389,7 +389,7 @@ impl Relay {
         }
         // A multi-row INSERT has no one key, as with insert({returning}) in the runner, so only a single row gives one.
         // The key is read by the first column's name: the row object is a map whose order is not the statement's.
-        let (affected, insert_id) = if pg && lex::insert_returning(&stmt, self.dialect) {
+        let (affected, insert_id) = if lex::insert_returning(&stmt, self.dialect) {
             // Like the runner's own rule, only a number or text stands in for a key; a BIGINT past 2^53 arrives as $numberLong.
             let key = |v: &&serde_json::Value| v.is_number() || v.is_string() || v.get("$numberLong").is_some();
             let id = if rows.len() == 1 { cols.first().and_then(|c| rows[0].get(&c.name)).filter(key).cloned() } else { None };

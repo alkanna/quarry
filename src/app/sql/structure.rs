@@ -666,6 +666,7 @@ impl App {
         let none = || "-".to_string();
         let bytes = |n: Option<u64>| n.map_or_else(none, size);
         let pg = self.is_pg(self.tabs[self.cur].sel.conn);
+        let no_stats = matches!(s.kind.as_str(), "v" | "f" | "p");
         let rows: Vec<(&str, String)> = if pg {
             // PostgreSQL has no engine, row format or auto increment to report: the sizes come from the catalog.
             vec![
@@ -675,9 +676,10 @@ impl App {
                 ("Total", bytes(s.total)),
                 ("Owner", if s.owner.is_empty() { none() } else { s.owner.clone() }),
                 ("Tablespace", if s.tablespace.is_empty() { "default".into() } else { s.tablespace.clone() }),
-                // A view has no sizes and no statistics row, so "never" would be wrong for it.
-                ("Last vacuum", if s.data.is_none() { none() } else if s.vacuumed.is_empty() { "never".into() } else { s.vacuumed.clone() }),
-                ("Last analyze", if s.data.is_none() { none() } else if s.analyzed.is_empty() { "never".into() } else { s.analyzed.clone() }),
+                // A view, a foreign table and a partitioned parent are never vacuumed themselves, so "never" would be
+                // wrong for them; their partitions carry the dates.
+                ("Last vacuum", if no_stats { none() } else if s.vacuumed.is_empty() { "never".into() } else { s.vacuumed.clone() }),
+                ("Last analyze", if no_stats { none() } else if s.analyzed.is_empty() { "never".into() } else { s.analyzed.clone() }),
                 ("Dead rows", s.dead_rows.map_or_else(none, |n| group(&n.to_string()))),
                 ("Comment", s.comment.clone()),
             ]

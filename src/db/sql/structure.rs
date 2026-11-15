@@ -330,6 +330,8 @@ pub struct Status {
     pub vacuumed: String,
     pub analyzed: String,
     pub dead_rows: Option<u64>,
+    /// PostgreSQL's relkind: r table, p partitioned, v view, m materialized view, f foreign table.
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -604,6 +606,7 @@ fn status(rows: &[SqlRow]) -> Status {
         vacuumed: s(r, "vacuumed"),
         analyzed: s(r, "analyzed"),
         dead_rows: num(r, "dead_rows"),
+        kind: s(r, "kind"),
     }
 }
 

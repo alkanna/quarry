@@ -607,44 +607,45 @@ impl App {
         self.reload();
     }
 
-    /// Show the other row of a duplicate-key error on table `sel`. PostgreSQL's message names the column; MySQL's names
-    /// the index, whose columns are read first. The value is sent quoted, which both servers read as any column type.
-    pub(in crate::app) fn sql_show_dup(&mut self, sel: Sel, key: String, value: String) {
+    /// Show the other row of a duplicate-key error on table `sel`. The error names an index (a PostgreSQL unique
+    /// constraint has its index's name), so the table's indexes are read first: the index must be there and cover one
+    /// whole column, and that column is filtered on. Reading it from the table also gives the column's own name,
+    /// which PostgreSQL's message quotes and MySQL's does not give at all.
+    pub(in crate::app) fn sql_show_dup(&mut self, sel: Sel, index: String, value: String) {
         if self.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
-        if self.is_pg(sel.conn) {
-            // The detail line quotes a name that needs it, such as "Email", as an index definition would.
-            let col = key.strip_prefix('"').and_then(|k| k.strip_suffix('"')).map_or_else(|| key.clone(), |k| k.replace("\"\"", "\""));
-            let filter = self.dup_filter(sel.conn, &col, value);
-            return self.sql_open_filtered(sel, filter);
-        }
         let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
         self.req += 1;
-        self.dup_wait = Some((self.req, sel.clone(), key, value));
+        self.dup_wait = Some((self.req, sel.clone(), index, value));
         self.worker.sql_structure(self.req, db, space, sel.coll.clone());
     }
 
-    /// The MySQL table's indexes are in: the duplicate's index must be one whole column for its value to be a filter.
+    /// The table's indexes are in: the duplicate's index must be on this table and be one whole column.
     pub(in crate::app) fn sql_dup_index(&mut self, sel: Sel, index: &str, value: String, res: db::Res<db::sql::Structure>) {
         let st = match res {
             Ok(st) => st,
             Err(e) => return self.err(e),
         };
-        let col = st.indexes.iter().find(|i| i.name.eq_ignore_ascii_case(index)).and_then(|i| match i.cols.as_slice() {
-            [c] if c.prefix.is_none() && c.expr.is_none() => Some(c.name.clone()),
-            _ => None,
-        });
-        let Some(col) = col else { return self.warn("This key spans several columns or part of one, so its value cannot be filtered on.") };
-        let filter = self.dup_filter(sel.conn, &col, value);
+        let Some(ix) = st.indexes.iter().find(|i| i.name.eq_ignore_ascii_case(index)) else {
+            return self.warn(format!("The key {index} is not on {}, so its other row is in another table.", sel.coll));
+        };
+        let [c] = ix.cols.as_slice() else { return self.warn("This key spans several columns, so its value cannot be filtered on.") };
+        if c.prefix.is_some() || c.expr.is_some() {
+            return self.warn("This key covers part of a column or an expression, so its value cannot be filtered on.");
+        }
+        let filter = self.dup_filter(sel.conn, &c.name, value);
         self.sql_open_filtered(sel, filter);
     }
 
-    /// `col = 'value'` in the dialect of connection `conn`.
+    /// `col = 'value'` in the dialect of connection `conn`. PostgreSQL prints a NULL key value as null, the same as the
+    /// text 'null', so that one matches both.
     fn dup_filter(&self, conn: u64, col: &str, value: String) -> String {
         let d = self.dialect_of(conn);
         let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
-        format!("{} = {}", d.quote_ident(col), db::copy::sql_literal(d, Some(&Bson::String(value)), false, bs))
+        let q = d.quote_ident(col);
+        let eq = format!("{q} = {}", db::copy::sql_literal(d, Some(&Bson::String(value.clone())), false, bs));
+        if d == db::sql::Dialect::Postgres && value == "null" { format!("({q} IS NULL OR {eq})") } else { eq }
     }
 
     /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.

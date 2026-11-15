@@ -216,6 +216,21 @@ fn dup_key(e: &str) -> Option<(String, String)> {
     Some((k.rsplit('.').next().unwrap_or(k).to_string(), v.to_string()))
 }
 
+/// The index a SQL duplicate-key error names, with the table MySQL 8.0.19+ puts before it ('orders.uq_email'). MariaDB
+/// and older MySQL give the index alone; PostgreSQL gives the constraint, whose index has the same name.
+pub fn dup_index(raw: &str) -> Option<(Option<String>, String)> {
+    if let Some(i) = raw.find("unique constraint \"") {
+        let r = &raw[i + 19..];
+        return r.split_once('"').map(|(n, _)| (None, n.to_string()));
+    }
+    let i = raw.find("Duplicate entry '")?;
+    let k = raw[i..].split_once("' for key '")?.1.split('\'').next()?;
+    Some(match k.split_once('.') {
+        Some((t, idx)) => (Some(t.to_string()), idx.to_string()),
+        None => (None, k.to_string()),
+    })
+}
+
 /// Closing line the worker adds to a 57014 that came after Stop was pressed, so a stop is told from a statement timeout
 /// by what Quarry did and not by the server's sentence, which follows its lc_messages.
 pub const STOP_MARK: &str = "\nStopped by you.";
@@ -741,6 +756,14 @@ mod tests {
         // MongoDB keeps its validator wording and button.
         let mongo = explain("Command failed: Error code 121 (DocumentValidationFailure): Document failed validation", &with_ns);
         assert_eq!((mongo.kind, mongo.fixes.as_slice()), (ErrKind::Validation, &[Fix::Validator][..]));
+    }
+
+    #[test]
+    fn dup_index_names_the_index_and_mysqls_table() {
+        assert_eq!(dup_index("error returned from database: 1062 (23000): Duplicate entry '4410' for key 'orders.number'"), Some((Some("orders".into()), "number".into())));
+        assert_eq!(dup_index("1062 (23000): Duplicate entry 'a' for key 'PRIMARY'"), Some((None, "PRIMARY".into())));
+        assert_eq!(dup_index("23505: duplicate key value violates unique constraint \"orders_pkey\"\nDetail: Key (id)=(1) already exists."), Some((None, "orders_pkey".into())));
+        assert_eq!(dup_index("E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 4410 }"), None);
     }
 
     #[test]

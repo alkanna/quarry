@@ -299,7 +299,7 @@ fn views_and_unknown_row_estimates() {
         let v = structure(l, &db, "t4_view", "v");
         assert!(v.create.starts_with("CREATE VIEW \"t4_view\".\"v\" AS\n") && v.create.contains("SELECT") && v.create.ends_with(';'), "{var}: {}", v.create);
         assert_eq!(v.columns.len(), 2);
-        assert!(v.status.dead_rows.is_none() && v.status.vacuumed.is_empty(), "{var}: a view has statistics {:?}", v.status);
+        assert!(v.status.dead_rows.is_none() && v.status.vacuumed.is_empty() && v.status.kind == "v", "{var}: a view has statistics {:?}", v.status);
         let m = structure(l, &db, "t4_view", "m");
         assert!(m.create.starts_with("CREATE MATERIALIZED VIEW \"t4_view\".\"m\" AS\n") && m.create.contains("CREATE INDEX m_id ON t4_view.m"), "{}", m.create);
         // The count of a plain page falls back to a real count as well.

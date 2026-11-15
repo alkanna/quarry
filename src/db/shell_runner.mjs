@@ -284,13 +284,9 @@ function makeTable(conn, name, schema) {
       if (ret === undefined || ret === false) return query(conn, text, params);
       if (ret !== true && !(Array.isArray(ret) && ret.length && ret.every((c) => typeof c === "string"))) throw new Error("returning must be true or a list of column names");
       // Every argument error above throws before this point, synchronously like the MySQL path, not as a rejected promise.
-      return query(conn, text + " RETURNING " + (ret === true ? "*" : ret.map(ident).join(", ")), params).then((rows) => {
-        rows.affected = rows.length;
-        // One row's first returned column (the key, by habit) can stand in for insertId.
-        const first = list.length === 1 && rows[0] && Object.values(rows[0])[0];
-        rows.insertId = typeof first === "number" || typeof first === "bigint" || typeof first === "string" ? first : undefined;
-        return rows;
-      });
+      // The relay sets affected, and insertId from the first returned column of a single row: it knows the column
+      // order, which the row object here does not keep.
+      return query(conn, text + " RETURNING " + (ret === true ? "*" : ret.map(ident).join(", ")), params);
     },
     update: (where, set) => {
       if (where === undefined) throw new Error("update needs a where. Pass {} to change every row.");
