@@ -369,8 +369,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn conn_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, id: u64, lifted: bool, target: Option<DropOn>, pick: &mut Option<u64>, act: &mut Option<(u64, TileAct)>, drops: &mut Vec<RailDrop>) -> Option<egui::Response> {
         let c = self.conns.iter().find(|c| c.meta.id == id)?;
-        let tabs = self.tabs.iter().filter(|t| t.sel.conn == id).count();
-        let r = conn_shortcut(ui, rect, c, self.active == Some(id), tabs);
+        let r = conn_shortcut(ui, rect, c, self.active == Some(id), || self.tabs.iter().filter(|t| t.sel.conn == id).count());
         if lifted {
             return Some(r);
         }
@@ -822,7 +821,7 @@ pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::Textu
 /// A connection's tile: a 32 px engine logo with a status dot, the name on two lines under it, a bar in the tag color on
 /// the left edge for a staging or production tag and, when active, a `SEL` fill with a bright marker on the rail's own edge.
 /// The marker is not the accent: a light theme's orange accent would read as the red of production.
-fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, tabs: usize) -> egui::Response {
+fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, tabs: impl FnOnce() -> usize) -> egui::Response {
     // Click only: the reorder engine senses the drag under it.
     let r = ui.interact(rect, ui.scope_id().with(("tile", c.meta.id)), Sense::click());
     let state = state_of(&r);
@@ -849,13 +848,27 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
     p.circle_filled(dot, 3.0, status_color(&c.status));
     let fg = if active || state > 0 { BRIGHT() } else { MUTED() };
     let room = rect.width() - 4.0;
-    let (first, second) = name_lines(&c.meta.name, |s| p.layout_no_wrap(s.to_string(), FontId::proportional(TXT_CAPTION), fg).size().x <= room);
+    // The first line that fits is the galley drawn, so the split does not lay it out again.
+    let mut fitted = None;
+    let (first, second) = name_lines(&c.meta.name, |s| {
+        let g = p.layout_no_wrap(s.to_string(), FontId::proportional(TXT_CAPTION), fg);
+        let fits = g.size().x <= room;
+        if fits {
+            fitted = Some(g);
+        }
+        fits
+    });
     for (i, line) in [first, second].iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-        let g = truncated(p, line, FontId::proportional(TXT_CAPTION), fg, room);
+        let g = if i == 0 { fitted.take() } else { None }.unwrap_or_else(|| truncated(p, line, FontId::proportional(TXT_CAPTION), fg, room));
         p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, logo.bottom() + 3.0 + i as f32 * 12.0), g, fg);
     }
     focus_ring(ui, &r, rect, R_MD as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Switch to {}", c.meta.name)));
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // The rail draws every tile each frame, so the tip and the tab count are worked out only for the tile under the pointer.
+    if !r.hovered() {
+        return r;
+    }
     let (name, product, host) = conn_label(c);
     let mut tip = name;
     if !c.meta.tag.is_empty() {
@@ -866,14 +879,15 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
         tip += &format!(" \u{b7} {host}");
     }
     tip += if c.status == Status::Connecting { "\nConnecting" } else if c.writable { "\nWrites on" } else { "\nRead-only" };
+    let tabs = tabs();
     tip += &format!(" \u{b7} {tabs} tab{}", if tabs == 1 { "" } else { "s" });
-    r.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    r.on_hover_text(tip)
 }
 
 /// A tile's name on two lines, split at the last space or dash whose first line `fits`: "shop-prod" stacks as "shop-" over
 /// "prod" and "Local sample" as "Local" over "sample". A name with no such break is one line, cut with an ellipsis when it is
 /// too wide, as is a second line that is.
-fn name_lines(name: &str, fits: impl Fn(&str) -> bool) -> (&str, &str) {
+fn name_lines(name: &str, mut fits: impl FnMut(&str) -> bool) -> (&str, &str) {
     for (i, c) in name.char_indices().rev().filter(|(_, c)| *c == ' ' || *c == '-') {
         // A dash stays at the end of the first line; a space goes.
         let first = if c == '-' { &name[..=i] } else { name[..i].trim_end() };

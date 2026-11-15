@@ -150,9 +150,14 @@ fn tag_kind(tag: &str) -> TagKind {
 
 /// What a connection is called, what it runs and where it lives, for headers and pickers. The version is left out
 /// until the server has answered.
-pub(super) fn conn_label(c: &Conn) -> (String, String, String) {
+/// The engine and version of a connection, such as "MySQL 8.4.2".
+pub(super) fn conn_product(c: &Conn) -> String {
     let (_, product) = super::rail::engine_mark(c.meta.engine, &c.server.product);
-    let product = if c.server.version.is_empty() { product.to_string() } else { format!("{product} {}", c.server.version) };
+    if c.server.version.is_empty() { product.to_string() } else { format!("{product} {}", c.server.version) }
+}
+
+pub(super) fn conn_label(c: &Conn) -> (String, String, String) {
+    let product = conn_product(c);
     let host = if c.server.host.is_empty() { host_of(&c.masked_uri) } else { c.server.host.clone() };
     (c.meta.name.clone(), product, host)
 }

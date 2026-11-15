@@ -899,8 +899,9 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 /// Reads the WHERE text back into rules when it changed from elsewhere (Filter to these, a restored tab, a
 /// foreign key row), or always with `force`. Text that is not rules switches the bar to SQL. Without columns
 /// nothing can be read, so `src` stays behind and the read happens once they arrive.
-fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d: Dialect, bs: bool, force: bool) {
-    if !b.c.sql && (force || text != b.src) && (!pairs.is_empty() || text.trim().is_empty()) {
+fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d: Dialect, bs: bool, force: bool) -> bool {
+    let read = !b.c.sql && (force || text != b.src) && (!pairs.is_empty() || text.trim().is_empty());
+    if read {
         match rules::parse(text, pairs, d, bs) {
             Some((r, any)) => {
                 // Every rule is a token; the draft is an empty one, shown when a condition is asked for.
@@ -916,6 +917,7 @@ fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d
     if !b.c.sql && b.draft.is_none() && let Some(c) = cols.first() {
         b.draft = Some(Rule::new(&c.name, c.kind));
     }
+    read
 }
 
 /// Writes the rules out as the WHERE text, so Run, Copy as SQL and the fold line see them. Only rules read
@@ -1110,11 +1112,9 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     b.memo = Some(memo);
     let mut run = false;
     b.gdlg.bs = bs;
-    let was = b.src.clone();
-    read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, false);
     // Reading the text as rules spells it their way, which is what this frame writes back. It is the same query, so it must not
     // count as an edit of the one that ran.
-    if b.src != was && !pairs.is_empty() && !b.c.sql {
+    if read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, false) && !pairs.is_empty() && !b.c.sql {
         let mut all = b.rules.clone();
         all.extend(b.draft.clone());
         let out = rules::to_sql(&all, b.any, d, bs);

@@ -895,7 +895,7 @@ impl App {
         let none = Fields::new();
         let values = self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none);
         // The footer's words are worked out before the tab is borrowed for the editor.
-        let engine_db = self.conn(conn).map(|c| format!("{}  \u{b7}  {db}", super::super::sidebar::conn_label(c).1)).unwrap_or_default();
+        let engine_db = self.conn(conn).map(|c| format!("{}  \u{b7}  {db}", super::super::sidebar::conn_product(c))).unwrap_or_default();
         let saved_in = self.tabs.get(self.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
         let mut gutter_run = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };

@@ -786,8 +786,9 @@ pub(crate) fn flow_item<R>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::
         ui.end_row();
     }
     let r = ui.push_id(salt, add);
-    let now = r.response.rect.width();
-    if (now - w).abs() > 0.5 {
+    // Whole pixels, so a width that wobbles by a fraction as text is laid out does not ask for frame after frame.
+    let now = r.response.rect.width().round();
+    if now != w {
         ui.data_mut(|d| d.insert_temp(key, now));
         // The row is decided from this width, so a group that changed size is laid out again at once.
         ui.ctx().request_repaint();

@@ -138,15 +138,16 @@ impl App {
                 self.pick_crumb_schema(s.conn, &run, schema);
             }
         }
+        let tab = self.tab_name(self.cur);
         if s.coll.is_empty() {
             // A query tab has no table, so its own name ends the path. One label with the slash, so no widget
             // carries the bare tab name that tests and the tab strip look up.
             let mut job = mono_label("/ ", FAINT(), 400.0);
-            job.append(&self.tab_name(self.cur), 0.0, mono_fmt(TXT_SMALL, BRIGHT(), W_SEMIBOLD));
+            job.append(&tab, 0.0, mono_fmt(TXT_SMALL, BRIGHT(), W_SEMIBOLD));
             ui.label(job);
         } else {
             ui.label(mono_label("/", FAINT(), 400.0));
-            let r = crumb(ui, &self.tab_name(self.cur), BRIGHT(), "Table crumb");
+            let r = crumb(ui, &tab, BRIGHT(), "Table crumb");
             if let Some(t) = crumb_menu(&r, "Table", &s.coll, &[], || self.tables_of(&Sel { coll: String::new(), ..s.clone() })) {
                 self.open_collection(Sel { coll: t, ..s.clone() }, Open::Here);
             }
