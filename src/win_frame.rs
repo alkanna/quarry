@@ -211,8 +211,10 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::{HEADER_H, WIN_BUTTON_W};
 
-    const MAX: [i32; 4] = [1000, 0, 1046, 40];
+    // A Maximize button as the header lays it out at 100 %.
+    const MAX: [i32; 4] = [1000, 0, 1000 + WIN_BUTTON_W as i32, HEADER_H as i32];
 
     #[test]
     fn the_top_band_resizes_and_its_ends_take_the_corners() {

@@ -1139,6 +1139,9 @@ pub(crate) const PICK_CHEVRON: f32 = 26.0;
 /// Also where the macOS traffic lights are centered, so it stays 40.
 pub(crate) const HEADER_H: f32 = 40.0;
 
+/// Width of each window button where the header replaces the title bar on Windows, as Windows draws its own caption buttons.
+pub(crate) const WIN_BUTTON_W: f32 = 46.0;
+
 pub(crate) const TAB_STRIP_H: f32 = 46.0;
 
 pub(crate) const STATUS_H: f32 = 26.0;

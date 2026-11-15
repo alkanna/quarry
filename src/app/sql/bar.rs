@@ -1039,6 +1039,24 @@ pub(in crate::app) fn run_item(ui: &mut egui::Ui, label: &str, keys: &str) -> eg
     r
 }
 
+/// Gap between the items of a query line.
+pub(in crate::app) const LINE_GAP: egui::Vec2 = egui::vec2(8.0, 6.0);
+
+/// The frame of a query line, `left` and `right` from its content, and whether its main field `fid` has the focus. The line
+/// reads the field's focus and hover from the last frame for its outline: alert on `err`, the accent while edited or focused,
+/// muted on hover.
+pub(in crate::app) fn line_frame(ui: &egui::Ui, fid: egui::Id, err: bool, dirty: bool, left: i8, right: i8) -> (egui::Frame, bool) {
+    let focused = ui.memory(|m| m.has_focus(fid));
+    let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
+    let edge = if err { ALERT() } else if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+    (egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left, right, top: 7, bottom: 7 }), focused)
+}
+
+/// The focus ring around a query line whose field has the focus.
+pub(in crate::app) fn line_ring(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().rect_stroke(rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
+}
+
 /// Run and its tip on a query line, and the menu the tip opens: Run, a divider, then what `more` adds. True on Run.
 pub(in crate::app) fn line_run(ui: &mut egui::Ui, dirty: bool, more: impl FnOnce(&mut egui::Ui)) -> bool {
     let (main, tip) = run_split(ui, "Run", "↵", dirty, "Run options");
@@ -1113,13 +1131,11 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
     let fid = query_id("SQL-WHERE");
-    let focused = ui.memory(|m| m.has_focus(fid));
-    let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-    let edge = if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
-    let frame = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }).show(ui, |ui| {
+    let (frame, focused) = line_frame(ui, fid, false, dirty, 8, 8);
+    let frame = frame.show(ui, |ui| {
         ui.set_width(size - 18.0);
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+            ui.spacing_mut().item_spacing = LINE_GAP;
             // The edited note, the history and library icons, Run with its tip, and the chip of a bound script when there is one.
             // Drawn first, in a child over the first row that claims no room, so the conditions get the width it leaves.
             let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
@@ -1147,7 +1163,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
             });
             let right_w = right.min_rect().width();
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - right_w - 16.0, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                ui.spacing_mut().item_spacing = LINE_GAP;
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
                 let can_rules = pairs.is_empty()
                     || match &b.parsable {
@@ -1176,7 +1192,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
                 // The conditions and the clauses in use share rows that wrap under the first condition, and the "+" ends the last.
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                    ui.spacing_mut().item_spacing = LINE_GAP;
                     if b.c.sql {
                         let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
                         if b.preset.ac {
@@ -1247,7 +1263,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         });
     });
     if focused {
-        ui.painter().rect_stroke(frame.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
+        line_ring(ui, frame.response.rect);
     }
     fold_line(ui, t, d);
     if dirty {

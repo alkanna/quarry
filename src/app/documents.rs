@@ -1,6 +1,7 @@
 //! The documents view: layout, row selection and actions on selected documents.
 
 use super::results_bar::BarInfo;
+use super::sql::bar::{line_frame, line_ring, LINE_GAP};
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -292,11 +293,8 @@ impl App {
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
         // The bar is the filter's frame: it reads the filter's focus and hover from the last frame.
-        let fid = query_id("QUERY");
-        let focused = ui.memory(|m| m.has_focus(fid));
-        let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
         let dirty = super::run::query_dirty(t);
-        let edge = if t.bar_err.is_some() { ALERT() } else if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+        let (frame, focused) = line_frame(ui, query_id("QUERY"), t.bar_err.is_some(), dirty, 12, 6);
         let bar_err = t.bar_err.clone();
         let (mut set, mut picked) = ([false; 6], None);
         // The option chips: the name each shows, the label of its editor, and whether it is set.
@@ -304,10 +302,10 @@ impl App {
         for (i, text) in [&t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt].into_iter().enumerate() {
             set[i] = !text.is_empty();
         }
-        let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
+        let bar = frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                ui.spacing_mut().item_spacing = LINE_GAP;
                 // The edited note, the history and library icons and Run with its tip. Drawn first, in a child over the first row
                 // that claims no room, so the filter and the options get the width it leaves.
                 let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
@@ -337,7 +335,7 @@ impl App {
                 });
                 let left_w = (ui.available_width() - right.min_rect().width() - 16.0).max(240.0);
                 ui.allocate_ui_with_layout(egui::vec2(left_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                    ui.spacing_mut().item_spacing = LINE_GAP;
                     // As wide as its longest line, up to most of the line, so the options can follow it on the same row.
                     let hint = "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])";
                     let longest = if t.filter_txt.is_empty() { hint } else { t.filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
@@ -394,7 +392,7 @@ impl App {
             }
         });
         if focused {
-            ui.painter().rect_stroke(bar.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
+            line_ring(ui, bar.response.rect);
         }
         if let Some(name) = picked && let Some((_, label)) = OPTS.iter().find(|(n, _)| *n == name) {
             ui.memory_mut(|m| m.request_focus(query_id(label)));

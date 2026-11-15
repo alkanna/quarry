@@ -4,10 +4,8 @@
 
 use super::*;
 
-/// Each button's width, as Windows draws its own caption buttons.
-pub(super) const BUTTON_W: f32 = 46.0;
 /// The room the three take at the right of the header.
-pub(super) const BUTTONS_W: f32 = BUTTON_W * 3.0;
+pub(super) const BUTTONS_W: f32 = WIN_BUTTON_W * 3.0;
 
 fn flag() -> egui::Id {
     egui::Id::unique("quarry-win-frame")
@@ -53,8 +51,8 @@ pub(super) fn window_buttons(ui: &mut egui::Ui, full: egui::Rect) {
     let (nc_hover, nc_press) = crate::win_frame::max_state();
     let glyph = if focused { TEXT() } else { FAINT() };
     for (i, name) in ["Minimize", if maxed { "Restore" } else { "Maximize" }, "Close"].into_iter().enumerate() {
-        let x = right - BUTTONS_W + BUTTON_W * i as f32;
-        let rect = egui::Rect::from_min_max(egui::pos2(x, full.top()), egui::pos2(x + BUTTON_W, full.bottom()));
+        let x = right - BUTTONS_W + WIN_BUTTON_W * i as f32;
+        let rect = egui::Rect::from_min_max(egui::pos2(x, full.top()), egui::pos2(x + WIN_BUTTON_W, full.bottom()));
         let r = ui.interact(rect, egui::Id::unique(("window-button", i)), Sense::click());
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
         let mut state = state_of(&r);
