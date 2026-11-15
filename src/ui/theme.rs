@@ -1150,6 +1150,8 @@ pub(crate) const TAB_STRIP_H: f32 = 46.0;
 pub(crate) const STATUS_H: f32 = 26.0;
 
 pub(crate) const RAIL_W: f32 = 62.0;
+/// A connection's app-icon tile in the rail, and the Connect tile.
+pub(crate) const RAIL_TILE: f32 = 40.0;
 
 pub(crate) const TABLE_HEAD_H: f32 = 30.0;
 

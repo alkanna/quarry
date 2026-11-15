@@ -340,9 +340,7 @@ impl App {
         let color = super::rail::mark_color(mark);
         let logo = egui::Rect::from_min_size(rect.left_top() + egui::vec2(12.0, 14.0), egui::vec2(32.0, 32.0));
         p.rect_filled(logo, R_MD, tint(color, 48));
-        if let Some(tex) = super::rail::engine_logo(ui.ctx(), mark) {
-            p.image(tex.id(), egui::Rect::from_center_size(logo.center(), egui::vec2(20.0, 20.0)), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), color);
-        }
+        super::rail::logo(p, logo.center(), 20.0, mark, color);
         let dot = logo.right_bottom() - egui::vec2(1.0, 1.0);
         p.circle_filled(dot, 4.5, RAISED());
         p.circle_filled(dot, 3.0, status_color(&c.status));

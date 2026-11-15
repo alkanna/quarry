@@ -1294,22 +1294,6 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let in_text = row.hit && !cx.query.is_empty() && matches!(row.node, Node::Script(_) | Node::File { .. }) && crate::ui::widgets::find_ci(&look.name, &cx.query).is_none();
         let right = if show_tools { String::new() } else if in_text { "in text".to_string() } else { look.right.clone() };
         let right_col = if look.warn { ALERT() } else if look.pill { C_LINK() } else { FAINT() };
-        let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(TXT_SECTION, right_col, 400.0))));
-        // The pill and the changed dot take a little more room than the bare text.
-        let mut rw = rg.as_ref().map_or(0.0, |g| g.size().x + 8.0 + if look.pill { 10.0 } else { 0.0 });
-        if let Some(g) = rg {
-            let dy = optical_dy(&g);
-            if look.pill {
-                let pill = egui::Rect::from_center_size(egui::pos2(inner.right() - g.size().x / 2.0 - 4.0, cy), egui::vec2(g.size().x + 10.0, 16.0));
-                p.rect_filled(pill, R_SM, tint(C_LINK(), 30));
-            }
-            let shift = if look.pill { 4.0 } else { 0.0 };
-            p.galley(egui::pos2(inner.right() - g.size().x - shift, cy - g.size().y / 2.0 + dy), g, right_col);
-        }
-        if look.dot && !show_tools {
-            p.circle_filled(egui::pos2(inner.right() - 4.0, cy), 3.0, WARNING());
-            rw += 12.0;
-        }
         let weight = if is_container { W_MEDIUM } else { 400.0 };
         let color = if selected || hovered { BRIGHT() } else { TEXT() };
         // The part of the name the search matched is marked, as in the Connections filter.
@@ -1323,7 +1307,34 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
             }
             None => job.append(&look.name, 0.0, plain),
         }
-        job.wrap = egui::text::TextWrapping::truncate_at_width((inner.right() - rw - tools_w - (x + 33.0)).max(20.0));
+        // The name comes first: the label on the right gets what the name leaves, and when the name must be cut too, no
+        // more than a third of the row, cut with an ellipsis. A long database name used to leave the script "all_c…".
+        let room = (inner.right() - tools_w - (x + 33.0)).max(20.0);
+        let dot_w = if look.dot && !show_tools { 12.0 } else { 0.0 };
+        let pad = 8.0 + if look.pill { 10.0 } else { 0.0 };
+        let name_w = p.layout_job(job.clone()).size().x;
+        let right_room = (room - dot_w - pad - name_w).max(room / 3.0 - pad);
+        let rg = (!right.is_empty() && right_room >= 24.0).then(|| {
+            let mut rj = LayoutJob::single_section(right, mono_fmt(TXT_SECTION, right_col, 400.0));
+            rj.wrap = egui::text::TextWrapping::truncate_at_width(right_room);
+            p.layout_job(rj)
+        });
+        // The pill and the changed dot take a little more room than the bare text.
+        let mut rw = rg.as_ref().map_or(0.0, |g| g.size().x + pad);
+        if let Some(g) = rg {
+            let dy = optical_dy(&g);
+            if look.pill {
+                let pill = egui::Rect::from_center_size(egui::pos2(inner.right() - g.size().x / 2.0 - 4.0, cy), egui::vec2(g.size().x + 10.0, 16.0));
+                p.rect_filled(pill, R_SM, tint(C_LINK(), 30));
+            }
+            let shift = if look.pill { 4.0 } else { 0.0 };
+            p.galley(egui::pos2(inner.right() - g.size().x - shift, cy - g.size().y / 2.0 + dy), g, right_col);
+        }
+        if look.dot && !show_tools {
+            p.circle_filled(egui::pos2(inner.right() - 4.0, cy), 3.0, WARNING());
+            rw += 12.0;
+        }
+        job.wrap = egui::text::TextWrapping::truncate_at_width((room - rw).max(20.0));
         let g = p.layout_job(job);
         let dy = optical_dy(&g);
         p.galley(egui::pos2(x + 33.0, cy - g.size().y / 2.0 + dy), g, color);
