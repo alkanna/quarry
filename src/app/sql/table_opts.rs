@@ -39,7 +39,6 @@ struct TableView {
     removes: bool,
     /// Only the table options of the form. They replace the staged ones, so opening the dialog twice never stacks two.
     new: Vec<Change>,
-    all: Vec<Change>,
     text: Result<String, String>,
     warnings: Vec<String>,
 }
@@ -120,7 +119,7 @@ impl App {
             None => self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all)),
         };
         let warnings = self.structure().map(|st| ddl::warnings(st, &all)).unwrap_or_default();
-        TableView { key, changes_empty: changes.is_empty(), invalid, removes, new: changes, all, text, warnings }
+        TableView { key, changes_empty: changes.is_empty(), invalid, removes, new: changes, text, warnings }
     }
 
     pub(in crate::app) fn table_dialog(&mut self, ui: &mut egui::Ui, f: &mut TableForm, keep: &mut bool) {
