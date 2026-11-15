@@ -22,7 +22,7 @@ const SQL_SHELL_WARNING: &str = if cfg!(target_os = "macos") {
     "Scripts run in Quarry's shell and can read files on this computer. Their SQL goes through Quarry, never with the password. Read the whole script before you allow it."
 };
 
-const READS: [&str; 10] = ["list_connections", "list_databases", "list_collections", "describe", "find", "aggregate", "count", "explain", "select_rows", "query_sql"];
+const READS: [&str; 11] = ["list_connections", "list_databases", "list_collections", "describe", "find", "aggregate", "count", "explain", "select_rows", "query_sql", "explain_sql"];
 const STRUCTURE: [&str; 6] = ["create_collection", "drop_collection", "create_index", "drop_index", "create_table", "drop_table"];
 
 /// "wants to ..." for the title, from the tool the agent called.

@@ -209,11 +209,43 @@ fn dup_key(e: &str) -> Option<(String, String)> {
             return Some((f.to_string(), v.split_once(") already exists").map_or(v, |x| x.0).to_string()));
         }
     }
-    let i = e.find("Duplicate entry '")?;
-    let r = &e[i + 17..];
-    let (v, r) = r.split_once("' for key '")?;
-    let k = r.split('\'').next()?;
+    let (v, k) = mysql_dup(e)?;
     Some((k.rsplit('.').next().unwrap_or(k).to_string(), v.to_string()))
+}
+
+/// MySQL's "Duplicate entry 'v' for key 'k'": the value and the key as written, with its table prefix when it has one.
+fn mysql_dup(e: &str) -> Option<(&str, &str)> {
+    let i = e.find("Duplicate entry '")?;
+    let (v, r) = e[i + 17..].split_once("' for key '")?;
+    Some((v, r.split('\'').next()?))
+}
+
+/// The index whose one value a SQL duplicate-key error lets a filter find again, when it can be on `table`. None when the
+/// message names another table, a key of several columns (PostgreSQL lists them), or a value MySQL may have cut (at 64
+/// bytes) or printed as \x escapes (binary bytes). The click still checks the table's indexes: MariaDB and older MySQL
+/// do not name the table, and PostgreSQL never does.
+pub fn dup_filterable(raw: &str, table: &str) -> Option<String> {
+    let (t, index) = dup_index(raw)?;
+    if t.is_some_and(|t| !t.eq_ignore_ascii_case(table)) {
+        return None;
+    }
+    let (f, v) = dup_key(raw)?;
+    let exact = if mysql_dup(raw).is_some() { v.len() <= 60 && !v.contains("\\x") } else { !f.contains([',', '(']) };
+    exact.then_some(index)
+}
+
+/// The index a SQL duplicate-key error names, with the table MySQL 8.0.19+ puts before it ('orders.uq_email'). MariaDB
+/// and older MySQL give the index alone; PostgreSQL gives the constraint, whose index has the same name.
+fn dup_index(raw: &str) -> Option<(Option<String>, String)> {
+    if let Some(i) = raw.find("unique constraint \"") {
+        let r = &raw[i + 19..];
+        return r.split_once('"').map(|(n, _)| (None, n.to_string()));
+    }
+    let (_, k) = mysql_dup(raw)?;
+    Some(match k.split_once('.') {
+        Some((t, idx)) => (Some(t.to_string()), idx.to_string()),
+        None => (None, k.to_string()),
+    })
 }
 
 /// Closing line the worker adds to a 57014 that came after Stop was pressed, so a stop is told from a statement timeout
@@ -741,6 +773,28 @@ mod tests {
         // MongoDB keeps its validator wording and button.
         let mongo = explain("Command failed: Error code 121 (DocumentValidationFailure): Document failed validation", &with_ns);
         assert_eq!((mongo.kind, mongo.fixes.as_slice()), (ErrKind::Validation, &[Fix::Validator][..]));
+    }
+
+    #[test]
+    fn dup_filterable_needs_one_exact_value_on_this_table() {
+        let my = |v: &str, k: &str| dup_filterable(&format!("1062 (23000): Duplicate entry '{v}' for key '{k}'"), "orders");
+        assert_eq!(my("ana@b.c", "orders.uq_email"), Some("uq_email".into()));
+        assert_eq!(my("42", "customers.PRIMARY"), None);
+        assert_eq!(my("42", "PRIMARY"), Some("PRIMARY".into()));
+        assert_eq!(my(&"x".repeat(61), "orders.uq_note"), None);
+        assert_eq!(my("\\x8F\\x01", "orders.uq_bin"), None);
+        let pg = |k: &str| dup_filterable(&format!("23505: duplicate key value violates unique constraint \"u\"\nDetail: Key ({k})=(1, 2) already exists."), "orders");
+        assert_eq!(pg("a"), Some("u".into()));
+        assert_eq!(pg("a, b"), None);
+        assert_eq!(pg("lower(email::text)"), None);
+    }
+
+    #[test]
+    fn dup_index_names_the_index_and_mysqls_table() {
+        assert_eq!(dup_index("error returned from database: 1062 (23000): Duplicate entry '4410' for key 'orders.number'"), Some((Some("orders".into()), "number".into())));
+        assert_eq!(dup_index("1062 (23000): Duplicate entry 'a' for key 'PRIMARY'"), Some((None, "PRIMARY".into())));
+        assert_eq!(dup_index("23505: duplicate key value violates unique constraint \"orders_pkey\"\nDetail: Key (id)=(1) already exists."), Some((None, "orders_pkey".into())));
+        assert_eq!(dup_index("E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 4410 }"), None);
     }
 
     #[test]

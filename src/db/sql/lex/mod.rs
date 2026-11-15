@@ -288,6 +288,12 @@ pub fn count_with(text: &str, d: Dialect, backslash: bool, ansi: bool) -> usize 
     split_with(text, opts(d, backslash, ansi)).len()
 }
 
+/// Whether `text` is one statement under both backslash rules, so a quote the server reads either way cannot hide a
+/// second statement.
+pub fn one_statement(text: &str, d: Dialect, ansi: bool) -> bool {
+    count_with(text, d, true, ansi) == 1 && count_with(text, d, false, ansi) == 1
+}
+
 /// The statement the caret belongs to. A caret right after a `;` stays with that statement, and one
 /// past the last statement picks the last one.
 pub fn statement_at(text: &str, caret: usize, d: Dialect) -> Option<Range<usize>> {
@@ -308,6 +314,13 @@ fn top_words(stmt: &str, d: Dialect) -> Option<Vec<String>> {
         }
     }
     Some(out)
+}
+
+/// Whether a PostgreSQL statement is an INSERT whose own RETURNING gives back the rows it wrote. A RETURNING inside a
+/// CTE or a subquery does not count, since the rows then come from somewhere else.
+pub fn insert_returning(stmt: &str, d: Dialect) -> bool {
+    // The head is read first: it is cheap and rules out every other statement before the whole text is lexed.
+    d == Dialect::Postgres && head_words(stmt, d, 1).first().is_some_and(|f| f == "INSERT") && top_words(stmt, d).is_some_and(|w| w.iter().any(|x| x == "RETURNING"))
 }
 
 /// Whether a statement can sit inside `SELECT * FROM (...) AS q LIMIT ...` to be read a page at a time:
@@ -894,6 +907,17 @@ impl ScriptSplitter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn insert_returning_is_a_top_level_insert_with_its_own_returning() {
+        use super::{insert_returning as ir, Dialect::*};
+        assert!(ir("INSERT INTO t (a) VALUES (1) RETURNING id", Postgres));
+        assert!(ir("insert into t default values returning *", Postgres));
+        assert!(!ir("INSERT INTO t (a) VALUES (1)", Postgres));
+        assert!(!ir("WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", Postgres));
+        assert!(!ir("UPDATE t SET a = 1 RETURNING id", Postgres));
+        assert!(!ir("INSERT INTO t VALUES (1) RETURNING id", MySql));
+    }
+
     #[test]
     fn use_names_its_database() {
         assert_eq!(use_target("USE shop").as_deref(), Some("shop"));

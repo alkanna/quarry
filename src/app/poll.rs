@@ -31,6 +31,10 @@ impl App {
                     }
                 }
                 Msg::SqlStructure { req, res } => {
+                    if let Some((_, sel, index, value)) = self.dup_wait.take_if(|w| w.0 == req) {
+                        self.sql_dup_index(sel, &index, value, res);
+                        continue;
+                    }
                     // The Add relation dialog asks for the table it points at on a request of its own.
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() && f.parent_loaded(req, res.clone()) {
                         continue;

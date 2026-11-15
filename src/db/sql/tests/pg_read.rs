@@ -267,6 +267,8 @@ fn structure_info_relations_and_triggers() {
         assert!(st.status.engine.is_empty() && st.status.auto_increment.is_none());
         assert!(st.status.data.is_some() && st.status.index.is_some() && st.status.total.is_some_and(|t| t > 0), "{:?}", st.status);
         assert!(st.status.rows.is_some(), "{var}");
+        // The default tablespace reads as none; every table has a statistics row, so a dead row count.
+        assert!(!st.status.owner.is_empty() && st.status.tablespace.is_empty() && st.status.dead_rows.is_some(), "{var}: {:?}", st.status);
         // The other direction.
         let pst = structure(l, &db, "t4_struct", "parent");
         assert!(pst.foreign_keys.is_empty() && pst.referenced_by.len() == 1 && pst.referenced_by[0].table == "orders");
@@ -297,6 +299,7 @@ fn views_and_unknown_row_estimates() {
         let v = structure(l, &db, "t4_view", "v");
         assert!(v.create.starts_with("CREATE VIEW \"t4_view\".\"v\" AS\n") && v.create.contains("SELECT") && v.create.ends_with(';'), "{var}: {}", v.create);
         assert_eq!(v.columns.len(), 2);
+        assert!(v.status.dead_rows.is_none() && v.status.vacuumed.is_empty() && v.status.kind == "v", "{var}: a view has statistics {:?}", v.status);
         let m = structure(l, &db, "t4_view", "m");
         assert!(m.create.starts_with("CREATE MATERIALIZED VIEW \"t4_view\".\"m\" AS\n") && m.create.contains("CREATE INDEX m_id ON t4_view.m"), "{}", m.create);
         // The count of a plain page falls back to a real count as well.

@@ -80,6 +80,8 @@ pub enum Call {
     Explain { ns: Ns, filter: Document, sort: Option<Document>, pipeline: Option<Vec<Document>> },
     SelectRows { ns: Ns, columns: Vec<String>, wher: Vec<Cond>, order: Vec<(String, bool)>, limit: Option<u32>, offset: u64 },
     QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32> },
+    /// The plan of one read-only statement, with the same checks as QuerySql.
+    ExplainSql { conn: ConnRef, db: Option<String>, sql: String },
     Insert { ns: Ns, docs: Vec<Document> },
     Update { ns: Ns, filter: Document, update: Update, many: bool },
     Delete { ns: Ns, filter: Document, many: bool },
@@ -199,6 +201,7 @@ fn build_tools() -> Vec<ToolDef> {
         t("explain", "Explain plan of a find (filter, sort) or of a pipeline.", coll(json!({ "filter": query_t("Query filter"), "sort": query_t("Sort"), "pipeline": { "type": ["array", "string"] } }), &[]), true, false),
         t("select_rows", "Read rows of a SQL table without writing SQL.", table(json!({ "columns": { "type": "array", "items": { "type": "string" }, "description": "Columns to return; all when left out." }, "where": where_p(), "order": { "type": "array", "items": { "type": "object", "required": ["column"], "additionalProperties": false, "properties": { "column": { "type": "string" }, "desc": { "type": "boolean" } } } }, "limit": limit_p(), "offset": { "type": "integer", "minimum": 0 } }), &[]), true, false),
         t("query_sql", "Run read-only SQL (SELECT, SHOW, EXPLAIN without ANALYZE). Refused on connections whose rules hide data.", props(with(sql_p(), json!({ "limit": limit_p() })), &["connection", "sql"]), true, false),
+        t("explain_sql", "Plan of one read-only SQL statement, as the server estimates it without running it: nodes with depth, access, index, rows and cost, and warnings such as full scans and filesorts.", props(sql_p(), &["connection", "sql"]), true, false),
         t("insert", "Insert documents into a MongoDB collection.", coll(json!({ "documents": { "type": "array", "items": { "type": "object" }, "maxItems": MAX_DOCS } }), &["documents"]), false, false),
         t("update", "Update documents with update operators or an update pipeline.", coll(json!({ "filter": query_t("Query filter"), "update": { "type": ["object", "array"], "description": "Update operators like {\"$set\": {...}} or a pipeline." }, "many": { "type": "boolean", "default": false } }), &["filter", "update"]), false, true),
         t("delete", "Delete documents matching a filter.", coll(json!({ "filter": query_t("Query filter"), "many": { "type": "boolean", "default": false } }), &["filter"]), false, true),
@@ -495,6 +498,7 @@ pub fn parse(tool: &str, args: &Value) -> Result<Call, ArgErr> {
             Call::SelectRows { ns: a.ns("table")?, columns, wher: a.wher()?, order, limit: a.limit()?, offset: a.uint("offset")?.unwrap_or(0) }
         }
         "query_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: a.limit()? },
+        "explain_sql" => Call::ExplainSql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")? },
         "insert" => {
             let docs = a.rows("documents")?.into_iter().map(|d| match Bson::try_from(Value::Object(d)) {
                 Ok(Bson::Document(d)) => Ok(d),
@@ -607,7 +611,7 @@ const USER_COMMANDS: [&str; 16] = ["createUser", "updateUser", "dropUser", "drop
 pub fn classify(c: &Call, dialect: Option<Dialect>) -> OpClass {
     match c {
         Call::ListConnections | Call::ListDatabases { .. } | Call::ListCollections { .. } | Call::Describe { .. } | Call::Find { .. } | Call::Aggregate { .. } | Call::Count { .. } | Call::Explain { .. } | Call::SelectRows { .. } => OpClass::ReadData,
-        Call::QuerySql { sql, .. } => match dialect {
+        Call::QuerySql { sql, .. } | Call::ExplainSql { sql, .. } => match dialect {
             Some(d) if read_only_check(sql, d).is_ok() => OpClass::ReadData,
             _ => OpClass::RunScripts,
         },
@@ -763,7 +767,7 @@ impl Call {
     pub fn conn(&self) -> Option<&ConnRef> {
         match self {
             Call::ListConnections => None,
-            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } => Some(conn),
+            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::ExplainSql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } => Some(conn),
             _ => self.ns().map(|n| &n.conn),
         }
     }
@@ -778,7 +782,7 @@ impl Call {
     /// Whether the call runs text Quarry does not parse into fields (SQL, scripts, commands), so field rules cannot
     /// guard it.
     pub fn is_free_text(&self) -> bool {
-        matches!(self, Call::QuerySql { .. } | Call::RunSql { .. } | Call::RunCommand { .. } | Call::RunShell { .. })
+        matches!(self, Call::QuerySql { .. } | Call::ExplainSql { .. } | Call::RunSql { .. } | Call::RunCommand { .. } | Call::RunShell { .. })
     }
 
     /// Every namespace the call reads or writes: its own, plus pipeline lookups and $out or $merge targets, so the
@@ -790,7 +794,7 @@ impl Call {
         }
         match self {
             Call::ListCollections { db, .. } => out.push(Target { db: db.clone(), coll: None }),
-            Call::QuerySql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. } => out.push(Target { db: db.clone(), coll: None }),
+            Call::QuerySql { db: Some(db), .. } | Call::ExplainSql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. } => out.push(Target { db: db.clone(), coll: None }),
             Call::RunCommand { db, command, .. } => {
                 out.push(Target { db: db.clone(), coll: None });
                 if let Some(Bson::String(c)) = command.iter().next().map(|(_, v)| v) {
@@ -876,7 +880,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_and_parses() {
         let names: Vec<&str> = tool_list().iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for t in tool_list() {
             let j = t.to_json();
             assert_eq!(j["annotations"]["openWorldHint"], false);

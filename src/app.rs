@@ -167,6 +167,8 @@ pub struct App {
     inline: Option<Inline>,
     /// The SQL grid cell being edited in place.
     sql_cell: Option<CellEdit>,
+    /// A MySQL duplicate-key toast's Show the other row, waiting for the table's indexes: (req, table, index, value).
+    dup_wait: Option<(u64, Sel, String, String)>,
     new_field: Option<NewField>,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
@@ -365,6 +367,7 @@ impl App {
             changed: HashSet::new(),
             inline: None,
             sql_cell: None,
+            dup_wait: None,
             new_field: None,
             fold: None,
             fold_busy: false,

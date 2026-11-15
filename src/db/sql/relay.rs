@@ -16,9 +16,10 @@ const RELAY_ROWS_MAX: usize = 100_000;
 /// And the most bytes of values one answer may hold, so a few huge cells cannot fill memory or the pipe.
 const RELAY_BYTES_MAX: usize = 64 << 20;
 
-/// What a shell script's query gave back: rows as relaxed Extended JSON, or the effect of a write.
+/// What a shell script's query gave back: rows as relaxed Extended JSON, or the effect of a write. A PostgreSQL
+/// INSERT ... RETURNING is both: its rows, how many it wrote, and the first returned column of a single row as the key.
 pub enum Answer {
-    Rows(Vec<serde_json::Value>),
+    Rows { rows: Vec<serde_json::Value>, affected: Option<u64>, insert_id: Option<serde_json::Value> },
     Wrote { affected: u64, insert_id: u64 },
 }
 
@@ -276,7 +277,7 @@ impl Relay {
         } else {
             fill(text, &args.iter().map(Arg::param).collect::<Vec<_>>(), self.backslash, self.ansi)?
         };
-        if lex::count_with(&stmt, self.dialect, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, self.dialect, !self.backslash, self.ansi) != 1 {
+        if !lex::one_statement(&stmt, self.dialect, self.ansi) {
             return Err("Send one statement per query".into());
         }
         if let Some(g) = gate {
@@ -386,7 +387,17 @@ impl Relay {
             let (affected, insert_id) = wrote.unwrap_or_default();
             return Ok(Answer::Wrote { affected, insert_id });
         }
-        Ok(Answer::Rows(rows))
+        // A multi-row INSERT has no one key, as with insert({returning}) in the runner, so only a single row gives one.
+        // The key is read by the first column's name: the row object is a map whose order is not the statement's.
+        let (affected, insert_id) = if lex::insert_returning(&stmt, self.dialect) {
+            // Like the runner's own rule, only a number or text stands in for a key; a BIGINT past 2^53 arrives as $numberLong.
+            let key = |v: &&serde_json::Value| v.is_number() || v.is_string() || v.get("$numberLong").is_some();
+            let id = if rows.len() == 1 { cols.first().and_then(|c| rows[0].get(&c.name)).filter(key).cloned() } else { None };
+            (Some(rows.len() as u64), id)
+        } else {
+            (None, None)
+        };
+        Ok(Answer::Rows { rows, affected, insert_id })
     }
 }
 

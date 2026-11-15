@@ -194,6 +194,50 @@ pub(in crate::db) async fn query_sql(db: &Db, schema: &str, sql: &str, limit: Op
     free_sql(db, schema, sql, true, limit, rules, limits, h, "query_sql runs read-only statements only (SELECT, SHOW, EXPLAIN without ANALYZE), so this one was not run.").await
 }
 
+/// `explain_sql`: the estimated plan of one read-only statement, never with ANALYZE, read through the same parser as the
+/// Explain dialog. It runs on the read-only path like `query_sql`. Conditions in a plan quote the statement's values, so
+/// every detail and warning line goes through the value rules.
+pub(in crate::db) async fn explain_sql(db: &Db, schema: &str, sql: &str, rules: &Rules, limits: &Limits, h: &RunHandle) -> Res<Answer> {
+    let d = db.dialect;
+    if !super::lex::one_statement(sql, d, false) {
+        return Err("explain_sql explains one statement at a time.".into());
+    }
+    super::plan::explainable(sql, d)?;
+    let nsr = rules.all();
+    let sets = run(db, schema, &super::plan::explain_script(d, sql, None), true, &h.conn, &h.cancel, 0).await;
+    h.conn.store(0, Ordering::SeqCst);
+    if let Some(s) = sets.iter().find(|s| s.error.is_some()) {
+        return Err(if s.refused { "explain_sql explains read-only statements only (SELECT, WITH, TABLE, VALUES), so this one was not run.".into() } else { failure(s.error.as_deref().unwrap_or(""), &nsr, "explain the statement") });
+    }
+    let text = super::plan::plan_text(&sets)?;
+    let scrub = |v: &[String]| v.iter().map(|x| nsr.scrub_text(x)).collect::<Vec<_>>();
+    let Ok(plan) = super::plan::parse(d, &text) else {
+        return capped(Answer::new(json!({ "raw": nsr.scrub_text(&super::plan::raw_text(&text)) }), "Plan".into()), limits);
+    };
+    let nodes: Vec<Value> = plan
+        .nodes
+        .iter()
+        .map(|n| {
+            let access = match n.access {
+                super::plan::Access::Scan => "full scan",
+                super::plan::Access::Index => "index",
+                super::plan::Access::Other => "other",
+            };
+            json!({ "depth": n.depth, "node": n.label, "table": n.target, "index": n.index, "access": access, "rows": n.rows, "cost": n.cost, "detail": scrub(&n.detail) })
+        })
+        .collect();
+    let summary = format!("Plan of {} node{}", nodes.len(), if nodes.len() == 1 { "" } else { "s" });
+    capped(Answer::new(json!({ "nodes": nodes, "warnings": scrub(&plan.warnings), "cost": plan.cost }), summary), limits)
+}
+
+/// An explain answer is one piece that cannot be paged, so one past the byte limit is refused whole.
+fn capped(a: Answer, limits: &Limits) -> Res<Answer> {
+    if a.bytes > limits.bytes as u64 {
+        return Err(format!("The plan is longer than the {} byte limit for agent answers. Explain a smaller part of the statement.", limits.bytes));
+    }
+    Ok(a)
+}
+
 /// `run_sql`: statements that may write, through the user's own script path. On a locked connection it runs read-only
 /// like the user's would, and a statement that writes is refused there. Nothing it does can be undone.
 pub(in crate::db) async fn run_sql(db: &Db, schema: &str, sql: &str, read_only: bool, rules: &Rules, limits: &Limits, h: &RunHandle) -> Res<Answer> {
@@ -609,6 +653,14 @@ mod tests {
             let raw = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO {db}.users (id, email) VALUES (1, 'dup@example.org')"))).execute(&l.pool).await.unwrap_err() });
             let e = failure(&crate::db::sql::se(raw), &r.all(), "insert");
             assert!(!e.contains("dup@example.org") && !e.contains("'1'"), "{var}: {e}");
+            // explain_sql: a plan with its nodes, the literal of the condition scrubbed, and no write or second statement.
+            let a = rt.block_on(explain_sql(&l.db, &db, "SELECT id FROM users WHERE email = 'ana@example.org'", &r, &limits(200, 1 << 20), &h)).unwrap();
+            assert!(a.value["nodes"].as_array().is_some_and(|n| !n.is_empty()), "{var}: {}", a.value);
+            assert!(!a.value.to_string().contains("ana@example.org"), "{var}: {}", a.value);
+            assert!(rt.block_on(explain_sql(&l.db, &db, "UPDATE users SET age = 0", &r, &limits(200, 1 << 20), &h)).is_err(), "{var}");
+            assert!(rt.block_on(explain_sql(&l.db, &db, "SELECT 1; SELECT 2", &r, &limits(200, 1 << 20), &h)).is_err(), "{var}");
+            assert!(rt.block_on(explain_sql(&l.db, &db, "EXPLAIN ANALYZE SELECT 1", &r, &limits(200, 1 << 20), &h)).is_err(), "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users WHERE age = 0")), "0");
             let a = rt.block_on(describe(&l.db, &db, "users", &r)).unwrap();
             assert_eq!(a.value["primary_key"], json!(["id"]));
             let pw = a.value["columns"].as_array().unwrap().iter().find(|c| c["name"] == "password").unwrap().clone();
@@ -651,6 +703,13 @@ mod tests {
             let a = rt.block_on(query_sql(&f.db, "agent_pg", "SELECT id, password FROM users ORDER BY id", None, &r, &limits(2, 1 << 20), &h)).unwrap();
             assert_eq!(a.value["results"][0]["rows"].as_array().unwrap().len(), 2);
             assert_eq!(a.value["results"][0]["rows"][0]["password"], json!("hidden"));
+            let a = rt.block_on(explain_sql(&f.db, "agent_pg", "SELECT id FROM users WHERE email = 'ana@example.org'", &r, &limits(200, 1 << 20), &h)).unwrap();
+            assert!(a.value["nodes"].as_array().is_some_and(|n| !n.is_empty()), "{var}: {}", a.value);
+            assert!(!a.value.to_string().contains("ana@example.org"), "{var}: {}", a.value);
+            assert!(rt.block_on(explain_sql(&f.db, "agent_pg", "DELETE FROM users", &r, &limits(200, 1 << 20), &h)).is_err(), "{var}");
+            let e = rt.block_on(explain_sql(&f.db, "agent_pg", "SELECT id FROM users", &r, &limits(200, 16), &h)).unwrap_err();
+            assert!(e.contains("byte limit"), "{var}: {e}");
+            assert_eq!(f.one("SELECT count(*)::text FROM users"), "3");
             let d = rt.block_on(describe(&f.db, "agent_pg", "users", &r)).unwrap();
             assert_eq!(d.value["primary_key"], json!(["id"]), "{var}");
             let s = rt.block_on(databases(&f.db, &Scope::default())).unwrap();

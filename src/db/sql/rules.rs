@@ -368,6 +368,44 @@ fn pg_rule_sql(r: &Rule, c: &str, n: impl Fn() -> String) -> Option<String> {
     })
 }
 
+/// The Query help window's text for a table's Content bar. The rule lines are written by `rule_sql`, so they show what
+/// this dialect is sent and cannot drift from it.
+pub fn filter_help(d: Dialect) -> String {
+    const COL: usize = 31;
+    let row = |a: &str, b: &str| format!("  {a:<COL$}{b}\n");
+    let mut s = String::from("The filter bar\n");
+    s += &row("Rules / SQL", "build the WHERE from rules, or type any SQL condition");
+    s += &row("Enter", "run the filter");
+    s += &row("ORDER BY", "any SQL sort; a column header click sorts too, Shift adds a key");
+    s += &row("Up / Down, Enter or Tab, Esc", "move in the completion list, insert, close");
+    s += "\nRules: pick a column, then an operator. What some of them send\n";
+    let samples: [(Op, Kind, &[&str]); 9] = [
+        (Op::Contains, Kind::Text, &["paid"]),
+        (Op::StartsWith, Kind::Text, &["A"]),
+        (Op::Regexp, Kind::Text, &["^[0-9]+$"]),
+        (Op::In, Kind::Text, &["paid", "sent"]),
+        (Op::NotInOrNull, Kind::Text, &["void"]),
+        (Op::Last, Kind::DateTime, &["7", "days"]),
+        (Op::ThisMonth, Kind::DateTime, &[]),
+        (Op::JsonPathEq, Kind::Json, &["$.a.b", "x"]),
+        (Op::JsonContains, Kind::Json, &["{\"a\": 1}"]),
+    ];
+    for (op, kind, vals) in samples {
+        let r = Rule { col: "name".into(), kind, op, values: vals.iter().map(|v| v.to_string()).collect() };
+        s += &row(label(op, kind), &rule_sql(&r, d, false));
+    }
+    if d == Dialect::Postgres {
+        s += &row("", "Contains, starts and ends with ignore case through ILIKE, like MySQL's default collations");
+    }
+    s += "\nShortcuts\n";
+    s += &row("Cmd+F", "focus the WHERE box");
+    s += &row("Cmd+E", "explain the filter's query");
+    s += &row("Up / Down", "move between rows");
+    s += &row("PageUp / PageDown", "previous and next page");
+    s += &row("Cmd+S", "save the filter to the script library");
+    s
+}
+
 /// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`).
 pub fn to_sql(rules: &[Rule], any: bool, d: Dialect, bs: bool) -> String {
     rules.iter().filter(|r| r.complete()).map(|r| rule_sql(r, d, bs)).collect::<Vec<_>>().join(if any { " OR " } else { " AND " })
@@ -753,6 +791,14 @@ impl Grain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_help_shows_each_dialects_own_operators() {
+        let pg = filter_help(Dialect::Postgres);
+        let my = filter_help(Dialect::MySql);
+        assert!(pg.contains("\"name\" ILIKE '%paid%'") && pg.contains("\"name\"::text ~ '^[0-9]+$'"), "{pg}");
+        assert!(my.contains("`name` LIKE '%paid%'") && my.contains("`name` REGEXP '^[0-9]+$'") && !my.contains("ILIKE"), "{my}");
+    }
 
     fn cols() -> Vec<(String, Kind)> {
         [("id", Kind::Int), ("total", Kind::Decimal), ("name", Kind::Text), ("created_at", Kind::DateTime), ("status", Kind::Enum), ("tags", Kind::Set), ("data", Kind::Json), ("blob", Kind::Binary), ("seen_at", Kind::DateTime)]

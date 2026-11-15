@@ -302,10 +302,13 @@ impl App {
 
     pub(super) fn err_toast(&mut self, e: ErrEntry) {
         let mut acts: Vec<(String, Act)> = Vec::new();
-        // SQL keys name an index, not a column, so there is no filter to write for them.
-        let mongo = e.conn.and_then(|c| self.conn(c)).is_some_and(|c| !c.meta.engine.is_sql());
-        if e.ex.dup.is_some() && e.sel.is_some() && mongo {
-            acts.push(("Show the other document".into(), Act::ShowDup));
+        // A SQL error is placed in the tab that was open when it came back, which need not be the table it is about, so
+        // the click reads that table's indexes and looks for the key's index there.
+        if let (Some(_), Some(sel), Some(c)) = (&e.ex.dup, &e.sel, e.conn.and_then(|c| self.conn(c))) {
+            let sql = c.meta.engine.is_sql();
+            if !sql || (!sel.coll.is_empty() && db::dup_filterable(&e.raw, &sel.coll).is_some()) {
+                acts.push((if sql { "Show the other row" } else { "Show the other document" }.into(), Act::ShowDup));
+            }
         }
         for f in &e.ex.fixes {
             // Retry needs the thing that failed, which a toast does not know; the action is still there to redo.
@@ -473,6 +476,10 @@ impl App {
             Act::ShowDup => {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };
+                if self.conn(sel.conn).is_some_and(|c| c.meta.engine.is_sql()) {
+                    let Some(index) = db::dup_filterable(&e.raw, &sel.coll) else { return };
+                    return self.sql_show_dup(sel, index, v);
+                }
                 self.open_collection(sel, Open::Here);
                 if let Some(t) = self.tm() {
                     t.view = View::Documents;

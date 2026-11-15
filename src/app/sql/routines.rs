@@ -101,22 +101,6 @@ impl RoutineWin {
     }
 }
 
-/// The ROUTINES caption of the sidebar: a painted chevron, the label and the count, like the TABLES and VIEWS captions.
-fn caption_row(ui: &mut egui::Ui, hidden: bool, n: usize) -> egui::Response {
-    let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
-    let g = ui.painter().layout_job(LayoutJob::single_section("ROUTINES".into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
-    if state_of(&hr) > 0 {
-        ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
-    }
-    let c = egui::pos2(cap.left() + 12.0, cap.center().y + 1.0);
-    let tri = if hidden { vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(-2.0, 3.5), c + egui::vec2(2.5, 0.0)] } else { vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)] };
-    ui.painter().add(egui::Shape::convex_polygon(tri, FAINT(), Stroke::NONE));
-    ui.painter().galley(egui::pos2(cap.left() + 22.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
-    ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
-    hr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Routines"));
-    hr.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 impl App {
     fn routines_key(&self, conn: u64, db: &str, schema: &str) -> (u64, String) {
         (conn, ns_key(db, if self.is_pg(conn) { schema } else { "" }))
@@ -171,8 +155,10 @@ impl App {
         if shown.is_empty() {
             return;
         }
-        let hidden = filter.is_empty() && self.routines.folded.contains(&key);
-        let cap = caption_row(ui, hidden, shown.len());
+        // A filter shows the group open whatever its fold, and opens it at once rather than animating.
+        let open = !filter.is_empty() || !self.routines.folded.contains(&key);
+        let gid = egui::Id::unique(("side-routines", &key));
+        let cap = crate::app::sidebar::side_group(ui, gid, "ROUTINES", "Routines", shown.len(), open, |ui| self.routine_rows(ui, conn, db_name, schema, pg, writable, system, shown, acts));
         if cap.clicked() {
             acts.push(RAct::Fold(key.1.clone()));
         }
@@ -180,9 +166,11 @@ impl App {
             menu_look(ui);
             Self::routines_new_items(ui, db_name, schema, pg, writable, system, acts);
         });
-        if hidden {
-            return;
-        }
+    }
+
+    /// The rows of the ROUTINES group, drawn inside its fold.
+    #[allow(clippy::too_many_arguments)]
+    fn routine_rows(&self, ui: &mut egui::Ui, conn: u64, db_name: &str, schema: &str, pg: bool, writable: bool, system: bool, shown: Vec<&Routine>, acts: &mut Vec<RAct>) {
         let dialect = self.dialect_of(conn);
         for r in shown {
             let active = self.routines.win.as_ref().is_some_and(|w| w.is(conn, db_name, schema, r));
@@ -417,7 +405,7 @@ impl App {
         let Some(w) = self.routines.win.as_ref() else { return };
         let Some(detail) = w.detail.as_ref() else { return };
         let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
+        let bs = self.sql_bs_of(conn);
         let Some(script) = rt::run_script(w.dialect, &schema, detail, &w.args, bs) else { return };
         if !detail.read_only && !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.routine_run_script(conn, db, script));

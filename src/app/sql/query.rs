@@ -594,12 +594,58 @@ impl App {
         }
         let base = Sel { conn: t.sel.conn, db: db_name, schema: String::new(), coll: String::new() };
         let sel = super::ns::with_ns(d, &base, &ns, table);
+        self.sql_open_filtered(sel, text);
+    }
+
+    /// Opens a table's Content in a tab of its own, filtered by the WHERE text `filter`.
+    pub(in crate::app) fn sql_open_filtered(&mut self, sel: Sel, filter: String) {
         self.open_tab(sel, Open::Link);
         let Some(t) = self.tm() else { return };
         t.view = View::Documents;
-        t.filter_txt = text;
+        t.filter_txt = filter;
         t.page = 0;
         self.reload();
+    }
+
+    /// Show the other row of a duplicate-key error on table `sel`. The error names an index (a PostgreSQL unique
+    /// constraint has its index's name), so the table's indexes are read first: the index must be there and cover one
+    /// whole column, and that column is filtered on. Reading it from the table also gives the column's own name,
+    /// which PostgreSQL's message quotes and MySQL's does not give at all.
+    pub(in crate::app) fn sql_show_dup(&mut self, sel: Sel, index: String, value: String) {
+        if self.sql_cell.is_some() {
+            return self.warn("Finish or cancel the cell edit first.");
+        }
+        let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
+        self.req += 1;
+        self.dup_wait = Some((self.req, sel.clone(), index, value));
+        self.worker.sql_structure(self.req, db, space, sel.coll.clone());
+    }
+
+    /// The table's indexes are in: the duplicate's index must be on this table and be one whole column.
+    pub(in crate::app) fn sql_dup_index(&mut self, sel: Sel, index: &str, value: String, res: db::Res<db::sql::Structure>) {
+        let st = match res {
+            Ok(st) => st,
+            Err(e) => return self.err(e),
+        };
+        let Some(ix) = st.indexes.iter().find(|i| i.name.eq_ignore_ascii_case(index)) else {
+            return self.warn(format!("The key {index} is not on {}, so its other row is in another table.", sel.coll));
+        };
+        let [c] = ix.cols.as_slice() else { return self.warn("This key spans several columns, so its value cannot be filtered on.") };
+        if c.prefix.is_some() || c.expr.is_some() {
+            return self.warn("This key covers part of a column or an expression, so its value cannot be filtered on.");
+        }
+        let filter = self.dup_filter(sel.conn, &c.name, value);
+        self.sql_open_filtered(sel, filter);
+    }
+
+    /// `col = 'value'` in the dialect of connection `conn`. PostgreSQL prints a NULL key value as null, the same as the
+    /// text 'null', so that one matches both.
+    fn dup_filter(&self, conn: u64, col: &str, value: String) -> String {
+        let d = self.dialect_of(conn);
+        let bs = self.sql_bs_of(conn);
+        let q = d.quote_ident(col);
+        let eq = format!("{q} = {}", db::copy::sql_literal(d, Some(&Bson::String(value.clone())), false, bs));
+        if d == db::sql::Dialect::Postgres && value == "null" { format!("({q} IS NULL OR {eq})") } else { eq }
     }
 
     /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.

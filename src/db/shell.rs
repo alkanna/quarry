@@ -234,16 +234,23 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
                     let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
                     let mut answer = serde_json::json!({ "type": "sqlres", "id": v.get("id") });
                     match res {
-                        Ok(sql::Answer::Rows(rows)) => {
+                        Ok(sql::Answer::Rows { rows, affected, insert_id }) => {
                             q.rows = Some(rows.len());
+                            q.affected = affected;
                             answer["ok"] = true.into();
                             answer["rows"] = rows.into();
+                            if let Some(n) = affected {
+                                answer["affected"] = n.into();
+                            }
+                            if let Some(id) = insert_id {
+                                answer["insertId"] = id;
+                            }
                         }
                         Ok(sql::Answer::Wrote { affected, insert_id }) => {
                             q.affected = Some(affected);
                             answer["ok"] = true.into();
                             answer["affected"] = affected.into();
-                            // PostgreSQL has no generated key to report here, the runner leaves insertId undefined there.
+                            // A PostgreSQL write without RETURNING has no generated key to report, the runner leaves insertId undefined there.
                             if job.sql.iter().find(|(n, _)| *n == q.conn).is_some_and(|(_, c)| c.db.dialect != sql::Dialect::Postgres) {
                                 answer["insertId"] = insert_id.into();
                             }
