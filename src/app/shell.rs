@@ -359,7 +359,7 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
         caption(ui, "NAMES YOU CAN USE");
         egui::Grid::new("sql-shell-names").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
             for (n, what) in [
-                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId; on PostgreSQL .insertId is undefined, use RETURNING; table.insert(row, { returning: true }) or { returning: ['id'] } returns the written rows and sets .insertId to the first column of a single row)"),
+                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId; on PostgreSQL an INSERT ... RETURNING returns its rows with .affected, and .insertId is the first returned column of a single row, undefined without RETURNING; table.insert(row, { returning: true }) or { returning: ['id'] } returns the written rows and sets .insertId to the first column of a single row)"),
                 ("sql.unsafe(text, params)", "the same with text you built yourself and ? placeholders ($1, $2 on PostgreSQL)"),
                 ("<table>", "every table of the database whose name is a plain word, e.g. orders.find()"),
                 ("table('name')", "any table by its name, also names that are not plain words (table('name', 'schema') on PostgreSQL)"),

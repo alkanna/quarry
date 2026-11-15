@@ -310,6 +310,12 @@ fn top_words(stmt: &str, d: Dialect) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Whether a PostgreSQL statement is an INSERT whose own RETURNING gives back the rows it wrote. A RETURNING inside a
+/// CTE or a subquery does not count, since the rows then come from somewhere else.
+pub fn insert_returning(stmt: &str, d: Dialect) -> bool {
+    d == Dialect::Postgres && top_words(stmt, d).is_some_and(|w| w.first().is_some_and(|f| f == "INSERT") && w.iter().any(|x| x == "RETURNING"))
+}
+
 /// Whether a statement can sit inside `SELECT * FROM (...) AS q LIMIT ...` to be read a page at a time:
 /// one SELECT, WITH, TABLE or VALUES that writes nothing and has no INTO or locking clause.
 pub fn pageable(stmt: &str, d: Dialect) -> bool {
@@ -894,6 +900,17 @@ impl ScriptSplitter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn insert_returning_is_a_top_level_insert_with_its_own_returning() {
+        use super::{insert_returning as ir, Dialect::*};
+        assert!(ir("INSERT INTO t (a) VALUES (1) RETURNING id", Postgres));
+        assert!(ir("insert into t default values returning *", Postgres));
+        assert!(!ir("INSERT INTO t (a) VALUES (1)", Postgres));
+        assert!(!ir("WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", Postgres));
+        assert!(!ir("UPDATE t SET a = 1 RETURNING id", Postgres));
+        assert!(!ir("INSERT INTO t VALUES (1) RETURNING id", MySql));
+    }
+
     #[test]
     fn use_names_its_database() {
         assert_eq!(use_target("USE shop").as_deref(), Some("shop"));

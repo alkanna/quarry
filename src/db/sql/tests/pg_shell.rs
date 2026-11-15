@@ -191,7 +191,7 @@ fn an_unlocked_relay_writes_in_autocommit_and_insert_returns_a_row_only_when_ask
   const none = await ins.update({ id: 99 }, { note: 'q' });
   const del = await ins.delete({ note: 'nope' });
   const [s] = await sql.unsafe("SELECT pg_catalog.current_setting('transaction_read_only') AS ro, (SELECT xact_start < query_start FROM pg_stat_activity WHERE pid = pg_backend_pid()) AS own_tx");
-  return { a: { id: a.insertId, affected: a.affected, row: a[0] }, plain: { id: typeof plain.insertId, affected: plain.affected, rows: plain.length }, cols: { id: cols.insertId, row: cols[0] }, b: { affected: b.affected, id: typeof b.insertId }, c, d: { affected: d.affected, id: typeof d.insertId }, none: none.affected, del: del.affected, n: await ins.count(), s };
+  return { a: { id: a.insertId, affected: a.affected, row: a[0] }, plain: { id: typeof plain.insertId, affected: plain.affected, rows: plain.length }, cols: { id: cols.insertId, row: cols[0] }, b: { affected: b.affected, id: typeof b.insertId }, c, ck: { id: c.insertId, affected: c.affected }, d: { affected: d.affected, id: typeof d.insertId }, none: none.affected, del: del.affected, n: await ins.count(), s };
 }"#;
         let (_, res) = script(l, &db, "t7_unlocked", code, &["ins"], false);
         let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -201,6 +201,8 @@ fn an_unlocked_relay_writes_in_autocommit_and_insert_returns_a_row_only_when_ask
         assert_eq!((v["cols"]["id"].clone(), v["cols"]["row"].clone()), (3.into(), serde_json::json!({ "id": 3 })), "{var}: {v}");
         assert_eq!((v["b"]["affected"].clone(), v["b"]["id"].clone()), (2.into(), "undefined".into()), "{var}: {v}");
         assert_eq!(v["c"], serde_json::json!([{ "id": 6, "note": "d" }]));
+        // A written INSERT ... RETURNING reports its key and count like insert({returning}) does.
+        assert_eq!(v["ck"], serde_json::json!({ "id": 6, "affected": 1 }), "{var}: {v}");
         assert_eq!((v["d"]["affected"].clone(), v["d"]["id"].clone()), (2.into(), "undefined".into()), "{var}: {v}");
         assert_eq!((v["none"].clone(), v["del"].clone(), v["n"].clone()), (0.into(), 0.into(), 6.into()), "{var}: {v}");
         assert_eq!((v["s"]["ro"].clone(), v["s"]["own_tx"].clone()), ("off".into(), false.into()), "{var}: {v}");

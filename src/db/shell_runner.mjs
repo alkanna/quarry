@@ -89,7 +89,7 @@ let first = true;
     if (!m.ok) return p.reject(new Error(m.error));
     const rows = m.rows ?? [];
     rows.affected = m.affected ?? 0;
-    // PostgreSQL reports no generated key with a write, so there it stays undefined unless table.insert found one.
+    // PostgreSQL reports a key only for an INSERT ... RETURNING of one row (its first column), so otherwise it stays undefined.
     rows.insertId = m.insertId ?? (p.pg ? undefined : 0);
     p.resolve(rows);
   };
