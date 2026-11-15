@@ -58,7 +58,8 @@ impl SqlTab {
 }
 
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
-pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
+#[cfg(test)]
+fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
     let all: Vec<Range<usize>> = lex::split_statements(text, d).into_iter().map(|(r, _)| r).collect();
     statement_in(&all, text, caret, d)
 }
