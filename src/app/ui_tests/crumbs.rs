@@ -67,3 +67,38 @@ fn the_title_bar_has_no_settings_button() {
     assert!(ui.h.query_by_label("Settings").is_none());
     assert!(ui.h.query_by_label("Database crumb").is_some());
 }
+
+#[test]
+fn picking_a_schema_in_a_postgres_query_tab_moves_its_runs_there() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let a = ui.h.state_mut();
+    a.conns.push(Conn { dbs: vec![("analytics".into(), Some(vec!["public".into(), "reporting".into()]))], ..Conn::new(ConnMeta { id: 9, name: "Analytics".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) });
+    let mut t = Tab::new(Sel { conn: 9, db: "analytics".into(), schema: "public".into(), ..Default::default() }).for_engine(db::sql::Engine::Postgres);
+    t.view = View::Sql;
+    // A schema a library script set, which the pick must replace.
+    t.sql.as_mut().unwrap().run_schema = "staging".into();
+    a.tabs.push(t);
+    let last = a.tabs.len() - 1;
+    a.set_cur(last);
+    ui.settle();
+    ui.click("Schema crumb");
+    ui.click("Schema reporting");
+    ui.settle();
+    let t = ui.app().t().unwrap();
+    assert_eq!(t.sel.schema, "reporting");
+    assert_eq!(t.sql.as_ref().unwrap().run_schema, "");
+}
+
+#[test]
+fn a_tables_query_view_runs_in_the_database_picked_in_the_crumb() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.h.state_mut().set_view(View::Sql);
+    ui.settle();
+    ui.click("Database crumb");
+    ui.click("Database analytics");
+    ui.settle();
+    let t = ui.app().t().unwrap();
+    // The tab keeps its table; only the statements move.
+    assert_eq!((t.sel.db.as_str(), t.sel.coll.as_str()), ("shop", "orders"));
+    assert_eq!(t.sql.as_ref().unwrap().run_db, "analytics");
+}

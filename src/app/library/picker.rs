@@ -282,7 +282,7 @@ fn script_row(ui: &mut egui::Ui, d: &PickData, row: &PickRow, selected: bool) ->
 /// number of scripts. Returns the button, which the demo uses to hold the popover open.
 pub(in crate::app) fn picker_button(ui: &mut egui::Ui, d: &PickData, icon: bool, acts: &mut Vec<PickAct>) -> egui::Response {
     let body = |ui: &mut egui::Ui| picker_body(ui, d, acts);
-    let button = if icon { icon_menu(ui, paint_book, true, body).on_hover_text(format!("Library ({})", super::keys_text(true, false, false, "O"))) } else { sticky_menu(ui, format!("Library {}", d.count), body) };
+    let button = if icon { icon_menu(ui, paint_book, true, body).on_hover_text(format!("Library ({})", super::keys_text(true, false, false, "O"))) } else { sticky_menu(ui, (icon_atom(paint_book), format!("Library {}", d.count)), body) };
     if d.open {
         egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&button));
     }

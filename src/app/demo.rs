@@ -408,7 +408,7 @@ impl App {
         });
     }
 
-    fn demo_error(&mut self, which: &str) {
+    pub(super) fn demo_error(&mut self, which: &str) {
         const REFUSED: &str = r#"Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command { find: "orders", filter: { status: "paid" }, limit: 50, lsid: { id: UUID("3f1c9e2a-41c8-4bb4-9b1e-6f3c2d1a0b7e") }, $db: "shop" }"#;
         const DUP: &str = r#"An error occurred when trying to execute a write operation: WriteError(WriteError { code: 11000, code_name: None, message: "E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 10402 }", details: None })"#;
         let i = self.cur;
@@ -453,9 +453,13 @@ impl App {
 
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
     pub(super) fn load_sql_demo(&mut self) {
-        use db::sql::{Col, value::Kind};
         let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
-        let which = which.as_str();
+        self.sql_demo(&which);
+    }
+
+    /// `load_sql_demo` on the view `which` names, apart so a test can draw each one without the environment.
+    pub(super) fn sql_demo(&mut self, which: &str) {
+        use db::sql::{Col, value::Kind};
         let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
         shop.sort();
         self.conns.push(Conn {

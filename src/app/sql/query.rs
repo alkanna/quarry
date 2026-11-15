@@ -117,11 +117,11 @@ fn preview(text: &str, d: db::sql::Dialect) -> String {
 }
 
 /// The database a run uses: the picked one, else the tab's own.
-fn run_db(t: &Tab) -> String {
+pub(in crate::app) fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
 }
 
-/// The schema a PostgreSQL Query view runs in: the one typed in its schema field, else the tab's own when the run is in
+/// The schema a PostgreSQL Query view runs in: the tab's own run schema (restored or set by a library script), else the tab's own when the run is in
 /// the tab's own database. Another database has other schemas, so the tab's schema is never carried over to it and the
 /// answer stays empty until that database's schemas arrive.
 pub(in crate::app) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str, sel_schema: &str) -> String {
@@ -135,7 +135,7 @@ pub(in crate::app) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str,
     }
 }
 
-fn run_schema_of(t: &Tab) -> String {
+pub(in crate::app) fn run_schema_of(t: &Tab) -> String {
     run_schema_choice(t.sql.as_ref().map_or("", |s| s.run_schema.as_str()), t.sql.as_ref().map_or("", |s| s.run_db.as_str()), &t.sel.db, &t.sel.schema)
 }
 
@@ -162,10 +162,6 @@ fn target_of(t: &Tab, db: db::sql::Db, rd: &str, rs: &str) -> (db::sql::Db, Stri
         return (db.at(&d), run_schema_choice(rs, rd, &t.sel.db, &t.sel.schema));
     }
     (db, d)
-}
-
-fn t_schema(t: Option<&Tab>) -> String {
-    t.and_then(|t| t.sql.as_ref()).map(|s| s.run_schema.clone()).unwrap_or_default()
 }
 
 /// One result tab: the statement number, its kind and the outcome in color.
@@ -721,35 +717,11 @@ impl App {
         let Some(t) = self.t() else { return };
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
-        let title = if free { self.tab_name(self.cur) } else { "Query".into() };
         let lib_pick = self.pick_data(ui.ctx(), PickKind::Sql);
         let mut pick_acts = Vec::new();
-        let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
+        let mut load = None;
         let dialect = self.sql_dialect();
-        let mut pg_schema = t_schema(self.t());
-        let tab_schema = self.t().map(|t| t.sel.schema.clone()).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(&title).size(TXT_HEADING).color(BRIGHT())));
-            ui.add_space(6.0);
-            ui.scope(|ui| {
-                quiet_look(ui);
-                egui::ComboBox::from_id_salt("sql-db").selected_text(RichText::new(&schema).font(FontId::monospace(TXT_SMALL))).show_ui(ui, |ui| {
-                    menu_look(ui);
-                    for (d, _) in self.conn(conn).map(|c| c.dbs.as_slice()).unwrap_or_default() {
-                        picked |= ui.selectable_value(&mut pick, d.clone(), d).clicked();
-                    }
-                });
-            });
-            if dialect == db::sql::Dialect::Postgres {
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut pg_schema).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(&tab_schema).color(FAINT())).desired_width(100.0)).on_hover_text("The schema put first in search_path for this tab. Empty uses the schema this tab was opened in.");
-            }
-        });
-        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
-            s.run_schema = pg_schema;
-        }
-        ui.add_space(4.0);
+        // The tab, the title bar crumbs and the editor footer name the script and where it runs, so the view has no header.
         // A table's Query view gets these from the view tabs above it; a Query tab of its own has none.
         if free {
             self.script_banners(ui);
@@ -765,7 +737,7 @@ impl App {
                 self.demo_open_library(ui.ctx(), &button);
                 self.demo_open_picker(ui.ctx(), &button, "picker");
                 ui.add_space(4.0);
-                sticky_menu(ui, "History".into(), |ui| {
+                sticky_menu(ui, (icon_atom(paint_clock), "History"), |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
                     let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.as_slice()).unwrap_or_default();
@@ -818,20 +790,6 @@ impl App {
             });
         });
         ui.add_space(8.0);
-        if picked {
-            // Another PostgreSQL database has its own schemas, so the tab moves to the one its sidebar shows.
-            let schema = self.ns_of(conn, &pick).to_string();
-            if self.is_pg(conn) && !self.sql_asked.contains(&(conn, pick.clone())) {
-                self.pg_ask_schemas(conn, &pick);
-            }
-            if let Some(t) = self.tm() {
-                match (free, t.sql.as_mut()) {
-                    (true, _) => (t.sel.db, t.sel.schema) = (pick, schema),
-                    (false, Some(s)) => (s.run_db, s.run_schema) = (pick, schema),
-                    _ => {}
-                }
-            }
-        }
         let ctx = ui.ctx().clone();
         if let Some(text) = load {
             self.sql_replace(&ctx, text, None);

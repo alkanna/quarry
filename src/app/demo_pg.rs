@@ -121,7 +121,11 @@ impl App {
     /// The PostgreSQL demo: a production connection with three databases, three schemas in `analytics` and an open orders table.
     pub(super) fn load_pg_demo(&mut self) {
         let which = std::env::var("QUARRY_TEST_PG").unwrap_or_default();
-        let which = which.as_str();
+        self.pg_demo(&which);
+    }
+
+    /// `load_pg_demo` on the view `which` names, apart so a test can draw each one without the environment.
+    pub(super) fn pg_demo(&mut self, which: &str) {
         let by_schema = HashMap::from([
             (SCHEMA.to_string(), names(&TABLES, &VIEWS)),
             ("reporting".to_string(), names(&["cohort_retention", "revenue_by_region", "weekly_kpis"], &["v_active_accounts"])),

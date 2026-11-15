@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke};
 
 /// A menu that stays open while you type or click inside it, closing on a click outside or Esc.
 /// Plain egui menus close on any click inside, which made their text boxes unusable.
-pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+pub(crate) fn sticky_menu<'a>(ui: &mut egui::Ui, title: impl egui::IntoAtoms<'a>, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
@@ -705,6 +705,11 @@ pub(crate) fn expand_button() -> impl egui::Widget {
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open in editor"));
         r
     }
+}
+
+/// A painted icon to put before a button's text, in the text's color so it follows the button's hover and press.
+pub(crate) fn icon_atom(paint: fn(&egui::Painter, egui::Pos2, Color32)) -> egui::Atom<'static> {
+    egui::Atom::paint(egui::vec2(16.0, 16.0), move |ui, a| paint(ui.painter(), a.rect.center(), a.fallback_text_color))
 }
 
 pub(crate) fn paint_clock(p: &egui::Painter, c: egui::Pos2, color: Color32) {

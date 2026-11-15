@@ -121,13 +121,31 @@ impl App {
         let Some((name, writable, tag)) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable, c.meta.tag.clone())) else { return };
         ui.label(mono_label(&name, MUTED(), 400.0));
         ui.label(mono_label("/", FAINT(), 400.0));
+        // The Query view runs its statements where its run target says, which a table's tab can point elsewhere, so
+        // there the crumbs name that database and schema.
+        let query = self.t().filter(|t| t.view == View::Sql && t.sql.is_some()).map(|t| (super::sql::query::run_db(t), super::sql::query::run_schema_of(t)));
+        let pg = self.is_pg(s.conn);
+        let run = query.as_ref().map_or(s.db.clone(), |q| q.0.clone());
         // A PostgreSQL path has a schema level between the database and the table.
-        let place = if s.schema.is_empty() || s.coll.is_empty() { s.db.clone() } else { format!("{} / {}", s.db, s.schema) };
+        let place = if query.is_some() || s.schema.is_empty() || s.coll.is_empty() { run.clone() } else { format!("{} / {}", s.db, s.schema) };
         let dbs: Vec<String> = self.conn(s.conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default();
         let recent: Vec<String> = self.prefs.recent_dbs(s.conn).to_vec();
         let r = crumb(ui, &place, if s.coll.is_empty() { BRIGHT() } else { TEXT() }, "Database crumb");
-        if let Some(db) = crumb_menu(&r, "Database", &s.db, &recent, &dbs) {
+        if let Some(db) = crumb_menu(&r, "Database", &run, &recent, &dbs) {
             self.pick_crumb_db(s.conn, db);
+        }
+        // The Query view has no schema field, so a PostgreSQL one picks the schema its statements run in here.
+        if let (true, Some((run, typed))) = (pg, query) {
+            let now = if typed.is_empty() { self.sel_schema(&Sel { db: run.clone(), schema: String::new(), ..s.clone() }) } else { typed };
+            let listed = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == run)).map(|d| d.1.clone());
+            if matches!(listed, Some(None)) && !self.sql_asked.contains(&(s.conn, run.clone())) {
+                self.pg_ask_schemas(s.conn, &run);
+            }
+            ui.label(mono_label("/", FAINT(), 400.0));
+            let r = crumb(ui, &now, TEXT(), "Schema crumb");
+            if let Some(schema) = crumb_menu(&r, "Schema", &now, &[], &listed.flatten().unwrap_or_default()) {
+                self.pick_crumb_schema(s.conn, &run, schema);
+            }
         }
         if s.coll.is_empty() {
             // A query tab has no table, so its own name ends the path. One label with the slash, so no widget
@@ -164,24 +182,48 @@ impl App {
         }
     }
 
-    /// A database picked in the crumb menu. A Query tab moves to it, as its database picker does; any other tab
-    /// reveals it in the explorer.
+    /// A database picked in the crumb menu. A Query tab moves to it and a table's Query view runs its statements there;
+    /// any other view reveals it in the explorer.
     fn pick_crumb_db(&mut self, conn: u64, db: String) {
         // A jump opens no tab, so opening one is not what records the database as recent.
         if self.prefs.note_recent_db(conn, &db) {
             self.save_prefs();
         }
-        let free = self.t().is_some_and(|t| t.view == View::Sql && t.sel.coll.is_empty());
-        if !free {
+        let Some(free) = self.t().filter(|t| t.view == View::Sql && (t.sel.coll.is_empty() || t.sql.is_some())).map(|t| t.sel.coll.is_empty()) else {
             return self.jump(Jump::Db(conn, db), Open::Here);
-        }
+        };
         // Another PostgreSQL database has its own schemas, so the tab moves to the one its sidebar shows.
         let schema = self.ns_of(conn, &db).to_string();
         if self.is_pg(conn) && !self.sql_asked.contains(&(conn, db.clone())) {
             self.pg_ask_schemas(conn, &db);
         }
-        if let Some(t) = self.tm() {
+        let Some(t) = self.tm() else { return };
+        let own = db == t.sel.db;
+        if free {
             (t.sel.db, t.sel.schema) = (db, schema);
+            // The tab's own database and schema are now the whole target, so a run target left by a script goes.
+            if let Some(q) = t.sql.as_mut() {
+                (q.run_db, q.run_schema) = (String::new(), String::new());
+            }
+        } else if let Some(q) = t.sql.as_mut() {
+            // A table's Query view keeps its table and only runs elsewhere. Its own database runs in the table's schema.
+            q.run_schema = if own { String::new() } else { schema };
+            q.run_db = db;
+        }
+    }
+
+    /// A schema picked in the crumb of a PostgreSQL Query view. Its tables load for the editor's suggestions.
+    fn pick_crumb_schema(&mut self, conn: u64, run: &str, schema: String) {
+        self.pg_load_tables(conn, run, &schema);
+        let Some(t) = self.tm() else { return };
+        let free = t.sel.coll.is_empty();
+        let Some(q) = t.sql.as_mut() else { return };
+        if free {
+            // A schema left from a script or a saved tab would win over the pick.
+            q.run_schema.clear();
+            t.sel.schema = schema;
+        } else {
+            q.run_schema = schema;
         }
     }
 }
