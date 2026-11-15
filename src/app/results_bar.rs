@@ -48,6 +48,15 @@ pub(super) fn grouped_text(rows: u64) -> String {
     format!("from {} rows, read-only", group(&rows.to_string()))
 }
 
+/// "14 ms · 412 KB · 6 indexes": the time in green, then the plain facts, one line with a middle dot between them.
+fn stats_job(ms: u128, stats: &[String]) -> LayoutJob {
+    let mut job = LayoutJob::single_section(format!("{ms} ms"), mono_fmt(TXT_SMALL, SUCCESS(), 400.0));
+    for s in stats {
+        job.append(&format!(" \u{b7} {s}"), 0.0, mono_fmt(TXT_SMALL, FAINT(), 400.0));
+    }
+    job
+}
+
 impl App {
     /// Draws the bar. `right` adds the tools right to left, so its first item is the rightmost.
     pub(super) fn results_bar(&mut self, ui: &mut egui::Ui, info: &BarInfo, right: impl FnOnce(&mut App, &mut egui::Ui)) -> BarOut {
@@ -61,7 +70,9 @@ impl App {
             let (r, _) = ui
                 .scope(|ui| {
                     quiet_look(ui);
-                    MenuButton::from_button(egui::Button::new(text).min_size(egui::vec2(0.0, BUTTON_H))).ui(ui, |ui| {
+                    // A painted down chevron right after the unit says the count opens a menu; a glyph would sit off center.
+                    let down = egui::Atom::paint(egui::vec2(8.0, 16.0), |ui, a| chevron(ui.painter(), a.rect.center(), true, MUTED()));
+                    MenuButton::from_button(egui::Button::new((text, down)).min_size(egui::vec2(0.0, BUTTON_H))).ui(ui, |ui| {
                         menu_look(ui);
                         for n in [db::PAGE_SIZE, 100, 200, db::PAGE_SIZE_MAX] {
                             if ui.selectable_label(size == n, format!("{n} per page")).clicked() {
@@ -73,12 +84,7 @@ impl App {
                 })
                 .inner;
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Page size"));
-            let (rc, _) = ui.allocate_exact_size(egui::vec2(10.0, BUTTON_H), Sense::hover());
-            crate::ui::fold::chevron(ui.painter(), rc.center(), 0.0, MUTED());
-            ui.label(mono(format!("{} ms", info.ms), SUCCESS()));
-            for s in &info.stats {
-                ui.label(mono(s.clone(), FAINT()));
-            }
+            ui.label(stats_job(info.ms, &info.stats));
             if let Some(rows) = info.grouped {
                 ui.label(RichText::new(grouped_text(rows)).size(TXT_SMALL).color(MUTED())).on_hover_text("Double-click a group to see its rows");
                 if quiet(ui, RichText::new("Ungroup").color(PRIMARY())).clicked() {
@@ -130,6 +136,12 @@ mod tests {
     #[test]
     fn an_estimate_marks_the_total() {
         assert_eq!(range_text(0, 50, 1_200_000, "rows", "~"), "1-50 of ~1,200,000 rows");
+    }
+
+    #[test]
+    fn the_stats_read_with_middle_dots() {
+        assert_eq!(stats_job(14, &["412 KB".into(), "6 indexes".into()]).text, "14 ms \u{b7} 412 KB \u{b7} 6 indexes");
+        assert_eq!(stats_job(18, &[]).text, "18 ms");
     }
 
     #[test]
