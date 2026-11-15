@@ -784,6 +784,7 @@ impl App {
                     let mut row = |ui: &mut egui::Ui, coll: &String| {
                             let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
                             let is_view = is_view_of(coll);
+                            let info = node_info(sql, is_view, || est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)));
                             let busy = pending.contains(&coll);
                             let mut glyph_at = egui::Rect::NOTHING;
                             let mut cut = false;
@@ -791,16 +792,14 @@ impl App {
                                 // Collections are marked as documents, views with a hollow diamond so
                                 // they read as derived data. A collection still being copied gets a spinner.
                                 glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
-                                if !busy && sql && !is_view {
+                                if !busy && info.table_glyph {
                                     table_glyph(p, egui::pos2(r.left() + 6.0, r.center().y), if active { PRIMARY() } else { FAINT() });
                                 } else if !busy {
                                     let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                                     p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                                 }
-                                // The server's estimate, once the schema is loaded for autocomplete.
-                                let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
                                 let mut w = r.width() - 20.0;
-                                if let Some(n) = est {
+                                if let Some(n) = info.est {
                                     let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
                                     p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
                                     w -= g.size().x + 12.0;
@@ -836,7 +835,7 @@ impl App {
                             }
                             r.context_menu(|ui| {
                                 menu_look(ui);
-                                ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
+                                ui.label(RichText::new(format!("{}: {coll}", info.kind)).size(TXT_SMALL).color(MUTED()));
                                 if ui.button("Open").clicked() {
                                     open = Some((this(), Open::Here));
                                 }
@@ -1234,6 +1233,21 @@ fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed })
 }
 
+/// What the sidebar draws for one table, view or collection, so the row and its menu read fields instead of asking the engine.
+struct NodeInfo {
+    kind: &'static str,
+    /// SQL tables get the grid glyph; views and collections have their own marks.
+    table_glyph: bool,
+    /// The server's row estimate, shown only on SQL tables: a view has none and a Mongo count would cost a query.
+    est: Option<u64>,
+}
+
+/// `est` looks up the node's estimate; it runs only where the engine shows one, since rows draw every frame.
+fn node_info(sql: bool, is_view: bool, est: impl FnOnce() -> Option<u64>) -> NodeInfo {
+    let table = sql && !is_view;
+    NodeInfo { kind: if is_view { "View" } else if sql { "Table" } else { "Collection" }, table_glyph: table, est: if table { est() } else { None } }
+}
+
 /// A row estimate in few characters: 842, 4.4k, 1.2M. Under 10,000 it is exact, so it never rounds up a count.
 fn rows_short(n: u64) -> String {
     match n {
@@ -1263,6 +1277,17 @@ mod tests {
     #[test]
     fn row_estimates_are_short() {
         assert_eq!([842, 9_999, 12_345, 1_250_000].map(rows_short), ["842", "9999", "12k", "1.2M"]);
+    }
+
+    #[test]
+    fn node_info_follows_the_engine() {
+        let t = node_info(true, false, || Some(7));
+        assert_eq!((t.kind, t.table_glyph, t.est), ("Table", true, Some(7)));
+        let v = node_info(true, true, || Some(7));
+        assert_eq!((v.kind, v.table_glyph, v.est), ("View", false, None));
+        let c = node_info(false, false, || Some(7));
+        assert_eq!((c.kind, c.table_glyph, c.est), ("Collection", false, None));
+        assert_eq!(node_info(false, true, || None).kind, "View");
     }
 
     #[test]

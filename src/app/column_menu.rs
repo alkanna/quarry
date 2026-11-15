@@ -294,17 +294,15 @@ impl App {
                 self.reload();
             }
             HeadAct::AddSort => {}
-            HeadAct::Sort(next) if t.sql.is_some() => {
-                let t = self.tm().unwrap();
-                t.sort_txt = next.map(|d| format!("{} {}", dialect.quote_ident(c), if d > 0 { "ASC" } else { "DESC" })).unwrap_or_default();
-                t.page = 0;
-                self.reload();
-            }
             HeadAct::Sort(next) => {
+                let sql = t.sql.is_some();
                 let t = self.tm().unwrap();
-                t.query.sort = next.map(|d| doc! { c: d });
-                t.sort_txt = t.query.sort.as_ref().map(|s| db::shell_text(&Bson::Document(s.clone()))).unwrap_or_default();
-                t.ran_sort();
+                t.sort_txt = sort_text(sql.then_some(dialect), c, next);
+                // Only Mongo keeps an applied sort besides the text; ran_sort reads the text, so it comes after.
+                if !sql {
+                    t.query.sort = mongo_sort(c, next);
+                    t.ran_sort();
+                }
                 t.page = 0;
                 self.reload();
             }
@@ -470,6 +468,19 @@ impl App {
     }
 }
 
+/// The Mongo sort document a header click asks for.
+fn mongo_sort(c: &str, next: Option<i64>) -> Option<Document> {
+    next.map(|d| doc! { c: d })
+}
+
+/// The sort bar text of a header click: a quoted column and direction for SQL (`dialect` is Some), the sort document as shell text for Mongo.
+fn sort_text(dialect: Option<db::sql::Dialect>, c: &str, next: Option<i64>) -> String {
+    match dialect {
+        Some(d) => next.map(|n| super::sql::bar::order_text(&[(c.to_string(), n < 0)], d)).unwrap_or_default(),
+        None => mongo_sort(c, next).map(|s| db::shell_text(&Bson::Document(s))).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +491,14 @@ mod tests {
         // The filter's own condition on the field must survive the exists clause.
         assert_eq!(with_exists(doc! { "a": "x" }, "a"), doc! { "$and": [{ "a": "x" }, { "a": { "$exists": true } }] });
         assert!(indexed("items.0.sku") && !indexed("items.sku"));
+    }
+
+    #[test]
+    fn sort_text_follows_the_engine() {
+        assert_eq!(sort_text(Some(db::sql::Dialect::MySql), "a b", Some(1)), "`a b` ASC");
+        assert_eq!(sort_text(Some(db::sql::Dialect::Postgres), "a", Some(-1)), "\"a\" DESC");
+        assert_eq!(sort_text(Some(db::sql::Dialect::Postgres), "a", None), "");
+        assert_eq!(sort_text(None, "a", None), "");
+        assert_eq!(sort_text(None, "a", Some(-1)), db::shell_text(&Bson::Document(doc! { "a": -1i64 })));
     }
 }
