@@ -224,7 +224,7 @@ fn the_picker_groups_its_list_folds_it_and_opens_the_panel() {
     ui.fill("Filter connections", "reports");
     ui.show("reports");
     assert!(ui.h.query_by_label("sandbox").is_none());
-    ui.click("Manage groups…");
+    ui.click("Manage…");
     assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
 }
 
