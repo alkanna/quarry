@@ -128,6 +128,48 @@ fn columns_are_added_renamed_retyped_and_dropped() {
 }
 
 #[test]
+fn generated_columns_are_added_read_back_and_changed_by_their_expression() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "gen", TABLE_DDL);
+        let computed = |name: &str, expr: &str, stored: bool| ColDef { generated: Some(ddl::Gen { expr: expr.into(), stored }), default: Dv::None, ..ColDef::new(name, "integer") };
+        let num = t.one("SHOW server_version_num").parse::<u32>().unwrap();
+        let values = |c: &str| t.one(&format!("SELECT string_agg({c}::text, ',' ORDER BY id) FROM t"));
+        let before = t.shape();
+        let undo = t.apply(&[add(computed("qty2", "qty * 2", true))]);
+        assert_eq!(values("qty2"), "2,4,60", "{var}");
+        t.undo(undo).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        t.apply(&[add(computed("qty2", "qty * 2", true))]);
+        let d = t.def("qty2");
+        assert!(d.generated.as_ref().is_some_and(|g| g.stored && g.expr.contains("qty")), "{var}: {:?}", d.generated);
+        // a comment-only change writes the expression the catalog gave back and leaves it as it was
+        t.apply(&[modify("qty2", ColDef { comment: "twice".into(), ..d.clone() })]);
+        assert_eq!(t.def("qty2").generated, d.generated, "{var}");
+        assert_eq!(values("qty2"), "2,4,60", "{var}");
+        if num >= 170000 {
+            let again = t.apply(&[modify("qty2", computed("qty2", "qty * 3", true))]);
+            assert_eq!(values("qty2"), "3,6,90", "{var}");
+            t.undo(again).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(values("qty2"), "2,4,60", "{var}");
+        } else {
+            assert!(t.plan(&[modify("qty2", computed("qty2", "qty * 3", true))]).unwrap_err().contains("needs 17"), "{var}");
+        }
+        // a stored column becomes a plain one and keeps its values, which cannot be undone; a plain one cannot become generated
+        let plain = t.plan(&[modify("qty2", ColDef { generated: None, ..d.clone() })]).unwrap();
+        assert!(plain.undo.is_err(), "{var}");
+        assert!(t.plan(&[modify("qty", computed("qty", "id", true))]).unwrap_err().contains("Drop and add"), "{var}");
+        let virt = t.plan(&[add(computed("v", "qty + 1", false))]);
+        if num >= 180000 {
+            t.apply(&[add(computed("v", "qty + 1", false))]);
+            assert_eq!(values("v"), "2,3,31", "{var}");
+            assert!(t.plan(&[modify("v", ColDef { generated: None, ..t.def("v") })]).unwrap_err().contains("virtual"), "{var}");
+        } else {
+            assert!(virt.unwrap_err().contains("needs 18"), "{var}");
+        }
+    });
+}
+
+#[test]
 fn defaults_nullability_and_comments_change() {
     every_pg(|l, var| {
         let t = fixture(l, var, "dflt", TABLE_DDL);

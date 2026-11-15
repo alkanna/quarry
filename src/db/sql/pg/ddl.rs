@@ -13,7 +13,7 @@
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
-use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, TableOpt, ORPHAN_SAMPLE};
+use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Gen, Plan, Pos, RefCheck, Sim, TableOpt, ORPHAN_SAMPLE};
 use crate::db::sql::exec::{bound_pg, sql_state, Conn, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
 use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
@@ -224,20 +224,27 @@ fn auto_of(c: &ColDef) -> Auto {
     }
 }
 
-/// A column as the catalog read gives it. A stored generated column is refused: it has an expression this definition does
-/// not hold, and rewriting it would lose it.
+/// A column as the catalog read gives it. The catalog writes a generated column's `extra` as `GENERATED ALWAYS AS (expr) STORED`
+/// or `VIRTUAL`.
 pub(in crate::db::sql) fn col_def(c: &Column) -> Result<ColDef, String> {
-    if c.extra.contains("GENERATED ALWAYS AS (") {
-        return Err(format!("Column {} is a generated column. Edit it with a query.", c.name));
-    }
+    const GEN: &str = "GENERATED ALWAYS AS (";
+    let generated = match c.extra.find(GEN) {
+        None => None,
+        Some(i) => {
+            let body = c.extra[i + GEN.len()..].trim_end();
+            let parsed = body.strip_suffix(") STORED").map(|e| (e, true)).or_else(|| body.strip_suffix(") VIRTUAL").map(|e| (e, false)));
+            Some(parsed.map(|(e, stored)| Gen { expr: e.to_string(), stored }).ok_or_else(|| format!("Column {} is generated and its expression could not be read.", c.name))?)
+        }
+    };
     let default = match (&c.default, c.default_expr) {
+        _ if generated.is_some() => Dv::None,
         (Some(d), true) => Dv::Expr(d.clone()),
         (Some(d), false) => Dv::Value(d.clone()),
         (None, _) if c.nullable => Dv::Null,
         (None, _) => Dv::None,
     };
     let identity = c.extra.contains("IDENTITY");
-    Ok(ColDef { default, auto_increment: c.extra.contains("auto_increment"), serial: c.extra.contains("auto_increment") && !identity, identity_always: identity && c.extra.contains("GENERATED ALWAYS AS IDENTITY"), collation: c.collation.clone(), nullable: c.nullable, comment: c.comment.clone(), ..ColDef::new(&c.name, &c.full_type) })
+    Ok(ColDef { default, auto_increment: c.extra.contains("auto_increment"), serial: c.extra.contains("auto_increment") && !identity, identity_always: identity && c.extra.contains("GENERATED ALWAYS AS IDENTITY"), collation: c.collation.clone(), nullable: c.nullable, comment: c.comment.clone(), generated, ..ColDef::new(&c.name, &c.full_type) })
 }
 
 /// A collation as the structure read gives it: a bare name (in pg_catalog, or typed by the person), or a ready
@@ -330,8 +337,14 @@ fn check_col(def: &ColDef) -> Result<(), String> {
     name_ok(&def.name, "A column")?;
     type_of(def)?;
     default_of(def)?;
-    if def.unsigned || def.zerofill || def.on_update.is_some() || def.srid.is_some() {
-        return Err("PostgreSQL has no unsigned, zero fill, ON UPDATE or SRID attributes.".into());
+    if def.unsigned || def.zerofill || def.on_update.is_some() || def.srid.is_some() || def.invisible {
+        return Err("PostgreSQL has no unsigned, zero fill, ON UPDATE, SRID or invisible attributes.".into());
+    }
+    if let Some(g) = &def.generated {
+        if def.auto_increment || has_default(&def.default) {
+            return Err("A generated column has no default and is not an identity.".into());
+        }
+        check_expr_pg(&g.expr)?;
     }
     if let Some(c) = &def.collation {
         collation_ok(c)?;
@@ -356,6 +369,9 @@ pub(in crate::db::sql) fn col_body(def: &ColDef) -> Result<String, String> {
     check_col(def)?;
     let ty = type_of(def)?;
     let collate = collate(&def.collation);
+    if let Some(g) = &def.generated {
+        return Ok(format!("{ty}{collate} GENERATED ALWAYS AS ({}) {}{}", g.expr.trim(), if g.stored { "STORED" } else { "VIRTUAL" }, if def.nullable { "" } else { " NOT NULL" }));
+    }
     Ok(match auto_of(def) {
         Auto::Serial => {
             if def.nullable || def.collation.is_some() {
@@ -578,6 +594,9 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
     Ok(match c {
         Change::Add { def, pos } => {
             no_pos(pos)?;
+            if def.generated.as_ref().is_some_and(|g| !g.stored) && sim.pg_major != 0 && sim.pg_major < 18 {
+                return Err(format!("PostgreSQL {} has stored generated columns only. A virtual one needs 18.", sim.pg_major));
+            }
             let (name, body) = (q(&def.name), col_body(def)?);
             let mut v = vec![format!("{alter} ADD COLUMN {name} {body}")];
             if !def.comment.is_empty() {
@@ -601,6 +620,22 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
                 v.push(format!("{alter} RENAME COLUMN {} TO {name}", q(from)));
             }
             let type_changed = old.ty != def.ty || old.collation != def.collation;
+            match (&old.generated, &def.generated) {
+                (None, Some(_)) => return Err(format!("Column {from} is not generated. Drop and add the column to make it generated.")),
+                (Some(o), Some(n)) if o.stored != n.stored => return Err(format!("Column {from} cannot change between STORED and VIRTUAL. Drop and add the column.")),
+                // The server converts a generated column with its own expression, and refuses a USING clause there.
+                (Some(_), _) if type_changed => return Err(format!("The type of generated column {from} cannot be changed here. Drop and add the column.")),
+                // PostgreSQL 18 refuses DROP EXPRESSION on a virtual column.
+                (Some(o), None) if !o.stored => return Err(format!("Column {from} is virtual, and PostgreSQL cannot make a virtual column a plain one. Drop and add the column.")),
+                (Some(_), None) => v.push(format!("{col} DROP EXPRESSION")),
+                (Some(o), Some(n)) if o.expr != n.expr => {
+                    if sim.pg_major != 0 && sim.pg_major < 17 {
+                        return Err(format!("PostgreSQL {} cannot change the expression of a generated column. That needs 17. Drop and add the column.", sim.pg_major));
+                    }
+                    v.push(format!("{col} SET EXPRESSION AS ({})", n.expr.trim()));
+                }
+                _ => {}
+            }
             let identity_on = matches!(kn, Auto::Identity(_)) && !matches!(ko, Auto::Identity(_));
             // A default does not follow a new type by itself, and an identity cannot be added to a column that has one.
             let dropped = has_default(&old.default) && (type_changed || identity_on || !has_default(&def.default));
@@ -1444,6 +1479,39 @@ mod tests {
         assert_eq!(p.steps, ["COMMENT ON TABLE \"public\".\"t\" IS 'it''s'"]);
         assert_eq!(p.undo.unwrap().steps, ["COMMENT ON TABLE \"public\".\"t\" IS 'old'"]);
         assert!(plan("t", &table(), &[Change::Table { opt: TableOpt::Engine("x".into()), was: TableOpt::Engine("y".into()) }]).is_err());
+    }
+
+    #[test]
+    fn generated_columns_are_added_read_and_changed_by_their_expression() {
+        use crate::db::sql::ddl::Gen;
+        let t = "\"public\".\"t\"";
+        let computed = |e: &str, stored: bool| ColDef { generated: Some(Gen { expr: e.into(), stored }), default: Dv::None, ..def("dbl", "integer") };
+        assert_eq!(steps(&[Change::Add { def: computed("length(note)", true), pos: Pos::Keep }]), [format!("ALTER TABLE {t} ADD COLUMN \"dbl\" integer GENERATED ALWAYS AS (length(note)) STORED")]);
+        assert_eq!(steps(&[Change::Add { def: ColDef { nullable: false, ..computed("length(note)", false) }, pos: Pos::Keep }]), [format!("ALTER TABLE {t} ADD COLUMN \"dbl\" integer GENERATED ALWAYS AS (length(note)) VIRTUAL NOT NULL")]);
+        assert!(plan("t", &table(), &[Change::Add { def: ColDef { default: Dv::Value("1".into()), ..computed("1", true) }, pos: Pos::Keep }]).is_err());
+        assert!(plan("t", &table(), &[Change::Add { def: ColDef { invisible: true, ..def("hidden", "integer") }, pos: Pos::Keep }]).is_err());
+        // the catalog's text is read back whole, with a bracket inside the expression
+        let mut st = table();
+        let mut c = col("dbl", "integer");
+        c.extra = "GENERATED ALWAYS AS (length((note)::text)) STORED".into();
+        st.columns.push(c);
+        assert_eq!(col_def(&st.columns[3]).unwrap().generated, Some(Gen { expr: "length((note)::text)".into(), stored: true }));
+        let change = |st: &Structure, d: ColDef| plan("t", st, &[Change::Modify { from: "dbl".into(), def: d, pos: Pos::Keep }]);
+        let p = change(&st, computed("length(note) + 1", true)).unwrap();
+        assert_eq!(p.steps, [format!("ALTER TABLE {t} ALTER COLUMN \"dbl\" SET EXPRESSION AS (length(note) + 1)")]);
+        assert_eq!(p.undo.unwrap().steps, [format!("ALTER TABLE {t} ALTER COLUMN \"dbl\" SET EXPRESSION AS (length((note)::text))")]);
+        // a stored column can become a plain one, which is not undone; the other directions are refused
+        let plain = change(&st, def("dbl", "integer")).unwrap();
+        assert_eq!(plain.steps, [format!("ALTER TABLE {t} ALTER COLUMN \"dbl\" DROP EXPRESSION")]);
+        assert!(plain.undo.unwrap_err().contains("Drop and add the column to make it generated"));
+        assert!(plan("t", &st, &[Change::Modify { from: "name".into(), def: computed("1", true), pos: Pos::Keep }]).is_err());
+        assert!(change(&st, computed("1", false)).unwrap_err().contains("STORED and VIRTUAL"));
+        // SET EXPRESSION is from 17 and a virtual column from 18
+        st.pg_major = 16;
+        assert!(change(&st, computed("1", true)).unwrap_err().contains("needs 17"));
+        assert!(plan("t", &st, &[Change::Add { def: computed("1", false), pos: Pos::Keep }]).unwrap_err().contains("needs 18"));
+        st.pg_major = 18;
+        assert!(change(&st, computed("1", true)).is_ok());
     }
 
     #[test]

@@ -46,8 +46,22 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         }
         s.push_str(&format!(" CHARACTER SET {} COLLATE {coll}", coll.split('_').next().unwrap_or(coll)));
     }
-    s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+    let computed = c.generated.as_ref();
+    if let Some(g) = computed {
+        if c.auto_increment {
+            return Err("A generated column cannot auto increment.".into());
+        }
+        check_expr_of("generation expression", &g.expr, m)?;
+        // MariaDB accepts STORED as a synonym of PERSISTENT, and its syntax has no NULL or NOT NULL after a generated column.
+        s.push_str(&format!(" GENERATED ALWAYS AS ({}) {}", g.expr.trim(), if g.stored { "STORED" } else { "VIRTUAL" }));
+        if d != Dialect::MariaDb {
+            s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+        }
+    } else {
+        s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+    }
     match &c.default {
+        _ if computed.is_some() => {}
         Dv::None => {}
         Dv::Null if c.nullable => s.push_str(" DEFAULT NULL"),
         Dv::Null => return Err("A NOT NULL column cannot default to NULL.".into()),
@@ -68,9 +82,12 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         }
         s.push_str(" AUTO_INCREMENT");
     }
-    if let Some(u) = c.on_update.as_deref().filter(|u| !u.is_empty()) {
+    if let (Some(u), true) = (c.on_update.as_deref().filter(|u| !u.is_empty()), computed.is_none()) {
         check_expr(u, m)?;
         s.push_str(&format!(" ON UPDATE {u}"));
+    }
+    if c.invisible && d != Dialect::Postgres {
+        s.push_str(" INVISIBLE");
     }
     if !c.comment.is_empty() {
         s.push_str(&format!(" COMMENT {}", lit(&c.comment, m.bs)));

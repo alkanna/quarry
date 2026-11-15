@@ -9,7 +9,7 @@ fn recv(rx: &Receiver<Msg>) -> Msg {
 
 /// Everything about the structure that an ALTER and its undo must leave as it was.
 pub(super) fn shape(st: &Structure) -> Vec<String> {
-    let cols = st.columns.iter().map(|c| format!("col {}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check));
+    let cols = st.columns.iter().map(|c| format!("col {}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}|{}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check, c.generation));
     let idx = st.indexes.iter().map(|i| format!("idx {}|{}|{}|{}|{}|{}", i.name, i.unique, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), i.kind, i.comment, i.invisible));
     let checks = st.checks.iter().map(super::sim::check_line);
     let table = std::iter::once(format!("table {}|{}|{}|{:?}", st.status.comment, st.status.engine, st.status.collation, st.status.auto_increment));
@@ -186,6 +186,43 @@ fn live(var: &str) {
         assert_eq!(names(st), ["memo", "id", "qty", "name", "price", "created"]);
         assert!(st.indexes.iter().any(|i| i.name == "idx_qty") && !st.indexes.iter().any(|i| i.name == "idx_name"));
     });
+
+    // Generated and invisible columns. The expression holds a quote and a backslash, which the server escapes again in
+    // information_schema, so a comment-only change that wrote that text back would corrupt it.
+    e.fresh();
+    e.exec("ALTER TABLE quarry_ddl.t ADD COLUMN g VARCHAR(80) GENERATED ALWAYS AS (CONCAT(name, 'it''s \\\\ x\"y')) STORED COMMENT 'c', ADD COLUMN v INT GENERATED ALWAYS AS (CHAR_LENGTH(name)) VIRTUAL, ADD COLUMN hid INT NULL INVISIBLE");
+    let gen_value = |e: &Env| -> String { e.w.rt.block_on(async { sqlx::query_scalar("SELECT g FROM quarry_ddl.t WHERE id = 1").fetch_one(&e.pool).await.unwrap() }) };
+    let want = "oneit's \\ x\"y";
+    assert_eq!(gen_value(&e), want);
+    let (g, v, hid) = (cdef(&mut e, "g"), cdef(&mut e, "v"), cdef(&mut e, "hid"));
+    assert!(g.generated.as_ref().is_some_and(|x| x.stored) && v.generated.as_ref().is_some_and(|x| !x.stored) && hid.invisible && !hid.generated.is_some(), "{g:?} {v:?} {hid:?}");
+    e.round_trip_here("comment of a generated column", vec![Change::Modify { from: "g".into(), def: ColDef { comment: "c2".into(), ..g.clone() }, pos: Pos::Keep }], |st| {
+        assert_eq!(col(st, "g").comment, "c2");
+        assert_eq!(ColDef::from_column(&col(st, "g")).unwrap().generated, g.generated);
+    });
+    assert_eq!(gen_value(&e), want);
+    let more = Gen { expr: "CHAR_LENGTH(`name`) + 5".into(), stored: false };
+    e.round_trip_here("expression of a virtual column", vec![Change::Modify { from: "v".into(), def: ColDef { generated: Some(more.clone()), ..v.clone() }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "v")).unwrap().generated.is_some_and(|x| x.expr.contains("5") && !x.stored)));
+    e.round_trip_here("column made visible", vec![Change::Modify { from: "hid".into(), def: ColDef { invisible: false, ..hid.clone() }, pos: Pos::Keep }], |st| assert!(!ColDef::from_column(&col(st, "hid")).unwrap().invisible));
+    let note = cdef(&mut e, "note");
+    e.round_trip_here("column made invisible", vec![Change::Modify { from: "note".into(), def: ColDef { invisible: true, ..note.clone() }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "note")).unwrap().invisible));
+    let gadd = ColDef { generated: Some(Gen { expr: "`price` * 2".into(), stored: true }), default: Dv::None, comment: "dbl".into(), ..ColDef::new("dbl", "DECIMAL") };
+    e.round_trip_here("add a stored generated column", vec![Change::Add { def: ColDef { args: "12,2".into(), ..gadd.clone() }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "dbl")).unwrap().generated.is_some_and(|x| x.stored)));
+    e.round_trip_here("add an invisible column", vec![Change::Add { def: ColDef { invisible: true, ..ColDef::new("secret", "INT") }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "secret")).unwrap().invisible));
+    // dropping a generated column is undone with its expression
+    e.round_trip_here("drop a generated column", vec![Change::Drop("g".into())], |st| assert!(!names(st).contains(&"g".to_string())));
+    assert_eq!(gen_value(&e), want);
+    // the server cannot turn a plain column into a generated one or back, so the plan says so before it runs
+    let st = e.structure();
+    let (d, ver) = (e.db.dialect, e.db.version.clone());
+    let refused = |c: Change| plan(d, &ver, Mode::of(&e.db.sql_mode), "t", &st, &[c]).unwrap_err();
+    assert!(refused(Change::Modify { from: "v".into(), def: ColDef { generated: None, ..v.clone() }, pos: Pos::Keep }).contains("plain column"));
+    assert!(refused(Change::Modify { from: "note".into(), def: ColDef { generated: v.generated.clone(), ..note.clone() }, pos: Pos::Keep }).contains("virtual one"));
+    assert!(refused(Change::Modify { from: "g".into(), def: ColDef { generated: v.generated.clone(), ..g.clone() }, pos: Pos::Keep }).contains("STORED and VIRTUAL"));
+    // a plain column and a STORED one are swapped by MODIFY on both servers, each way, and the undo is the other way
+    e.round_trip_here("stored column made plain", vec![Change::Modify { from: "g".into(), def: ColDef { generated: None, default: Dv::Null, ..g.clone() }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "g")).unwrap().generated.is_none()));
+    let stored = Gen { expr: "CONCAT(`name`,'x')".into(), stored: true };
+    e.round_trip_here("plain column made stored", vec![Change::Modify { from: "note".into(), def: ColDef { generated: Some(stored), default: Dv::None, ..note.clone() }, pos: Pos::Keep }], |st| assert!(ColDef::from_column(&col(st, "note")).unwrap().generated.is_some_and(|x| x.stored)));
 
     // Table options. Each carries what the structure read, which is what the undo writes back.
     e.fresh();
