@@ -302,10 +302,16 @@ impl App {
 
     pub(super) fn err_toast(&mut self, e: ErrEntry) {
         let mut acts: Vec<(String, Act)> = Vec::new();
-        // SQL keys name an index, not a column, so there is no filter to write for them.
-        let mongo = e.conn.and_then(|c| self.conn(c)).is_some_and(|c| !c.meta.engine.is_sql());
-        if e.ex.dup.is_some() && e.sel.is_some() && mongo {
-            acts.push(("Show the other document".into(), Act::ShowDup));
+        let sql = e.conn.and_then(|c| self.conn(c)).map(|c| c.meta.engine.is_sql());
+        let pg = e.conn.is_some_and(|c| self.is_pg(c));
+        if let (Some((f, v)), Some(_), Some(sql)) = (&e.ex.dup, &e.sel, sql) {
+            // PostgreSQL names the key's columns: one plain column can be filtered on, a list or an expression cannot.
+            // MySQL names the index, read when clicked; its message cuts the value at 64 characters and joins the values
+            // of a composite key with '-', so a value that long may not be the stored one.
+            let one = !sql || if pg { !f.contains([',', '(']) } else { v.chars().count() < 64 };
+            if one {
+                acts.push((if sql { "Show the other row" } else { "Show the other document" }.into(), Act::ShowDup));
+            }
         }
         for f in &e.ex.fixes {
             // Retry needs the thing that failed, which a toast does not know; the action is still there to redo.
@@ -473,6 +479,9 @@ impl App {
             Act::ShowDup => {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };
+                if self.conn(sel.conn).is_some_and(|c| c.meta.engine.is_sql()) {
+                    return self.sql_show_dup(sel, f, v);
+                }
                 self.open_collection(sel, Open::Here);
                 if let Some(t) = self.tm() {
                     t.view = View::Documents;

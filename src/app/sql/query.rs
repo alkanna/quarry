@@ -594,12 +594,55 @@ impl App {
         }
         let base = Sel { conn: t.sel.conn, db: db_name, schema: String::new(), coll: String::new() };
         let sel = super::ns::with_ns(d, &base, &ns, table);
+        self.sql_open_filtered(sel, text);
+    }
+
+    /// Opens a table's Content in a tab of its own, filtered by the WHERE text `filter`.
+    pub(in crate::app) fn sql_open_filtered(&mut self, sel: Sel, filter: String) {
         self.open_tab(sel, Open::Link);
         let Some(t) = self.tm() else { return };
         t.view = View::Documents;
-        t.filter_txt = text;
+        t.filter_txt = filter;
         t.page = 0;
         self.reload();
+    }
+
+    /// Show the other row of a duplicate-key error on table `sel`. PostgreSQL's message names the column; MySQL's names
+    /// the index, whose columns are read first. The value is sent quoted, which both servers read as any column type.
+    pub(in crate::app) fn sql_show_dup(&mut self, sel: Sel, key: String, value: String) {
+        if self.sql_cell.is_some() {
+            return self.warn("Finish or cancel the cell edit first.");
+        }
+        if self.is_pg(sel.conn) {
+            let filter = self.dup_filter(sel.conn, &key, value);
+            return self.sql_open_filtered(sel, filter);
+        }
+        let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
+        self.req += 1;
+        self.dup_wait = Some((self.req, sel.clone(), key, value));
+        self.worker.sql_structure(self.req, db, space, sel.coll.clone());
+    }
+
+    /// The MySQL table's indexes are in: the duplicate's index must be one whole column for its value to be a filter.
+    pub(in crate::app) fn sql_dup_index(&mut self, sel: Sel, index: &str, value: String, res: db::Res<db::sql::Structure>) {
+        let st = match res {
+            Ok(st) => st,
+            Err(e) => return self.err(e),
+        };
+        let col = st.indexes.iter().find(|i| i.name.eq_ignore_ascii_case(index)).and_then(|i| match i.cols.as_slice() {
+            [c] if c.prefix.is_none() && c.expr.is_none() => Some(c.name.clone()),
+            _ => None,
+        });
+        let Some(col) = col else { return self.warn("This key spans several columns or part of one, so its value cannot be filtered on.") };
+        let filter = self.dup_filter(sel.conn, &col, value);
+        self.sql_open_filtered(sel, filter);
+    }
+
+    /// `col = 'value'` in the dialect of connection `conn`.
+    fn dup_filter(&self, conn: u64, col: &str, value: String) -> String {
+        let d = self.dialect_of(conn);
+        let bs = self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|s| s.backslash_escapes());
+        format!("{} = {}", d.quote_ident(col), db::copy::sql_literal(d, Some(&Bson::String(value)), false, bs))
     }
 
     /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.

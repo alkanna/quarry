@@ -35,6 +35,7 @@ mod sidebar;
 mod sidebar_resize;
 mod sql_bulk;
 mod sql_chrome_fixes;
+mod sql_dup;
 mod sql_bulk_dialog;
 mod sql_checks;
 mod sql_create;
