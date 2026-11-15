@@ -72,13 +72,13 @@ fn the_palette_hints_the_view_digits_of_each_engine() {
 fn add_from_cloud_sql_is_offered_on_sql_connections_and_hidden_on_mongodb() {
     let Some(mut sql) = demo_ui(App::load_sql_demo) else { return };
     assert!(sql.app().command_hints().iter().any(|(n, _)| n.starts_with("Add from Cloud SQL")), "the palette lost the Cloud SQL command on a SQL connection");
-    sql.click("Connections");
+    sql.click("Connect");
     sql.show("Add from Cloud SQL\u{2026}");
 
     let Some(mut mongo) = demo_ui(App::load_demo) else { return };
     assert!(!mongo.app().command_hints().iter().any(|(n, _)| n.starts_with("Add from Cloud SQL")), "the palette offers Cloud SQL on a MongoDB connection");
-    mongo.click("Connections");
-    mongo.show("+  New connection\u{2026}");
+    mongo.click("Connect");
+    mongo.show("New connection\u{2026}");
     assert!(mongo.h.query_all_by_label("Add from Cloud SQL\u{2026}").next().is_none(), "the connection menu offers Cloud SQL on a MongoDB connection");
 }
 

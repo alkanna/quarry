@@ -5,7 +5,7 @@ use super::*;
 impl App {
     /// QUARRY_TEST_RAIL=<state>: the MySQL demo connection and a connecting one beside the Mongo demo. groups folds the two
     /// SQL connections into a Production folder, open shows it open, and tip is the closed folder, which a
-    /// QUARRY_TEST_POINTER over it shows the tooltip of. Apart from `load_demo` so a test can load each state.
+    /// QUARRY_TEST_POINTER over it shows the tooltip of. connect opens the Connect popover and menu draws the context menu of a tile. Apart from `load_demo` so a test can load each state.
     pub(super) fn demo_rail(&mut self, state: &str) {
         // The SQL demo replaces the tabs, which the Mongo demo keeps.
         let tabs = std::mem::take(&mut self.tabs);
@@ -14,6 +14,12 @@ impl App {
         self.cur = 1;
         self.active = Some(1);
         self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+        match state {
+            // The Connect popover over the rail, and the menu of the MySQL tile.
+            "connect" => self.conns_ui.demo_picker = true,
+            "menu" => self.conns_ui.demo_tile_menu = Some(3),
+            _ => {}
+        }
         if matches!(state, "groups" | "open" | "tip") {
             let gid = self.groups.new_group("Production");
             let all = self.conn_ids();
