@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.48.0](https://github.com/alkanna/quarry/compare/v0.47.0...v0.48.0) (2026-11-15)
+
+
+### Features
+
+* SOCKS5 proxy for SQL connections and a structured MongoDB connection form ([#240](https://github.com/alkanna/quarry/issues/240)) ([8a2e24f](https://github.com/alkanna/quarry/commit/8a2e24fd6f364bc505c8ca2a75205e7ed7fb9f3c))
+* SQL column Update values, Server sizes and PostgreSQL counters, sidebar menu parity, typed PostgreSQL shell attachments ([#239](https://github.com/alkanna/quarry/issues/239)) ([0671bc8](https://github.com/alkanna/quarry/commit/0671bc84d30247474d8c76aef406c5c3a2f46e5d))
+* SQL query help, PostgreSQL Info facts, Show the other row, RETURNING insertId, explain_sql for agents, animated explorer groups ([#236](https://github.com/alkanna/quarry/issues/236)) ([9e2f79b](https://github.com/alkanna/quarry/commit/9e2f79bfa98ab7a23f382b2b178e225897e1d763))
+* table options, generated and invisible columns in Structure, and keys in the MySQL new-table builder ([#241](https://github.com/alkanna/quarry/issues/241)) ([55c250d](https://github.com/alkanna/quarry/commit/55c250dcf1b08c49a3c32aa5f894f6ffef51fb74))
+* the rail lists open connections by name, tabs and the title bar say where they come from, and one query line and results bar for tables and collections ([#242](https://github.com/alkanna/quarry/issues/242)) ([f9836ca](https://github.com/alkanna/quarry/commit/f9836cafe0d959aee6c7ee5bfd19a45b04ed2004))
+
+
+### Bug Fixes
+
+* try the next SOCKS5 proxy address when one refuses the connect ([#244](https://github.com/alkanna/quarry/issues/244)) ([2f2a59d](https://github.com/alkanna/quarry/commit/2f2a59decf67f16023c19ddbe1e681bc0a8fa0ed))
+
 ## [0.47.0](https://github.com/alkanna/quarry/compare/v0.46.1...v0.47.0) (2026-11-14)
 
 
