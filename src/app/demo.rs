@@ -154,11 +154,14 @@ impl App {
             }
             self.modal = Some(Modal::Conn(Box::new(form)));
         } else if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
+            let tls = std::env::var("QUARRY_TEST_CONNFORM_TAB").as_deref() == Ok("tls");
             self.modal = Some(Modal::Conn(Box::new(ConnForm {
                 id: Some(2),
                 name: "Staging".into(),
                 tag: "Staging".into(),
-                uri: "mongodb://app:secret@10.0.3.12:27017/?replicaSet=rs0".into(),
+                // QUARRY_TEST_CONNFORM_TAB=tls opens the TLS tab on an address that already has its options.
+                uri: if tls { "mongodb://app:secret@10.0.3.12:27017/?replicaSet=rs0&tls=true&tlsCAFile=/etc/ssl/staging-ca.pem&tlsCertificateKeyFile=/etc/ssl/staging-client.pem" } else { "mongodb://app:secret@10.0.3.12:27017/?replicaSet=rs0" }.into(),
+                tab: if tls { ConnTab::Tls } else { ConnTab::Standard },
                 ssh_on: true,
                 ssh: crate::ssh::SshConf { host: "bastion.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::KeyFile, key_path: "~/.ssh/id_ed25519".into(), legacy_rsa: false, known_host: Some("SHA256:3n9Yk0mF1q2hV7Qp6zXcR4tL8wE5sA0dJ2uB1nM7kPo".into()) },
                 ..Default::default()

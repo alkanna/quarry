@@ -33,10 +33,159 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
 /// The tabs of the connection form: both engine families can go through SSH or a SOCKS5 proxy, SQL engines also have TLS
 /// settings and, where the engine has them, session settings.
 fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
-    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] }
+    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Proxy, "Proxy")] }
+}
+
+/// A label, a path box named "<label> field" and a Choose button.
+fn file_row(ui: &mut egui::Ui, label: &str, path: &mut String, hint: &str) {
+    form_label(ui, label);
+    ui.horizontal(|ui| {
+        let r = ui.add(egui::TextEdit::singleline(path).hint_text(hint).desired_width(280.0));
+        let name = format!("{label} field");
+        r.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, true, name.clone()));
+        if ui.button("Choose…").clicked() && let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
+            *path = p.display().to_string();
+        }
+    });
+    ui.end_row();
+}
+
+/// A single-line field named "<name> field", so a test finds the box and not the label beside it. True when the text changed.
+fn named_field(ui: &mut egui::Ui, name: &str, text: &mut String, hint: &str, secret: bool, w: f32) -> bool {
+    let r = ui.add(egui::TextEdit::singleline(text).password(secret).hint_text(hint).desired_width(w).margin(FIELD_MARGIN));
+    let n = format!("{name} field");
+    r.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, true, n.clone()));
+    r.changed()
+}
+
+const READ_PREFERENCES: [&str; 5] = ["primary", "primaryPreferred", "secondary", "secondaryPreferred", "nearest"];
+
+/// The MongoDB address as fields, a view over `f.uri`: each frame parses it and an edit is written back through the
+/// setters, which leave every option the form has no field for as it was.
+fn mongo_rows(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) {
+    use db::mongo_uri::MongoUri;
+    let Some(mut m) = MongoUri::parse(&f.uri) else {
+        form_label(ui, "");
+        ui.add(egui::Label::new(RichText::new("This is not a mongodb:// or mongodb+srv:// address, so only the URI above is edited.").size(TXT_SMALL).color(FAINT())).wrap());
+        ui.end_row();
+        return;
+    };
+    form_label(ui, "SRV");
+    let mut srv = m.srv;
+    ui.checkbox(&mut srv, "mongodb+srv:// address (one DNS name, TLS on)");
+    if srv != m.srv {
+        m.set_srv(srv);
+    }
+    ui.end_row();
+    form_label(ui, "Hosts");
+    let mut hosts = m.hosts_text();
+    if named_field(ui, "Hosts", &mut hosts, if m.srv { "cluster0.abcde.mongodb.net" } else { "host1:27017,host2:27017" }, false, field_w) {
+        m.set_hosts(&hosts);
+    }
+    ui.end_row();
+    form_label(ui, "User");
+    let mut user = m.user();
+    if named_field(ui, "User", &mut user, "", false, 200.0) {
+        m.set_user(&user);
+    }
+    ui.end_row();
+    form_label(ui, "Password");
+    let mut pwd = m.password();
+    if named_field(ui, "Password", &mut pwd, "", true, 200.0) {
+        m.set_password(&pwd);
+    }
+    ui.end_row();
+    form_label(ui, "Database");
+    let mut name = m.database();
+    if named_field(ui, "Database", &mut name, "Optional", false, 200.0) {
+        m.set_database(&name);
+    }
+    ui.end_row();
+    for (label, key, hint) in [("Auth source", "authSource", "admin, or the database the user lives in"), ("Replica set", "replicaSet", "Optional")] {
+        form_label(ui, label);
+        let mut v = m.opt(key).unwrap_or_default();
+        if named_field(ui, label, &mut v, hint, false, 200.0) {
+            m.set_opt(key, (!v.is_empty()).then_some(v.as_str()));
+        }
+        ui.end_row();
+    }
+    form_label(ui, "Read preference");
+    let cur = m.opt("readPreference");
+    let mut pick = None;
+    egui::ComboBox::from_id_salt("mongo-readpref").width(200.0).selected_text(cur.clone().unwrap_or_else(|| "Default (primary)".into())).show_ui(ui, |ui| {
+        menu_look(ui);
+        if ui.selectable_label(cur.is_none(), "Default (primary)").clicked() {
+            pick = Some(None);
+        }
+        for p in READ_PREFERENCES {
+            if ui.selectable_label(cur.as_deref() == Some(p), p).clicked() {
+                pick = Some(Some(p));
+            }
+        }
+    });
+    if let Some(p) = pick {
+        m.set_opt("readPreference", p);
+    }
+    ui.end_row();
+    let new = m.to_string();
+    if new != f.uri {
+        f.uri = new;
+    }
+}
+
+/// The MongoDB TLS tab, a view over the same URI. The driver takes one PEM file holding the client certificate and key.
+fn mongo_tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
+    use db::mongo_uri::MongoUri;
+    settings_section(ui, "TLS", |ui| {
+        let Some(mut m) = MongoUri::parse(&f.uri) else {
+            ui.add(egui::Label::new(RichText::new("This is not a mongodb:// or mongodb+srv:// address, so TLS is set in the URI on the Standard tab.").size(TXT_SMALL).color(FAINT())).wrap());
+            return;
+        };
+        egui::Grid::new("mongo-tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            form_label(ui, "TLS");
+            let mut on = m.tls_on();
+            ui.checkbox(&mut on, "Encrypt the connection");
+            if on != m.tls_on() {
+                m.set_tls(on);
+            }
+            ui.end_row();
+            if !on {
+                return;
+            }
+            for (label, key) in [("CA file", "tlsCAFile"), ("Client cert and key", "tlsCertificateKeyFile")] {
+                let before = m.opt(key).unwrap_or_default();
+                let mut path = before.clone();
+                file_row(ui, label, &mut path, "optional, PEM file");
+                if path != before {
+                    m.set_opt(key, (!path.is_empty()).then_some(path.as_str()));
+                }
+            }
+            form_label(ui, "Certificates");
+            let mut invalid = m.allow_invalid();
+            ui.checkbox(&mut invalid, "Allow invalid certificates");
+            if invalid != m.allow_invalid() {
+                m.set_allow_invalid(invalid);
+            }
+            ui.end_row();
+        });
+        ui.add_space(6.0);
+        let note = if m.tls_on() {
+            "Without a CA file the public CAs are trusted. The client certificate and its private key are one PEM file, for X.509 sign-in. Allow invalid certificates skips every check and is for testing only."
+        } else {
+            "TLS is off. Turn it on to set a CA file or a client certificate. The Proxy and SSH tabs carry the connection as before."
+        };
+        ui.add(egui::Label::new(RichText::new(note).size(TXT_SMALL).color(FAINT())).wrap());
+        let new = m.to_string();
+        if new != f.uri {
+            f.uri = new;
+        }
+    });
 }
 
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
+    if !f.engine.is_sql() {
+        return mongo_tls_tab(ui, f);
+    }
     if f.cloud_on().is_some() {
         note_row(ui, C_LINK(), true, "The Cloud SQL proxy encrypts the connection with the instance's own certificate, so these settings are not used.");
         ui.add_space(8.0);
@@ -53,19 +202,9 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
             form_label(ui, if pg { "Mode" } else { "SSL mode" });
             segmented(ui, &mut f.addr.ssl_mode, if pg { &db::sql::SslMode::PG_ALL } else { &db::sql::SslMode::ALL });
             ui.end_row();
-            let file_row = |ui: &mut egui::Ui, label: &str, path: &mut String| {
-                form_label(ui, label);
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(path).hint_text("optional, PEM file").desired_width(280.0));
-                    if ui.button("Choose…").clicked() && let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
-                        *path = p.display().to_string();
-                    }
-                });
-                ui.end_row();
-            };
-            file_row(ui, "CA file", &mut f.addr.ssl_ca);
-            file_row(ui, "Client cert", &mut f.addr.ssl_cert);
-            file_row(ui, "Client key", &mut f.addr.ssl_key);
+            file_row(ui, "CA file", &mut f.addr.ssl_ca, "optional, PEM file");
+            file_row(ui, "Client cert", &mut f.addr.ssl_cert, "optional, PEM file");
+            file_row(ui, "Client key", &mut f.addr.ssl_key, "optional, PEM file");
             if pg {
                 form_label(ui, "Passphrase");
                 ui.add(egui::TextEdit::singleline(&mut f.pg_key_pass).password(true).hint_text("only for an encrypted key").desired_width(280.0));
@@ -501,7 +640,8 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::C
                 form_label(ui, "URI");
                 ui.vertical(|ui| {
                     let edit = if f.show { egui::TextEdit::multiline(&mut f.uri).desired_rows(3).return_key(None) } else { egui::TextEdit::singleline(&mut f.uri).password(true) };
-                    ui.add(edit.font(egui::TextStyle::Monospace).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(FIELD_MARGIN_TALL));
+                    let r = ui.add(edit.font(egui::TextStyle::Monospace).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(FIELD_MARGIN_TALL));
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "URI field"));
                     // Wrapping is only visual; a pasted newline would break the URI.
                     if f.show {
                         f.uri.retain(|c| c != '\n' && c != '\r');
@@ -510,6 +650,7 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::C
                     ui.checkbox(&mut f.show, "Show address");
                 });
                 ui.end_row();
+                mongo_rows(ui, f, field_w);
                 return;
             }
             form_label(ui, "Host");

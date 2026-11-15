@@ -18,6 +18,7 @@ mod explain;
 mod import;
 mod js_ls;
 mod log;
+pub mod mongo_uri;
 mod shell;
 pub mod sql;
 pub mod collopts;
