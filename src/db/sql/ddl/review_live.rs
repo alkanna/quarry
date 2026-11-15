@@ -46,16 +46,16 @@ fn alter_undo(a: &UndoAction) -> &AlterUndo {
 
 impl R {
     fn exec(&self, sql: &str) {
-        self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) });
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) });
     }
 
     fn rows(&self, sql: &str) -> Vec<String> {
-        self.w.rt.block_on(async { sqlx::query_scalar::<_, String>(sql).fetch_all(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) })
+        self.w.rt.block_on(async { sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql)).fetch_all(&self.pool).await.unwrap_or_else(|err| panic!("{sql}: {err}")) })
     }
 
     fn exists(&self, table: &str) -> bool {
         let q = format!("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{S}' AND TABLE_NAME = '{table}'");
-        self.w.rt.block_on(async { sqlx::query_scalar::<_, i64>(&q).fetch_one(&self.pool).await.unwrap() }) == 1
+        self.w.rt.block_on(async { sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q.as_str())).fetch_one(&self.pool).await.unwrap() }) == 1
     }
 
     fn st(&mut self, db: &Db, table: &str) -> Structure {
@@ -78,7 +78,7 @@ impl R {
                 .max_connections(2)
                 .after_connect(move |c, _| {
                     let q = q.clone();
-                    Box::pin(async move { c.execute(q.as_str()).await.map(|_| ()) })
+                    Box::pin(async move { c.execute(sqlx::AssertSqlSafe(q.as_str())).await.map(|_| ()) })
                 })
                 .connect_with(opts)
                 .await
@@ -137,7 +137,7 @@ fn start(var: &str) -> Option<R> {
     let pool = w.rt.block_on(async {
         let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
         for sql in [format!("DROP DATABASE IF EXISTS {S}"), format!("CREATE DATABASE {S}")] {
-            sqlx::raw_sql(&sql).execute(&p).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).execute(&p).await.unwrap();
         }
         p
     });

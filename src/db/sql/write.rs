@@ -614,7 +614,7 @@ pub(super) async fn primary_key(db: &Db, schema: &str, table: &str) -> Res<Vec<S
     let pool = db.my_pool()?;
     let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
     let t = Instant::now();
-    let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(schema).bind(table).fetch_all(pool).await;
     db.note(schema, &sql, t, &rows);
     let rows = rows.map_err(se)?;
     Ok(rows.iter().filter_map(|r| super::worker::text_at(r, 0)).collect())
@@ -937,8 +937,8 @@ mod tests {
         let pool = w.rt.block_on(async {
             let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
             sqlx::raw_sql("CREATE DATABASE IF NOT EXISTS quarry_write_test").execute(&p).await.unwrap();
-            sqlx::raw_sql(&format!("DROP TABLE IF EXISTS quarry_write_test.{table}")).execute(&p).await.unwrap();
-            sqlx::raw_sql(&format!("CREATE TABLE quarry_write_test.{table} ({ddl})")).execute(&p).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS quarry_write_test.{table}"))).execute(&p).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TABLE quarry_write_test.{table} ({ddl})"))).execute(&p).await.unwrap();
             p
         });
         w.sql_connect(1, uri, Duration::from_secs(30), crate::db::Net::default());
@@ -948,7 +948,7 @@ mod tests {
 
     impl Live {
         fn exec(&self, sql: &str) {
-            self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.unwrap() });
+            self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.unwrap() });
         }
         fn exec_t(&self, sql: &str) {
             self.exec(&sql.replace("{T}", &self.table));
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(undo.is_none());
         assert!(l.delete(&cols, &[], rows.clone(), false).0.is_err());
         assert_eq!(l.page().2.len(), 2);
-        let n: i64 = l.w.rt.block_on(async { sqlx::query_scalar(&format!("SELECT COUNT(*) FROM quarry_write_test.{} WHERE f = 9", l.table)).fetch_one(&l.pool).await.unwrap() });
+        let n: i64 = l.w.rt.block_on(async { sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM quarry_write_test.{} WHERE f = 9", l.table))).fetch_one(&l.pool).await.unwrap() });
         assert_eq!(n, 0);
         l.exec_t("DROP TABLE quarry_write_test.{T}");
         // A key that lacks one of the table's key columns is refused too.

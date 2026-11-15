@@ -103,7 +103,7 @@ fn user_text_cannot_leave_the_session_writable_or_change_how_the_next_statement_
         let show = |what: &str| {
             l.w.rt.block_on(async {
                 let mut c = pool.acquire().await.unwrap();
-                let r = c.fetch_all(format!("SHOW {what}").as_str()).await.unwrap();
+                let r = c.fetch_all(sqlx::AssertSqlSafe(format!("SHOW {what}"))).await.unwrap();
                 crate::db::sql::worker::text_at(&r[0], 0).unwrap()
             })
         };
@@ -385,7 +385,7 @@ fn every_filter_rule_runs_on_postgres() {
                 let r = Rule { col: col.into(), kind, op, values };
                 let sql = rules::to_sql(std::slice::from_ref(&r), false, crate::db::sql::Dialect::Postgres, false);
                 let q = format!("SELECT count(*)::text FROM t4_rules.t WHERE {sql}");
-                let ran = l.w.rt.block_on(async { sqlx::raw_sql(&q).fetch_all(&pool).await });
+                let ran = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(q.as_str())).fetch_all(&pool).await });
                 assert!(ran.is_ok(), "{var}: {op:?} on {col} ({kind:?}): {q}: {:?}", ran.err());
             }
         }

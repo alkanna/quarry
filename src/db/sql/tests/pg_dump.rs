@@ -31,14 +31,14 @@ impl<'a> Dbs<'a> {
     }
 
     fn drop_one(l: &LivePg, name: &str) {
-        let _ = l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)")).execute(&l.pool).await });
+        let _ = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))).execute(&l.pool).await });
     }
 
     /// A new empty database `name`, and a plain pool on it outside the session guard, for fixtures.
     fn make(&mut self, name: &str) -> (Db, PgPool) {
         Dbs::drop_one(self.l, name);
         // template0 is never connected to, so two tests creating a database at once do not meet "template1 is being accessed".
-        self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\" TEMPLATE template0")).execute(&self.l.pool).await }).unwrap_or_else(|x| panic!("create {name}: {x}"));
+        self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\" TEMPLATE template0"))).execute(&self.l.pool).await }).unwrap_or_else(|x| panic!("create {name}: {x}"));
         self.names.push(name.to_string());
         (self.l.db.at(name), pool_of(self.l, name))
     }
@@ -96,7 +96,7 @@ fn lines(l: &LivePg, pool: &PgPool, q: &str) -> Vec<String> {
     l.w.rt.block_on(async {
         let mut c = pool.acquire().await.unwrap();
         sqlx::raw_sql("SET search_path = ''; SET standard_conforming_strings = on").execute(&mut *c).await.unwrap();
-        let rows = sqlx::raw_sql(q).fetch_all(&mut *c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(q)).fetch_all(&mut *c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
         rows.iter().map(|r| crate::db::sql::worker::text_at(r, 0).unwrap_or_default()).collect()
     })
 }
@@ -111,7 +111,7 @@ fn psql_like(l: &LivePg, pool: &PgPool, text: &str) {
         sp.feed(text.as_bytes());
         sp.finish();
         while let Some(p) = sp.next_piece().unwrap() {
-            sqlx::raw_sql(&p.text).execute(&mut *c).await.unwrap_or_else(|x| panic!("statement at line {} failed: {x}\n{}", p.line, p.text));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(p.text.as_str())).execute(&mut *c).await.unwrap_or_else(|x| panic!("statement at line {} failed: {x}\n{}", p.line, p.text));
             let r = sqlx::query("SHOW standard_conforming_strings").persistent(false).fetch_one(&mut *c).await.unwrap();
             sp.set_plain_backslash(crate::db::sql::worker::text_at(&r, 0).as_deref() != Some("on"));
         }
@@ -443,7 +443,7 @@ fn live_awkward_values_read_back_under_both_string_settings() {
         assert_eq!(one(l, &pool_off, "SHOW standard_conforming_strings"), "off", "{var}");
         l.w.rt.block_on(async {
             let mut c = pool_off.acquire().await.unwrap();
-            sqlx::raw_sql(&text).execute(&mut *c).await.unwrap_or_else(|x| panic!("{var}: the dump under standard_conforming_strings = off: {x}"));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(text.as_str())).execute(&mut *c).await.unwrap_or_else(|x| panic!("{var}: the dump under standard_conforming_strings = off: {x}"));
         });
         let off = shape(l, &pool_off);
         same(&format!("{var} scs off"), &before, &off);
@@ -720,7 +720,7 @@ fn live_a_dump_taken_while_another_session_writes_is_one_snapshot() {
             let mut n = 150_000i64;
             while !flag.load(Ordering::SeqCst) {
                 n += 1;
-                let _ = sqlx::raw_sql(&format!("BEGIN; INSERT INTO a VALUES ({n}, 'w'); INSERT INTO b VALUES ({n}, 'w'); COMMIT")).execute(&writer_pool).await;
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("BEGIN; INSERT INTO a VALUES ({n}, 'w'); INSERT INTO b VALUES ({n}, 'w'); COMMIT"))).execute(&writer_pool).await;
             }
             n
         });
@@ -754,8 +754,8 @@ fn live_privileges_are_checked_before_anything_is_dumped() {
         let (_, pool) = dbs.make(&format!("qdump_priv_{t}"));
         let role = format!("qdump_lim_{t}");
         sql(l, &pool, "CREATE TABLE allowed (id int PRIMARY KEY, v text); CREATE TABLE secret (id int); INSERT INTO allowed VALUES (1, 'a'); INSERT INTO secret VALUES (1); CREATE SEQUENCE hidden_seq; CREATE TABLE uses_hidden (id int DEFAULT nextval('hidden_seq'))");
-        let _ = l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {role}")).execute(&l.pool).await });
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'pw'")).execute(&l.pool).await }).unwrap();
+        let _ = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}"))).execute(&l.pool).await });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD 'pw'"))).execute(&l.pool).await }).unwrap();
         sql(l, &pool, &format!("GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT ON allowed, uses_hidden TO {role}"));
         let uri = l.uri.replacen("postgres:quarry@", &format!("{role}:pw@"), 1).rsplit_once('/').map(|(a, _)| format!("{a}/qdump_priv_{t}")).unwrap();
         let lim = live_pg_at(uri);
@@ -773,7 +773,7 @@ fn live_privileges_are_checked_before_anything_is_dumped() {
         let _ = std::fs::remove_file(path);
         drop(lim);
         sql(l, &pool, &format!("DROP OWNED BY {role}"));
-        let _ = l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {role}")).execute(&l.pool).await });
+        let _ = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}"))).execute(&l.pool).await });
     });
 }
 
@@ -847,14 +847,14 @@ impl<'a> Roles<'a> {
         for n in &r.names {
             // One left by a test that failed while it still owned something cannot be dropped, and is used again.
             let make = format!("DO $$BEGIN CREATE ROLE {n} LOGIN PASSWORD 'pw'; EXCEPTION WHEN duplicate_object THEN NULL; END$$");
-            l.w.rt.block_on(async { sqlx::raw_sql(&make).execute(&l.pool).await }).unwrap_or_else(|x| panic!("create role {n}: {x}"));
+            l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(make.as_str())).execute(&l.pool).await }).unwrap_or_else(|x| panic!("create role {n}: {x}"));
         }
         r
     }
 
     fn drop_all(&self) {
         for n in &self.names {
-            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {n}")).execute(&self.l.pool).await });
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {n}"))).execute(&self.l.pool).await });
         }
     }
 }
@@ -1291,7 +1291,7 @@ fn live_a_value_that_is_not_utf8_stops_the_dump_and_names_its_table() {
         let mut dbs = Dbs::new(l);
         let name = format!("qdump_ascii_{t}");
         Dbs::drop_one(l, &name);
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\" TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'")).execute(&l.pool).await }).unwrap_or_else(|x| panic!("{var}: create {name}: {x}"));
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\" TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'"))).execute(&l.pool).await }).unwrap_or_else(|x| panic!("{var}: create {name}: {x}"));
         dbs.names.push(name.clone());
         let pool = pool_of(l, &name);
         sql(l, &pool, r"CREATE TABLE public.raw (id int, s text); INSERT INTO public.raw VALUES (1, 'plain'), (2, convert_from('\x61ff62'::bytea, 'SQL_ASCII'))");

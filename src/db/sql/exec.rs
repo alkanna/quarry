@@ -344,7 +344,7 @@ impl Conn {
     /// wrote them. A CALL ends several results, each with an `Item::End`.
     pub fn fetch_text<'c>(&'c mut self, sql: &'c str) -> BoxStream<'c, Result<Item, sqlx::Error>> {
         match self {
-            Conn::My(c) => raw_sql(sql)
+            Conn::My(c) => raw_sql(sqlx::AssertSqlSafe(sql))
                 .fetch_many(&mut *c)
                 .map(|item| {
                     item.map(|x| match x {
@@ -353,7 +353,7 @@ impl Conn {
                     })
                 })
                 .boxed(),
-            Conn::Pg(c) => raw_sql(sql)
+            Conn::Pg(c) => raw_sql(sqlx::AssertSqlSafe(sql))
                 .fetch_many(&mut **c)
                 .map(|item| {
                     item.map(|x| match x {
@@ -368,25 +368,25 @@ impl Conn {
     /// Runs `sql` through the text protocol and collects its rows.
     pub async fn fetch_all(&mut self, sql: &str) -> Result<Vec<SqlRow>, sqlx::Error> {
         match self {
-            Conn::My(c) => c.fetch_all(sql).await.map(SqlRow::wrap),
-            Conn::Pg(c) => c.fetch_all(sql).await.map(SqlRow::wrap_pg),
+            Conn::My(c) => c.fetch_all(sqlx::AssertSqlSafe(sql)).await.map(SqlRow::wrap),
+            Conn::Pg(c) => c.fetch_all(sqlx::AssertSqlSafe(sql)).await.map(SqlRow::wrap_pg),
         }
     }
 
     /// Runs one statement and drops its rows.
     pub async fn execute(&mut self, sql: &str) -> Result<Done, sqlx::Error> {
         match self {
-            Conn::My(c) => c.execute(sql).await.map(done_my),
-            Conn::Pg(c) => c.execute(sql).await.map(done_pg),
+            Conn::My(c) => c.execute(sqlx::AssertSqlSafe(sql)).await.map(done_my),
+            Conn::Pg(c) => c.execute(sqlx::AssertSqlSafe(sql)).await.map(done_pg),
         }
     }
 
     /// The columns a statement would return, without running it. Empty for a write.
     pub async fn describe(&mut self, sql: &str) -> Result<Vec<ColInfo>, sqlx::Error> {
         match self {
-            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns(), Dialect::MySql)),
+            Conn::My(c) => Ok(col_infos(c.describe(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(sql))).await?.columns(), Dialect::MySql)),
             Conn::Pg(c) => {
-                let d = c.describe(sql).await.map(|d| col_infos(d.columns(), Dialect::Postgres));
+                let d = c.describe(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(sql))).await.map(|d| col_infos(d.columns(), Dialect::Postgres));
                 // sqlx describes through a named statement it caches, which behind a pooler would stay on a backend other
                 // clients share. This runs inside the statement's own transaction, so the backend is the same one.
                 let _ = c.clear_cached_statements().await;
@@ -401,7 +401,7 @@ impl Conn {
     pub async fn begin_write(&mut self, db: &Db) -> Result<Tx<'_>, sqlx::Error> {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
-            Conn::Pg(c) => Ok(Tx::Pg(c.begin_with(db.pg_begin_write().to_string()).await?)),
+            Conn::Pg(c) => Ok(Tx::Pg(c.begin_with(sqlx::AssertSqlSafe(db.pg_begin_write().to_string())).await?)),
         }
     }
 
@@ -441,8 +441,8 @@ impl Tx<'_> {
     /// here, so it is only for text the caller has checked is one.
     pub async fn fetch_text(&mut self, sql: &str) -> Result<Vec<SqlRow>, sqlx::Error> {
         match self {
-            Tx::My(t) => (&mut **t).fetch_all(sql).await.map(SqlRow::wrap),
-            Tx::Pg(t) => (&mut **t).fetch_all(sql).await.map(SqlRow::wrap_pg),
+            Tx::My(t) => (&mut **t).fetch_all(sqlx::AssertSqlSafe(sql)).await.map(SqlRow::wrap),
+            Tx::Pg(t) => (&mut **t).fetch_all(sqlx::AssertSqlSafe(sql)).await.map(SqlRow::wrap_pg),
         }
     }
 
@@ -464,7 +464,7 @@ impl Tx<'_> {
 type Query<'q> = sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>;
 
 pub(super) fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for p in params {
         q = match p {
             Param::Null => q.bind(None::<String>),
@@ -493,7 +493,7 @@ pub(super) fn sql_state(err: &sqlx::Error) -> Option<String> {
 }
 
 pub(super) fn bound_pg<'q>(sql: &'q str, params: &'q [Param]) -> PgQuery<'q> {
-    let mut q = sqlx::query(sql).persistent(false);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).persistent(false);
     for p in params {
         q = match p {
             Param::Null => q.bind(None::<String>),
@@ -540,7 +540,7 @@ impl Db {
             let t = std::time::Instant::now();
             let res = match &self.pool {
                 Pool::My(p) => {
-                    let mut q = sqlx::query(&full);
+                    let mut q = sqlx::query(sqlx::AssertSqlSafe(full.as_str()));
                     for x in params {
                         q = q.bind(x);
                     }
@@ -548,7 +548,7 @@ impl Db {
                 }
                 Pool::Pg(pp) => {
                     let pool = self.pg_pool()?;
-                    let mut q = sqlx::query(&full).persistent(false);
+                    let mut q = sqlx::query(sqlx::AssertSqlSafe(full.as_str())).persistent(false);
                     for x in params {
                         q = q.bind(x);
                     }

@@ -29,7 +29,7 @@ struct Env {
 
 impl Env {
     fn try_exec(&self, sql: &str) -> Result<(), String> {
-        self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.map(|_| ()).map_err(|e| e.to_string()) })
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.map(|_| ()).map_err(|e| e.to_string()) })
     }
 
     fn exec(&self, sql: &str) {
@@ -37,7 +37,7 @@ impl Env {
     }
 
     fn scalar(&self, sql: &str) -> Option<String> {
-        self.w.rt.block_on(async { sqlx::raw_sql(sql).fetch_one(&self.pool).await.ok().and_then(|r| super::super::worker::text_at(&r, 0)) })
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await.ok().and_then(|r| super::super::worker::text_at(&r, 0)) })
     }
 
     fn structure_in(&mut self, schema: &str, table: &str) -> Structure {
@@ -125,7 +125,7 @@ fn pinned(w: &Worker, opts: sqlx::mysql::MySqlConnectOptions, mode: &str) -> sql
             .max_connections(4)
             .after_connect(move |c, _| {
                 let set = set.clone();
-                Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
+                Box::pin(async move { sqlx::Executor::execute(c, sqlx::AssertSqlSafe(set.as_str())).await.map(|_| ()) })
             })
             .connect_with(opts)
             .await

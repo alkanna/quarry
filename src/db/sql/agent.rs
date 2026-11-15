@@ -606,7 +606,7 @@ mod tests {
             assert!(e.to_lowercase().contains("read"), "{var}: {e}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users WHERE age = 0")), "0");
             // A real duplicate key error, made outside the agent path, loses the value it quotes.
-            let raw = l.w.rt.block_on(async { sqlx::raw_sql(&format!("INSERT INTO {db}.users (id, email) VALUES (1, 'dup@example.org')")).execute(&l.pool).await.unwrap_err() });
+            let raw = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO {db}.users (id, email) VALUES (1, 'dup@example.org')"))).execute(&l.pool).await.unwrap_err() });
             let e = failure(&crate::db::sql::se(raw), &r.all(), "insert");
             assert!(!e.contains("dup@example.org") && !e.contains("'1'"), "{var}: {e}");
             let a = rt.block_on(describe(&l.db, &db, "users", &r)).unwrap();

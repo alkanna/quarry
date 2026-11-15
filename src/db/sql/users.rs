@@ -1068,10 +1068,10 @@ fn action(conn: u64, acct: &Account, undo: AccountUndo) -> UndoAction {
 
 async fn grants_of(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account) -> Res<Vec<Grant>> {
     let sql = format!("SHOW GRANTS FOR {}", acct.literal(m.bs));
-    let rows = match sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await {
+    let rows = match sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).persistent(false).fetch_all(&mut *c).await {
         Ok(r) => r,
         // Not every server prepares SHOW GRANTS; the text holds only the quoted account.
-        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sql.as_str()).await.map_err(se)?,
+        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await.map_err(se)?,
         Err(x) => return Err(e(x)),
     };
     Ok(rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| parse_grant(&String::from_utf8_lossy(b)))).collect())
@@ -1269,7 +1269,7 @@ async fn exec_any(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     match ddl::exec(c, sql).await {
         Err(x) if x.contains("1295") || x.contains("prepared statement protocol") => {
             let t = std::time::Instant::now();
-            let res = c.execute(sql).await.map(|_| ());
+            let res = c.execute(sqlx::AssertSqlSafe(sql)).await.map(|_| ());
             crate::db::note_here(sql, t, &res);
             res.map_err(se)
         }
@@ -2121,7 +2121,7 @@ mod tests {
     fn grants(l: &crate::db::sql::testing::Live, a: &Account) -> Vec<String> {
         l.w.rt.block_on(async {
             let sql = format!("SHOW GRANTS FOR {}", a.literal(true));
-            sqlx::raw_sql(&sql).fetch_all(&l.pool).await.unwrap().iter().map(|r| super::super::worker::text_at(r, 0).unwrap_or_default()).collect()
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_all(&l.pool).await.unwrap().iter().map(|r| super::super::worker::text_at(r, 0).unwrap_or_default()).collect()
         })
     }
 
@@ -2133,7 +2133,7 @@ mod tests {
     }
 
     fn drop_it(l: &crate::db::sql::testing::Live, a: &Account) {
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP USER IF EXISTS {}", a.literal(true))).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP USER IF EXISTS {}", a.literal(true)))).execute(&l.pool).await.unwrap() });
     }
 
     #[test]
@@ -2492,7 +2492,7 @@ mod tests {
             }
             // A chain needs a second plugin; use unix_socket when the server has it.
             let a = Account::named(&unique("ch"), "localhost");
-            let made = l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE USER {} IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('x1')", a.literal(true))).execute(&l.pool).await.is_ok() });
+            let made = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE USER {} IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('x1')", a.literal(true)))).execute(&l.pool).await.is_ok() });
             if made {
                 l.w.sql_user_password(1, l.db.clone(), a.clone(), None, "new-secret".into(), false);
                 let err = done(l).1.unwrap_err();

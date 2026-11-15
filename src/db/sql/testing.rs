@@ -35,13 +35,13 @@ pub fn every_server(f: impl Fn(&Live, &str)) {
 
 impl Live {
     pub fn sql(&self, s: &str) {
-        self.w.rt.block_on(async { sqlx::raw_sql(s).execute(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(s)).execute(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
     }
 
     /// The first cell of the first row, as text.
     pub fn one(&self, s: &str) -> String {
         self.w.rt.block_on(async {
-            let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             super::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
     }
@@ -49,7 +49,7 @@ impl Live {
     /// One cell of the first row, as text.
     pub fn cell(&self, s: &str, col: usize) -> String {
         self.w.rt.block_on(async {
-            let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             super::worker::text_at(&rows[0], col).unwrap_or_default()
         })
     }
@@ -77,7 +77,7 @@ pub fn with_session(w: &Worker, db: &Db, set: &str) -> Db {
             .max_connections(2)
             .after_connect(move |c, _| {
                 let set = set.clone();
-                Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
+                Box::pin(async move { sqlx::Executor::execute(c, sqlx::AssertSqlSafe(set.as_str())).await.map(|_| ()) })
             })
             .connect_with(db.opts.my().unwrap().clone())
             .await
@@ -132,7 +132,7 @@ impl LivePg {
     /// The first cell of the first row, as text.
     pub fn one(&self, s: &str) -> String {
         self.w.rt.block_on(async {
-            let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             super::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
     }
@@ -147,13 +147,13 @@ impl LivePg {
 
     /// Runs statements (several are fine) in `quarry_test` as the fixture login.
     pub fn qsql(&self, pool: &sqlx::PgPool, s: &str) {
-        self.w.rt.block_on(async { sqlx::raw_sql(s).execute(pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
+        self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(s)).execute(pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
     }
 
     /// The first cell of the first row of a query in `quarry_test`, as text.
     pub fn qone(&self, pool: &sqlx::PgPool, s: &str) -> String {
         self.w.rt.block_on(async {
-            let rows = sqlx::raw_sql(s).fetch_all(pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             super::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
     }
@@ -251,7 +251,7 @@ impl<'a> PgFixture<'a> {
 
 impl Drop for PgFixture<'_> {
     fn drop(&mut self) {
-        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_ident(&self.schema))).execute(&self.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_ident(&self.schema)))).execute(&self.pool).await });
     }
 }
 
@@ -279,7 +279,7 @@ impl<'a> MyFixture<'a> {
 
 impl Drop for MyFixture<'_> {
     fn drop(&mut self) {
-        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS `{}`", self.name)).execute(&self.l.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS `{}`", self.name))).execute(&self.l.pool).await });
     }
 }
 

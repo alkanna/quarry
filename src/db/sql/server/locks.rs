@@ -278,7 +278,7 @@ mod tests {
 
     /// A plain function, because inside a spawned block the executor lifetimes of a borrowed connection do not infer.
     async fn run(c: &mut sqlx::MySqlConnection, q: &str) {
-        let _ = sqlx::Executor::execute(c, q).await;
+        let _ = sqlx::Executor::execute(c, sqlx::AssertSqlSafe(q)).await;
     }
 
     fn wait(waiter: u64, blocker: u64) -> LockWait {
@@ -367,13 +367,13 @@ mod tests {
             let t = format!("t_locks_{}", var.to_lowercase());
             let waits = l.w.rt.block_on(async {
                 let pool = l.pool.clone();
-                sqlx::raw_sql(&format!("DROP TABLE IF EXISTS quarry_test.{t}")).execute(&pool).await.unwrap();
-                sqlx::raw_sql(&format!("CREATE TABLE quarry_test.{t} (id INT PRIMARY KEY, v INT) ENGINE=InnoDB")).execute(&pool).await.unwrap();
-                sqlx::raw_sql(&format!("INSERT INTO quarry_test.{t} VALUES (1, 0)")).execute(&pool).await.unwrap();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS quarry_test.{t}"))).execute(&pool).await.unwrap();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TABLE quarry_test.{t} (id INT PRIMARY KEY, v INT) ENGINE=InnoDB"))).execute(&pool).await.unwrap();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("INSERT INTO quarry_test.{t} VALUES (1, 0)"))).execute(&pool).await.unwrap();
                 let mut holder = pool.acquire().await.unwrap();
                 sqlx::raw_sql("SET SESSION innodb_lock_wait_timeout = 30").execute(&mut *holder).await.unwrap();
                 sqlx::raw_sql("BEGIN").execute(&mut *holder).await.unwrap();
-                sqlx::raw_sql(&format!("UPDATE quarry_test.{t} SET v = 1 WHERE id = 1")).execute(&mut *holder).await.unwrap();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("UPDATE quarry_test.{t} SET v = 1 WHERE id = 1"))).execute(&mut *holder).await.unwrap();
                 let hid: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut *holder).await.unwrap();
                 let mut waiter = pool.acquire().await.unwrap();
                 sqlx::raw_sql("SET SESSION innodb_lock_wait_timeout = 30").execute(&mut *waiter).await.unwrap();
@@ -394,7 +394,7 @@ mod tests {
                 let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *holder).await;
                 let _ = blocked.await;
                 drop(holder);
-                sqlx::raw_sql(&format!("DROP TABLE IF EXISTS quarry_test.{t}")).execute(&pool).await.unwrap();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS quarry_test.{t}"))).execute(&pool).await.unwrap();
                 found
             });
             let (k, wid, hid) = waits.expect("the wait is listed");

@@ -115,7 +115,7 @@ fn fresh(l: &LivePg, names: &[&str]) -> Vec<String> {
         let mut c = sqlx::PgConnection::connect_with(&sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap()).await.unwrap();
         let mut out = Vec::new();
         for n in names {
-            let rows = c.fetch_all(format!("SHOW {n}").as_str()).await.unwrap();
+            let rows = c.fetch_all(sqlx::AssertSqlSafe(format!("SHOW {n}"))).await.unwrap();
             out.push(String::from_utf8_lossy(rows[0].cell(0).unwrap()).into_owned());
         }
         let _ = c.close().await;

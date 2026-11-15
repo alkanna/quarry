@@ -16,7 +16,7 @@ pub(in crate::db::sql) async fn session(db: &Db, schema: &str, read_only: bool, 
 /// One statement, prepared, so the server parses exactly one whatever the text holds.
 pub(in crate::db::sql) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     let t = Instant::now();
-    let res = sqlx::query(sql).persistent(false).execute(&mut *c).await;
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql)).persistent(false).execute(&mut *c).await;
     crate::db::note_here(sql, t, &res);
     res.map_err(se)?;
     Ok(())
@@ -142,7 +142,7 @@ pub(super) async fn replay(c: &mut sqlx::MySqlConnection, d: Dialect, s: &Stored
 /// compiler inside a spawned task.
 pub(super) async fn raw_first(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<Option<sqlx::mysql::MySqlRow>> {
     let t = Instant::now();
-    let mut s = sqlx::raw_sql(sql).fetch_many(&mut *c);
+    let mut s = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(&mut *c);
     let mut first = None;
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
         match item {
@@ -361,7 +361,7 @@ impl Worker {
             let pool = match db.my_pool() { Ok(p) => p, Err(err) => return Msg::SqlOrphans { req, res: Err(err), sample: Vec::new() } };
             let sql = orphans_sql(db.dialect, &schema, &table, &fk);
             let t = Instant::now();
-            let res = sqlx::query(&sql).fetch_one(pool).await;
+            let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).fetch_one(pool).await;
             db.note(&schema, &sql, t, &res);
             let res = res.map_err(se).map(|r| crate::db::sql::structure::num(&r, "n").unwrap_or(0));
             Msg::SqlOrphans { req, res, sample: Vec::new() }

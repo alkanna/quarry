@@ -300,7 +300,7 @@ async fn read_def(db: &Db, schema: &str, name: &str) -> Res<ViewDef> {
 }
 
 async fn my_def(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, name: &str) -> Res<ViewDef> {
-    let rows = sqlx::query(&d.create_stmt(true, schema, name)).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(d.create_stmt(true, schema, name))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     def_from_create(&rows, schema, name)
 }
 

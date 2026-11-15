@@ -34,7 +34,7 @@ pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: b
             c.execute("SET SESSION autocommit = 1").await.map_err(se)?;
             if !schema.is_empty() {
                 let q = format!("USE {}", db.dialect.quote_ident(schema));
-                c.execute(q.as_str()).await.map_err(se)?;
+                c.execute(sqlx::AssertSqlSafe(q.as_str())).await.map_err(se)?;
             }
             if !read_only {
                 c.execute(db.dialect.session_read_only(false)).await.map_err(se)?;
@@ -385,7 +385,7 @@ pub(super) async fn count_rows(db: &Db, schema: &str, stmt: &str) -> Res<u64> {
     let t = Instant::now();
     let r = match &mut conn {
         // The connection is closed below whatever happens, so a failed ROLLBACK cannot reach another statement.
-        Conn::Pg(c) => super::pg::read::in_read_only(c, db, &db.pg_run_locals(schema), async |c| c.fetch_all(sql.as_str()).await).await.map(super::exec::SqlRow::wrap_pg),
+        Conn::Pg(c) => super::pg::read::in_read_only(c, db, &db.pg_run_locals(schema), async |c| c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await).await.map(super::exec::SqlRow::wrap_pg),
         c => c.fetch_all(&sql).await,
     };
     db.note(schema, &sql, t, &r);
@@ -814,7 +814,7 @@ mod pg_tests {
                     // The same backend, outside any transaction, as the next client of the pooler would find it.
                     let Conn::Pg(c) = &mut conn else { unreachable!() };
                     for (name, want) in ["search_path", "default_transaction_read_only", "statement_timeout"].iter().zip(&defaults) {
-                        let rows = c.fetch_all(format!("SHOW {name}").as_str()).await.unwrap();
+                        let rows = c.fetch_all(sqlx::AssertSqlSafe(format!("SHOW {name}"))).await.unwrap();
                         assert_eq!(&String::from_utf8_lossy(rows[0].cell(0).unwrap()), want, "{var} {name} read_only={read_only}");
                     }
                     let _ = conn.close().await;
@@ -830,7 +830,7 @@ mod pg_tests {
                 let fresh = l.w.rt.block_on(async {
                     use std::str::FromStr;
                     let mut c = <sqlx::PgConnection as sqlx::Connection>::connect_with(&sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database("quarry_test")).await.unwrap();
-                    let rows = c.fetch_all(format!("SHOW {name}").as_str()).await.unwrap();
+                    let rows = c.fetch_all(sqlx::AssertSqlSafe(format!("SHOW {name}"))).await.unwrap();
                     String::from_utf8_lossy(rows[0].cell(0).unwrap()).into_owned()
                 });
                 assert_eq!(fresh, l.one(&format!("SHOW {name}")), "{var} {name}");

@@ -12,7 +12,10 @@ eframe = { version = "0.37", features = ["persistence"] }
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 mongodb = { version = "3", features = ["socks5-proxy"] }
 # MySQL and MariaDB. Postgres and SQLite are one feature each when they come. Runtime queries only, no macros.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "postgres"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "mysql-rsa", "postgres"] }
+# Executor::describe sits behind the drivers' offline feature since sqlx 0.9; enabling it here avoids the macros crate.
+sqlx-mysql = { version = "0.9", default-features = false, features = ["offline"] }
+sqlx-postgres = { version = "0.9", default-features = false, features = ["offline"] }
 # net and time also come in through other crates; named because the AI agents link uses sockets, pipes and timeouts.
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "sync", "net", "time"] }
 futures-util = "0.3"
@@ -20,10 +23,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 json5 = "1"
 keyring = "4"
-rfd = "0.17"
+rfd = "0.18"
 # Deleting a file of a linked folder moves it to the Trash; its bytes are kept for the Undo toast.
 trash = "5"
-dirs = "6"
+dirs = "7"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.11"
 # Already in the build through sqlx; signs agents.json, proves both ends of the AI agents link and keys the scrub hash.

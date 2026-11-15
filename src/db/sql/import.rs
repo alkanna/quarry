@@ -192,17 +192,17 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     }
     // A long import is not a slow query to cut off.
     let timeout = d.session_timeout(0);
-    let _ = c.execute(timeout.as_str()).await;
+    let _ = c.execute(sqlx::AssertSqlSafe(timeout.as_str())).await;
     // Counted on the pool: Cancel kills the import's own connection.
     let pool = db.my_pool()?;
     let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
     let trans = plan.info.transactional();
-    let before: Option<i64> = if trans { None } else { sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok() };
+    let before: Option<i64> = if trans { None } else { sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str())).fetch_one(pool).await.ok() };
     let res = import_on(&mut c, d, schema, table, plan, &names, per, conn, prog, cancel).await;
     let stopped = cancel.load(Ordering::SeqCst);
     let res = match res {
         Err(x) if !trans => {
-            let after: Option<i64> = sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok();
+            let after: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str())).fetch_one(pool).await.ok();
             let kept = before.zip(after).map(|(b, a)| (a - b).max(0) as u64);
             let note = kept_note(kept, &plan.info.engine, stopped);
             if stopped { Err(format!("Import stopped. {note}")) } else { Err(format!("{} {note}", x.strip_suffix(NOTHING).unwrap_or(&x).trim_end())) }
@@ -219,7 +219,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
 async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str, plan: &ImportPlan, names: &[&str], per: usize, conn: u64, prog: &Progress, cancel: &AtomicBool) -> Res<Done> {
     let mut tx = c.begin().await.map_err(se)?;
     let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
-    let before: i64 = if plan.dup == Dup::Stop { 0 } else { sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(se)? };
+    let before: i64 = if plan.dup == Dup::Stop { 0 } else { sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str())).fetch_one(&mut *tx).await.map_err(se)? };
     let mut keys = Keys::Off;
     let mut found: Vec<Document> = Vec::new();
     let mut why_not = None;
@@ -331,7 +331,7 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
     let inserted = if plan.dup == Dup::Stop {
         rows
     } else {
-        let after: i64 = sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(se)?;
+        let after: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str())).fetch_one(&mut *tx).await.map_err(se)?;
         (after - before).max(0) as u64
     };
     tx.commit().await.map_err(se)?;

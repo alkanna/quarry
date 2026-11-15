@@ -183,7 +183,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     let started = std::time::Instant::now();
     let (mut kinds, mut copy, mut batch, mut bytes, mut rows) = (Vec::new(), Vec::new(), Vec::<Document>::new(), 0usize, 0u64);
     let res: Res<()> = async {
-        let mut s = raw_sql(&sql).fetch(&mut *c);
+        let mut s = raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch(&mut *c);
         while let Some(row) = futures_util::StreamExt::next(&mut s).await {
             let row = row.map_err(se)?;
             if kinds.is_empty() {
@@ -217,7 +217,7 @@ async fn show_create(c: &mut sqlx::MySqlConnection, sql: String, at: usize) -> R
     // Read as a stream like the exports: `fetch_one` of a raw statement on a borrowed connection is refused by the
     // compiler inside a spawned task.
     let t = std::time::Instant::now();
-    let mut s = raw_sql(&sql).fetch_many(&mut *c);
+    let mut s = raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_many(&mut *c);
     let mut got = None;
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
         let item = match item {
@@ -255,7 +255,7 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
     pin_reads(&mut c).await.map_err(se)?;
     // The statement timeout of the pool would cut the read of a big table short.
     let timeout = d.session_timeout(0);
-    let _ = c.execute(timeout.as_str()).await;
+    let _ = c.execute(sqlx::AssertSqlSafe(timeout.as_str())).await;
     // Like mysqldump: SHOW CREATE writes names the way the session's sql_mode quotes them, so ANSI_QUOTES in the
     // server's mode would write "t", which the file cannot run back. A filter is the user's text, read under the
     // mode they typed it in, and a filtered dump writes no CREATE, so it keeps the mode.
@@ -422,7 +422,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
         id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
     let timeout = db.dialect.session_timeout(0);
-    let _ = c.execute(timeout.as_str()).await;
+    let _ = c.execute(sqlx::AssertSqlSafe(timeout.as_str())).await;
     let mut file = src.open_script().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = ScriptSplitter::new(mode_of(&mut c).await);
     if let Some(max) = max_packet(&mut c).await {
@@ -517,7 +517,7 @@ async fn run_stmt(c: &mut sqlx::MySqlConnection, stmt: &[u8]) -> Result<(), Stri
 
 /// Runs one statement as text and reads its results to the end.
 async fn run_text(c: &mut sqlx::MySqlConnection, stmt: &str) -> Result<(), sqlx::Error> {
-    let mut s = raw_sql(stmt).fetch_many(&mut *c);
+    let mut s = raw_sql(sqlx::AssertSqlSafe(stmt)).fetch_many(&mut *c);
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
         item?;
     }
@@ -765,7 +765,7 @@ mod tests {
     /// Every table and view of `db`, all of it, as the Whole database choice writes it.
     fn whole(l: &crate::db::sql::testing::Live, db: &str) -> DumpPlan {
         let names: Vec<(String, bool)> = l.w.rt.block_on(async {
-            let rows = sqlx::raw_sql(&format!("SELECT TABLE_NAME, TABLE_TYPE = 'VIEW' FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME")).fetch_all(&l.pool).await.unwrap();
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SELECT TABLE_NAME, TABLE_TYPE = 'VIEW' FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME"))).fetch_all(&l.pool).await.unwrap();
             rows.iter().map(|r| (String::from_utf8_lossy(raw(r, 0).unwrap()).into_owned(), raw(r, 1) == Some(b"1"))).collect()
         });
         DumpPlan { schema: db.into(), tables: names.into_iter().map(|(name, view)| DumpTable { name, view, structure: true, content: !view, drop: true }).collect(), create_db: true, extras: true, rows_per_insert: 1000, snapshot: true, filter: None, grants: false, owners: false }

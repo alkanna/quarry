@@ -476,7 +476,7 @@ fn collations_of_rows(rows: &[sqlx::mysql::MySqlRow], charsets: &[Charset]) -> V
 }
 
 async fn count(pool: &sqlx::MySqlPool, sql: &str, schema: &str) -> u64 {
-    sqlx::query(sql).bind(schema).fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n")).unwrap_or(0)
+    sqlx::query(sqlx::AssertSqlSafe(sql)).bind(schema).fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n")).unwrap_or(0)
 }
 
 /// Counts for the database confirmation: the sum is what DROP DATABASE takes with it.
@@ -562,7 +562,7 @@ pub(super) async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
 /// or a connection busy once the dialog has its answer.
 async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, d: Dialect, sql: &str) -> Option<u64> {
     let me = whoami(&mut c, d).await;
-    let got = tokio::time::timeout(COUNT_WAIT, sqlx::query(sql).persistent(false).fetch_one(&mut c)).await;
+    let got = tokio::time::timeout(COUNT_WAIT, sqlx::query(sqlx::AssertSqlSafe(sql)).persistent(false).fetch_one(&mut c)).await;
     match got {
         Ok(r) => {
             let _ = c.close().await;
@@ -609,7 +609,7 @@ async fn stop_count(pool: &sqlx::MySqlPool, d: Dialect, me: &(u64, String), sql:
         return;
     }
     // A plain query, not raw_sql: a raw statement on a borrowed connection makes the spawned future not Send.
-    if sqlx::query(&d.cancel(id)).persistent(false).execute(&mut *k).await.is_err() {
+    if sqlx::query(sqlx::AssertSqlSafe(d.cancel(id))).persistent(false).execute(&mut *k).await.is_err() {
         return;
     }
     for _ in 0..30 {
@@ -622,7 +622,7 @@ async fn stop_count(pool: &sqlx::MySqlPool, d: Dialect, me: &(u64, String), sql:
 }
 
 pub(super) async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
-    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!("SHOW TABLES FROM {}", d.quote_ident(schema)))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     Ok(rows.iter().filter_map(|r| text_at(r, 0)).collect())
 }
 
@@ -690,7 +690,7 @@ async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, tab
     if let Some(made) = made && create_time(c, schema, table).await.as_deref() != Some(made) {
         return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
     }
-    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(se)?.is_some();
+    let has = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT 1 AS n FROM {q} LIMIT 1"))).persistent(false).fetch_optional(&mut *c).await.map_err(se)?.is_some();
     if has {
         return Err(format!("Not undone: {table} has rows now."));
     }
@@ -726,7 +726,7 @@ async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, rea
         let q = d.qualified(schema, table);
         // Without the LOCK TABLES privilege the checks still run, only without the lock. MySQL cannot prepare LOCK
         // TABLES (error 1295), so it goes as text; it holds nothing but the quoted names.
-        let locked = c.execute(format!("LOCK TABLES {q} WRITE").as_str()).await.is_ok();
+        let locked = c.execute(sqlx::AssertSqlSafe(format!("LOCK TABLES {q} WRITE"))).await.is_ok();
         let res = drop_if_same_and_empty(&mut c, schema, table, made, &q, &sql).await;
         if locked {
             let _ = c.execute("UNLOCK TABLES").await;
@@ -1190,10 +1190,10 @@ mod tests {
             self.rx.recv_timeout(Duration::from_secs(20)).expect("worker answer")
         }
         fn exec(&self, sql: &str) {
-            self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.unwrap() });
+            self.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.unwrap() });
         }
         fn scalar(&self, sql: &str) -> i64 {
-            self.w.rt.block_on(async { sqlx::query_scalar(sql).fetch_one(&self.pool).await.unwrap() })
+            self.w.rt.block_on(async { sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await.unwrap() })
         }
         fn meta(&self, schema: &str) -> Meta {
             self.w.sql_create_meta(1, self.db.clone(), schema.into());
@@ -1224,7 +1224,7 @@ mod tests {
             Answer { schema, table, res, undo, sql_mode }
         }
         fn text_of(&self, sql: &str) -> String {
-            self.w.rt.block_on(async { crate::db::sql::worker::text_at(&sqlx::query(sql).fetch_one(&self.pool).await.unwrap_or_else(|x| panic!("{sql}: {x}")), 0).unwrap_or_default() })
+            self.w.rt.block_on(async { crate::db::sql::worker::text_at(&sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await.unwrap_or_else(|x| panic!("{sql}: {x}")), 0).unwrap_or_default() })
         }
         fn utf8mb4(&self) -> (Meta, String) {
             let m = self.meta("");
@@ -1313,8 +1313,8 @@ mod tests {
             let values = (1..=1000).map(|i| format!("({i})")).collect::<Vec<_>>().join(",");
             let mut lock = l.w.rt.block_on(async {
                 let mut c = sqlx::MySqlConnection::connect_with(l.db.opts.my().unwrap()).await.unwrap();
-                c.execute(format!("LOCK TABLES `{schema}`.t WRITE").as_str()).await.unwrap();
-                c.execute(format!("INSERT INTO `{schema}`.t (v) VALUES {values}").as_str()).await.unwrap();
+                c.execute(sqlx::AssertSqlSafe(format!("LOCK TABLES `{schema}`.t WRITE"))).await.unwrap();
+                c.execute(sqlx::AssertSqlSafe(format!("INSERT INTO `{schema}`.t (v) VALUES {values}"))).await.unwrap();
                 c
             });
             let (info, took) = l.drop_info(&schema, "t");
@@ -1463,7 +1463,7 @@ mod tests {
             assert_eq!(what, Ddl::CreatedDb);
             assert_eq!(res.unwrap(), format!("Created database {name}"), "{}", l.label);
             assert!(dbs.unwrap().contains(&name));
-            let got = l.w.rt.block_on(async { text(&sqlx::query(&format!("SELECT DEFAULT_COLLATION_NAME AS d FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{name}'")).fetch_one(&l.pool).await.unwrap(), "d").unwrap() });
+            let got = l.w.rt.block_on(async { text(&sqlx::query(sqlx::AssertSqlSafe(format!("SELECT DEFAULT_COLLATION_NAME AS d FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{name}'"))).fetch_one(&l.pool).await.unwrap(), "d").unwrap() });
             assert_eq!(got, "latin1_swedish_ci");
             // Creating it again is an error and offers no undo that would drop the first one.
             let (_, again, undo2, _) = l.create_db(&name, "latin1", "latin1_swedish_ci", false);
@@ -1514,7 +1514,7 @@ mod tests {
             assert_eq!(what, Ddl::CreatedTable);
             assert!(res.is_ok(), "{}: {res:?}", l.label);
             let cols: Vec<(String, String, String)> = l.w.rt.block_on(async {
-                sqlx::query(&format!("SELECT COLUMN_NAME AS n, COLUMN_TYPE AS t, COLUMN_KEY AS k FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = 're`funds' ORDER BY ORDINAL_POSITION"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("SELECT COLUMN_NAME AS n, COLUMN_TYPE AS t, COLUMN_KEY AS k FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = 're`funds' ORDER BY ORDINAL_POSITION")))
                     .fetch_all(&l.pool)
                     .await
                     .unwrap()
@@ -1531,7 +1531,7 @@ mod tests {
             l.exec(&format!("INSERT INTO `{schema}`.`re``funds` (amount, `created at`) VALUES (1.5, NOW())"));
             // The default text went in whole, quote, backtick and backslash included. Read back through a row,
             // because MariaDB reports COLUMN_DEFAULT as a quoted literal.
-            let note = l.w.rt.block_on(async { text(&sqlx::query(&format!("SELECT `no``te` AS d FROM `{schema}`.`re``funds`")).fetch_one(&l.pool).await.unwrap(), "d").unwrap() });
+            let note = l.w.rt.block_on(async { text(&sqlx::query(sqlx::AssertSqlSafe(format!("SELECT `no``te` AS d FROM `{schema}`.`re``funds`"))).fetch_one(&l.pool).await.unwrap(), "d").unwrap() });
             assert_eq!(note, "it's `x` \\ ok", "{}", l.label);
             let (_, res, back, _) = l.undo(undo.unwrap(), false);
             assert!(res.unwrap_err().contains("has rows"), "{}", l.label);

@@ -22,7 +22,7 @@ fn sleeper(uri: &str, tag: &str) -> mpsc::Receiver<Result<(), String>> {
                     Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
                 }
             };
-            let r = sqlx::Executor::execute(&mut c, sql.as_str()).await.map(|_| ()).map_err(|x| x.to_string());
+            let r = sqlx::Executor::execute(&mut c, sqlx::AssertSqlSafe(sql.as_str())).await.map(|_| ()).map_err(|x| x.to_string());
             let _ = tx.send(r);
         });
     });

@@ -115,7 +115,7 @@ fn live_mysql_routines_list_view_create_edit_restore_and_drop() {
 
 fn pg_text(l: &LivePg, pool: &sqlx::PgPool, sql: &str) -> String {
     l.w.rt.block_on(async {
-        let rows = sqlx::raw_sql(sql).fetch_all(pool).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
+        let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_all(pool).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
         crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default()
     })
 }

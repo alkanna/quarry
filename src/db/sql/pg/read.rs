@@ -14,7 +14,7 @@ use std::time::Instant;
 /// The rows of one simple-protocol statement. A function with explicit lifetimes, because inside a spawned future the
 /// executor lifetimes of `raw_sql(..).fetch_all(&mut conn)` do not infer.
 fn rows_of<'c>(c: &'c mut PgConnection, sql: &'c str) -> BoxStream<'c, Result<Either<PgQueryResult, PgRow>, sqlx::Error>> {
-    raw_sql(sql).fetch_many(c)
+    raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(c)
 }
 
 /// Runs one statement of the user's in its own `BEGIN READ ONLY`, rolls it back and never commits. The session guard
@@ -50,7 +50,7 @@ pub(in crate::db::sql) async fn read_only(db: &Db, user_text: bool, extra: &str,
 /// future that is cancelled midway leaves nothing open either. A ROLLBACK that fails is returned as the error when the
 /// work succeeded: the connection may then still sit inside the transaction, so the caller must close it, never reuse it.
 pub(in crate::db::sql) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &str, work: impl AsyncFnOnce(&mut PgConnection) -> Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
-    let mut tx = conn.begin_with(db.pg_begin("BEGIN READ ONLY", extra)).await?;
+    let mut tx = conn.begin_with(sqlx::AssertSqlSafe(db.pg_begin("BEGIN READ ONLY", extra))).await?;
     let res = work(&mut *tx).await;
     let end = tx.rollback().await;
     match res {
@@ -105,7 +105,7 @@ pub(in crate::db::sql) async fn begin_read_write(c: &mut PgConnection, db: &Db, 
 }
 
 async fn begin_with(c: &mut PgConnection, sql: String) -> Result<(), sqlx::Error> {
-    if let Err(x) = c.execute(sql.as_str()).await {
+    if let Err(x) = c.execute(sqlx::AssertSqlSafe(sql.as_str())).await {
         let _ = c.execute("ROLLBACK").await;
         return Err(x);
     }
@@ -131,7 +131,7 @@ impl Db {
     pub(in crate::db::sql) async fn read_text_with(&self, schema: &str, before: &str, sql: &str, user_text: bool) -> Res<Vec<SqlRow>> {
         let t = Instant::now();
         let res = match &self.pool {
-            Pool::My(p) => raw_sql(sql).fetch_all(p).await.map(SqlRow::wrap),
+            Pool::My(p) => raw_sql(sqlx::AssertSqlSafe(sql)).fetch_all(p).await.map(SqlRow::wrap),
             Pool::Pg(_) => read_only(self, user_text, before, sql).await.map(SqlRow::wrap_pg),
         };
         self.note(schema, sql, t, &res);
@@ -142,12 +142,12 @@ impl Db {
     /// Preparing runs nothing, so no transaction is needed.
     pub(in crate::db::sql) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
         match &self.pool {
-            Pool::My(p) => Ok(col_infos(p.describe(sql).await.map_err(se)?.columns(), self.dialect)),
+            Pool::My(p) => Ok(col_infos(p.describe(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(sql))).await.map_err(se)?.columns(), self.dialect)),
             Pool::Pg(_) => {
                 // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
                 // read-only transaction that is rolled back, like every other statement that carries user text.
                 let mut conn = self.pg_pool()?.acquire().await.map_err(se)?;
-                let d = in_read_only(&mut conn, self, "", async |tx| tx.describe(sql).await).await;
+                let d = in_read_only(&mut conn, self, "", async |tx| tx.describe(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(sql))).await).await;
                 conn.close_on_drop();
                 Ok(col_infos(d.map_err(se)?.columns(), Dialect::Postgres))
             }

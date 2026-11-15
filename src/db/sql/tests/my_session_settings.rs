@@ -100,7 +100,7 @@ fn live_an_alter_runs_past_the_statement_timeout() {
         let mut hold = l.w.rt.block_on(sqlx::MySqlConnection::connect_with(l.db.opts.my().unwrap())).unwrap();
         l.w.rt.block_on(async {
             sqlx::Executor::execute(&mut hold, "START TRANSACTION").await.unwrap();
-            sqlx::Executor::execute(&mut hold, format!("SELECT * FROM {db}.t").as_str()).await.unwrap();
+            sqlx::Executor::execute(&mut hold, sqlx::AssertSqlSafe(format!("SELECT * FROM {db}.t"))).await.unwrap();
         });
         let m = crate::db::sql::ddl::Mode::of(&l.db.sql_mode);
         l.w.sql_alter(1, odd, db.into(), "t".into(), "ALTER TABLE `t` ADD COLUMN `z` INT".into(), m, None, false, "done".into());

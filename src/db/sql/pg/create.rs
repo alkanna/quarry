@@ -598,7 +598,7 @@ pub(in crate::db::sql) async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<P
 
 async fn read_on(c: &mut Conn, db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
     let Conn::Pg(pc) = c else { return Err("Not a PostgreSQL connection".into()) };
-    let mut tx = Tx::Pg(pc.begin_with(db.pg_begin("BEGIN READ ONLY", "")).await.map_err(se)?);
+    let mut tx = Tx::Pg(pc.begin_with(sqlx::AssertSqlSafe(db.pg_begin("BEGIN READ ONLY", ""))).await.map_err(se)?);
     let mut all = Vec::new();
     let mut res = Ok(());
     for (sql, args) in steps {

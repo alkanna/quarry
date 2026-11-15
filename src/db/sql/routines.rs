@@ -590,7 +590,7 @@ impl Steps for Session<'_> {
         // Routine DDL is refused by the prepared protocol (1295) on MySQL, DROP and CREATE alike, so it goes as text. The text is the
         // person's own definition and runs with their own rights; the server reads the CREATE with its whole body as one statement.
         let res = {
-            let mut s = sqlx::raw_sql(sql).fetch_many(&mut *self.c);
+            let mut s = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(&mut *self.c);
             let mut out = Ok(());
             while let Some(item) = futures_util::StreamExt::next(&mut s).await {
                 if let Err(e) = item {

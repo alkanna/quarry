@@ -678,7 +678,7 @@ mod live {
         fn one(&self, db: &Db, q: &str) -> String {
             let p = db.my_pool().unwrap();
             self.w.rt.block_on(async {
-                let r = sqlx::raw_sql(q).fetch_one(p).await.unwrap_or_else(|x| panic!("{q}: {x}"));
+                let r = sqlx::raw_sql(sqlx::AssertSqlSafe(q)).fetch_one(p).await.unwrap_or_else(|x| panic!("{q}: {x}"));
                 String::from_utf8_lossy(raw(&r, 0).unwrap_or_default()).into_owned()
             })
         }
@@ -687,7 +687,7 @@ mod live {
         fn admin(&self, q: &str) -> Vec<String> {
             self.w.rt.block_on(async {
                 let mut c = sqlx::MySqlConnection::connect(&self.uri).await.unwrap();
-                let rows = sqlx::raw_sql(q).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
+                let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(q)).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
                 let _ = c.close().await;
                 rows.iter().map(|r| String::from_utf8_lossy(raw(r, 0).unwrap_or_default()).into_owned()).collect()
             })
@@ -915,7 +915,7 @@ mod live {
             let p = db.my_pool().unwrap();
             let time = |q: &str| {
                 let t = Instant::now();
-                let _ = c.w.rt.block_on(async { sqlx::raw_sql(q).execute(p).await });
+                let _ = c.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(q)).execute(p).await });
                 t.elapsed()
             };
             let t = time("SELECT SLEEP(5)");

@@ -41,9 +41,9 @@ impl Drop for Roles<'_> {
         for n in &self.names {
             let q = format!("\"{n}\"");
             for pool in [self.l.fixture_pool(), self.l.pool.clone()] {
-                let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{n}') THEN EXECUTE 'DROP OWNED BY {q}'; END IF; END $$")).execute(&pool).await });
+                let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{n}') THEN EXECUTE 'DROP OWNED BY {q}'; END IF; END $$"))).execute(&pool).await });
             }
-            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {q}")).execute(&self.l.pool).await });
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {q}"))).execute(&self.l.pool).await });
         }
     }
 }
@@ -355,7 +355,7 @@ fn live_create_role_and_its_undo_only_while_it_owns_nothing() {
     each(true, |l, var| {
         let r = Roles::new(l, &["new", "grp", "owns"]);
         let (n, g, o) = (r.get(0), r.get(1), r.get(2));
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{g}\"")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{g}\""))).execute(&l.pool).await.unwrap() });
         let spec = NewRole { name: n.into(), attrs: Attrs { login: true, conn_limit: 3, ..Default::default() }, groups: vec![g.into()] };
         l.w.pg_role_create(1, l.db.clone(), spec, "Zq9'pw".into(), false);
         let (_, res, u) = done(l);
@@ -390,7 +390,7 @@ impl<'a> OtherDb<'a> {
     fn new(l: &'a LivePg) -> Self {
         let name = unique_name("qr_db");
         let _turn = db_turn();
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\"")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\""))).execute(&l.pool).await.unwrap() });
         OtherDb { l, name }
     }
 
@@ -399,7 +399,7 @@ impl<'a> OtherDb<'a> {
         let o = sqlx::postgres::PgConnectOptions::from_str(&self.l.uri).unwrap().database(&self.name);
         self.l.w.rt.block_on(async {
             let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(o).await.unwrap();
-            sqlx::raw_sql(s).execute(&pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(s)).execute(&pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             pool.close().await;
         });
     }
@@ -409,7 +409,7 @@ impl<'a> OtherDb<'a> {
         let o = sqlx::postgres::PgConnectOptions::from_str(&self.l.uri).unwrap().database(&self.name);
         self.l.w.rt.block_on(async {
             let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(o).await.unwrap();
-            let rows = sqlx::raw_sql(s).fetch_all(&pool).await.unwrap();
+            let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).fetch_all(&pool).await.unwrap();
             pool.close().await;
             crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
@@ -419,7 +419,7 @@ impl<'a> OtherDb<'a> {
 impl Drop for OtherDb<'_> {
     fn drop(&mut self) {
         let _turn = db_turn();
-        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)", self.name)).execute(&self.l.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)", self.name))).execute(&self.l.pool).await });
     }
 }
 
@@ -521,7 +521,7 @@ fn live_a_role_without_createrole_reads_but_cannot_change() {
         let r = Roles::new(l, &["weak", "other"]);
         let (weak, other) = (r.get(0), r.get(1));
         let pw = "weak'pw";
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{weak}\" LOGIN PASSWORD 'weak''pw'; CREATE ROLE \"{other}\"")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{weak}\" LOGIN PASSWORD 'weak''pw'; CREATE ROLE \"{other}\""))).execute(&l.pool).await.unwrap() });
         let w = live_pg_at(uri_as(l, weak, pw));
         let c = cluster(&w);
         assert!(c.read_only_reason().is_some_and(|why| why.contains(weak)), "{var}");
@@ -577,7 +577,7 @@ fn live_version_gating_of_maintain_and_membership_options() {
 /// A login of its own, for the tests that need the signed-in role to be another one than postgres.
 fn login(l: &LivePg, name: &str, attrs: &str) -> LivePg {
     let pw = "Zq9login";
-    l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{name}\" LOGIN {attrs} PASSWORD '{pw}'")).execute(&l.pool).await.unwrap() });
+    l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{name}\" LOGIN {attrs} PASSWORD '{pw}'"))).execute(&l.pool).await.unwrap() });
     live_pg_at(uri_as(l, name, pw))
 }
 
@@ -599,7 +599,7 @@ fn live_the_signed_in_role_cannot_lock_itself_out() {
         assert_eq!(cluster(l).role(su).unwrap().attrs, a, "{var}: nothing ran");
         // Another role loses them as before.
         let other = Roles::new(l, &["other"]);
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{}\" LOGIN", other.get(0))).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{}\" LOGIN", other.get(0)))).execute(&l.pool).await.unwrap() });
         let c = cluster(&w);
         let oa = c.role(other.get(0)).unwrap().attrs.clone();
         let b = Batch { changes: vec![Change::Attrs { role: other.get(0).into(), from: oa.clone(), to: Attrs { login: false, ..oa } }], roles: oids(&c), ..Default::default() };
@@ -686,7 +686,7 @@ fn live_a_role_with_only_shared_privileges_is_dropped() {
         let n = r.get(0);
         // The fixture makes quarry_test, whose CONNECT the role gets.
         let _f = PgFixture::new(l, &unique_name("qr_shared"), "");
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{n}\"; GRANT CONNECT ON DATABASE quarry_test TO \"{n}\"; GRANT CREATE ON TABLESPACE pg_default TO \"{n}\"")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{n}\"; GRANT CONNECT ON DATABASE quarry_test TO \"{n}\"; GRANT CREATE ON TABLESPACE pg_default TO \"{n}\""))).execute(&l.pool).await.unwrap() });
         let info = drop_info(l, n);
         assert!(info.dbs.is_empty(), "{var}: {info:?}");
         assert!(info.shared_held.iter().any(|s| s.contains("quarry_test")) && info.shared_held.iter().any(|s| s.contains("pg_default")), "{var}: {info:?}");
@@ -744,7 +744,7 @@ fn live_an_md5_server_gets_the_md5_hash() {
     each(false, |l, var| {
         let r = Roles::new(l, &["pe", "new"]);
         let (pe, n) = (r.get(0), r.get(1));
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{pe}\" LOGIN CREATEROLE PASSWORD 'Zq9login'; ALTER ROLE \"{pe}\" SET password_encryption = 'md5'")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{pe}\" LOGIN CREATEROLE PASSWORD 'Zq9login'; ALTER ROLE \"{pe}\" SET password_encryption = 'md5'"))).execute(&l.pool).await.unwrap() });
         let w = live_pg_at(uri_as(l, pe, "Zq9login"));
         assert_eq!(cluster(&w).password_encryption, "md5", "{var}");
         w.w.pg_role_create(1, w.db.clone(), NewRole { name: n.into(), attrs: Attrs { login: true, ..Default::default() }, groups: vec![] }, "Zq9md5pw".into(), false);
@@ -763,11 +763,11 @@ fn live_saslprep_matches_what_the_server_computes() {
     each(false, |l, var| {
         let r = Roles::new(l, &["prep"]);
         let n = r.get(0);
-        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{n}\"")).execute(&l.pool).await.unwrap() });
+        l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE \"{n}\""))).execute(&l.pool).await.unwrap() });
         for pw in ["Zq9\u{a0}x\u{1f600}", "\u{ad}", "\u{200b}\u{ad}", "Zq9\u{a0}\u{fb01}", "\u{627}1", "\u{627}\u{628}", "a\u{301}b", "Zq9 Märker"] {
             // The server hashes a password given in clear with its own SASLprep; the verifier here must match it.
             let lit = pw.replace('\'', "''");
-            l.w.rt.block_on(async { sqlx::raw_sql(&format!("SET password_encryption = 'scram-sha-256'; ALTER ROLE \"{n}\" PASSWORD '{lit}'")).execute(&l.pool).await.unwrap() });
+            l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET password_encryption = 'scram-sha-256'; ALTER ROLE \"{n}\" PASSWORD '{lit}'"))).execute(&l.pool).await.unwrap() });
             let stored = l.one(&format!("SELECT rolpassword FROM pg_authid WHERE rolname = '{n}'"));
             let (iters, salt) = stored.strip_prefix("SCRAM-SHA-256$").and_then(|s| s.split('$').next()).and_then(|s| s.split_once(':')).unwrap_or_else(|| panic!("{var}: {stored}"));
             let salt = b64_decode(salt);
