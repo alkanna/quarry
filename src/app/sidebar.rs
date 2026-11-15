@@ -586,7 +586,6 @@ impl App {
                 if sql {
                     matches.sort_by_key(|n| is_view_of(n));
                 }
-                let mut group: Option<bool> = None;
                 let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
                 if sql && is_open && colls.is_none() && c.status == Status::Ready && !self.sql_asked.contains(&(id, db_name.clone())) {
                     lazy.push(db_name.clone());
@@ -732,171 +731,176 @@ impl App {
                     let schema = if sql { self.sql_schema.get(&(id, ns.clone())) } else { None };
                     let est_rows = self.sql_rows.get(&(id, ns.clone()));
                     let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, ns.clone(), v)));
-                    for coll in matches {
-                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
-                        let is_view = is_view_of(coll);
-                        let busy = pending.contains(&coll);
-                        if sql && group != Some(is_view) {
-                            group = Some(is_view);
-                            let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
-                            let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
-                            let key = (id, ns.clone(), is_view);
-                            if hr.clicked() {
-                                folded.push(key.clone());
-                            }
-                            let hidden = group_hidden[is_view as usize];
-                            let g = ui.painter().layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
-                            if state_of(&hr) > 0 {
-                                ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
-                            }
-                            // A painted chevron, since the glyph sits off center.
-                            let c = egui::pos2(cap.left() + 12.0, cap.center().y + 1.0);
-                            let tri = if hidden { vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(-2.0, 3.5), c + egui::vec2(2.5, 0.0)] } else { vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)] };
-                            ui.painter().add(egui::Shape::convex_polygon(tri, FAINT(), Stroke::NONE));
-                            ui.painter().galley(egui::pos2(cap.left() + 22.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
-                            ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
-                            hr.on_hover_cursor(egui::CursorIcon::PointingHand);
-                        }
-                        if group_hidden[is_view as usize] {
-                            continue;
-                        }
-                        let mut glyph_at = egui::Rect::NOTHING;
-                        let mut cut = false;
-                        let r = side_row(ui, SIDE_ROW_H, 18.0, active, coll, |p, r| {
-                            // Collections are marked as documents, views with a hollow diamond so
-                            // they read as derived data. A collection still being copied gets a spinner.
-                            glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
-                            if !busy && sql && !is_view {
-                                table_glyph(p, egui::pos2(r.left() + 6.0, r.center().y), if active { PRIMARY() } else { FAINT() });
-                            } else if !busy {
-                                let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
-                                p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
-                            }
-                            // The server's estimate, once the schema is loaded for autocomplete.
-                            let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
-                            let mut w = r.width() - 20.0;
-                            if let Some(n) = est {
-                                let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
-                                p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
-                                w -= g.size().x + 12.0;
-                            }
-                            // One line cut with an ellipsis: the row has a fixed height, so a wrapped name drew over its neighbours.
-                            let mut job = egui::text::LayoutJob::simple_singleline(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() });
-                            job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
-                            let galley = p.layout_job(job);
-                            cut = galley.elided;
-                            p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
-                        });
-                        // A collection still being copied does not exist yet, so it neither opens nor offers actions.
-                        if busy {
-                            spin_at(ui, glyph_at);
-                            r.on_hover_text("Being copied");
-                            continue;
-                        }
-                        let r = match (is_view, cut) {
-                            (true, true) => r.on_hover_text(format!("{coll}\nView (read-only)")),
-                            (true, false) => r.on_hover_text("View (read-only)"),
-                            (false, true) => r.on_hover_text(coll.as_str()),
-                            (false, false) => r,
-                        };
-                        if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
-                            r.scroll_to_me(Some(egui::Align::Center));
-                            revealed = true;
-                        }
-                        let this = || Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() };
-                        if new_tab_click(&r) {
-                            open = Some((this(), Open::NewTab));
-                        } else if r.clicked() {
-                            open = Some((this(), Open::Here));
-                        }
-                        r.context_menu(|ui| {
-                            menu_look(ui);
-                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
-                            if ui.button("Open").clicked() {
-                                open = Some((this(), Open::Here));
-                            }
-                            if ui.button("Open in new tab").clicked() {
-                                open = Some((this(), Open::NewTab));
-                            }
-                            if sql {
-                                if !is_view {
-                                    ui.separator();
-                                    if ui.button("Import file…").on_hover_text("Adds the rows of a CSV, JSON or JSON Lines file to this table").clicked() {
-                                        side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
-                                    }
-                                    if ui.button("Import from clipboard…").on_hover_text("Adds the rows of CSV or JSON text on the clipboard to this table").clicked() {
-                                        side.push(SideAct::SqlImportPaste(db_name.clone(), coll.clone()));
-                                    }
+                    // One row of the list. It is a closure so a group's rows can be drawn inside the fold that animates them.
+                    let mut row = |ui: &mut egui::Ui, coll: &String| {
+                            let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
+                            let is_view = is_view_of(coll);
+                            let busy = pending.contains(&coll);
+                            let mut glyph_at = egui::Rect::NOTHING;
+                            let mut cut = false;
+                            let r = side_row(ui, SIDE_ROW_H, 18.0, active, coll, |p, r| {
+                                // Collections are marked as documents, views with a hollow diamond so
+                                // they read as derived data. A collection still being copied gets a spinner.
+                                glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
+                                if !busy && sql && !is_view {
+                                    table_glyph(p, egui::pos2(r.left() + 6.0, r.center().y), if active { PRIMARY() } else { FAINT() });
+                                } else if !busy {
+                                    let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
+                                    p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                                 }
-                                if ui.button("Export as SQL dump…").clicked() {
-                                    side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
+                                // The server's estimate, once the schema is loaded for autocomplete.
+                                let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
+                                let mut w = r.width() - 20.0;
+                                if let Some(n) = est {
+                                    let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
+                                    p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
+                                    w -= g.size().x + 12.0;
                                 }
-                                if is_view {
-                                    // PostgreSQL's items stay enabled on a locked connection and ask to unlock; MySQL's wait for the unlock like its other writes.
-                                    let system = sql::ns::system_ns(pg, picked, db_name);
-                                    if ui.add_enabled(!system && (pg || writable), egui::Button::new("Edit view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to edit a view" }).clicked() {
-                                        side.push(SideAct::EditView(db_name.clone(), coll.clone()));
-                                    }
-                                }
-                                if pg {
-                                    let system = db::sql::pg::create::system_schema(picked);
-                                    ui.separator();
-                                    if ui.add_enabled(!system, egui::Button::new("Rename…")).on_disabled_hover_text("Belongs to the server").clicked() {
-                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
-                                    }
-                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Duplicate…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
-                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
-                                    }
-                                    if !is_view && ui.add_enabled(!system, egui::Button::new("Empty table…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Deletes every row and keeps the table").clicked() {
-                                        side.push(SideAct::PgTruncate(db_name.clone(), coll.clone()));
-                                    }
-                                    if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
-                                        side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
-                                    }
-                                } else {
-                                    let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
-                                    let on = writable && !system;
-                                    let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
-                                    ui.separator();
-                                    if ui.add_enabled(on, egui::Button::new("Rename…")).on_disabled_hover_text(note).clicked() {
-                                        side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
-                                    }
-                                    if !is_view && ui.add_enabled(on, egui::Button::new("Duplicate…")).on_disabled_hover_text(note).on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
-                                        side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
-                                    }
-                                    if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
-                                        side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
-                                    }
-                                    if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
-                                        side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
-                                    }
-                                }
+                                // One line cut with an ellipsis: the row has a fixed height, so a wrapped name drew over its neighbours.
+                                let mut job = egui::text::LayoutJob::simple_singleline(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() });
+                                job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+                                let galley = p.layout_job(job);
+                                cut = galley.elided;
+                                p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
+                            });
+                            // A collection still being copied does not exist yet, so it neither opens nor offers actions.
+                            if busy {
+                                spin_at(ui, glyph_at);
+                                r.on_hover_text("Being copied");
                                 return;
                             }
-                            if ui.button("Statistics").clicked() {
-                                side.push(SideAct::Stats(db_name.clone(), coll.clone()));
+                            let r = match (is_view, cut) {
+                                (true, true) => r.on_hover_text(format!("{coll}\nView (read-only)")),
+                                (true, false) => r.on_hover_text("View (read-only)"),
+                                (false, true) => r.on_hover_text(coll.as_str()),
+                                (false, false) => r,
+                            };
+                            if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
+                                r.scroll_to_me(Some(egui::Align::Center));
+                                revealed = true;
                             }
-                            if is_view && ui.button("View definition").clicked() {
-                                side.push(SideAct::ViewDef(db_name.clone(), coll.clone()));
+                            let this = || Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() };
+                            if new_tab_click(&r) {
+                                open = Some((this(), Open::NewTab));
+                            } else if r.clicked() {
+                                open = Some((this(), Open::Here));
                             }
-                            if !is_view && ui.button("Analyze data relations").on_hover_text("Find fields that hold ids of other collections' documents").clicked() {
-                                side.push(SideAct::Analyze(db_name.clone(), coll.clone()));
-                            }
-                            if ui.button("Compare with…").clicked() {
-                                side.push(SideAct::Compare(db_name.clone(), coll.clone()));
-                            }
-                            if !is_view && ui.button("Dump collection…").clicked() {
-                                side.push(SideAct::Dump(db_name.clone(), coll.clone()));
-                            }
-                            ui.separator();
-                            if !is_view && ui.button("Rename…").clicked() {
-                                side.push(SideAct::Rename(db_name.clone(), coll.clone()));
-                            }
-                            if !is_view && ui.button("Duplicate…").on_hover_text("Copies the documents and indexes under a new name").clicked() {
-                                side.push(SideAct::Duplicate(db_name.clone(), coll.clone()));
-                            }
-                            if danger(ui, if is_view { "Drop view…" } else { "Drop collection…" }).clicked() {
-                                side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
+                            r.context_menu(|ui| {
+                                menu_look(ui);
+                                ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
+                                if ui.button("Open").clicked() {
+                                    open = Some((this(), Open::Here));
+                                }
+                                if ui.button("Open in new tab").clicked() {
+                                    open = Some((this(), Open::NewTab));
+                                }
+                                if sql {
+                                    if !is_view {
+                                        ui.separator();
+                                        if ui.button("Import file…").on_hover_text("Adds the rows of a CSV, JSON or JSON Lines file to this table").clicked() {
+                                            side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
+                                        }
+                                        if ui.button("Import from clipboard…").on_hover_text("Adds the rows of CSV or JSON text on the clipboard to this table").clicked() {
+                                            side.push(SideAct::SqlImportPaste(db_name.clone(), coll.clone()));
+                                        }
+                                    }
+                                    if ui.button("Export as SQL dump…").clicked() {
+                                        side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
+                                    }
+                                    if is_view {
+                                        // PostgreSQL's items stay enabled on a locked connection and ask to unlock; MySQL's wait for the unlock like its other writes.
+                                        let system = sql::ns::system_ns(pg, picked, db_name);
+                                        if ui.add_enabled(!system && (pg || writable), egui::Button::new("Edit view…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to edit a view" }).clicked() {
+                                            side.push(SideAct::EditView(db_name.clone(), coll.clone()));
+                                        }
+                                    }
+                                    if pg {
+                                        let system = db::sql::pg::create::system_schema(picked);
+                                        ui.separator();
+                                        if ui.add_enabled(!system, egui::Button::new("Rename…")).on_disabled_hover_text("Belongs to the server").clicked() {
+                                            side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                        }
+                                        if !is_view && ui.add_enabled(!system, egui::Button::new("Duplicate…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                            side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                        }
+                                        if !is_view && ui.add_enabled(!system, egui::Button::new("Empty table…")).on_disabled_hover_text("Belongs to the server").on_hover_text("Deletes every row and keeps the table").clicked() {
+                                            side.push(SideAct::PgTruncate(db_name.clone(), coll.clone()));
+                                        }
+                                        if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
+                                            side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                        }
+                                    } else {
+                                        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                                        let on = writable && !system;
+                                        let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
+                                        ui.separator();
+                                        if ui.add_enabled(on, egui::Button::new("Rename…")).on_disabled_hover_text(note).clicked() {
+                                            side.push(SideAct::SqlRename(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                        }
+                                        if !is_view && ui.add_enabled(on, egui::Button::new("Duplicate…")).on_disabled_hover_text(note).on_hover_text("Copies the table under a new name, with or without its rows").clicked() {
+                                            side.push(SideAct::SqlDuplicate(db_name.clone(), coll.clone()));
+                                        }
+                                        if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
+                                            side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
+                                        }
+                                        if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
+                                            side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                        }
+                                    }
+                                    return;
+                                }
+                                if ui.button("Statistics").clicked() {
+                                    side.push(SideAct::Stats(db_name.clone(), coll.clone()));
+                                }
+                                if is_view && ui.button("View definition").clicked() {
+                                    side.push(SideAct::ViewDef(db_name.clone(), coll.clone()));
+                                }
+                                if !is_view && ui.button("Analyze data relations").on_hover_text("Find fields that hold ids of other collections' documents").clicked() {
+                                    side.push(SideAct::Analyze(db_name.clone(), coll.clone()));
+                                }
+                                if ui.button("Compare with…").clicked() {
+                                    side.push(SideAct::Compare(db_name.clone(), coll.clone()));
+                                }
+                                if !is_view && ui.button("Dump collection…").clicked() {
+                                    side.push(SideAct::Dump(db_name.clone(), coll.clone()));
+                                }
+                                ui.separator();
+                                if !is_view && ui.button("Rename…").clicked() {
+                                    side.push(SideAct::Rename(db_name.clone(), coll.clone()));
+                                }
+                                if !is_view && ui.button("Duplicate…").on_hover_text("Copies the documents and indexes under a new name").clicked() {
+                                    side.push(SideAct::Duplicate(db_name.clone(), coll.clone()));
+                                }
+                                if danger(ui, if is_view { "Drop view…" } else { "Drop collection…" }).clicked() {
+                                    side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
+                                }
+                            });
+                    };
+                    if !sql {
+                        for &coll in &matches {
+                            row(ui, coll);
+                        }
+                    }
+                    // TABLES then VIEWS, each under a caption that folds it away.
+                    for is_view in [false, true].into_iter().filter(|_| sql) {
+                        let list: Vec<&String> = matches.iter().copied().filter(|c| is_view_of(c) == is_view).collect();
+                        if list.is_empty() {
+                            continue;
+                        }
+                        let key = (id, ns.clone(), is_view);
+                        let gid = egui::Id::new(("side-group", &key));
+                        let unfolded = !group_hidden[is_view as usize];
+                        let t = fold::openness(ui.ctx(), gid, unfolded);
+                        let n = if is_view { n_views } else { matches_len - n_views };
+                        let cap = group_caption(ui, if is_view { "VIEWS" } else { "TABLES" }, if is_view { "Views" } else { "Tables" }, n, t);
+                        if cap.clicked() {
+                            fold::start(ui.ctx(), gid, !unfolded);
+                            folded.push(key);
+                        }
+                        let guess = list.len() as f32 * (SIDE_ROW_H + ui.spacing().item_spacing.y);
+                        fold::body(ui, gid, t, guess, unfolded, |ui| {
+                            for coll in list {
+                                row(ui, coll);
                             }
                         });
                     }
@@ -1068,6 +1072,23 @@ impl App {
             }
         }
     }
+}
+
+/// The caption of a sidebar group (TABLES, VIEWS, ROUTINES), `t` open: a chevron that turns as the group folds, the label
+/// and the count, each centered on its ink, since box centering leaves all-caps text sitting high or low.
+pub(in crate::app) fn group_caption(ui: &mut egui::Ui, label: &str, name: &str, n: usize, t: f32) -> egui::Response {
+    let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
+    if state_of(&hr) > 0 {
+        ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
+    }
+    let p = ui.painter();
+    fold::chevron(p, egui::pos2(cap.left() + 12.0, cap.center().y), t, FAINT());
+    let g = p.layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
+    p.galley(egui::pos2(cap.left() + 22.0, cap.center().y - g.size().y / 2.0 + optical_dy(&g)), g, FAINT());
+    let g = p.layout_no_wrap(n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+    p.galley(egui::pos2(cap.right() - 8.0 - g.size().x, cap.center().y - g.size().y / 2.0 + optical_dy(&g)), g, FAINT());
+    hr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    hr.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Whether `name` holds `needle`, which is already lower case, ignoring case. Names are mostly ASCII, so this compares bytes
