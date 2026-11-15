@@ -28,6 +28,8 @@ pub(super) struct CloudCache {
     /// The load in flight or answered; 0 before the first.
     pub(super) req: u64,
     pub(super) start: Option<Start>,
+    /// The answer a Refresh replaced, shown until the new one arrives so the window keeps the layout it had.
+    pub(super) prev: Option<Start>,
     pub(super) instances: HashMap<String, Result<Vec<Instance>, String>>,
     /// Projects still to ask for, and how many gcloud lists are running, those of a load Refresh replaced included.
     pub(super) queue: VecDeque<String>,
@@ -44,7 +46,8 @@ impl CloudCache {
     /// never runs more gcloud processes at once.
     pub(super) fn reload(&mut self, req: u64) {
         let old = std::mem::take(self);
-        *self = CloudCache { req, busy: old.busy, running: old.running, gcloud_seen: old.gcloud_seen, gcloud_asked: old.gcloud_asked, ..Default::default() };
+        let prev = old.start.or(old.prev);
+        *self = CloudCache { req, prev, busy: old.busy, running: old.running, gcloud_seen: old.gcloud_seen, gcloud_asked: old.gcloud_asked, ..Default::default() };
     }
 
     /// The next project to list, when fewer than `PARALLEL` lists run.
@@ -526,6 +529,7 @@ impl App {
                     self.cloud.queue = ps.iter().filter(|p| !self.cloud.instances.contains_key(&p.id)).map(|p| p.id.clone()).collect();
                 }
                 self.cloud.start = Some(s);
+                self.cloud.prev = None;
                 self.cloud_pump();
             }
         }
@@ -684,7 +688,8 @@ impl App {
                 });
             });
             ui.add_space(12.0);
-            let start = self.cloud.start.clone();
+            // While a Refresh waits, the cards of the last answer stay: the panels are taller than a card, so swapping to them made the window jump.
+            let start = self.cloud.start.clone().or_else(|| self.cloud.prev.clone());
             let signed_out = start.as_ref().is_some_and(|s| matches!(&s.projects, Err(e) if e.contains("gcloud auth login")));
             match &start {
                 Some(s) if s.gcloud.is_none() => act = act.or(state_card(ui, Card::NoGcloud, None, false, None, "Refresh")),
