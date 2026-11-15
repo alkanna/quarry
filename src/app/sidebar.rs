@@ -171,12 +171,7 @@ pub(super) fn tag_room(span: f32) -> f32 {
     (span - 90.0).max(span * 0.4)
 }
 
-/// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
-pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
-    paint_name_tag_hl(p, x, cy, name, font, color, tag, &[]);
-}
-
-/// `paint_name_tag` with the byte ranges of `name` that a filter matched drawn on `HIGHLIGHT()`.
+/// `name` cut to fit before its tag badge, both centered on `cy` within `x`, with the byte ranges of `name` that a filter matched drawn on `HIGHLIGHT()`.
 pub(super) fn paint_name_tag_hl(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str, hl: &[(usize, usize)]) {
     let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, tag_room(x.span())) - 8.0 };
     let g = truncated_hl(p, name, font, color, name_right - x.min, hl);
