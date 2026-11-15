@@ -134,7 +134,8 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
     let edge = if focused { PRIMARY() } else if hovered { BORDER() } else { LINE() };
     let (mut clear, mut enter) = (false, false);
-    egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
+    // A frame is a group of widgets, which egui does not move to the next row of a wrapping line by itself.
+    flow_item(ui, id, |ui| egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             // Painted and centered on its ink like the other chips, because a label sits about 1 px high.
@@ -149,7 +150,7 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
                 clear = close_x(ui).on_hover_text(format!("Remove {name}")).clicked();
             });
         });
-    });
+    }));
     if clear {
         text.clear();
     }
@@ -311,12 +312,51 @@ impl App {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-                // Room for the edited note, the history and library icons and Run with its tip.
-                let left_w = (ui.available_width() - 290.0).max(240.0);
+                // The edited note, the history and library icons and Run with its tip. Drawn first, in a child over the first row
+                // that claims no room, so the filter and the options get the width it leaves.
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
+                let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Min)));
+                right.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
+                    if main.on_hover_text("Enter").clicked() {
+                        run = true;
+                    }
+                    egui::Popup::menu(&tip).width(220.0).show(|ui| {
+                        menu_list(ui);
+                        if super::sql::bar::run_item(ui, "Run", "↵").clicked() {
+                            run = true;
+                            ui.close();
+                        }
+                        popover_divider(ui);
+                        if super::sql::bar::run_item(ui, "Explain", "⌘E").on_hover_text("Explain the query that ran").clicked() {
+                            explain = true;
+                            ui.close();
+                        }
+                        ui.menu_button("Copy as code", |ui| {
+                            menu_look(ui);
+                            for l in db::Lang::ALL {
+                                if ui.button(l.name()).clicked() {
+                                    code_lang = Some(l);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    vsep(ui, 6.0);
+                    let button = picker_button(ui, &pick, true, &mut pick_acts);
+                    demo_pick.get_or_insert(button);
+                    history_menu(ui, &hist, &index_sorts, None, &mut qacts);
+                    edited_note(ui, dirty);
+                });
+                let left_w = (ui.available_width() - right.min_rect().width() - 16.0).max(240.0);
                 ui.allocate_ui_with_layout(egui::vec2(left_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-                    let w = (left_w * 0.6).clamp(220.0, left_w);
-                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                    // As wide as its longest line, up to most of the line, so the options can follow it on the same row.
+                    let hint = "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])";
+                    let longest = if t.filter_txt.is_empty() { hint } else { t.filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
+                    let w = (text_w(ui, longest, mono.clone()) + 24.0).clamp(220.0, (left_w * 0.6).max(220.0)).min(left_w);
+                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, hint, w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
                     // A pasted shell query carries its own sort, projection, limit and skip.
                     if shell {
                         return;
@@ -355,42 +395,6 @@ impl App {
                     let plus = super::sql::bar::add_button(ui);
                     let items: Vec<_> = OPTS.iter().zip(set).map(|((name, _), on)| super::sql::bar::AddItem { label: *name, note: "", group: "OPTIONS", on, keyword: false }).collect();
                     picked = super::sql::bar::add_menu(&plus, &items, &mut help);
-                });
-                // A fixed height, or a right-to-left layout takes all the height left in the bar.
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
-                    if main.on_hover_text("Enter").clicked() {
-                        run = true;
-                    }
-                    egui::Popup::menu(&tip).width(220.0).show(|ui| {
-                        menu_list(ui);
-                        if super::sql::bar::run_item(ui, "Run", "↵").clicked() {
-                            run = true;
-                            ui.close();
-                        }
-                        popover_divider(ui);
-                        if super::sql::bar::run_item(ui, "Explain", "⌘E").on_hover_text("Explain the query that ran").clicked() {
-                            explain = true;
-                            ui.close();
-                        }
-                        ui.menu_button("Copy as code", |ui| {
-                            menu_look(ui);
-                            for l in db::Lang::ALL {
-                                if ui.button(l.name()).clicked() {
-                                    code_lang = Some(l);
-                                    ui.close();
-                                }
-                            }
-                        });
-                    });
-                    vsep(ui, 6.0);
-                    let button = picker_button(ui, &pick, true, &mut pick_acts);
-                    demo_pick.get_or_insert(button);
-                    history_menu(ui, &hist, &index_sorts, None, &mut qacts);
-                    if dirty {
-                        ui.label(RichText::new("edited").size(TXT_SMALL).color(PRIMARY()));
-                    }
                 });
             });
             // Nothing was sent, so the rows below are still those of the last query that ran.

@@ -435,8 +435,8 @@ pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Res
 /// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip opens a menu of what to run.
 /// Returns the button, then the tip.
 pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool) -> (egui::Response, egui::Response) {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
+    let w = run_w(ui, text, keys);
+    split_row(ui, w, |ui| {
         let main = run_face(ui, text, keys, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 });
         let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), if tip_on { Sense::click() } else { Sense::hover() });
         let p = ui.painter();
@@ -449,7 +449,22 @@ pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool)
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Choose what to run"));
         (main, if tip_on { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r })
     })
-    .inner
+}
+
+/// Width of the button part of a split Run, laid out as `run_face` lays it.
+fn run_w(ui: &egui::Ui, text: &str, keys: &str) -> f32 {
+    let w = |s: &str, f| ui.painter().layout_job(egui::text::LayoutJob::single_section(s.to_string(), f)).size().x;
+    let content = 8.0 + 8.0 + w(text, ui_fmt(TXT_BODY, TEXT(), W_SEMIBOLD, 0.0)) + 10.0 + w(keys, mono_fmt(TXT_CAPTION, FAINT(), 400.0));
+    (content + 28.0).max(96.0)
+}
+
+/// Lays the button and the tip of a split Run left to right in one rect, so the tip stays on the right inside a right-to-left
+/// row, where a scope would have put it left of the button.
+fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let (_, rect) = ui.allocate_space(egui::vec2(main_w + 22.0, 26.0));
+    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    row.spacing_mut().item_spacing.x = 0.0;
+    add(&mut row)
 }
 
 /// The Run of a query line: on the accent while the line holds a query the rows below did not come from (`loud`), else a quiet
@@ -461,8 +476,8 @@ pub(crate) fn run_split_state(ui: &mut egui::Ui, text: &str, keys: &str, loud: b
         tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Run options"));
         return (main, tip);
     }
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
+    let w = run_w(ui, text, keys);
+    split_row(ui, w, |ui| {
         const TRI: f32 = 8.0;
         let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, TEXT(), W_SEMIBOLD, 0.0)));
         let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, FAINT(), 400.0)));
@@ -482,13 +497,13 @@ pub(crate) fn run_split_state(ui: &mut egui::Ui, text: &str, keys: &str, loud: b
         main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
         let (rect, tip) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
         let p = ui.painter();
-        p.rect(rect, egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, shade_fill(PANEL(), state_of(&tip)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        // Over the button's right edge by a pixel, so the two outlines meet as one divider and not a double line.
+        p.rect(rect.with_min_x(rect.min.x - 1.0), egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, shade_fill(PANEL(), state_of(&tip)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, MUTED());
         focus_ring(ui, &tip, rect, R_MD as f32);
         tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Run options"));
         (main.on_hover_cursor(egui::CursorIcon::PointingHand), tip.on_hover_cursor(egui::CursorIcon::PointingHand))
     })
-    .inner
 }
 
 fn run_face(ui: &mut egui::Ui, text: &str, keys: &str, corners: egui::CornerRadius) -> egui::Response {
@@ -746,6 +761,36 @@ pub(crate) fn paint_bolt(p: &egui::Painter, left: egui::Pos2) {
 }
 
 /// A short vertical rule between groups of toolbar buttons, with `pad` on each side.
+/// Adds a group of widgets (a frame, a scope) to a wrapping row. egui moves a single widget that does not fit to the next row
+/// but lets a group run past the right edge, so the group starts a new row itself when its width from the last frame does not
+/// fit what is left of this one. `salt` keeps the group's ids, and the popovers hung on them, the same whatever comes before.
+pub(crate) fn flow_item<R>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let key = ui.scope_id().with("flow-w").with(&salt);
+    let w = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(0.0);
+    let x = ui.cursor().min.x;
+    if x > ui.max_rect().left() + 0.5 && x + w > ui.max_rect().right() + 0.5 {
+        ui.end_row();
+    }
+    let r = ui.push_id(salt, add);
+    let now = r.response.rect.width();
+    if (now - w).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(key, now));
+        // The row is decided from this width, so a group that changed size is laid out again at once.
+        ui.ctx().request_repaint();
+    }
+    r.inner
+}
+
+/// The "edited" note of a query line. Its room is kept while it is hidden, so the line does not reflow as typing starts.
+pub(crate) fn edited_note(ui: &mut egui::Ui, on: bool) {
+    let g = ui.painter().layout_no_wrap("edited".into(), FontId::proportional(TXT_SMALL), PRIMARY());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(g.size().x, BUTTON_H), Sense::hover());
+    if on {
+        let dy = optical_dy(&g);
+        ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy), g, PRIMARY());
+    }
+}
+
 pub(crate) fn vsep(ui: &mut egui::Ui, pad: f32) {
     ui.add_space(pad);
     let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, BUTTON_H * 0.75), Sense::hover());

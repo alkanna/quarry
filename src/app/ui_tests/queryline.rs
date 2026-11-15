@@ -98,3 +98,41 @@ fn a_mongo_header_sort_leaves_the_line_clean() {
     assert!(ui.app().t().is_some_and(|t| t.sort_txt.contains(&col)), "the header menu did not sort on {col}");
     assert!(!dirty(&ui), "a header sort marked the line edited");
 }
+
+fn rect_of(ui: &UiApp, label: &str) -> egui::Rect {
+    ui.h.get_by_label(label).rect()
+}
+
+/// Run and its menu tip are one control: the tip on the right of Run, on the same line.
+fn assert_run_split(ui: &UiApp) {
+    let (run, tip) = (rect_of(ui, "Run"), rect_of(ui, "Run options"));
+    assert!(tip.left() >= run.right() - 1.5 && (tip.center().y - run.center().y).abs() < 1.0, "the Run tip at {tip:?} is not on the right of Run at {run:?}");
+}
+
+#[test]
+fn the_grouped_sql_line_wraps_its_chips_beside_run() {
+    let Some(mut ui) = demo_ui(|a| a.sql_demo("grouped")) else { return };
+    ui.settle();
+    assert_run_split(&ui);
+    let run = rect_of(&ui, "Run");
+    let plus = rect_of(&ui, "Add a condition or clause");
+    // Run, its tip, and the history and library icons left of them.
+    let tools = run.union(rect_of(&ui, "Run options")).with_min_x(run.left() - 120.0);
+    for label in ["ORDER BY clause", "GROUP BY clause", "HAVING clause", "Add a condition or clause"] {
+        let r = rect_of(&ui, label);
+        assert!(!r.intersects(tools), "{label} at {r:?} runs under the Run group at {tools:?}");
+    }
+    let having = rect_of(&ui, "HAVING clause");
+    assert!((plus.center().y - having.center().y).abs() < 2.0 && plus.left() > having.right(), "the + at {plus:?} is not right after the last chip at {having:?}");
+    assert!(plus.center().y - run.center().y <= crate::ui::theme::BUTTON_H + 8.0, "the chips took more than two rows: the + is at {plus:?}, Run at {run:?}");
+}
+
+#[test]
+fn the_mongo_line_keeps_its_plus_on_the_first_row() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    ui.settle();
+    assert_run_split(&ui);
+    let (run, plus) = (rect_of(&ui, "Run"), rect_of(&ui, "Add a condition or clause"));
+    assert!((plus.center().y - run.center().y).abs() < 2.0, "the + at {plus:?} left the row of Run at {run:?}");
+    assert!(plus.right() < run.left(), "the + at {plus:?} runs under Run at {run:?}");
+}

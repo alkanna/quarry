@@ -612,6 +612,7 @@ fn clause_chip(ui: &mut egui::Ui, name: &str, summary: &str, open: bool) -> (egu
     // A child ui, not a scope: a scope would also claim room in the row and push the chips out of line.
     let mut cross = ui.new_child(egui::UiBuilder::new().max_rect(close));
     let x = close_x(&mut cross).on_hover_text(format!("Remove {name}")).clicked();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} clause")));
     (r.on_hover_cursor(egui::CursorIcon::PointingHand), x)
 }
 
@@ -1117,103 +1118,10 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
             // The edited note, the history and library icons, Run with its tip, and the chip of a bound script when there is one.
-            let run_w = if side.pick.bound.is_some() { 530.0 } else { 262.0 };
-            // The conditions and the clauses in use share one wrapping row, and the "+" ends it.
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-                // Rules mode needs text this module wrote; anything else stays in SQL mode.
-                let can_rules = pairs.is_empty()
-                    || match &b.parsable {
-                        Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
-                        _ => {
-                            let ok = rules::parse(&t.filter_txt, &pairs, d, bs).is_some();
-                            b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
-                            ok
-                        }
-                    };
-                let mut sql = b.c.sql;
-                let r0 = ui.cursor().min;
-                segmented(ui, &mut sql, &[(false, "Rules"), (true, "SQL")]);
-                let seg = egui::Rect::from_min_size(r0, egui::vec2(ui.cursor().min.x - r0.x, BUTTON_H));
-                if b.c.sql && !can_rules {
-                    ui.interact(seg, ui.scope_id().with("mode-why"), Sense::hover()).on_hover_text("Rules mode reads a flat AND or OR list of column comparisons. This WHERE has something else (a function, a subquery, or AND mixed with OR), so it stays SQL.");
-                }
-                if sql != b.c.sql && (sql || can_rules) {
-                    b.c.sql = sql;
-                    if !sql {
-                        // The rules are from before SQL mode, so they are read again now, before this frame writes them out.
-                        b.src.clear();
-                        read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, true);
-                    }
-                }
-                ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
-                if b.c.sql {
-                    let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
-                    if b.preset.ac {
-                        open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
-                    }
-                    run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
-                } else {
-                    let mut edit: Option<usize> = None;
-                    let mut remove: Option<usize> = None;
-                    for (i, r) in b.rules.iter().enumerate() {
-                        if i > 0 {
-                            let w = if b.any { "OR" } else { "AND" };
-                            if quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch between AND and OR").clicked() {
-                                b.any = !b.any;
-                                run = true;
-                            }
-                        }
-                        let (click, rm) = rule_token(ui, r);
-                        if click {
-                            edit = Some(i);
-                        }
-                        if rm {
-                            remove = Some(i);
-                        }
-                    }
-                    if let Some(i) = remove {
-                        b.rules.remove(i);
-                        run = true;
-                    } else if let Some(i) = edit {
-                        // The rule being edited goes back to a token when it is complete, else it is dropped.
-                        let picked = b.rules.remove(i);
-                        if let Some(old) = b.draft.replace(picked).filter(|r| r.complete()) {
-                            b.rules.insert(i.min(b.rules.len()), old);
-                        }
-                        b.show_draft = true;
-                    }
-                    if let Some(mut dr) = b.draft.take() {
-                        let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
-                        // The draft is always there to be filled in, but only shows once a condition was asked for or a token opened.
-                        if b.show_draft {
-                            if !b.rules.is_empty() {
-                                ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
-                            }
-                            let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
-                            run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
-                            let add = plus_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
-                            let close = close_x(ui).on_hover_text("Remove this condition").clicked();
-                            if add || (enter && dr.complete()) {
-                                b.rules.push(dr);
-                                b.draft = fresh;
-                                b.show_draft = false;
-                            } else if close {
-                                run |= dr.complete();
-                                b.draft = fresh;
-                                b.show_draft = false;
-                            } else {
-                                b.draft = Some(dr);
-                            }
-                        } else {
-                            b.draft = Some(dr);
-                        }
-                    }
-                    write_rules(b, &mut t.filter_txt, &pairs, d, bs);
-                }
-                run |= clause_chips(ui, &mut t.sort_txt, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
-            });
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            // Drawn first, in a child over the first row that claims no room, so the conditions get the width it leaves.
+            let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
+            let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Min)));
+            right.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
                 if main.on_hover_text("Enter").clicked() {
@@ -1242,9 +1150,106 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 vsep(ui, 6.0);
                 picker_button(ui, side.pick, true, &mut side.pick_acts);
                 history_menu(ui, side.hist, &[], Some(d), &mut side.qacts);
-                if dirty {
-                    ui.label(RichText::new("edited").size(TXT_SMALL).color(PRIMARY()));
+                edited_note(ui, dirty);
+            });
+            let right_w = right.min_rect().width();
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - right_w - 16.0, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                // Rules mode needs text this module wrote; anything else stays in SQL mode.
+                let can_rules = pairs.is_empty()
+                    || match &b.parsable {
+                        Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
+                        _ => {
+                            let ok = rules::parse(&t.filter_txt, &pairs, d, bs).is_some();
+                            b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
+                            ok
+                        }
+                    };
+                let mut sql = b.c.sql;
+                let r0 = ui.cursor().min;
+                segmented(ui, &mut sql, &[(false, "Rules"), (true, "SQL")]);
+                let seg = egui::Rect::from_min_size(r0, egui::vec2(ui.cursor().min.x - r0.x, BUTTON_H));
+                if b.c.sql && !can_rules {
+                    ui.interact(seg, ui.scope_id().with("mode-why"), Sense::hover()).on_hover_text("Rules mode reads a flat AND or OR list of column comparisons. This WHERE has something else (a function, a subquery, or AND mixed with OR), so it stays SQL.");
                 }
+                if sql != b.c.sql && (sql || can_rules) {
+                    b.c.sql = sql;
+                    if !sql {
+                        // The rules are from before SQL mode, so they are read again now, before this frame writes them out.
+                        b.src.clear();
+                        read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, true);
+                    }
+                }
+                ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
+                // The conditions and the clauses in use share rows that wrap under the first condition, and the "+" ends the last.
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                    if b.c.sql {
+                        let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
+                        if b.preset.ac {
+                            open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
+                        }
+                        run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
+                    } else {
+                        let mut edit: Option<usize> = None;
+                        let mut remove: Option<usize> = None;
+                        for (i, r) in b.rules.iter().enumerate() {
+                            if i > 0 {
+                                let w = if b.any { "OR" } else { "AND" };
+                                if quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch between AND and OR").clicked() {
+                                    b.any = !b.any;
+                                    run = true;
+                                }
+                            }
+                            let (click, rm) = rule_token(ui, r);
+                            if click {
+                                edit = Some(i);
+                            }
+                            if rm {
+                                remove = Some(i);
+                            }
+                        }
+                        if let Some(i) = remove {
+                            b.rules.remove(i);
+                            run = true;
+                        } else if let Some(i) = edit {
+                            // The rule being edited goes back to a token when it is complete, else it is dropped.
+                            let picked = b.rules.remove(i);
+                            if let Some(old) = b.draft.replace(picked).filter(|r| r.complete()) {
+                                b.rules.insert(i.min(b.rules.len()), old);
+                            }
+                            b.show_draft = true;
+                        }
+                        if let Some(mut dr) = b.draft.take() {
+                            let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
+                            // The draft is always there to be filled in, but only shows once a condition was asked for or a token opened.
+                            if b.show_draft {
+                                if !b.rules.is_empty() {
+                                    ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
+                                }
+                                let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
+                                run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
+                                let add = plus_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
+                                let close = close_x(ui).on_hover_text("Remove this condition").clicked();
+                                if add || (enter && dr.complete()) {
+                                    b.rules.push(dr);
+                                    b.draft = fresh;
+                                    b.show_draft = false;
+                                } else if close {
+                                    run |= dr.complete();
+                                    b.draft = fresh;
+                                    b.show_draft = false;
+                                } else {
+                                    b.draft = Some(dr);
+                                }
+                            } else {
+                                b.draft = Some(dr);
+                            }
+                        }
+                        write_rules(b, &mut t.filter_txt, &pairs, d, bs);
+                    }
+                    run |= clause_chips(ui, &mut t.sort_txt, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
+                });
             });
         });
     });
@@ -1304,49 +1309,49 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
                 Some(k) => k.iter().map(|(c, d)| format!("{c} {}", if *d { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", "),
                 None => sort.clone(),
             };
-            run |= ui
-                .push_id("clause-order", |ui| {
-                    let mut run = false;
-                    let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);
-                    popover(&r, 340.0, b.preset.order, |ui| {
-                        if order_popover(ui, sort, cols, d, b.preset.pick.take()) {
-                            run = true;
-                        }
-                    });
-                    if cleared {
-                        sort.clear();
+            run |= flow_item(ui, "clause-order", |ui| {
+                let mut run = false;
+                let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);
+                popover(&r, 340.0, b.preset.order, |ui| {
+                    if order_popover(ui, sort, cols, d, b.preset.pick.take()) {
                         run = true;
                     }
-                    run
-                })
-                .inner;
+                });
+                if cleared {
+                    sort.clear();
+                    run = true;
+                }
+                run
+            });
         }
         if grouped {
-            run |= ui
-                .push_id("clause-group", |ui| {
-                    let mut run = false;
-                    let (r, cleared) = clause_chip(ui, "GROUP BY", &b.c.group, false);
+            run |= flow_item(ui, "clause-group", |ui| {
+                let mut run = false;
+                let (r, cleared) = clause_chip(ui, "GROUP BY", &b.c.group, false);
+                let mut applied = false;
+                popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, matched.max(rows)));
+                run |= applied;
+                if cleared {
+                    b.c.group.clear();
+                    b.c.having.clear();
+                    b.c.select.clear();
+                    run = true;
+                }
+                run
+            });
+            // A unit of its own, so it can wrap to the next row apart from GROUP BY.
+            if !b.c.having.trim().is_empty() {
+                run |= flow_item(ui, "clause-having", |ui| {
                     let mut applied = false;
+                    let (r, cleared) = clause_chip(ui, "HAVING", &b.c.having.replace('`', ""), false);
                     popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, matched.max(rows)));
-                    run |= applied;
                     if cleared {
-                        b.c.group.clear();
                         b.c.having.clear();
-                        b.c.select.clear();
-                        run = true;
+                        applied = true;
                     }
-                    if !b.c.having.trim().is_empty() {
-                        let (r2, cleared) = clause_chip(ui, "HAVING", &b.c.having.replace('`', ""), false);
-                        popover(&r2, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, matched.max(rows)));
-                        run |= applied;
-                        if cleared {
-                            b.c.having.clear();
-                            run = true;
-                        }
-                    }
-                    run
-                })
-                .inner;
+                    applied
+                });
+            }
         }
     }
     let id = query_id("SQL-LIMIT");
@@ -1367,18 +1372,16 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
         } else {
             let n = split_top(&b.c.select).len();
             if n > 0 {
-                run |= ui
-                    .push_id("clause-columns", |ui| {
-                        let mut run = false;
-                        let (r, cleared) = clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false);
-                        popover(&r, 320.0, false, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
-                        if cleared {
-                            b.c.select.clear();
-                            run = true;
-                        }
-                        run
-                    })
-                    .inner;
+                run |= flow_item(ui, "clause-columns", |ui| {
+                    let mut run = false;
+                    let (r, cleared) = clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false);
+                    popover(&r, 320.0, false, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
+                    if cleared {
+                        b.c.select.clear();
+                        run = true;
+                    }
+                    run
+                });
             }
         }
     }
