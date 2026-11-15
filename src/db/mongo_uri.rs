@@ -160,7 +160,7 @@ impl MongoUri {
     pub fn set_tls(&mut self, on: bool) {
         self.set_opt("ssl", None);
         if !on {
-            let keys: Vec<String> = self.query.iter().flatten().map(|(k, _)| k.clone()).filter(|k| k.len() >= 3 && k[..3].eq_ignore_ascii_case("tls")).collect();
+            let keys: Vec<String> = self.query.iter().flatten().map(|(k, _)| k.clone()).filter(|k| k.len() >= 3 && k[..3].eq_ignore_ascii_case("tls") && !k.eq_ignore_ascii_case("tls")).collect();
             for k in keys {
                 self.set_opt(&k, None);
             }

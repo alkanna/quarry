@@ -60,13 +60,13 @@ fn a_pasted_address_fills_the_fields() {
 #[test]
 fn the_tls_tab_sets_tls_and_drops_the_files_when_it_goes_off() {
     let mut ui = open_form("mongodb://h/?w=1", ConnTab::Tls);
-    ui.click("Encrypt the connection");
+    ui.click("Encrypt the connection switch");
     assert_eq!(form(ui.h.state_mut()).uri, "mongodb://h/?w=1&tls=true");
     replace(&mut ui, "CA file field", "/certs/ca.pem");
     ui.settle();
-    ui.click("Allow invalid certificates");
+    ui.click("Allow invalid certificates switch");
     assert_eq!(form(ui.h.state_mut()).uri, "mongodb://h/?w=1&tls=true&tlsCAFile=/certs/ca.pem&tlsAllowInvalidCertificates=true");
-    ui.click("Encrypt the connection");
+    ui.click("Encrypt the connection switch");
     assert_eq!(form(ui.h.state_mut()).uri, "mongodb://h/?w=1&tls=false");
 }
 

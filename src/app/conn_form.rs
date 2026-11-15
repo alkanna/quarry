@@ -58,12 +58,13 @@ fn named_field(ui: &mut egui::Ui, name: &str, text: &mut String, hint: &str, sec
     r.changed()
 }
 
-/// A switch with its label beside it, named for the accessibility tree and the UI tests.
+/// A switch with its label beside it. The switch is named "<label> switch", so the label text stays a single node.
 fn mongo_toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) {
     ui.horizontal(|ui| {
         let t = toggle(ui, on);
         let now = *on;
-        t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, now, label));
+        let name = format!("{label} switch");
+        t.widget_info(move || egui::WidgetInfo::selected(egui::Role::CheckBox, true, now, name.clone()));
         ui.label(RichText::new(label).color(TEXT()));
     });
 }
