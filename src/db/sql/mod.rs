@@ -5,6 +5,7 @@ mod dialect;
 pub mod advanced;
 mod worker;
 mod run;
+mod lint;
 pub mod pg;
 pub mod exec;
 mod relay;
@@ -52,6 +53,7 @@ pub use structure::Structure;
 pub use pg::read::PgSchema;
 pub use relay::{Answer, Arg, Relay, RelayGate};
 pub use run::RunHandle;
+pub use lint::Lint;
 pub(crate) use pg::WRITE_LOCK_SECS;
 
 /// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends

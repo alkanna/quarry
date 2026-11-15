@@ -55,3 +55,21 @@ fn the_run_menu_offers_explain_and_the_statements() {
     ui.show("Explain");
     ui.show("Run statement 2");
 }
+
+#[test]
+fn lint_of_the_statement_under_the_caret_shows_in_the_footer() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_query_demo();
+        a.demo_lint(false);
+    }) else { return };
+    assert!(ui.shows("Syntax error near 'SELCT ( FRO orders'"), "the syntax error of the caret's statement is not in the footer");
+    assert!(!ui.shows("doesn't exist"), "another statement's mark showed in the footer");
+    let cur = ui.app().cur;
+    let at = ui.query_text().find("SELECT").unwrap() + 3;
+    if let Some(s) = ui.h.state_mut().tabs[cur].sql.as_mut() {
+        s.caret = at;
+    }
+    ui.settle();
+    assert!(ui.shows("Table 'shop.shipment' doesn't exist, unless an earlier statement creates it"), "an unknown table is not worded as a warning");
+}

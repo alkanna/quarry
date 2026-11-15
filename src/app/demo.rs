@@ -585,8 +585,11 @@ impl App {
         if let v @ ("processes" | "variables" | "overview" | "status") = which {
             self.sql_server = Some(SqlServerWin::demo(3, v));
         }
-        if matches!(which, "query" | "log" | "format" | "library") {
+        if matches!(which, "query" | "log" | "format" | "library" | "lint") {
             self.sql_query_demo();
+        }
+        if which == "lint" {
+            self.demo_lint(false);
         }
         if which == "log" {
             self.sql_log_demo();

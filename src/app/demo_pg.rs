@@ -177,6 +177,10 @@ impl App {
         self.pg_structure_demo(which);
         match which {
             "query" => self.pg_query_demo(),
+            "lint" => {
+                self.pg_query_demo();
+                self.demo_lint(true);
+            }
             "shell" => self.pg_shell_demo(),
             "acquery" => self.pg_acquery_demo(),
             "edit" => self.sql_demo_stage(),

@@ -866,6 +866,11 @@ impl Worker {
         });
     }
 
+    /// Parses `stmt` in `schema` without running it, for the Query editor's marks. Never logged: it runs on every pause in typing.
+    pub fn sql_lint(&self, req: u64, db: Db, schema: String, stmt: String) {
+        self.spawn(async move { Msg::SqlLint { req, lint: super::lint::check(&db, &schema, &stmt).await } });
+    }
+
     /// Stops a running script: sets `cancel` and interrupts the statement running on connection
     /// `connection_id`. It uses a connection of its own because the pool may be busy with paging.
     pub fn sql_kill(&self, db: Db, connection_id: u64, cancel: Arc<AtomicBool>) {
