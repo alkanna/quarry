@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.0](https://github.com/alkanna/quarry/compare/v0.48.1...v0.49.0) (2026-11-15)
+
+
+### Features
+
+* the rail shows connections as app-icon tiles on group shelves ([#248](https://github.com/alkanna/quarry/issues/248)) ([0d34a56](https://github.com/alkanna/quarry/commit/0d34a565ad8b2a3a05eab5ed1a442dac4d0cfeae))
+
 ## [0.48.1](https://github.com/alkanna/quarry/compare/v0.48.0...v0.48.1) (2026-11-15)
 
 
