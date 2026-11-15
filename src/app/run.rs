@@ -23,6 +23,7 @@ impl App {
                 t.query = q;
                 t.page = 0;
                 t.bar_err = None;
+                t.ran_txt = Some(bar_texts(t));
                 self.reload();
             }
             // Nothing ran, so the message goes under the bar and the rows stay.
@@ -80,6 +81,7 @@ impl App {
                 t.clear_options();
                 t.query = q;
                 t.page = 0;
+                t.ran_txt = Some(bar_texts(t));
                 self.reload();
             }
             ShellKind::Aggregate(p) => {
@@ -109,6 +111,23 @@ impl App {
                 None => self.warn_offline(),
             }
         }
+    }
+}
+
+/// The texts of the Documents bar, in the order `Tab::ran_txt` keeps them.
+pub(super) fn bar_texts(t: &Tab) -> [String; 7] {
+    [&t.filter_txt, &t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt].map(|s| s.clone())
+}
+
+/// Whether the query bar of a Content or Documents tab holds something other than what the rows below came from. The rows stay
+/// until Run, so the bar says so.
+pub(super) fn query_dirty(t: &Tab) -> bool {
+    if t.view != View::Documents {
+        return false;
+    }
+    match &t.sql {
+        Some(s) => s.bar.ran_seen() && sql::bar::page_query(t) != s.bar.ran_as_shown(&s.ran),
+        None => t.ran_txt.as_ref().is_some_and(|r| *r != bar_texts(t)),
     }
 }
 

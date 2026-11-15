@@ -23,6 +23,7 @@ fn open_edit(app: &mut App, database: &str, schema: &str, name: &str) {
 #[test]
 fn save_as_view_on_the_content_bar_opens_a_new_view_named_after_the_table() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.click("Run options");
     ui.click("Save as view…");
     let f = view_form(&ui);
     assert!(!f.edit && f.name == "orders_view", "the dialog is not a new view named after the table: {}", f.name);
@@ -48,6 +49,7 @@ fn save_as_view_on_the_content_bar_opens_a_new_view_named_after_the_table() {
 fn save_as_view_on_a_locked_connection_asks_to_unlock() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.lock();
+    ui.click("Run options");
     ui.click("Save as view…");
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(..))), "a locked connection did not ask to unlock");
 }

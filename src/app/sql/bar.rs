@@ -67,12 +67,43 @@ pub(in crate::app) struct Bar {
     pub(in crate::app) explain: bool,
     /// Initial open states; only the offline demo sets them.
     pub(in crate::app) preset: Preset,
+    /// The draft rule shows as an editor, which it does only once a condition was asked for or a token was opened.
+    show_draft: bool,
+    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
+    adding: Option<Add>,
+    /// Whether the bar has taken the page it first showed as the one that ran.
+    ran_seen: bool,
+    /// A WHERE text as it ran and as the rules respelled it.
+    respelled: Option<(String, String)>,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
     memo: Option<ColsMemo>,
     /// Whether the WHERE text read as rules, for the text, the column pairs and the mode it was read with.
     parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
     /// The folded statement line as a job, for the statement text and the fold state it was built from.
     fold: Option<(String, bool, LayoutJob)>,
+}
+
+impl Bar {
+    pub(in crate::app) fn ran_seen(&self) -> bool {
+        self.ran_seen
+    }
+
+    /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
+    /// the text as it ran, so only this comparison reads the other spelling.
+    pub(in crate::app) fn ran_as_shown(&self, ran: &PageQuery) -> PageQuery {
+        let mut r = ran.clone();
+        if let Some((from, to)) = &self.respelled && r.filter == *from {
+            r.filter = to.clone();
+        }
+        r
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Add {
+    Order,
+    Columns,
+    Group,
 }
 
 struct ColsMemo {
@@ -378,6 +409,10 @@ fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
 
 /// A round "+" button, painted because the glyph sits off center.
 fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    plus_named(ui, enabled, "Add rule")
+}
+
+fn plus_named(ui: &mut egui::Ui, enabled: bool, name: &str) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H + 4.0, BUTTON_H), Sense::click());
     let state = if enabled { state_of(&r) } else { 0 };
     ui.painter().rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
@@ -386,7 +421,7 @@ fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     ui.painter().line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], Stroke::new(1.3, color));
     ui.painter().line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], Stroke::new(1.3, color));
     focus_ring(ui, &r, rect, rect.height() / 2.0);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Add rule"));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default })
 }
 
@@ -872,8 +907,10 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d: Dialect, bs: bool, force: bool) {
     if !b.c.sql && (force || text != b.src) && (!pairs.is_empty() || text.trim().is_empty()) {
         match rules::parse(text, pairs, d, bs) {
-            Some((mut r, any)) => {
-                b.draft = r.pop();
+            Some((r, any)) => {
+                // Every rule is a token; the draft is an empty one, shown when a condition is asked for.
+                b.draft = None;
+                b.show_draft = false;
                 b.rules = r;
                 b.any = any;
             }
@@ -912,10 +949,97 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) help: bool,
 }
 
-/// Draws the bar and the clause chips. Returns true when the query should run.
+/// A row of the "+" menu: a condition or a clause. `on` marks the ones already in the query.
+pub(in crate::app) struct AddItem {
+    pub(in crate::app) label: &'static str,
+    pub(in crate::app) note: &'static str,
+    pub(in crate::app) group: &'static str,
+    pub(in crate::app) on: bool,
+    /// SQL clause names read as keywords; the Mongo option names stay plain.
+    pub(in crate::app) keyword: bool,
+}
+
+/// The one "+" at the end of a query line.
+pub(in crate::app) fn add_button(ui: &mut egui::Ui) -> egui::Response {
+    plus_named(ui, true, "Add a condition or clause")
+}
+
+/// The searchable menu of the "+": what can be added to the query, with a check on what is in it, and Query help last. Returns
+/// the label picked. It stays open while the search is typed in; each row closes it.
+pub(in crate::app) fn add_menu(plus: &egui::Response, items: &[AddItem], help: &mut bool) -> Option<&'static str> {
+    let needle_id = plus.id.with("add-needle");
+    let field = needle_id.with("field");
+    let mut pick = None;
+    egui::Popup::menu(plus).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(250.0).show(|ui| {
+        menu_list(ui);
+        let mut needle: String = ui.data(|d| d.get_temp(needle_id)).unwrap_or_default();
+        well_field(ui, field, FieldIcon::Search, None, |ui| ui.add(field_edit(&mut needle, field, "Add a condition or clause", ui.available_width(), egui::TextStyle::Body)));
+        // Typing starts at once; nothing else in the menu takes keyboard focus until it is clicked.
+        if ui.memory(|m| m.focused().is_none()) {
+            ui.memory_mut(|m| m.request_focus(field));
+        }
+        ui.add_space(4.0);
+        let q = needle.trim().to_lowercase();
+        let mut group = "";
+        for it in items.iter().filter(|i| q.is_empty() || i.label.to_lowercase().contains(&q)) {
+            if it.group != group {
+                group = it.group;
+                caption(ui, group);
+            }
+            if menu_row_in(ui, it.label, if it.keyword { C_KEYWORD() } else { TEXT() }, it.on, it.note, needle.trim(), false).clicked() {
+                pick = Some(it.label);
+                needle.clear();
+                ui.close();
+            }
+        }
+        popover_divider(ui);
+        if menu_row(ui, "Query help", MUTED(), false, "").clicked() {
+            *help = true;
+            ui.close();
+        }
+        ui.data_mut(|d| d.insert_temp(needle_id, needle));
+    });
+    pick
+}
+
+/// A row of a Run menu, named by its bare label so the shortcut hint does not become part of the name.
+pub(in crate::app) fn run_item(ui: &mut egui::Ui, label: &str, keys: &str) -> egui::Response {
+    let mut b = egui::Button::new(label);
+    if !keys.is_empty() {
+        b = b.right_text(RichText::new(keys).size(TXT_CAPTION).color(FAINT()));
+    }
+    let r = ui.add(b);
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MenuItem, enabled, label));
+    r
+}
+
+/// The note under a query line whose text is not what the rows below came from. Returns true on its Run link.
+pub(in crate::app) fn stale_note(ui: &mut egui::Ui) -> bool {
+    let mut run = false;
+    egui::Frame::new().fill(tint(WARNING(), 14)).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 5, bottom: 5 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Showing the results of the previous query.").size(TXT_SMALL).color(WARNING()));
+            run = quiet(ui, RichText::new("Run ↵").size(TXT_SMALL).color(PRIMARY())).clicked();
+        });
+    });
+    run
+}
+
+/// Draws the query line and what hangs under it. Returns true when the query should run.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
+    let mut q = page_query(t);
     let Some(s) = t.sql.as_mut() else { return false };
+    // A tab whose page this bar did not ask for (the offline demo) takes the texts it opens with as what ran.
+    if !s.bar.ran_seen {
+        s.bar.ran_seen = true;
+        if s.ran == PageQuery::default() {
+            s.ran = q.clone();
+        }
+    }
+    let matched = s.matched.unwrap_or(0);
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let memo = match s.bar.memo.take() {
         Some(m) if Arc::ptr_eq(&m.cols, &cols) && m.pk == s.pk => m,
@@ -927,27 +1051,44 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         },
     };
     // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
-    scope.table = Some(t.sel.coll.clone());
+    let table = t.sel.coll.clone();
+    scope.table = Some(table.clone());
     scope.fallback = memo.fallback.clone();
     let pairs = memo.pairs.clone();
+    let rows = t.count;
     let b = &mut s.bar;
     b.memo = Some(memo);
     let mut run = false;
     b.gdlg.bs = bs;
+    let was = b.src.clone();
     read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, false);
+    // Reading the text as rules spells it their way, which is what this frame writes back. It is the same query, so it must not
+    // count as an edit of the one that ran.
+    if b.src != was && !pairs.is_empty() && !b.c.sql {
+        let mut all = b.rules.clone();
+        all.extend(b.draft.clone());
+        let out = rules::to_sql(&all, b.any, d, bs);
+        if out != t.filter_txt {
+            b.respelled = Some((t.filter_txt.clone(), out.clone()));
+        }
+        q.filter = out;
+    }
+    let dirty = q != b.ran_as_shown(&s.ran);
+    let (mut copy, mut save_view) = (false, false);
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
     let fid = query_id("SQL-WHERE");
     let focused = ui.memory(|m| m.has_focus(fid));
     let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-    let edge = if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+    let edge = if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
     let frame = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 8, right: 8, top: 7, bottom: 7 }).show(ui, |ui| {
         ui.set_width(size - 18.0);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-            // Run, the history and library icons, and the chip of a bound script when there is one.
-            let run_w = if side.pick.bound.is_some() { 470.0 } else { 202.0 };
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+            // The edited note, the history and library icons, Run with its tip, and the chip of a bound script when there is one.
+            let run_w = if side.pick.bound.is_some() { 530.0 } else { 262.0 };
+            // The conditions and the clauses in use share one wrapping row, and the "+" ends it.
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
                 let can_rules = pairs.is_empty()
@@ -1009,109 +1150,153 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         if let Some(old) = b.draft.replace(picked).filter(|r| r.complete()) {
                             b.rules.insert(i.min(b.rules.len()), old);
                         }
+                        b.show_draft = true;
                     }
                     if let Some(mut dr) = b.draft.take() {
-                        if !b.rules.is_empty() {
-                            ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
-                        }
-                        let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
-                        run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
-                        if plus_button(ui, dr.complete()).on_hover_text("Add another rule").clicked() && dr.complete() {
-                            let next = cols.first().map(|c| Rule::new(&c.name, c.kind));
-                            b.rules.push(dr);
-                            b.draft = next;
+                        let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
+                        // The draft is always there to be filled in, but only shows once a condition was asked for or a token opened.
+                        if b.show_draft {
+                            if !b.rules.is_empty() {
+                                ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
+                            }
+                            let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
+                            run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
+                            let add = plus_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
+                            let close = close_x(ui).on_hover_text("Remove this condition").clicked();
+                            if add || (enter && dr.complete()) {
+                                b.rules.push(dr);
+                                b.draft = fresh;
+                                b.show_draft = false;
+                            } else if close {
+                                run |= dr.complete();
+                                b.draft = fresh;
+                                b.show_draft = false;
+                            } else {
+                                b.draft = Some(dr);
+                            }
                         } else {
                             b.draft = Some(dr);
                         }
                     }
                     write_rules(b, &mut t.filter_txt, &pairs, d, bs);
                 }
+                run |= clause_chips(ui, &mut t.sort_txt, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
             });
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
+                let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
+                if main.on_hover_text("Enter").clicked() {
                     run = true;
                 }
+                egui::Popup::menu(&tip).width(220.0).show(|ui| {
+                    menu_list(ui);
+                    if run_item(ui, "Run", "↵").clicked() {
+                        run = true;
+                        ui.close();
+                    }
+                    popover_divider(ui);
+                    if run_item(ui, "Explain", "⌘E").on_hover_text("Explain the SELECT of the rows shown in a new Query tab").clicked() {
+                        b.explain = true;
+                        ui.close();
+                    }
+                    if run_item(ui, "Copy as SQL", "").on_hover_text("Copy the whole SELECT").clicked() {
+                        copy = true;
+                        ui.close();
+                    }
+                    if run_item(ui, "Save as view…", "").on_hover_text("Create a view from the SELECT of the rows shown").clicked() {
+                        save_view = true;
+                        ui.close();
+                    }
+                });
                 vsep(ui, 6.0);
                 picker_button(ui, side.pick, true, &mut side.pick_acts);
                 history_menu(ui, side.hist, &[], Some(d), &mut side.qacts);
-                side.help |= quiet(ui, "?").on_hover_text("Filter shortcuts and syntax").clicked();
+                if dirty {
+                    ui.label(RichText::new("edited").size(TXT_SMALL).color(PRIMARY()));
+                }
             });
         });
     });
     if focused {
         ui.painter().rect_stroke(frame.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
     }
+    fold_line(ui, t, d);
+    if dirty {
+        ui.add_space(8.0);
+        run |= stale_note(ui);
+    }
     ui.add_space(8.0);
-    run |= clauses(ui, t, d, &cols, &scope, values);
+    if copy {
+        ui.ctx().copy_text(format!("{};", select_sql(t, d)));
+    }
+    if save_view && let Some(s) = t.sql.as_mut() {
+        s.save_view = true;
+    }
     run
 }
 
-/// The chips under the bar, and the Copy as SQL and Explain buttons.
-fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields) -> bool {
-    let table = t.sel.coll.clone();
-    let matched = t.sql.as_ref().and_then(|s| s.matched).unwrap_or(0);
-    let rows = t.count;
-    // The statement is built only where it is shown (SQL mode) or copied.
-    let select = |t: &Tab| page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
-    let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
-    let (mut copy, mut save_view) = (false, false);
-    let Some(s) = t.sql.as_mut() else { return false };
-    let b = &mut s.bar;
+/// The SELECT of the bar as it reads now.
+fn select_sql(t: &Tab, d: Dialect) -> String {
+    page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None)
+}
+
+/// The clauses in use as chips, then the "+" that adds one. Each chip is in a scope of its own so its popover keeps its place when
+/// the chips before it come and go.
+#[allow(clippy::too_many_arguments)]
+fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields, table: &str, matched: u64, rows: u64, help: &mut bool) -> bool {
     let mut run = false;
     let sql = b.c.sql;
     let mono = FontId::monospace(TXT_SMALL);
     let grouped = !b.c.group.trim().is_empty();
-    ui.horizontal_top(|ui| {
-        let w = ui.available_width() - 320.0;
-        // The option chips are framed and so 2 px taller than the others; a row sized for them centers every chip.
-        ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            // ORDER BY
-            if sql {
-                let id = query_id("SQL-ORDER");
-                let tw = (text_w(ui, if t.sort_txt.is_empty() { "created_at DESC" } else { &t.sort_txt }, mono.clone()) + 8.0).clamp(24.0, 420.0);
-                run |= opt_chip(ui, "ORDER BY", id, &mut t.sort_txt, |ui, text| {
-                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "created_at DESC", tw)
-                });
-                let id = query_id("SQL-GROUP");
-                let tw = (text_w(ui, if b.c.group.is_empty() { "status, currency" } else { &b.c.group }, mono.clone()) + 8.0).clamp(24.0, 420.0);
-                run |= opt_chip(ui, "GROUP BY", id, &mut b.c.group, |ui, text| {
-                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "status, currency", tw)
-                });
-            } else {
-                let keys = parse_order(&t.sort_txt, Some(d));
-                let summary = match &keys {
-                    Some(k) => k.iter().map(|(c, d)| format!("{c} {}", if *d { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", "),
-                    None => t.sort_txt.clone(),
-                };
-                if t.sort_txt.is_empty() {
-                    let r = add_chip(ui, "ORDER BY");
-                    popover(&r, 340.0, b.preset.order, |ui| {
-                        if order_popover(ui, &mut t.sort_txt, cols, d, b.preset.pick.take()) {
-                            run = true;
-                        }
-                    });
-                    if r.clicked() && t.sort_txt.is_empty() && let Some(c) = cols.first() {
-                        t.sort_txt = order_text(&[(c.name.clone(), false)], d);
-                        run = true;
-                    }
-                } else {
+    // A clause shows as a chip while it is set or its editor has focus, which is how the "+" menu starts an empty one.
+    let shown = |ui: &egui::Ui, id: egui::Id, text: &str| !text.is_empty() || ui.memory(|m| m.has_focus(id));
+    let fit = |ui: &egui::Ui, text: &str, hint: &str| (text_w(ui, if text.is_empty() { hint } else { text }, mono.clone()) + 8.0).clamp(24.0, 420.0);
+    if sql {
+        let id = query_id("SQL-ORDER");
+        if shown(ui, id, sort) {
+            let tw = fit(ui, sort, "created_at DESC");
+            run |= opt_chip(ui, "ORDER BY", id, sort, |ui, text| sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "created_at DESC", tw));
+        }
+        let id = query_id("SQL-GROUP");
+        if shown(ui, id, &b.c.group) {
+            let tw = fit(ui, &b.c.group, "status, currency");
+            run |= opt_chip(ui, "GROUP BY", id, &mut b.c.group, |ui, text| sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "status, currency", tw));
+        }
+        let id = query_id("SQL-HAVING");
+        if grouped && shown(ui, id, &b.c.having) {
+            let tw = fit(ui, &b.c.having, "orders > 10");
+            run |= opt_chip(ui, "HAVING", id, &mut b.c.having, |ui, text| sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "orders > 10", tw));
+        }
+    } else {
+        if !sort.is_empty() {
+            let summary = match parse_order(sort, Some(d)) {
+                Some(k) => k.iter().map(|(c, d)| format!("{c} {}", if *d { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", "),
+                None => sort.clone(),
+            };
+            run |= ui
+                .push_id("clause-order", |ui| {
+                    let mut run = false;
                     let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);
                     popover(&r, 340.0, b.preset.order, |ui| {
-                        if order_popover(ui, &mut t.sort_txt, cols, d, b.preset.pick.take()) {
+                        if order_popover(ui, sort, cols, d, b.preset.pick.take()) {
                             run = true;
                         }
                     });
                     if cleared {
-                        t.sort_txt.clear();
+                        sort.clear();
                         run = true;
                     }
-                }
-                if grouped {
+                    run
+                })
+                .inner;
+        }
+        if grouped {
+            run |= ui
+                .push_id("clause-group", |ui| {
+                    let mut run = false;
                     let (r, cleared) = clause_chip(ui, "GROUP BY", &b.c.group, false);
                     let mut applied = false;
-                    popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                    popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, matched.max(rows)));
                     run |= applied;
                     if cleared {
                         b.c.group.clear();
@@ -1121,122 +1306,187 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                     }
                     if !b.c.having.trim().is_empty() {
                         let (r2, cleared) = clause_chip(ui, "HAVING", &b.c.having.replace('`', ""), false);
-                        popover(&r2, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                        popover(&r2, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, matched.max(rows)));
                         run |= applied;
                         if cleared {
                             b.c.having.clear();
                             run = true;
                         }
                     }
-                }
+                    run
+                })
+                .inner;
+        }
+    }
+    let id = query_id("SQL-LIMIT");
+    if shown(ui, id, &b.c.limit) {
+        run |= opt_chip(ui, "LIMIT", id, &mut b.c.limit, |ui, text| {
+            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("100").desired_width(44.0));
+            r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+        });
+    }
+    // Columns: a checklist in Rules mode, the select list text in SQL mode. Grouped results write their own.
+    if !grouped {
+        if sql {
+            let id = query_id("SQL-COLUMNS");
+            if shown(ui, id, &b.c.select) {
+                let tw = fit(ui, &b.c.select, "id, status, total");
+                run |= opt_chip(ui, "Columns", id, &mut b.c.select, |ui, text| sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "id, status, total", tw));
             }
-            if sql && grouped {
-                let id = query_id("SQL-HAVING");
-                let tw = (text_w(ui, if b.c.having.is_empty() { "orders > 10" } else { &b.c.having }, mono.clone()) + 8.0).clamp(24.0, 420.0);
-                run |= opt_chip(ui, "HAVING", id, &mut b.c.having, |ui, text| {
-                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "orders > 10", tw)
-                });
+        } else {
+            let n = split_top(&b.c.select).len();
+            if n > 0 {
+                run |= ui
+                    .push_id("clause-columns", |ui| {
+                        let mut run = false;
+                        let (r, cleared) = clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false);
+                        popover(&r, 320.0, false, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
+                        if cleared {
+                            b.c.select.clear();
+                            run = true;
+                        }
+                        run
+                    })
+                    .inner;
             }
-            // LIMIT
-            let id = query_id("SQL-LIMIT");
-            run |= opt_chip(ui, "LIMIT", id, &mut b.c.limit, |ui, text| {
-                let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("100").desired_width(44.0));
-                r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-            });
-            // Columns: a checklist in Rules mode, the select list text in SQL mode. Grouped results write their own.
-            if !grouped {
-                if sql {
-                    let id = query_id("SQL-COLUMNS");
-                    let tw = (text_w(ui, if b.c.select.is_empty() { "id, status, total" } else { &b.c.select }, mono.clone()) + 8.0).clamp(24.0, 420.0);
-                    run |= opt_chip(ui, "Columns", id, &mut b.c.select, |ui, text| {
-                        sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "id, status, total", tw)
-                    });
-                } else {
-                    let n = split_top(&b.c.select).len();
-                    let (r, cleared) = if n == 0 { (add_chip(ui, "Columns"), false) } else { clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false) };
-                    popover(&r, 320.0, false, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
-                    if cleared {
-                        b.c.select.clear();
-                        run = true;
-                    }
-                }
+        }
+    }
+    // DISTINCT, a toggle
+    if b.c.distinct {
+        let (r, cleared) = clause_chip(ui, "DISTINCT", "", false);
+        if cleared || r.clicked() {
+            b.c.distinct = false;
+            run = true;
+        }
+    }
+    let id = query_id("SQL-OFFSET");
+    if shown(ui, id, &b.c.offset) {
+        run |= opt_chip(ui, "OFFSET", id, &mut b.c.offset, |ui, text| {
+            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("0").desired_width(44.0));
+            r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+        });
+    }
+    // ponytail: the index names are free text; list them from SHOW INDEX when someone asks for a picker.
+    let hints = d.supports(db::sql::Feature::IndexHint);
+    let id = query_id("SQL-INDEX");
+    if hints && shown(ui, id, &b.c.hint) {
+        run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
+            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
+            r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+        });
+    }
+    let plus = add_button(ui);
+    let item = |label, note, group, on, keyword| AddItem { label, note, group, on, keyword };
+    let mut items = vec![item("Column condition", "AND", "CONDITION", false, false), item("ORDER BY", "", "CLAUSES", !sort.is_empty(), true), item("LIMIT", "", "CLAUSES", !b.c.limit.is_empty(), true)];
+    if !grouped {
+        items.push(item("Columns", "", "CLAUSES", !b.c.select.is_empty(), false));
+    }
+    items.push(item("GROUP BY", "", "CLAUSES", grouped, true));
+    if grouped {
+        items.push(item("HAVING", "", "CLAUSES", !b.c.having.trim().is_empty(), true));
+    }
+    items.push(item("DISTINCT", "", "CLAUSES", b.c.distinct, true));
+    items.push(item("OFFSET", "", "CLAUSES", !b.c.offset.is_empty(), true));
+    if hints {
+        items.push(item("USE INDEX", "", "CLAUSES", !b.c.hint.is_empty(), true));
+    }
+    let focus = |ui: &egui::Ui, id: &str| ui.memory_mut(|m| m.request_focus(query_id(id)));
+    let popover_id = plus.id.with("clause-popover");
+    match add_menu(&plus, &items, help) {
+        Some("Column condition") if sql => focus(ui, "SQL-WHERE"),
+        Some("Column condition") => {
+            b.show_draft = true;
+            if b.draft.is_none() {
+                b.draft = cols.first().map(|c| Rule::new(&c.name, c.kind));
             }
-            if !sql && !grouped {
-                let r = add_chip(ui, "GROUP BY");
-                let mut applied = false;
-                popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, rows));
-                run |= applied;
-            }
-            // DISTINCT, a toggle
-            if b.c.distinct {
-                let (r, cleared) = clause_chip(ui, "DISTINCT", "", false);
-                if cleared || r.clicked() {
-                    b.c.distinct = false;
-                    run = true;
-                }
-            } else if add_chip(ui, "DISTINCT").clicked() {
-                b.c.distinct = true;
+        }
+        Some("ORDER BY") if sql => focus(ui, "SQL-ORDER"),
+        Some("ORDER BY") if sort.is_empty() => {
+            if let Some(c) = cols.first() {
+                *sort = order_text(&[(c.name.clone(), false)], d);
                 run = true;
             }
-            let id = query_id("SQL-OFFSET");
-            run |= opt_chip(ui, "OFFSET", id, &mut b.c.offset, |ui, text| {
-                let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("0").desired_width(44.0));
-                r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-            });
-            // ponytail: the index names are free text; list them from SHOW INDEX when someone asks for a picker.
-            if d.supports(db::sql::Feature::IndexHint) {
-                let id = query_id("SQL-INDEX");
-                run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
-                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
-                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-                });
-            }
-        });
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            copy = quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked();
-            save_view = quiet(ui, "Save as view…").on_hover_text("Create a view from the SELECT of the rows shown").clicked();
-            b.explain = quiet(ui, "Explain").on_hover_text("Explain the SELECT in a new Query tab (Cmd+E)").clicked();
-        });
-    });
-    // The full SELECT, folded under the bar in SQL mode.
-    if let Some(stmt) = stmt.as_ref().filter(|_| sql) {
-        ui.add_space(8.0);
-        let mut job = match &b.fold {
-            Some((key, open, job)) if *open == b.fold_open && key == stmt => job.clone(),
-            _ => {
-                let text = if b.fold_open { stmt.clone() } else { stmt.split_whitespace().collect::<Vec<_>>().join(" ") };
-                let job = sql_job(&text, TXT_SMALL);
-                b.fold = Some((stmt.clone(), b.fold_open, job.clone()));
-                job
-            }
+        }
+        Some("ORDER BY") => {
+            b.adding = Some(Add::Order);
+            ui.data_mut(|d| d.insert_temp(popover_id, true));
+        }
+        Some("LIMIT") => focus(ui, "SQL-LIMIT"),
+        Some("Columns") if sql => focus(ui, "SQL-COLUMNS"),
+        Some("Columns") => {
+            b.adding = Some(Add::Columns);
+            ui.data_mut(|d| d.insert_temp(popover_id, true));
+        }
+        Some("GROUP BY") if sql => focus(ui, "SQL-GROUP"),
+        Some("HAVING") if sql => focus(ui, "SQL-HAVING"),
+        Some("GROUP BY" | "HAVING") => {
+            b.adding = Some(Add::Group);
+            ui.data_mut(|d| d.insert_temp(popover_id, true));
+        }
+        Some("DISTINCT") => {
+            b.c.distinct = !b.c.distinct;
+            run = true;
+        }
+        Some("OFFSET") => focus(ui, "SQL-OFFSET"),
+        Some("USE INDEX") => focus(ui, "SQL-INDEX"),
+        _ => {}
+    }
+    // A Rules mode clause with no chip yet opens its popover on the "+", and is done once it closes.
+    if let Some(a) = b.adding {
+        let out = match a {
+            Add::Order => popover(&plus, 340.0, true, |ui| order_popover(ui, sort, cols, d, None)),
+            Add::Columns => popover(&plus, 320.0, true, |ui| columns_popover(ui, &mut b.c.select, cols, d)),
+            Add::Group => popover(&plus, 580.0, true, |ui| group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, table, rows)),
         };
-        job.wrap.max_width = ui.available_width() - 46.0;
-        if !b.fold_open {
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
+        match out {
+            Some(applied) => {
+                if applied && a == Add::Group {
+                    b.adding = None;
+                }
+                run |= applied;
+            }
+            None => b.adding = None,
         }
-        let g = ui.fonts_mut(|f| f.layout_job(job));
-        let h = (g.size().y + 14.0).max(30.0);
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
-        let state = state_of(&r);
-        ui.painter().rect(rect, R_MD, if state > 0 { HOVER() } else { PANEL() }, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
-        let c = egui::pos2(rect.left() + 16.0, rect.top() + 15.0);
-        let tri = if b.fold_open { vec![c + egui::vec2(-4.0, -2.5), c + egui::vec2(4.0, -2.5), c + egui::vec2(0.0, 3.0)] } else { vec![c + egui::vec2(-2.5, -4.0), c + egui::vec2(-2.5, 4.0), c + egui::vec2(3.0, 0.0)] };
-        ui.painter().add(egui::Shape::convex_polygon(tri, MUTED(), Stroke::NONE));
-        ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 7.0), g, TEXT());
-        focus_ring(ui, &r, rect, R_MD as f32);
-        if r.on_hover_text(if b.fold_open { "Fold the statement" } else { "Show the whole statement" }).clicked() {
-            b.fold_open = !b.fold_open;
-        }
-    }
-    if copy {
-        ui.ctx().copy_text(format!("{};", stmt.unwrap_or_else(|| select(t))));
-    }
-    if save_view && let Some(s) = t.sql.as_mut() {
-        s.save_view = true;
     }
     run
+}
+
+/// The full SELECT, folded under the bar in SQL mode.
+fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
+    if !t.sql.as_ref().is_some_and(|s| s.bar.c.sql) {
+        return;
+    }
+    let stmt = select_sql(t, d);
+    let Some(s) = t.sql.as_mut() else { return };
+    let b = &mut s.bar;
+    ui.add_space(8.0);
+    let mut job = match &b.fold {
+        Some((key, open, job)) if *open == b.fold_open && *key == stmt => job.clone(),
+        _ => {
+            let text = if b.fold_open { stmt.clone() } else { stmt.split_whitespace().collect::<Vec<_>>().join(" ") };
+            let job = sql_job(&text, TXT_SMALL);
+            b.fold = Some((stmt.clone(), b.fold_open, job.clone()));
+            job
+        }
+    };
+    job.wrap.max_width = ui.available_width() - 46.0;
+    if !b.fold_open {
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+    }
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let h = (g.size().y + 14.0).max(30.0);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
+    let state = state_of(&r);
+    ui.painter().rect(rect, R_MD, if state > 0 { HOVER() } else { PANEL() }, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
+    let c = egui::pos2(rect.left() + 16.0, rect.top() + 15.0);
+    let tri = if b.fold_open { vec![c + egui::vec2(-4.0, -2.5), c + egui::vec2(4.0, -2.5), c + egui::vec2(0.0, 3.0)] } else { vec![c + egui::vec2(-2.5, -4.0), c + egui::vec2(-2.5, 4.0), c + egui::vec2(3.0, 0.0)] };
+    ui.painter().add(egui::Shape::convex_polygon(tri, MUTED(), Stroke::NONE));
+    ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 7.0), g, TEXT());
+    focus_ring(ui, &r, rect, R_MD as f32);
+    if r.on_hover_text(if b.fold_open { "Fold the statement" } else { "Show the whole statement" }).clicked() {
+        b.fold_open = !b.fold_open;
+    }
 }
 
 fn tcols(s: &SqlTab) -> &[Col] {

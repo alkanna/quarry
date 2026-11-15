@@ -96,6 +96,7 @@ fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     // The Content view: the bar's button and the shortcut explain the SELECT of the last page.
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.h.state_mut().status = "idle".into();
+    ui.click("Run options");
     ui.click("Explain");
     assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };

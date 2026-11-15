@@ -159,7 +159,8 @@ fn postgresql_info_offers_vacuum_analyze_and_reindex_with_a_confirm_for_the_slow
 #[test]
 fn the_question_mark_on_the_content_bar_opens_this_dialects_filter_help() {
     let Some(mut ui) = demo_ui(App::load_pg_demo) else { return };
-    ui.click("?");
+    ui.click("Add a condition or clause");
+    ui.click("Query help");
     let Some(Modal::Text { title, body, .. }) = &ui.app().modal else { panic!("no help opened") };
     assert_eq!(title, "Query help");
     assert!(body.contains("ILIKE"), "{body}");
