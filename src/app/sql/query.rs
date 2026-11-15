@@ -486,14 +486,20 @@ impl App {
         Some(q[a..b].to_string()).filter(|t| !t.trim().is_empty())
     }
 
-    /// The statements of the script, one line each, for the Run button's tip. Returns the one picked.
+    /// The statements of the script, one line each under a separator, for the Run button's tip. Draws nothing for an empty script. Returns the one picked.
     fn sql_statement_menu(&self, ui: &mut egui::Ui) -> Option<String> {
         let s = self.t()?.sql.as_ref()?;
         let d = self.sql_dialect();
-        let here = s.caret_info(d).stmt.map(|(r, _, _)| r);
+        let info = s.caret_info(d);
+        if info.stmts.is_empty() {
+            return None;
+        }
+        let here = info.stmt.map(|(r, _, _)| r);
         let mut pick = None;
+        ui.separator();
         egui::ScrollArea::vertical().id_salt("sql-run-pick").max_height(360.0).show(ui, |ui| {
-            for (i, (r, text)) in lex::split_statements(&s.query, d).into_iter().enumerate() {
+            for (i, r) in info.stmts.iter().cloned().enumerate() {
+                let text = &s.query[r.clone()];
                 // The number keeps two statements that read the same apart; the one under the caret is in the accent.
                 let mut job = egui::text::LayoutJob::single_section(format!("{:>2}  ", i + 1), mono_fmt(TXT_SMALL, if here.as_ref() == Some(&r) { PRIMARY() } else { FAINT() }, 400.0));
                 let sql = sql_job_in(&preview(text, d), TXT_SMALL, d);
@@ -738,6 +744,8 @@ impl App {
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view, mut run_sel) = (false, false, false, false, false, None, false, None);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            // As tall as History, Library and Run, so the clip on the tools below does not cut their bottom edge.
+            ui.set_min_height(PICK_H);
             // The right side is laid out first, so a narrow window clips the tools and never History or Library.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The first one added sits at the right edge: the library, then the history beside it.
@@ -786,7 +794,6 @@ impl App {
                                 explain = true;
                                 ui.close();
                             }
-                            ui.separator();
                             run_pick = self.sql_statement_menu(ui);
                         });
                     }

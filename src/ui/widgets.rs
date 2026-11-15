@@ -440,7 +440,7 @@ pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool, t
     let (label, hint, w) = run_text(ui, text, keys, loud);
     split_row(ui, w, |ui| {
         let main = run_face(ui, text, label, hint, w, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, loud);
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, PICK_H), Sense::click());
         let p = ui.painter();
         let corners = egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD };
         if loud {
@@ -477,7 +477,7 @@ fn run_fill(state: usize) -> Color32 {
 /// Lays the button and the tip of a split Run left to right in one rect, so the tip stays on the right inside a right-to-left
 /// row, where a scope would have put it left of the button.
 fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let (_, rect) = ui.allocate_space(egui::vec2(main_w + 22.0, 26.0));
+    let (_, rect) = ui.allocate_space(egui::vec2(main_w + 22.0, PICK_H));
     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
     row.spacing_mut().item_spacing.x = 0.0;
     add(&mut row)
@@ -485,7 +485,7 @@ fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) 
 
 /// The button part of a Run: on the accent when `loud`, else outlined on the panel.
 fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, hint: std::sync::Arc<egui::Galley>, w: f32, corners: egui::CornerRadius, loud: bool) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 26.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), Sense::click());
     let p = ui.painter();
     let (mark, ink) = if loud {
         p.rect_filled(rect, corners, run_fill(state_of(&r)));
