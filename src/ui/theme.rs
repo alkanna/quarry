@@ -1072,6 +1072,9 @@ pub(crate) const SIDEBAR_W: f32 = 250.0;
 pub(crate) const FOLD_S: f32 = 0.15;
 
 // Type scale: every text size in the app is one of these.
+/// The faint second line of a tab and key hints inside a field, a step under the section headers.
+pub(crate) const TXT_MICRO: f32 = 10.0;
+
 /// Small caps headers over a sidebar panel or a group ("DATABASE EXPLORER", "LIBRARY") and the faint counts on tree rows.
 pub(crate) const TXT_SECTION: f32 = 10.5;
 

@@ -504,10 +504,10 @@ impl App {
                 View::Documents => None,
             };
             if let Some(v) = v {
-                job.append(v, 6.0, mono_fmt(10.0, C_LINK(), 400.0));
+                job.append(v, 6.0, mono_fmt(TXT_MICRO, C_LINK(), 400.0));
             }
             let line2 = crumbs::tab_second_line(self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str()), t.sel.scope_label());
-            let sub = LayoutJob::single_section(line2, mono_fmt(10.0, FAINT(), 400.0));
+            let sub = LayoutJob::single_section(line2, mono_fmt(TXT_MICRO, FAINT(), 400.0));
             ui.fonts_mut(|f| (f.layout_job(job), f.layout_job(sub)))
         }).collect();
         let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 });
@@ -576,7 +576,7 @@ impl App {
                         let name = if active { BRIGHT() } else if hovered || st.lifted { TEXT() } else { MUTED() };
                         let tx = rect.left() + TAB_PAD_L;
                         // Cut with an ellipsis at the cross, so the database goes first and the connection stays.
-                        let sub = truncated(p, &sub.job.text, FontId::monospace(10.0), FAINT(), clip.right() - tx - 4.0);
+                        let sub = truncated(p, &sub.job.text, FontId::monospace(TXT_MICRO), FAINT(), clip.right() - tx - 4.0);
                         let top = rect.center().y + 1.0 - (title.size().y + sub.size().y + 1.0) / 2.0;
                         let below = top + title.size().y + 1.0;
                         let pc = p.with_clip_rect(clip.intersect(p.clip_rect()));
@@ -840,7 +840,7 @@ fn search_pill(ui: &mut egui::Ui) -> egui::Response {
     p.rect(rect, R_MD, fill, Stroke::new(1.0, if r.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
     let hint = p.layout_no_wrap("Search or jump to…".into(), FontId::proportional(TXT_SMALL), if r.hovered() { MUTED() } else { FAINT() });
     p.galley(egui::pos2(rect.left() + 12.0, rect.center().y - hint.size().y / 2.0), hint, Color32::PLACEHOLDER);
-    let k = p.layout_job(LayoutJob::single_section(keys(false, false, "K"), mono_fmt(10.0, MUTED(), 400.0)));
+    let k = p.layout_job(LayoutJob::single_section(keys(false, false, "K"), mono_fmt(TXT_MICRO, MUTED(), 400.0)));
     let kr = egui::Rect::from_min_size(egui::pos2(rect.right() - 6.0 - (k.size().x + 10.0), rect.center().y - 8.0), egui::vec2(k.size().x + 10.0, 16.0));
     paint_kbd(p, kr, k);
     r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Jump to a connection, database or collection")

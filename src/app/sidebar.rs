@@ -111,24 +111,40 @@ pub(super) const TAG_PRESETS: [&str; 5] = ["Production", "Staging", "Development
 /// Production is red so it is never mistaken for a scratch server. Only the first word counts,
 /// so custom tags like "Prod EU" keep their environment's color.
 pub(super) fn tag_color(tag: &str) -> Color32 {
-    let t = tag.trim().to_ascii_lowercase();
-    match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
-        "production" | "prod" | "live" => ALERT(),
-        "staging" | "preprod" | "uat" => WARNING(),
-        "development" | "dev" | "local" | "test" => SUCCESS(),
-        "internal" => PRIMARY(),
-        _ => C_KEYWORD(),
+    match tag_kind(tag) {
+        TagKind::Prod => ALERT(),
+        TagKind::Staging => WARNING(),
+        TagKind::Dev => SUCCESS(),
+        TagKind::Internal => PRIMARY(),
+        TagKind::Other => C_KEYWORD(),
     }
 }
 
 /// The color that marks a connection as risky: red for production-like tags, amber for staging-like ones, none for
-/// the rest. Matches the same words as `tag_color`.
+/// the rest.
 pub(super) fn tag_level(tag: &str) -> Option<Color32> {
+    matches!(tag_kind(tag), TagKind::Prod | TagKind::Staging).then(|| tag_color(tag))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TagKind {
+    Prod,
+    Staging,
+    Dev,
+    Internal,
+    Other,
+}
+
+/// What a tag's first word says about the connection. Both the chip color and the risk mark read it, so a word added here
+/// changes both.
+fn tag_kind(tag: &str) -> TagKind {
     let t = tag.trim().to_ascii_lowercase();
     match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
-        "production" | "prod" | "live" => Some(ALERT()),
-        "staging" | "preprod" | "uat" => Some(WARNING()),
-        _ => None,
+        "production" | "prod" | "live" => TagKind::Prod,
+        "staging" | "preprod" | "uat" => TagKind::Staging,
+        "development" | "dev" | "local" | "test" => TagKind::Dev,
+        "internal" => TagKind::Internal,
+        _ => TagKind::Other,
     }
 }
 
