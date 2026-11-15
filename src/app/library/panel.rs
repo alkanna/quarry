@@ -555,6 +555,8 @@ impl App {
         };
         self.side_switch(ui);
         ui.add_space(8.0);
+        // The scope shares its row with the buttons, so the header takes one line
+        let mut scope_all = all;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = dots_menu(ui, |ui| {
@@ -567,15 +569,12 @@ impl App {
                 if glyph_button(ui, egui::vec2(28.0, 24.0), glyphs::folder_plus, "New folder", "New folder").clicked() {
                     acts.push(Act::NewFolder(new_parent));
                 }
+                ui.add_space(4.0);
+                // Two equal halves over the rest of the row; a long name is cut to its half by the control.
+                let label = active_name.clone().unwrap_or_else(|| "No connection".into());
+                segmented_fill(ui, &mut scope_all, &[(false, label.as_str(), active.is_some()), (true, "All", true)]);
             });
         });
-        ui.add_space(6.0);
-
-        // Scope
-        let mut scope_all = all;
-        // The design spans the panel in two equal halves; a long name is cut to its half by the control.
-        let label = active_name.clone().unwrap_or_else(|| "No connection".into());
-        segmented_fill(ui, &mut scope_all, &[(false, label.as_str(), active.is_some()), (true, "All connections", true)]);
         if scope_all != all {
             acts.push(Act::Scope(scope_all));
         }
