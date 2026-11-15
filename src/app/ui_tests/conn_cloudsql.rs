@@ -189,3 +189,35 @@ fn settings_finds_gcloud_once_and_the_demo_shows_no_real_path() {
     ui.settle();
     assert!(!ui.app().cloud.gcloud_asked && ui.app().cloud.gcloud_seen.is_none(), "closed, Settings looks again next time");
 }
+
+/// Height of the browser window, read from its title to its Cancel button.
+fn browser_h(ui: &UiApp) -> f32 {
+    ui.h.get_by_label("Cancel").rect().bottom() - ui.h.get_by_label("Add from Cloud SQL").rect().top()
+}
+
+#[test]
+fn refresh_in_the_cloud_sql_browser_keeps_the_window_size_while_it_checks_again() {
+    let mut ui = bare();
+    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().open_cloud_browser(false);
+    let missing = || Start { gcloud: None, proxy: None, components: false, account: None, projects: Ok(Vec::new()), adc: false };
+    feed(&mut ui, Found::Start(missing()), "the gcloud missing answer", |a| a.cloud.start.is_some());
+    ui.show("Google Cloud CLI not found");
+    ui.settle();
+    let before = browser_h(&ui);
+
+    // What Refresh does minus the real gcloud lookup, so the answer comes only when the test sends it.
+    let a = ui.h.state_mut();
+    a.req += 1;
+    let req = a.req;
+    a.cloud.reload(req);
+    for _ in 0..6 {
+        ui.h.step();
+        assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size while Refresh waited");
+    }
+    assert!(ui.app().cloud.start.is_none(), "the answer has not come yet");
+    ui.app().worker.send(Msg::CloudSql { req, found: Found::Start(missing()) });
+    ui.wait("the answer", |a| a.cloud.start.is_some());
+    ui.settle();
+    assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size after the answer");
+}
