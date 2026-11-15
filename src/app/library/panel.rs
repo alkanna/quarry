@@ -367,6 +367,9 @@ fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui:
     let mut b = egui::Button::new(shown);
     if !key.is_empty() {
         b = b.shortcut_text(RichText::new(key).color(FAINT()));
+    } else if checked {
+        // The tick is painted over the button, so invisible text holds its room and the menu widens for it
+        b = b.shortcut_text(RichText::new("00").color(Color32::TRANSPARENT));
     }
     let r = ui.add(b);
     if checked {
