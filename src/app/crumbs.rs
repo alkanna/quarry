@@ -46,7 +46,7 @@ fn crumb_menu(resp: &egui::Response, kind: &str, current: &str, recent: &[String
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut q = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
         let hint = RichText::new(format!("Filter {plural}")).color(FAINT());
-        let r = ui.add(egui::TextEdit::singleline(&mut q).font(FontId::proportional(TXT_BODY)).hint_text(hint).desired_width(f32::INFINITY));
+        let r = ui.add(egui::TextEdit::singleline(&mut q).font(FontId::proportional(TXT_BODY)).hint_text(hint).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER));
         r.request_focus();
         let tok = tokens(&q);
         let hit = |n: &String| tok.iter().all(|w| n.to_lowercase().contains(w.as_str()));
