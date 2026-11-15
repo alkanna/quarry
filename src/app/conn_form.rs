@@ -17,8 +17,13 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
     let fg = if enabled { color } else { FAINT() };
     let mark = egui::Rect::from_min_size(rect.left_center() + egui::vec2(12.0, -14.0), egui::vec2(28.0, 28.0));
     p.rect_filled(mark, R_SM, tint(fg, 40));
-    let g = p.layout_job(egui::text::LayoutJob::single_section(code.to_string(), mono_fmt(TXT_SMALL, fg, W_SEMIBOLD)));
-    p.galley(mark.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, fg);
+    // SQLite has no logo yet, so it keeps its two-letter mark
+    if code == "SQ" {
+        let g = p.layout_job(egui::text::LayoutJob::single_section(code.to_string(), mono_fmt(TXT_SMALL, fg, W_SEMIBOLD)));
+        p.galley(mark.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, fg);
+    } else {
+        super::rail::logo(p, mark.center(), 18.0, code, fg);
+    }
     let title = p.layout_job(egui::text::LayoutJob::single_section(name.to_string(), ui_fmt(TXT_BODY, Color32::PLACEHOLDER, W_SEMIBOLD, 0.0)));
     let sub = p.layout_job(egui::text::LayoutJob::single_section(sub.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, 400.0, 0.0)));
     let x = mark.right() + 10.0;
