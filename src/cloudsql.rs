@@ -32,11 +32,6 @@ pub struct CloudSql {
     pub mysql: bool,
 }
 
-/// Whether IAM database authentication is offered for MySQL instances. sqlx 0.8 can send the cleartext password the
-/// mysql_clear_password plugin wants (`enable_cleartext_plugin`, which `worker::open_full` turns on for an IAM connection),
-/// but the sign-in has not been tried against a live Cloud SQL instance, so the browser and the form keep it off.
-pub const MYSQL_IAM: bool = false;
-
 /// Where the proxy program and gcloud were found, from Settings or the app's own search. None means the worker searches.
 #[derive(Clone, Default)]
 pub struct Tools {
@@ -143,9 +138,13 @@ pub fn adc_exists() -> bool {
     adc_path(|k| std::env::var_os(k), dirs::home_dir(), cfg!(windows)).is_some_and(|p| p.is_file())
 }
 
-/// The database user for an IAM account: a service account drops its `.gserviceaccount.com`, a user stays as is.
-pub fn iam_user(account: &str) -> String {
+/// The database user for an IAM account. PostgreSQL keeps the address and drops a service account's
+/// `.gserviceaccount.com`; Cloud SQL for MySQL cuts the name at the @ and only accepts it in lowercase.
+pub fn iam_user(account: &str, mysql: bool) -> String {
     let a = account.trim();
+    if mysql {
+        return a.split('@').next().unwrap_or(a).to_lowercase();
+    }
     match a.strip_suffix(".gserviceaccount.com") {
         Some(s) => s.to_string(),
         None => a.to_string(),
@@ -660,11 +659,6 @@ impl Instance {
     pub fn mysql(&self) -> bool {
         self.version.starts_with("MYSQL_")
     }
-
-    /// Whether Use may turn IAM sign-in on for this instance: its flag is on and the engine's sign-in is offered.
-    pub fn iam_usable(&self) -> bool {
-        self.iam && (!self.mysql() || MYSQL_IAM)
-    }
 }
 
 pub fn instances(gcloud: &Path, project: &str) -> Result<Vec<Instance>, String> {
@@ -945,8 +939,10 @@ pub(crate) mod tests {
 
     #[test]
     fn iam_user_drops_the_service_account_domain() {
-        assert_eq!(iam_user("app@proj.iam.gserviceaccount.com"), "app@proj.iam");
-        assert_eq!(iam_user("me@example.com\n"), "me@example.com");
+        assert_eq!(iam_user("app@proj.iam.gserviceaccount.com", false), "app@proj.iam");
+        assert_eq!(iam_user("me@example.com\n", false), "me@example.com");
+        assert_eq!(iam_user("App@proj.iam.gserviceaccount.com", true), "app");
+        assert_eq!(iam_user("Me@example.com\n", true), "me");
     }
 
     const INSTANCES: &str = r#"[
@@ -966,9 +962,9 @@ pub(crate) mod tests {
     fn instances_parse_and_keep_only_postgres_and_mysql() {
         let v = parse_instances(INSTANCES).unwrap();
         assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["main", "internal", "psc", "idle", "shop"]);
-        // MySQL names its IAM flag with an underscore, and IAM sign-in is not offered for it.
-        assert!(v[4].mysql() && v[4].iam && !v[4].iam_usable() && v[4].public_ip);
-        assert!(!v[0].mysql() && v[0].iam_usable());
+        // MySQL names its IAM flag with an underscore.
+        assert!(v[4].mysql() && v[4].iam && v[4].public_ip);
+        assert!(!v[0].mysql() && v[0].iam);
         assert_eq!(v[3].state, "STOPPED", "an instance set to never run is stopped, as gcloud's list says");
         assert!(v[0].public_ip && v[0].iam && !v[0].private_ip && !v[0].psc);
         assert!(v[1].private_ip && !v[1].public_ip && !v[1].iam);

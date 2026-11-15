@@ -572,18 +572,13 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
     ui.end_row();
     form_label(ui, "IAM sign-in");
     ui.horizontal(|ui| {
-        if conf.mysql && !crate::cloudsql::MYSQL_IAM {
-            conf.iam = false;
-            ui.label(RichText::new("Not offered for MySQL instances, which sign in with a database password").color(MUTED()));
-            return;
-        }
         let was = conf.iam;
         let t = toggle(ui, &mut conf.iam);
         t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, conf.iam, "Sign in with IAM"));
         // Turned on, the user becomes the gcloud account, which is usually also the one Application Default Credentials
         // were made with. The proxy cannot use the gcloud account for IAM, so the note says which one counts.
         if conf.iam && !was && let Some(a) = account {
-            f.addr.user = crate::cloudsql::iam_user(a);
+            f.addr.user = crate::cloudsql::iam_user(a, conf.mysql);
         }
         let note = if conf.iam { "No password. The proxy signs in with Application Default Credentials, which must be this user's account" } else { "The database user signs in with its password" };
         ui.label(RichText::new(note).color(MUTED()));
@@ -593,7 +588,7 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut f.addr.user).font(egui::TextStyle::Monospace).desired_width(200.0).margin(FIELD_MARGIN));
         let note = match (conf.iam, account) {
-            (true, Some(a)) if f.addr.user.trim() == crate::cloudsql::iam_user(a) => "From gcloud, editable",
+            (true, Some(a)) if f.addr.user.trim() == crate::cloudsql::iam_user(a, conf.mysql) => "From gcloud, editable",
             (true, Some(_)) => "The IAM user to sign in as",
             (true, None) => "No gcloud account, so type the IAM user",
             (false, _) => "A database user of the instance",

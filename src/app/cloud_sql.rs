@@ -147,7 +147,7 @@ fn running(i: &Instance) -> bool {
 pub(super) fn use_instance(f: &mut ConnForm, inst: &Instance, account: Option<&str>) {
     let keep = f.cloud_sql.as_ref().map(|c| c.ip).filter(|k| ip_on(inst, *k));
     let ip = keep.or_else(|| KINDS.iter().map(|k| k.0).find(|k| ip_on(inst, *k))).unwrap_or_default();
-    let iam = inst.iam_usable();
+    let iam = inst.iam;
     f.cloud_sql = Some(CloudSql { instance: inst.connection_name.clone(), iam, ip, mysql: inst.mysql() });
     f.cloud_inst = Some(inst.clone());
     let scheme = if inst.mysql() { "mysql" } else { "postgres" };
@@ -164,7 +164,7 @@ pub(super) fn use_instance(f: &mut ConnForm, inst: &Instance, account: Option<&s
     }
     if iam {
         if let Some(a) = account {
-            f.addr.user = crate::cloudsql::iam_user(a);
+            f.addr.user = crate::cloudsql::iam_user(a, inst.mysql());
         }
         f.addr.password.clear();
     }
@@ -718,9 +718,8 @@ impl App {
             let ui = outer;
             let shown = b.sel.as_ref().and_then(|n| self.cloud.instance(n));
             let foot = match shown {
-                Some(i) if i.mysql() && i.iam => format!("Only PostgreSQL and MySQL instances are listed. Use saves {} with a database password: IAM sign-in is not offered for MySQL instances.", i.connection_name),
                 Some(i) => format!("Only PostgreSQL and MySQL instances are listed. Use saves {} {}.", i.connection_name, if i.iam { "with IAM sign-in on" } else { "with a database password" }),
-                None => "Only PostgreSQL and MySQL instances are listed. IAM sign-in is offered for PostgreSQL only.".to_string(),
+                None => "Only PostgreSQL and MySQL instances are listed.".to_string(),
             };
             dialog_foot(ui, |ui| {
                 close = ui.button("Cancel").on_hover_text("Esc").clicked();
@@ -730,7 +729,7 @@ impl App {
         self.cloud_card_act(act, |a| a.cloud_load(true));
         if let Some(i) = pick {
             // Without Application Default Credentials the proxy cannot sign in to IAM, so the browser asks for them first.
-            if !(i.iam_usable() && !self.cloud.adc()) {
+            if !(i.iam && !self.cloud.adc()) {
                 return self.cloud_use(&i, b.change);
             }
             (b.adc_for, b.sel) = (Some(i.connection_name.clone()), Some(i.connection_name));
@@ -932,12 +931,12 @@ fn instance_row(ui: &mut egui::Ui, i: &Instance, b: &mut CloudBrowser) -> bool {
         p.layout_job(job)
     };
     let mut x = left + COL_NAME + 15.0;
-    let badge_room = if i.iam_usable() { iam_galley(p).size().x + 14.0 + 8.0 } else { 0.0 };
+    let badge_room = if i.iam { iam_galley(p).size().x + 14.0 + 8.0 } else { 0.0 };
     let name = fit(&i.name, mono_fmt(TXT_BODY, name_c, 400.0), end - x - badge_room);
     let name_w = name.size().x;
     galley_at(p, x, cy, name, name_c);
     x += name_w + 8.0;
-    if i.iam_usable() {
+    if i.iam {
         x = iam_badge(p, x, cy) + 6.0;
     }
     if !up && x < end {
@@ -1030,15 +1029,15 @@ mod tests {
     }
 
     #[test]
-    fn use_fills_a_mysql_instance_with_the_mysql_engine_and_a_password_sign_in() {
+    fn use_fills_a_mysql_instance_with_the_mysql_engine_and_its_iam_user() {
         let mut f = ConnForm { addr: db::sql::Addr { scheme: "postgres".into(), ssl_mode: db::sql::SslMode::Required, ..Default::default() }, ..Default::default() };
         let shop = Instance { version: "MYSQL_8_0".into(), name: "shop".into(), ..inst(true, false, false, true) };
         use_instance(&mut f, &shop, Some("me@example.com"));
         let c = f.cloud_sql.clone().unwrap();
-        assert_eq!((c.mysql, c.iam, f.engine), (true, false, db::sql::Engine::MySql));
+        assert_eq!((c.mysql, c.iam, f.engine), (true, true, db::sql::Engine::MySql));
         assert_eq!((f.addr.scheme.as_str(), f.addr.port), ("mysql", 3306));
         assert_eq!(f.addr.ssl_mode, db::sql::SslMode::default());
-        assert!(f.addr.user.is_empty(), "no IAM user is filled in");
+        assert_eq!(f.addr.user, "me");
         // The form goes through the proxy for MySQL and not for the PostgreSQL card it was switched to.
         assert!(f.cloud_on().is_some() && f.net().cloud_sql.is_some());
         f.engine = db::sql::Engine::Postgres;
