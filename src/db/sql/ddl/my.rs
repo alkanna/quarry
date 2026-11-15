@@ -1,7 +1,7 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
 //! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
-use crate::db::sql::ddl::{check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
+use crate::db::sql::ddl::{fk_action, check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, TableOpt, FK_ACTIONS};
 use crate::db::sql::structure::{CheckConstraint, ForeignKey};
 use crate::db::sql::value::lit;
 use crate::db::sql::Dialect;
@@ -46,8 +46,22 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         }
         s.push_str(&format!(" CHARACTER SET {} COLLATE {coll}", coll.split('_').next().unwrap_or(coll)));
     }
-    s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+    let computed = c.generated.as_ref();
+    if let Some(g) = computed {
+        if c.auto_increment {
+            return Err("A generated column cannot auto increment.".into());
+        }
+        check_expr_of("generation expression", &g.expr, m)?;
+        // MariaDB accepts STORED as a synonym of PERSISTENT, and its syntax has no NULL or NOT NULL after a generated column.
+        s.push_str(&format!(" GENERATED ALWAYS AS ({}) {}", g.expr.trim(), if g.stored { "STORED" } else { "VIRTUAL" }));
+        if d != Dialect::MariaDb {
+            s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+        }
+    } else {
+        s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
+    }
     match &c.default {
+        _ if computed.is_some() => {}
         Dv::None => {}
         Dv::Null if c.nullable => s.push_str(" DEFAULT NULL"),
         Dv::Null => return Err("A NOT NULL column cannot default to NULL.".into()),
@@ -68,9 +82,12 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         }
         s.push_str(" AUTO_INCREMENT");
     }
-    if let Some(u) = c.on_update.as_deref().filter(|u| !u.is_empty()) {
+    if let (Some(u), true) = (c.on_update.as_deref().filter(|u| !u.is_empty()), computed.is_none()) {
         check_expr(u, m)?;
         s.push_str(&format!(" ON UPDATE {u}"));
+    }
+    if c.invisible && d != Dialect::Postgres {
+        s.push_str(" INVISIBLE");
     }
     if !c.comment.is_empty() {
         s.push_str(&format!(" COMMENT {}", lit(&c.comment, m.bs)));
@@ -98,7 +115,8 @@ pub(in crate::db::sql) fn index_cols(d: Dialect, ix: &IndexDef) -> Result<String
     Ok(parts.join(", "))
 }
 
-pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
+/// The index as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. A name left empty lets the server name it.
+pub(in crate::db::sql) fn index_clause(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
     if ix.functional {
         return Err(format!("Index {} has an expression part, which this editor cannot write.", ix.name));
     }
@@ -108,9 +126,11 @@ pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Resul
     }
     let comment = if ix.comment.is_empty() { String::new() } else { format!(" COMMENT {}", lit(&ix.comment, m.bs)) };
     if ix.kind == IndexKind::Primary {
-        return Ok(format!("ADD PRIMARY KEY ({cols}){comment}"));
+        return Ok(format!("PRIMARY KEY ({cols}){comment}"));
     }
-    check_ident(&ix.name, "An index")?;
+    if !ix.name.is_empty() {
+        check_ident(&ix.name, "An index")?;
+    }
     let kind = match ix.kind {
         IndexKind::Unique => "UNIQUE ",
         IndexKind::Fulltext => "FULLTEXT ",
@@ -124,24 +144,44 @@ pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Resul
         // PostgreSQL has no hidden indexes
         (true, Dialect::Postgres) => "",
     };
-    Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
+    let name = if ix.name.is_empty() { String::new() } else { format!("{} ", d.quote_ident(&ix.name)) };
+    Ok(format!("{kind}INDEX {name}({cols}){comment}{hidden}"))
 }
 
-pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
-    check_ident(&k.name, "A foreign key")?;
+pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
+    if ix.kind != IndexKind::Primary {
+        check_ident(&ix.name, "An index")?;
+    }
+    index_clause(d, m, ix).map(|b| format!("ADD {b}"))
+}
+
+/// The key as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. A name left empty lets the server name it.
+pub(in crate::db::sql) fn fk_clause(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+    if !k.name.is_empty() {
+        check_ident(&k.name, "A foreign key")?;
+    }
     check_ident(&k.ref_table, "The referenced table")?;
     if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
         return Err("Pick the same number of columns on both sides.".into());
     }
-    let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
+    let action = |a: &str| fk_action(&FK_ACTIONS, a);
     let names = |v: &[String]| v.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
     let target = if k.ref_db.is_empty() || k.ref_db == k.db { d.quote_ident(&k.ref_table) } else { d.qualified(&k.ref_db, &k.ref_table) };
-    Ok(format!("ADD CONSTRAINT {}\n    FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", d.quote_ident(&k.name), names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
+    let name = if k.name.is_empty() { String::new() } else { format!("CONSTRAINT {}\n    ", d.quote_ident(&k.name)) };
+    Ok(format!("{name}FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
 }
 
-/// ADD CONSTRAINT .. CHECK. The expression stays one expression, since the server runs it on every row written later.
-pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
-    check_ident(&k.name, "A check constraint")?;
+pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+    check_ident(&k.name, "A foreign key")?;
+    fk_clause(d, k).map(|b| format!("ADD {b}"))
+}
+
+/// The CHECK as it stands in an ALTER after ADD and in a CREATE TABLE between the columns. The expression stays one expression,
+/// since the server runs it on every row written later. A name left empty lets the server name it.
+pub(in crate::db::sql) fn check_clause(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
+    if !k.name.is_empty() {
+        check_ident(&k.name, "A check constraint")?;
+    }
     check_expr_of("CHECK expression", &k.expr, m)?;
     if k.not_valid || k.no_inherit {
         return Err("Only PostgreSQL has NOT VALID and NO INHERIT.".into());
@@ -149,11 +189,41 @@ pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) ->
     if k.not_enforced && d == Dialect::MariaDb {
         return Err("MariaDB has no NOT ENFORCED for a CHECK.".into());
     }
-    Ok(format!("ADD CONSTRAINT {} CHECK ({}){}", d.quote_ident(&k.name), k.expr.trim(), if k.not_enforced { " NOT ENFORCED" } else { "" }))
+    let name = if k.name.is_empty() { String::new() } else { format!("CONSTRAINT {} ", d.quote_ident(&k.name)) };
+    Ok(format!("{name}CHECK ({}){}", k.expr.trim(), if k.not_enforced { " NOT ENFORCED" } else { "" }))
+}
+
+pub(in crate::db::sql) fn add_check(d: Dialect, m: Mode, k: &CheckConstraint) -> Result<String, String> {
+    check_ident(&k.name, "A check constraint")?;
+    check_clause(d, m, k).map(|b| format!("ADD {b}"))
 }
 
 pub(in crate::db::sql) fn drop_index(d: Dialect, name: &str) -> String {
     if name == "PRIMARY" { "DROP PRIMARY KEY".into() } else { format!("DROP INDEX {}", d.quote_ident(name)) }
+}
+
+/// An engine or collation name goes into the statement bare, so it is limited to the characters the server's own names use.
+fn table_word(what: &str, v: &str) -> Result<(), String> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(format!("{v:?} is not {what} name."));
+    }
+    Ok(())
+}
+
+fn table_opt(m: Mode, o: &TableOpt) -> Result<String, String> {
+    Ok(match o {
+        TableOpt::Comment(t) if t.chars().count() > 2048 => return Err("A table comment is at most 2048 characters.".into()),
+        TableOpt::Comment(t) => format!("COMMENT = {}", lit(t, m.bs)),
+        TableOpt::Engine(e) => {
+            table_word("an engine", e)?;
+            format!("ENGINE = {e}")
+        }
+        TableOpt::Collation(c) => {
+            table_word("a collation", c)?;
+            format!("DEFAULT CHARACTER SET {} COLLATE {c}", c.split('_').next().unwrap_or(c))
+        }
+        TableOpt::AutoIncrement(n) => format!("AUTO_INCREMENT = {n}"),
+    })
 }
 
 /// One clause of the ALTER, or two for a rename the server cannot do directly.
@@ -176,6 +246,7 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
         Change::AddCheck(k) => vec![add_check(d, m, k)?],
         // MySQL has DROP CHECK from 8.0.16 and takes DROP CONSTRAINT only from 8.0.19. MariaDB drops a CHECK with DROP CONSTRAINT.
         Change::DropCheck(n) => vec![format!("DROP {} {}", d.drop_check_word(), d.quote_ident(n))],
+        Change::Table { opt, .. } => vec![table_opt(m, opt)?],
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
@@ -192,6 +263,16 @@ pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Chan
 pub fn alter(d: Dialect, version: &str, m: Mode, table: &str, changes: &[Change]) -> Result<String, String> {
     if changes.is_empty() {
         return Err("Nothing is staged.".into());
+    }
+    // An engine change copies every row. Beside other table options it is still one rewrite with a plain undo, but beside a
+    // column, index, key or check change a failure leaves no clear picture of what ran.
+    if changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Engine(_), .. })) && changes.iter().any(|c| !matches!(c, Change::Table { .. })) {
+        return Err("Apply or discard the column, index, key and check changes first; changing the engine rewrites the table.".into());
+    }
+    // A column redefined in the same ALTER that names no collation takes the new default and has its values converted, which a
+    // collation change on its own does not do. The editor leaves out a collation that is the table's own.
+    if changes.iter().any(|c| matches!(c, Change::Table { opt: TableOpt::Collation(_), .. })) && changes.iter().any(|c| matches!(c, Change::Modify { .. })) {
+        return Err("Apply or discard the column changes first; a text column changed together with a new default collation would be converted to it.".into());
     }
     let can = d.can_rename_index(version);
     let mut lines = Vec::new();

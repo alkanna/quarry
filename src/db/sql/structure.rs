@@ -37,9 +37,18 @@ pub struct Column {
     /// PostgreSQL's type of the column without its length, precision or bit width, and with a domain replaced by its base
     /// type: what an import casts a value to, so the INSERT applies the length and refuses a value that does not fit.
     pub cast_type: Option<String>,
+    /// MySQL and MariaDB: the expression of a generated column, read from SHOW CREATE TABLE by `load`. information_schema
+    /// has it too, but MySQL escapes its strings a second time there, so it cannot be written back. Empty for any other column.
+    pub generation: String,
 }
 
 impl Column {
+    /// A MySQL or MariaDB generated column (MariaDB says PERSISTENT for a stored one in older versions).
+    pub fn is_generated(&self) -> bool {
+        let x = self.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
+        x.contains("GENERATED") || x.contains("PERSISTENT")
+    }
+
     /// "INT" for "int unsigned", "DECIMAL" for "decimal(10,2)".
     pub fn base_type(&self) -> String {
         split_type(&self.full_type).0
@@ -354,6 +363,8 @@ pub struct Structure {
     pub pg_schema: Option<String>,
     /// PostgreSQL: what depends on each column, so dropping a column can say what goes with it. Empty on MySQL.
     pub pg_deps: Vec<ColDep>,
+    /// PostgreSQL: the server's major version, which decides what a generated column can be. 0 when not known, which gates nothing.
+    pub pg_major: u32,
     pub usage: IndexUsage,
 }
 
@@ -489,7 +500,7 @@ pub(super) fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
             let raw = text(r, "col_default");
             let (default, default_expr) = normalize_default(d, raw.clone(), nullable, &extra);
             let pg = d == Dialect::Postgres;
-            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None, kind: pg.then(|| pg_kind(r)), default_raw: if pg { raw } else { None }, cast_type: if pg { text(r, "cast_type") } else { None } }
+            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None, kind: pg.then(|| pg_kind(r)), default_raw: if pg { raw } else { None }, cast_type: if pg { text(r, "cast_type") } else { None }, generation: String::new() }
         })
         .collect()
 }
@@ -842,6 +853,51 @@ pub(super) fn json_check_pairs(rows: &[SqlRow]) -> Vec<(String, String)> {
     rows.iter().filter_map(|r| Some((text(r, "tbl")?, json_check_col(&text(r, "clause")?)?))).collect()
 }
 
+/// The next auto increment value that SHOW CREATE TABLE reports, 1 when it leaves the clause out. information_schema.TABLES keeps
+/// the counter cached on MySQL 8 for a day, which would make an edit of it start from a number the table has left behind.
+pub(super) fn create_auto(create: &str) -> u64 {
+    let Some((_, tail)) = create.split_once("\n) ") else { return 1 };
+    // The comment is the one option that holds free text.
+    let tail = tail.split("COMMENT=").next().unwrap_or(tail);
+    tail.split_once("AUTO_INCREMENT=").and_then(|(_, r)| r.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).unwrap_or(1)
+}
+
+/// The expression of the generated column `name` in the text of SHOW CREATE TABLE: what stands in the brackets after
+/// `GENERATED ALWAYS AS` (or after `AS` on a MariaDB that predates that spelling). Quoted strings and names are skipped, so a
+/// bracket inside one does not end the expression.
+pub(super) fn generation_of(create: &str, name: &str) -> Option<String> {
+    let head = format!("\n  {} ", Dialect::MySql.quote_ident(name));
+    let rest = &create[create.find(&head)? + head.len()..];
+    // Up to the next column or key, so the expression of a later column is never taken for this one's.
+    let line = rest.split("\n  ").next().unwrap_or(rest);
+    let start = line.find("GENERATED ALWAYS AS (").map(|i| i + 21).or_else(|| line.find(" AS (").map(|i| i + 5))?;
+    let (mut depth, mut chars) = (1, line[start..].char_indices());
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\'' | '"' | '`' => {
+                while let Some((_, n)) = chars.next() {
+                    match n {
+                        '\\' if c != '`' => {
+                            chars.next();
+                        }
+                        n if n == c => break,
+                        _ => {}
+                    }
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(line[start..start + i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view. PostgreSQL composes a table's text from what is read below.
@@ -877,8 +933,20 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         checks: Vec::new(),
         pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
         pg_deps: Vec::new(),
+        pg_major: if d == Dialect::Postgres { db.version.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0) } else { 0 },
         usage: IndexUsage::default(),
     };
+    if d != Dialect::Postgres {
+        let create = st.create.clone();
+        for c in st.columns.iter_mut().filter(|c| c.is_generated()) {
+            if let Some(e) = generation_of(&create, &c.name) {
+                c.generation = e;
+            }
+        }
+        // The statistics read NULL for a table the server has just rebuilt, so whether there is a counter is told by the columns.
+        let counted = st.columns.iter().any(|c| c.extra.to_ascii_lowercase().contains("auto_increment"));
+        st.status.auto_increment = counted.then(|| create_auto(&st.create));
+    }
     extras(db, schema, table, &mut st).await?;
     usage(db, schema, table, &mut st).await;
     if d == Dialect::Postgres {
@@ -1074,6 +1142,24 @@ mod tests {
         // A literal followed by an operator is an expression.
         assert_eq!(n("'a'::text || 'b'::text"), (Some("'a'::text || 'b'::text".into()), true));
         assert_eq!(normalize_default(Dialect::Postgres, None, true, ""), (None, false));
+    }
+
+    #[test]
+    fn a_generated_expression_is_cut_out_of_the_create_text_whole() {
+        let create = "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `a` varchar(20) DEFAULT NULL,\n  `g` varchar(40) GENERATED ALWAYS AS (concat(`a`,_utf8mb4'it\\'s ) \\\\ x\"y',`a``)`)) STORED COMMENT 'c',\n  `v` int GENERATED ALWAYS AS ((`id` + 1)) VIRTUAL,\n  `old` int AS (`id`) PERSISTENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+        assert_eq!(generation_of(create, "g").as_deref(), Some("concat(`a`,_utf8mb4'it\\'s ) \\\\ x\"y',`a``)`)"));
+        assert_eq!(generation_of(create, "v").as_deref(), Some("(`id` + 1)"));
+        assert_eq!(generation_of(create, "old").as_deref(), Some("`id`"));
+        // a column that is not generated, or not there, has none, and never borrows the next column's
+        assert_eq!(generation_of(create, "a"), None);
+        assert_eq!(generation_of(create, "nope"), None);
+    }
+
+    #[test]
+    fn the_auto_increment_counter_is_read_from_the_create_text() {
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT\n) ENGINE=InnoDB AUTO_INCREMENT=500 DEFAULT CHARSET=utf8mb4"), 500);
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"), 1);
+        assert_eq!(create_auto("CREATE TABLE `t` (\n  `id` int\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AUTO_INCREMENT=9'"), 1);
     }
 
     #[test]

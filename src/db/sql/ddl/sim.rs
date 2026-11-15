@@ -12,6 +12,8 @@ pub(in crate::db::sql) struct Sim {
     pub(in crate::db::sql) checks: Vec<CheckConstraint>,
     /// PostgreSQL drops a column together with every index that holds it, puts a new column last and cannot place one.
     pg: bool,
+    /// PostgreSQL: the server's major version, 0 when unknown.
+    pub(in crate::db::sql) pg_major: u32,
     /// PostgreSQL: what the server drops with each column, as read from the catalog.
     pub(in crate::db::sql) deps: Vec<crate::db::sql::structure::ColDep>,
     /// What the inverses collected so far give up, for the undo's confirmation.
@@ -20,7 +22,7 @@ pub(in crate::db::sql) struct Sim {
 
 impl Sim {
     pub(in crate::db::sql) fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), checks: st.checks.clone(), pg: st.is_pg(), deps: st.pg_deps.clone(), notes: Vec::new() }
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), checks: st.checks.clone(), pg: st.is_pg(), pg_major: st.pg_major, deps: st.pg_deps.clone(), notes: Vec::new() }
     }
 
     /// An index the server can use for a key on these columns: it starts with them, in order, whole.
@@ -270,6 +272,7 @@ impl Sim {
                 let i = self.check_at(name).ok_or_else(|| format!("Check constraint {name} is not on the table."))?;
                 Ok(vec![Change::AddCheck(self.checks.remove(i))])
             }
+            Change::Table { opt, was } => Ok(vec![Change::Table { opt: was.clone(), was: opt.clone() }]),
         }
     }
 }
@@ -463,8 +466,29 @@ pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, sta
     if d == Dialect::Postgres {
         return crate::db::sql::pg::ddl::plan(table, st, &changes);
     }
+    if let Some(why) = generated_problem(st, &changes) {
+        return Err(why);
+    }
     let sql = alter(d, version, m, table, &changes)?;
     Ok(Plan { steps: vec![sql], undo: undo_of(d, version, m, table, st, &changes), expect: None })
+}
+
+/// MySQL and MariaDB turn a plain column into a STORED one and back with MODIFY, but refuse a VIRTUAL one in either direction and
+/// refuse STORED to VIRTUAL or back (error 3106, and 1907 on MariaDB), so the preview says so instead of the server's error.
+fn generated_problem(before: &Structure, changes: &[Change]) -> Option<String> {
+    let mut sim = Sim::of(before);
+    for c in changes {
+        if let Change::Modify { from, def, .. } = c && let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) {
+            match (&old.generated, &def.generated) {
+                (None, Some(n)) if !n.stored => return Some(format!("Column {from} is not generated, and the server cannot make it a virtual one. Make it STORED, or drop and add the column.")),
+                (Some(o), None) if !o.stored => return Some(format!("Column {from} is virtual, and the server cannot make it a plain column. Drop and add the column.")),
+                (Some(o), Some(n)) if o.stored != n.stored => return Some(format!("Column {from} cannot change between STORED and VIRTUAL. Drop and add the column.")),
+                _ => {}
+            }
+        }
+        let _ = sim.apply(c);
+    }
+    None
 }
 
 pub(super) fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, changes: &[Change]) -> Result<AlterUndo, String> {
@@ -594,6 +618,7 @@ pub(in crate::db::sql) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<S
                 add_exact(&mut checks, n);
                 None
             }
+            Change::Table { .. } => None,
         };
         if let Some(Pos::After(n)) = pos {
             add(&mut cols, n);
@@ -670,6 +695,9 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
                 out.push(format!("PostgreSQL checks every row of the table for {} while it holds an exclusive lock, and refuses the constraint if one fails. On a big table add it NOT VALID instead.", k.name));
             }
         }
+        if let Change::Add { def, .. } = c && def.generated.as_ref().is_some_and(|g| g.stored) {
+            out.push(format!("Adding the stored column {} rewrites the table and computes its value for every row.", def.name));
+        }
         let _ = fk_sim.apply(c);
         match c {
             Change::Drop(n) if before.is_pg() => {
@@ -684,11 +712,18 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
             }
             Change::Drop(n) => out.push(format!("Dropping {n} deletes its values for good. Undo brings the column back empty.")),
             Change::Modify { from, def, .. } => {
-                if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) && converts(old, def) {
-                    out.push(format!("Changing {from} converts its values and can cut or reject some. Undo restores the definition, not the values."));
+                if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) {
+                    if converts(old, def) {
+                        out.push(format!("Changing {from} converts its values and can cut or reject some. Undo restores the definition, not the values."));
+                    }
+                    if def.generated.as_ref().is_some_and(|g| g.stored) && old.generated != def.generated {
+                        out.push(format!("Changing the expression of the stored column {from} rewrites the table and computes every value again."));
+                    }
                 }
             }
             Change::DropIndex(n) if n == "PRIMARY" || before.indexes.iter().any(|i| i.primary && i.name == *n) => out.push("Dropping the primary key makes the rows read-only here until the table has a key again.".into()),
+            Change::Table { opt: TableOpt::Engine(_), .. } => out.push("Changing the engine rewrites the whole table and blocks writes to it while it runs. Undo rewrites it again.".into()),
+            Change::Table { opt: TableOpt::AutoIncrement(_), .. } => out.push("The server never sets the counter below the largest id plus one, so a lower value is raised and an undo that lowers it again may not hold.".into()),
             _ => {}
         }
     }

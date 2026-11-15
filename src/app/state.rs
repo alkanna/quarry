@@ -923,6 +923,8 @@ pub(super) enum Modal {
     IdxEdit(Box<IdxForm>),
     /// Add or edit a CHECK constraint of the open SQL table, with its ALTER preview.
     CheckEdit(Box<super::sql::checks::CheckForm>),
+    /// Change the comment, engine, collation or auto increment counter of the open SQL table.
+    TableOpts(Box<super::sql::table_opts::TableForm>),
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
@@ -988,6 +990,17 @@ pub(super) enum Modal {
     OpenOn(Box<super::library::open::OpenOnForm>),
     /// Link a folder on disk to the library.
     LinkFolder(Box<super::library::link_dialog::LinkForm>),
+}
+
+impl Modal {
+    /// The keys of a New table dialog, whichever dialect's, which a parent table's structure is handed to.
+    pub(super) fn new_keys_mut(&mut self) -> Option<&mut super::sql::new_keys::NewKeys> {
+        match self {
+            Modal::PgNewTable(f) => Some(&mut f.keys),
+            Modal::SqlNewTable(f) => Some(&mut f.keys),
+            _ => None,
+        }
+    }
 }
 
 /// A value being edited in place in the document tree.

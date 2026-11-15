@@ -331,7 +331,8 @@ pub struct Check {
 pub struct NewIndex {
     pub name: String,
     pub cols: Vec<String>,
-    pub unique: bool,
+    /// Unique or plain. MySQL's FULLTEXT and SPATIAL kinds are for the dialog it shares with this one; PostgreSQL treats all but Unique as plain.
+    pub kind: crate::db::sql::ddl::IndexKind,
 }
 
 /// What the New table dialog collects. A column is the structure editor's `ColDef`, so its type, default and identity are written
@@ -466,7 +467,7 @@ pub fn create_table_stmts(spec: &TableSpec) -> Res<Vec<String>> {
     let mut out = vec![format!("CREATE TABLE {t} (\n{}\n)", lines.join(",\n"))];
     for i in &spec.indexes {
         let name = if i.name.is_empty() { String::new() } else { new_name("An index", &i.name).map(|_| format!("{} ", q(&i.name)))? };
-        out.push(format!("CREATE {}INDEX {name}ON {t} ({})", if i.unique { "UNIQUE " } else { "" }, group("index", &i.cols)?));
+        out.push(format!("CREATE {}INDEX {name}ON {t} ({})", if i.kind == crate::db::sql::ddl::IndexKind::Unique { "UNIQUE " } else { "" }, group("index", &i.cols)?));
     }
     if !spec.comment.is_empty() {
         out.push(comment_stmt(&format!("TABLE {t}"), &spec.comment)?);
@@ -1452,7 +1453,7 @@ mod tests {
     #[test]
     fn indexes_come_after_the_table_and_names_are_not_given_twice() {
         let mut s = spec();
-        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["customer".into(), "price".into()], unique: false }, NewIndex { name: "by code".into(), cols: vec!["Code".into()], unique: true }];
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["customer".into(), "price".into()], ..Default::default() }, NewIndex { name: "by code".into(), cols: vec!["Code".into()], kind: crate::db::sql::ddl::IndexKind::Unique, ..Default::default() }];
         s.comment = "c".into();
         let all = create_table_stmts(&s).unwrap();
         assert_eq!(all[1], "CREATE INDEX ON \"app\".\"orders\" (\"customer\", \"price\")");
@@ -1469,7 +1470,7 @@ mod tests {
     fn the_spec_reads_as_a_structure_for_the_key_checks() {
         let mut s = spec();
         s.uniques = vec![Unique { name: "u".into(), cols: vec!["customer".into(), "Code".into()] }];
-        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["price".into()], unique: true }];
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["price".into()], kind: crate::db::sql::ddl::IndexKind::Unique, ..Default::default() }];
         let st = s.as_structure();
         assert!(st.is_pg() && st.columns.len() == 4 && !st.columns[0].nullable && st.columns[1].nullable);
         assert_eq!(st.indexes.iter().map(|i| i.cols.len()).collect::<Vec<_>>(), [1, 2], "the key and the UNIQUE, not the index made after the table");

@@ -39,8 +39,8 @@ impl App {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() && f.parent_loaded(req, res.clone()) {
                         continue;
                     }
-                    // So does the New table dialog, for the parent of each of its foreign keys.
-                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() && f.parent_loaded(req, &res) {
+                    // So does the New table dialog, for the parent of each of its foreign keys. MySQL and PostgreSQL each have their own.
+                    if let Some(keys) = self.modal.as_mut().and_then(Modal::new_keys_mut) && keys.parent_loaded(req, &res) {
                         continue;
                     }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {

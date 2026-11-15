@@ -332,10 +332,13 @@ fn undo_of_a_combined_change_runs_backwards() {
     assert!(back[0].contains("ADD INDEX `idx_cust_total` (`customer_id`, `total`)"), "{back:?}");
     assert_eq!(back[1], "ALTER TABLE `orders`\n  CHANGE COLUMN `amount` `qty` INT NULL DEFAULT NULL");
     assert_eq!(back[2], "ALTER TABLE `orders`\n  DROP COLUMN `qty`");
-    // No undo for a generated column or an unknown one.
+    // A generated column is brought back with its expression; one the server gave no expression for, and an unknown one, have no undo.
     let mut g = table();
     g.columns[3].extra = "STORED GENERATED".into();
     assert!(inverse(M, "8.4.0", B, "orders", &g, &[Change::Drop("note".into())]).is_err());
+    g.columns[3].generation = "concat(`id`,'x')".into();
+    let up = inverse(M, "8.4.0", B, "orders", &g, &[Change::Drop("note".into())]).unwrap();
+    assert!(up[0].contains("ADD COLUMN `note` VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci GENERATED ALWAYS AS (concat(`id`,'x')) STORED NULL"), "{up:?}");
     assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::Drop("nope".into())]).is_err());
 }
 
@@ -1000,4 +1003,134 @@ fn the_undo_of_a_check_change_puts_the_check_back_as_it_was() {
     t2.checks.remove(0);
     assert!(snapshot(&t2, &[], &[], &[], &u.checks)[0].1.is_none());
     assert_eq!(checks_after(&t, &edit), ["chk_note", "chk_total"]);
+}
+
+fn opt(o: TableOpt, was: TableOpt) -> Change {
+    Change::Table { opt: o, was }
+}
+
+#[test]
+fn table_options() {
+    let t = table();
+    let comment = opt(TableOpt::Comment("it's new".into()), TableOpt::Comment("old".into()));
+    assert_eq!(alt(std::slice::from_ref(&comment)), "ALTER TABLE `orders`\n  COMMENT = 'it''s new'");
+    assert_eq!(alt(&[opt(TableOpt::Engine("MyISAM".into()), TableOpt::Engine("InnoDB".into()))]), "ALTER TABLE `orders`\n  ENGINE = MyISAM");
+    assert_eq!(alt(&[opt(TableOpt::Collation("latin1_swedish_ci".into()), TableOpt::Collation("utf8mb4_0900_ai_ci".into()))]), "ALTER TABLE `orders`\n  DEFAULT CHARACTER SET latin1 COLLATE latin1_swedish_ci");
+    assert_eq!(alt(&[opt(TableOpt::AutoIncrement(500), TableOpt::AutoIncrement(3))]), "ALTER TABLE `orders`\n  AUTO_INCREMENT = 500");
+    // an option joins the other clauses of the one ALTER
+    assert_eq!(alt(&[Change::Drop("note".into()), comment.clone()]), "ALTER TABLE `orders`\n  DROP COLUMN `note`,\n  COMMENT = 'it''s new'");
+    // names go into the statement bare, so anything but a name is refused
+    assert!(alter(M, "8.4.0", B, "orders", &[opt(TableOpt::Engine("x; DROP TABLE t".into()), TableOpt::Engine("InnoDB".into()))]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[opt(TableOpt::Collation("a b".into()), TableOpt::Collation("c".into()))]).is_err());
+    // the undo writes back what the structure read
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &[comment]).unwrap(), ["ALTER TABLE `orders`\n  COMMENT = 'old'"]);
+    assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &[opt(TableOpt::AutoIncrement(500), TableOpt::AutoIncrement(3))]).unwrap(), ["ALTER TABLE `orders`\n  AUTO_INCREMENT = 3"]);
+    assert!(Change::Table { opt: TableOpt::AutoIncrement(5), was: TableOpt::AutoIncrement(1) }.describe().contains("auto increment"));
+}
+
+#[test]
+fn the_engine_is_staged_beside_other_table_options_only() {
+    let engine = opt(TableOpt::Engine("MyISAM".into()), TableOpt::Engine("InnoDB".into()));
+    let comment = opt(TableOpt::Comment("c".into()), TableOpt::Comment(String::new()));
+    for beside in [Change::Drop("note".into()), Change::DropIndex("idx_status".into())] {
+        let e = alter(M, "8.4.0", B, "orders", &[beside, engine.clone()]).unwrap_err();
+        assert_eq!(e, "Apply or discard the column, index, key and check changes first; changing the engine rewrites the table.");
+    }
+    // the options of one dialog go together, and the undo writes each back
+    let both = [engine.clone(), comment.clone()];
+    assert_eq!(alter(M, "8.4.0", B, "orders", &both).unwrap(), "ALTER TABLE `orders`\n  ENGINE = MyISAM,\n  COMMENT = 'c'");
+    assert!(plan(M, "8.4.0", B, "orders", &table(), &both).unwrap().undo.is_ok());
+    let alone = plan(M, "8.4.0", B, "orders", &table(), std::slice::from_ref(&engine)).unwrap();
+    assert!(alone.undo.is_ok());
+    assert!(warnings(&table(), &[engine]).iter().any(|w| w.contains("rewrites the whole table")));
+}
+
+#[test]
+fn a_new_default_collation_is_not_staged_with_a_changed_column() {
+    let collate = opt(TableOpt::Collation("latin1_swedish_ci".into()), TableOpt::Collation("utf8mb4_0900_ai_ci".into()));
+    let change = Change::Modify { from: "note".into(), def: def("note", "TEXT"), pos: Pos::Keep };
+    // a text column redefined in the same ALTER would take the new collation and be converted, which the collation alone does not do
+    assert!(alter(M, "8.4.0", B, "orders", &[change, collate.clone()]).unwrap_err().contains("column changes first"));
+    // a column added or dropped beside it is not touched
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::Drop("note".into()), collate]).is_ok());
+}
+
+fn generated(name: &str, expr: &str, stored: bool) -> ColDef {
+    ColDef { generated: Some(Gen { expr: expr.into(), stored }), default: Dv::None, ..def(name, "INT") }
+}
+
+#[test]
+fn generated_and_invisible_columns_are_written() {
+    let add = |c: ColDef| alter(M, "8.4.0", B, "orders", &[Change::Add { def: c, pos: Pos::Keep }]).unwrap();
+    assert_eq!(add(generated("dbl", "`total` * 2", false)), "ALTER TABLE `orders`\n  ADD COLUMN `dbl` INT GENERATED ALWAYS AS (`total` * 2) VIRTUAL NULL");
+    let stored = ColDef { nullable: false, comment: "twice".into(), invisible: true, ..generated("dbl", "`total` * 2", true) };
+    assert_eq!(add(stored.clone()), "ALTER TABLE `orders`\n  ADD COLUMN `dbl` INT GENERATED ALWAYS AS (`total` * 2) STORED NOT NULL INVISIBLE COMMENT 'twice'");
+    // MariaDB has STORED as a synonym of PERSISTENT, and no NULL or NOT NULL after a generated column
+    let maria = alter(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", &[Change::Add { def: stored, pos: Pos::Keep }]).unwrap();
+    assert_eq!(maria, "ALTER TABLE `orders`\n  ADD COLUMN `dbl` INT GENERATED ALWAYS AS (`total` * 2) STORED INVISIBLE COMMENT 'twice'");
+    assert_eq!(add(ColDef { invisible: true, ..def("hidden", "INT") }), "ALTER TABLE `orders`\n  ADD COLUMN `hidden` INT NULL DEFAULT NULL INVISIBLE");
+    // a generated column has no default, no auto increment and no ON UPDATE, whatever the definition carries
+    let busy = ColDef { default: Dv::Value("5".into()), on_update: Some("CURRENT_TIMESTAMP".into()), ..generated("dbl", "1", true) };
+    assert_eq!(add(busy), "ALTER TABLE `orders`\n  ADD COLUMN `dbl` INT GENERATED ALWAYS AS (1) STORED NULL");
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::Add { def: ColDef { auto_increment: true, ..generated("dbl", "1", true) }, pos: Pos::Keep }]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::Add { def: generated("dbl", "1); DROP TABLE t; --", true), pos: Pos::Keep }]).is_err());
+    assert!(alter(M, "8.4.0", B, "orders", &[Change::Add { def: generated("dbl", " ", true), pos: Pos::Keep }]).is_err());
+}
+
+#[test]
+fn a_generated_column_is_read_and_written_back() {
+    let mut c = col("dbl", "int", true, None);
+    c.extra = "STORED GENERATED".into();
+    c.generation = "(`total` * 2)".into();
+    let d = ColDef::from_column(&c).unwrap();
+    assert_eq!(d.generated, Some(Gen { expr: "(`total` * 2)".into(), stored: true }));
+    assert!(!d.invisible && d.default == Dv::None);
+    c.extra = "VIRTUAL GENERATED INVISIBLE".into();
+    let d = ColDef::from_column(&c).unwrap();
+    assert!(d.invisible && d.generated.as_ref().is_some_and(|g| !g.stored));
+    // MariaDB separates the words with a comma and calls an older stored column PERSISTENT
+    c.extra = "PERSISTENT, INVISIBLE".into();
+    assert!(ColDef::from_column(&c).unwrap().generated.is_some_and(|g| g.stored));
+    // DEFAULT_GENERATED is a plain default written as an expression, not a generated column
+    c.extra = "DEFAULT_GENERATED".into();
+    assert!(ColDef::from_column(&c).unwrap().generated.is_none());
+    // a comment-only change keeps the expression and the kind, which is what the server needs to accept the MODIFY
+    let mut t = table();
+    let mut g = col("dbl", "int", true, None);
+    g.extra = "STORED GENERATED".into();
+    g.generation = "concat(`a`,_utf8mb4'it\\'s \\\\ x')".into();
+    t.columns.push(g);
+    let mut d = ColDef::in_table(&t, &t.columns[4]).unwrap();
+    d.comment = "c".into();
+    let sql = alter(M, "8.4.0", B, "orders", &[Change::Modify { from: "dbl".into(), def: d, pos: Pos::Keep }]).unwrap();
+    assert_eq!(sql, "ALTER TABLE `orders`\n  MODIFY `dbl` INT GENERATED ALWAYS AS (concat(`a`,_utf8mb4'it\\'s \\\\ x')) STORED NULL COMMENT 'c'");
+}
+
+#[test]
+fn a_column_cannot_become_generated_or_plain_or_switch_kind() {
+    let mut t = table();
+    let mut g = col("dbl", "int", true, None);
+    g.extra = "VIRTUAL GENERATED".into();
+    g.generation = "`id`".into();
+    t.columns.push(g);
+    let modify = |from: &str, d: ColDef| plan(M, "8.4.0", B, "orders", &t, &[Change::Modify { from: from.into(), def: d, pos: Pos::Keep }]);
+    assert!(modify("dbl", def("dbl", "INT")).unwrap_err().contains("cannot make it a plain column"));
+    assert!(modify("dbl", generated("dbl", "`id`", true)).unwrap_err().contains("STORED and VIRTUAL"));
+    assert!(modify("customer_id", generated("customer_id", "`id`", false)).unwrap_err().contains("make it a virtual one"));
+    // the expression of a virtual column can change, and the undo writes the old one back
+    let p = modify("dbl", generated("dbl", "`id` + 1", false)).unwrap();
+    assert!(p.steps[0].contains("AS (`id` + 1) VIRTUAL") && p.undo.unwrap().steps[0].contains("AS (`id`) VIRTUAL"));
+    // a stored column that changes is rewritten, which the preview says
+    let mut s = table();
+    let mut gs = col("dbl", "int", true, None);
+    gs.extra = "STORED GENERATED".into();
+    gs.generation = "`id`".into();
+    s.columns.push(gs);
+    let w = warnings(&s, &[Change::Modify { from: "dbl".into(), def: generated("dbl", "`id` + 1", true), pos: Pos::Keep }]);
+    assert!(w.iter().any(|x| x.contains("rewrites the table")), "{w:?}");
+    // MODIFY swaps a plain column and a STORED one in both directions, and the undo is the other direction
+    let to_plain = plan(M, "8.4.0", B, "orders", &s, &[Change::Modify { from: "dbl".into(), def: def("dbl", "INT"), pos: Pos::Keep }]).unwrap();
+    assert!(to_plain.undo.unwrap().steps[0].contains("GENERATED ALWAYS AS (`id`) STORED"));
+    let to_stored = plan(M, "8.4.0", B, "orders", &s, &[Change::Modify { from: "customer_id".into(), def: generated("customer_id", "`id`", true), pos: Pos::Keep }]).unwrap();
+    assert!(to_stored.steps[0].contains("STORED NULL") && !to_stored.undo.unwrap().steps[0].contains("GENERATED"));
 }

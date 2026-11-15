@@ -31,6 +31,7 @@ mod live_rel;
 
 pub use fk::*;
 pub use my::alter;
+pub(in crate::db::sql) use my::{check_clause, fk_clause, index_clause};
 pub use sim::*;
 pub use trig::*;
 pub use worker::*;
@@ -106,15 +107,26 @@ pub struct ColDef {
     /// MariaDB: the CHECK written on the column itself, as the server reports it. A MODIFY without it drops the CHECK, so
     /// it is written again each time the column is.
     pub check: Option<String>,
+    /// A generated column: the server computes it from `expr`. It has no default, no auto increment and no ON UPDATE.
+    pub generated: Option<Gen>,
+    /// MySQL and MariaDB: the column is left out of SELECT * and of an INSERT that names no columns.
+    pub invisible: bool,
+}
+
+/// The expression of a generated column and whether the server stores the value or computes it on read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gen {
+    pub expr: String,
+    pub stored: bool,
 }
 
 impl ColDef {
     pub fn new(name: &str, ty: &str) -> ColDef {
-        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false, serial: false, check: None }
+        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false, serial: false, check: None, generated: None, invisible: false }
     }
 
-    /// What the structure read holds about a column. Generated, invisible and compressed columns
-    /// carry attributes this definition does not write, so redefining them would lose them: those are refused.
+    /// What the structure read holds about a column. A compressed column carries an attribute this definition does not
+    /// write, so redefining it would lose it: that one is refused.
     pub fn from_column(c: &Column) -> Result<ColDef, String> {
         // Only a PostgreSQL column has a catalog kind, apart from MariaDB's JSON, which the structure read marks so the grid shows
         // it as JSON: that one is still a LONGTEXT with its CHECK and is written the MariaDB way below.
@@ -122,9 +134,16 @@ impl ColDef {
             return super::pg::ddl::col_def(c);
         }
         let extra = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
-        if extra.contains("GENERATED") || extra.contains("INVISIBLE") || extra.contains("PERSISTENT") {
-            return Err(format!("Column {} is generated or invisible. Edit it with a query.", c.name));
-        }
+        // MariaDB says PERSISTENT for a stored column in older versions and STORED in newer ones.
+        let generated = if c.is_generated() {
+            if c.generation.trim().is_empty() {
+                return Err(format!("Column {} is generated and the server did not give its expression.", c.name));
+            }
+            Some(Gen { expr: c.generation.clone(), stored: extra.contains("STORED") || extra.contains("PERSISTENT") })
+        } else {
+            None
+        };
+        let invisible = extra.contains("INVISIBLE");
         if c.full_type.to_ascii_uppercase().contains("COMPRESSED") {
             return Err(format!("Column {} is COMPRESSED, which this editor would drop. Edit it with a query.", c.name));
         }
@@ -150,13 +169,15 @@ impl ColDef {
         if on_update.as_deref().is_some_and(|s| !s.bytes().all(|b| b.is_ascii_alphanumeric() || b" _(),".contains(&b))) {
             return Err(format!("Column {} has an ON UPDATE clause that cannot be edited here.", c.name));
         }
+        // A generated column has no default of its own, so the form's "unchanged" test does not see the NULL a read gives it.
         let default = match (&c.default, c.default_expr) {
+            _ if generated.is_some() => Dv::None,
             (Some(d), true) => Dv::Expr(d.clone()),
             (Some(d), false) => Dv::Value(d.clone()),
             (None, _) if c.nullable => Dv::Null,
             (None, _) => Dv::None,
         };
-        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false, serial: false, check })
+        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false, serial: false, check, generated, invisible })
     }
 
     /// `from_column` for a column of `st`. A collation that is the table's default is left out, so an edit or an
@@ -246,6 +267,16 @@ impl IndexDef {
     }
 }
 
+/// A table option the Structure view changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TableOpt {
+    Comment(String),
+    Engine(String),
+    /// The collation the table gives to columns added later; the charset follows from its name.
+    Collation(String),
+    AutoIncrement(u64),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     Add { def: ColDef, pos: Pos },
@@ -267,6 +298,8 @@ pub enum Change {
     /// A table CHECK. Editing one is a drop and an add, staged together.
     AddCheck(CheckConstraint),
     DropCheck(String),
+    /// `was` is what the structure read held, which is also what the undo writes back, so the simulation keeps no table state.
+    Table { opt: TableOpt, was: TableOpt },
 }
 
 impl Change {
@@ -287,6 +320,13 @@ impl Change {
             Change::SetFkDeferral { name, .. } => format!("Change when foreign key {name} is checked"),
             Change::AddCheck(k) => format!("Add check {}", k.name),
             Change::DropCheck(n) => format!("Drop check {n}"),
+            Change::Table { opt, .. } => match opt {
+                TableOpt::Comment(_) => "Change the table comment".into(),
+                TableOpt::Engine(e) => format!("Change the engine to {e}"),
+                TableOpt::Collation(c) => format!("Change the default collation to {c}"),
+                // The server raises the value to the largest id plus one, so an undo that lowers it may not hold.
+                TableOpt::AutoIncrement(n) => format!("Set the next auto increment value to {n} (never below the largest id)"),
+            },
         }
     }
 }
@@ -502,3 +542,8 @@ pub(super) fn is_number(s: &str) -> bool {
 
 /// The actions a foreign key can take, as the server writes them.
 pub const FK_ACTIONS: [&str; 4] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION"];
+
+/// `a` as one of `list` in the server's spelling, so only a known action word is ever written into a statement.
+pub(in crate::db::sql) fn fk_action(list: &[&'static str], a: &str) -> Result<&'static str, String> {
+    list.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."))
+}

@@ -1113,7 +1113,7 @@ fn orders(s: &str, fks: Vec<ForeignKey>) -> TableSpec {
         uniques: vec![Unique { name: String::new(), cols: vec!["customer".into(), "code".into()] }],
         checks: vec![Check { name: "price_set".into(), expr: "price >= 0".into() }],
         fks,
-        indexes: vec![NewIndex { name: String::new(), cols: vec!["region".into()], unique: false }, NewIndex { name: "by price".into(), cols: vec!["price".into(), "code".into()], unique: true }],
+        indexes: vec![NewIndex { name: String::new(), cols: vec!["region".into()], ..Default::default() }, NewIndex { name: "by price".into(), cols: vec!["price".into(), "code".into()], kind: crate::db::sql::ddl::IndexKind::Unique, ..Default::default() }],
         ..Default::default()
     }
 }

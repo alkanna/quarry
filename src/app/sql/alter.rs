@@ -24,6 +24,8 @@ enum DMode {
     Null,
     Value,
     Expr,
+    /// The server computes the column from an expression, which `dtext` holds.
+    Generated,
 }
 
 /// The Add column and Edit column dialog.
@@ -35,6 +37,8 @@ pub(in crate::app) struct ColForm {
     orig: Option<(ColDef, Pos)>,
     dmode: DMode,
     dtext: String,
+    /// A generated column is STORED rather than VIRTUAL.
+    stored: bool,
     pos: Pos,
     /// The staged changes this one goes after.
     rest: Vec<Change>,
@@ -121,6 +125,7 @@ fn dflt_of(mode: DMode, text: &str) -> Dv {
         DMode::Null => Dv::Null,
         DMode::Value => Dv::Value(text.to_string()),
         DMode::Expr => Dv::Expr(text.to_string()),
+        DMode::Generated => Dv::None,
     }
 }
 
@@ -232,9 +237,13 @@ impl App {
     fn show_col_form(&mut self, from: Option<String>, def: ColDef, pos: Pos, rest: Vec<Change>) {
         let Some(st) = self.structure() else { return };
         let order: Vec<String> = ddl::columns_after(st, &rest).into_iter().filter(|n| Some(n) != from.as_ref()).collect();
-        let (dmode, dtext) = mode_of(&def.default);
+        let (dmode, dtext) = match &def.generated {
+            Some(g) => (DMode::Generated, g.expr.clone()),
+            None => mode_of(&def.default),
+        };
+        let stored = def.generated.as_ref().is_none_or(|g| g.stored);
         let orig = from.is_some().then(|| (def.clone(), pos.clone()));
-        self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, pos, rest, order, memo: None })));
+        self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, stored, pos, rest, order, memo: None })));
     }
 
     pub(in crate::app) fn duplicate_column(&mut self, i: usize) {
@@ -565,7 +574,7 @@ impl App {
     }
 
     pub(in crate::app) fn col_dialog(&mut self, ui: &mut egui::Ui, f: &mut ColForm, keep: &mut bool) {
-        let (dialect, ..) = self.alter_env();
+        let (dialect, version, _) = self.alter_env();
         let pg = dialect == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(600.0);
@@ -636,19 +645,32 @@ impl App {
             }
 
             form_label(ui, "Options");
-            ui.horizontal(|ui| {
+            // The mode as the frame starts: the Default row below can change it, and these boxes follow on the next frame.
+            let generated = f.dmode == DMode::Generated;
+            ui.horizontal_wrapped(|ui| {
                 if pg {
                     ui.checkbox(&mut f.def.nullable, "Allow NULL");
-                    ui.add_enabled(db::sql::pg::ddl::identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
+                    ui.add_enabled(db::sql::pg::ddl::identity_type(&f.def.ty) && !generated, egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
                     // An identity is never NULL.
                     if f.def.auto_increment {
                         f.def.nullable = false;
                     }
                 } else {
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.unsigned, "Unsigned"));
-                ui.checkbox(&mut f.def.nullable, "Allow NULL");
+                // MariaDB has no NULL or NOT NULL after a generated column and the column is always nullable, so the statement
+                // would silently drop a NOT NULL.
+                let maria_generated = dialect == Dialect::MariaDb && generated;
+                if maria_generated {
+                    f.def.nullable = true;
+                }
+                ui.add_enabled(!maria_generated, egui::Checkbox::new(&mut f.def.nullable, "Allow NULL")).on_disabled_hover_text("A generated column on MariaDB always allows NULL.");
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.zerofill, "Zero fill"));
-                ui.add_enabled(ddl::is_integer(&t), egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
+                ui.add_enabled(ddl::is_integer(&t) && !generated, egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
+                let can_hide = dialect.can_invisible_column(&version);
+                ui.add_enabled(can_hide, egui::Checkbox::new(&mut f.def.invisible, "Invisible")).on_hover_text("Left out of SELECT * and of an INSERT that names no columns").on_disabled_hover_text("Invisible columns need MySQL 8.0.23 or newer, or MariaDB 10.3.3.");
+                }
+                if generated {
+                    f.def.auto_increment = false;
                 }
             });
             ui.end_row();
@@ -658,11 +680,27 @@ impl App {
                 if !f.def.nullable && f.dmode == DMode::Null {
                     f.dmode = DMode::None;
                 }
-                segmented(ui, &mut f.dmode, &[(DMode::None, "None"), (DMode::Null, "NULL"), (DMode::Value, "Value"), (DMode::Expr, "Expression")]);
-                let on = matches!(f.dmode, DMode::Value | DMode::Expr);
-                ui.add_enabled(on, egui::TextEdit::singleline(&mut f.dtext).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text(if f.dmode == DMode::Expr { if pg { "now()" } else { "CURRENT_TIMESTAMP" } } else { "" })).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, on, "Column default"));
+                segmented(ui, &mut f.dmode, &[(DMode::None, "None"), (DMode::Null, "NULL"), (DMode::Value, "Value"), (DMode::Expr, "Expression"), (DMode::Generated, "Generated")]);
+                let on = matches!(f.dmode, DMode::Value | DMode::Expr | DMode::Generated);
+                let hint = match f.dmode { DMode::Expr if pg => "now()", DMode::Expr => "CURRENT_TIMESTAMP", DMode::Generated => "price * qty", _ => "" };
+                ui.add_enabled(on, egui::TextEdit::singleline(&mut f.dtext).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text(hint)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, on, if f.dmode == DMode::Generated { "Column generation expression" } else { "Column default" }));
             });
             ui.end_row();
+
+            if f.dmode == DMode::Generated {
+                form_label(ui, "Computed");
+                // PostgreSQL has virtual generated columns from 18.
+                // A major of 0 is a server the structure could not read a version from, which the statement check then decides.
+                let virtual_ok = !pg || self.structure().is_none_or(|st| st.pg_major == 0 || st.pg_major >= 18);
+                if !virtual_ok {
+                    f.stored = true;
+                }
+                ui.horizontal(|ui| {
+                    segmented_on(ui, &mut f.stored, &[(true, "Stored", true), (false, "Virtual", virtual_ok)]);
+                    ui.label(RichText::new(if f.stored { "Computed when the row is written, and kept." } else { "Computed each time the row is read." }).size(TXT_SMALL).color(FAINT()));
+                });
+                ui.end_row();
+            }
 
             if !pg {
             form_label(ui, "Collation");
@@ -709,6 +747,7 @@ impl App {
             }
         });
         f.def.default = dflt_of(f.dmode, &f.dtext);
+        f.def.generated = (f.dmode == DMode::Generated).then(|| ddl::Gen { expr: f.dtext.clone(), stored: f.stored });
         // A position that names a column that no longer exists would break the statement.
         if let Pos::After(c) = &f.pos && !f.order.contains(c) {
             f.pos = Pos::Keep;
