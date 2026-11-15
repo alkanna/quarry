@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.1](https://github.com/alkanna/quarry/compare/v0.48.0...v0.48.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* the SQL Query toolbar no longer cuts the bottom edge off its buttons, and the Run menu shows no bare separator for an empty script ([#246](https://github.com/alkanna/quarry/issues/246)) ([7e85d71](https://github.com/alkanna/quarry/commit/7e85d7192da3f60933d0db4672919345382da7f3))
+
 ## [0.48.0](https://github.com/alkanna/quarry/compare/v0.47.0...v0.48.0) (2026-11-15)
 
 
