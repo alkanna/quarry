@@ -318,7 +318,7 @@ impl App {
         let dialect = dialect_of(c);
         let live = LiveState { connected: c.status == Status::Ready, writable: c.writable, always_writable: self.prefs.always_writable, sql: dialect };
         match for_mongo(call) {
-            Some(true) if !mongo => return Err(("This tool works on MongoDB connections. Use select_rows, query_sql or run_shell on SQL connections.".into(), "wrong_engine")),
+            Some(true) if !mongo => return Err(("This tool works on MongoDB connections. Use select_rows, query_sql, explain_sql or run_shell on SQL connections.".into(), "wrong_engine")),
             Some(false) if mongo => return Err(("This tool works on SQL connections. Use find, aggregate or count on MongoDB.".into(), "wrong_engine")),
             _ => {}
         }

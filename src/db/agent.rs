@@ -642,6 +642,7 @@ async fn exec(job: &AgentJob, h: &sql::RunHandle) -> Res<Answer> {
         (AgentTarget::Sql(db), C::ListCollections { db: schema, .. }) => sql::agent::tables(db, schema, &job.scope).await.map_err(listing),
         (AgentTarget::Sql(db), C::Describe { ns }) => sql::agent::describe(db, &ns.db, &ns.coll, rules).await,
         (AgentTarget::Sql(db), C::SelectRows { ns, columns, wher, order, limit, offset }) => sql::agent::select_rows(db, &ns.db, &ns.coll, columns, wher, order, *limit, *offset, rules, l).await,
+        (AgentTarget::Sql(db), C::QuerySql { db: schema, sql, explain: true, .. }) => sql::agent::explain_sql(db, schema.as_deref().unwrap_or(""), sql, rules, h).await,
         (AgentTarget::Sql(db), C::QuerySql { db: schema, sql, limit, .. }) => sql::agent::query_sql(db, schema.as_deref().unwrap_or(""), sql, *limit, rules, l, h).await,
         (AgentTarget::Mongo(c), C::Insert { .. } | C::Update { .. } | C::Delete { .. } | C::AggregateInto { .. }) => mongo_write(c, job, t).await,
         (AgentTarget::Sql(db), C::SqlInsertRows { .. } | C::SqlUpdateRows { .. } | C::SqlDeleteRows { .. }) => sql::agent::write(db, job).await,

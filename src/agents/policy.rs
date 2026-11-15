@@ -87,6 +87,9 @@ pub fn decide(p: Option<&ConnPolicy>, live: LiveState, call: &Call, class: OpCla
     if p.access == Access::Read && class != OpClass::ReadData {
         return Refuse(format!("This connection is shared read only, and this call needs {}.", class_name(class)));
     }
+    if matches!(call, Call::QuerySql { explain: true, .. }) && class != OpClass::ReadData {
+        return Refuse("explain_sql explains read-only statements only (SELECT, WITH, TABLE, VALUES).".into());
+    }
     if matches!(call, Call::QuerySql { .. }) && class != OpClass::ReadData {
         return Refuse("query_sql runs read-only statements only. Use run_sql to change data.".into());
     }
@@ -349,7 +352,7 @@ mod tests {
     }
 
     fn sql(s: &str) -> Call {
-        Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: s.into(), limit: None }
+        Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: s.into(), limit: None, explain: false }
     }
 
     fn command(c: mongodb::bson::Document) -> Call {
@@ -618,7 +621,7 @@ mod tests {
         let update = Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE orders SET a = 1".into() };
         assert_eq!(decide(Some(&p), live(Dialect::MySql), &update, OpClass::RunScripts, &Grants::default(), None, false), Decision::Allow);
         // A read through query_sql may not read server files either.
-        let file = Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: "SELECT LOAD_FILE('/etc/passwd')".into(), limit: None };
+        let file = Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: "SELECT LOAD_FILE('/etc/passwd')".into(), limit: None, explain: false };
         assert!(is_refused(&decide(Some(&p), live(Dialect::MySql), &file, OpClass::ReadData, &Grants::default(), None, false)));
     }
 
@@ -635,6 +638,9 @@ mod tests {
     fn query_sql_must_be_read_only() {
         let p = pol(Access::ReadWrite, Mode::Allow);
         assert!(is_refused(&decide(Some(&p), OPEN, &sql("DELETE FROM t"), OpClass::RunScripts, &Grants::default(), None, false)));
+        let explain = Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: "DELETE FROM t".into(), limit: None, explain: true };
+        let Decision::Refuse(why) = decide(Some(&p), OPEN, &explain, OpClass::RunScripts, &Grants::default(), None, false) else { panic!("explain_sql of a write was not refused") };
+        assert!(why.starts_with("explain_sql"), "{why}");
     }
 
     #[test]

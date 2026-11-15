@@ -79,7 +79,8 @@ pub enum Call {
     Count { ns: Ns, filter: Document },
     Explain { ns: Ns, filter: Document, sort: Option<Document>, pipeline: Option<Vec<Document>> },
     SelectRows { ns: Ns, columns: Vec<String>, wher: Vec<Cond>, order: Vec<(String, bool)>, limit: Option<u32>, offset: u64 },
-    QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32> },
+    /// `explain`: the explain_sql tool, which returns the statement's plan instead of its rows.
+    QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32>, explain: bool },
     Insert { ns: Ns, docs: Vec<Document> },
     Update { ns: Ns, filter: Document, update: Update, many: bool },
     Delete { ns: Ns, filter: Document, many: bool },
@@ -199,6 +200,7 @@ fn build_tools() -> Vec<ToolDef> {
         t("explain", "Explain plan of a find (filter, sort) or of a pipeline.", coll(json!({ "filter": query_t("Query filter"), "sort": query_t("Sort"), "pipeline": { "type": ["array", "string"] } }), &[]), true, false),
         t("select_rows", "Read rows of a SQL table without writing SQL.", table(json!({ "columns": { "type": "array", "items": { "type": "string" }, "description": "Columns to return; all when left out." }, "where": where_p(), "order": { "type": "array", "items": { "type": "object", "required": ["column"], "additionalProperties": false, "properties": { "column": { "type": "string" }, "desc": { "type": "boolean" } } } }, "limit": limit_p(), "offset": { "type": "integer", "minimum": 0 } }), &[]), true, false),
         t("query_sql", "Run read-only SQL (SELECT, SHOW, EXPLAIN without ANALYZE). Refused on connections whose rules hide data.", props(with(sql_p(), json!({ "limit": limit_p() })), &["connection", "sql"]), true, false),
+        t("explain_sql", "Plan of one read-only SQL statement, as the server estimates it without running it: nodes with depth, access, index, rows and cost, and warnings such as full scans and filesorts.", props(sql_p(), &["connection", "sql"]), true, false),
         t("insert", "Insert documents into a MongoDB collection.", coll(json!({ "documents": { "type": "array", "items": { "type": "object" }, "maxItems": MAX_DOCS } }), &["documents"]), false, false),
         t("update", "Update documents with update operators or an update pipeline.", coll(json!({ "filter": query_t("Query filter"), "update": { "type": ["object", "array"], "description": "Update operators like {\"$set\": {...}} or a pipeline." }, "many": { "type": "boolean", "default": false } }), &["filter", "update"]), false, true),
         t("delete", "Delete documents matching a filter.", coll(json!({ "filter": query_t("Query filter"), "many": { "type": "boolean", "default": false } }), &["filter"]), false, true),
@@ -494,7 +496,8 @@ pub fn parse(tool: &str, args: &Value) -> Result<Call, ArgErr> {
             };
             Call::SelectRows { ns: a.ns("table")?, columns, wher: a.wher()?, order, limit: a.limit()?, offset: a.uint("offset")?.unwrap_or(0) }
         }
-        "query_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: a.limit()? },
+        "query_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: a.limit()?, explain: false },
+        "explain_sql" => Call::QuerySql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")?, limit: None, explain: true },
         "insert" => {
             let docs = a.rows("documents")?.into_iter().map(|d| match Bson::try_from(Value::Object(d)) {
                 Ok(Bson::Document(d)) => Ok(d),
@@ -876,7 +879,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_and_parses() {
         let names: Vec<&str> = tool_list().iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for t in tool_list() {
             let j = t.to_json();
             assert_eq!(j["annotations"]["openWorldHint"], false);
@@ -1063,7 +1066,7 @@ mod tests {
     #[test]
     fn classes() {
         let ns = Ns { conn: ConnRef::Id(1), db: "d".into(), coll: "c".into() };
-        let q = |sql: &str| Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: sql.into(), limit: None };
+        let q = |sql: &str| Call::QuerySql { conn: ConnRef::Id(1), db: None, sql: sql.into(), limit: None, explain: false };
         assert_eq!(classify(&q("SELECT 1"), Some(Dialect::MySql)), OpClass::ReadData);
         assert_eq!(classify(&q("SELECT 1"), Some(Dialect::Postgres)), OpClass::ReadData);
         assert_eq!(classify(&q("SELECT 1; DELETE FROM t"), Some(Dialect::MySql)), OpClass::RunScripts);
