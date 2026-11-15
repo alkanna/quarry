@@ -28,19 +28,29 @@ fn right_click(ui: &mut UiApp, label: &str) {
 }
 
 #[test]
-fn the_rail_button_switches_the_sidebar_to_the_panel_and_hides_it() {
+fn manage_in_connect_opens_the_panel_and_the_switch_leads_back() {
     let Some(mut ui) = panel() else { return };
     ui.h.state_mut().prefs.set_side_mode(SideMode::Explorer);
     ui.settle();
     assert!(ui.h.query_by_label("Group Production").is_none());
-    ui.click("Saved connections");
+    ui.click("Connect");
+    ui.click("Manage…");
     assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
     ui.show("Group Production");
-    // The active mode while the sidebar shows hides it, and the explorer button brings the explorer back.
-    ui.click("Saved connections");
-    assert!(ui.app().prefs.sidebar_hidden);
-    ui.click("Database explorer");
-    assert!(!ui.app().prefs.sidebar_hidden && ui.app().prefs.side_mode() == SideMode::Explorer);
+    // The switch at the top of the panel leads back to the other two.
+    ui.click("Tables");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
+}
+
+#[test]
+fn the_tables_and_scripts_switch_sets_the_side_mode() {
+    let Some(mut ui) = panel() else { return };
+    ui.h.state_mut().prefs.set_side_mode(SideMode::Explorer);
+    ui.settle();
+    ui.click("Scripts");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Library);
+    ui.click("Tables");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
 }
 
 #[test]

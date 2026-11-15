@@ -1140,7 +1140,7 @@ pub(crate) const TAB_STRIP_H: f32 = 34.0;
 
 pub(crate) const STATUS_H: f32 = 26.0;
 
-pub(crate) const RAIL_W: f32 = 44.0;
+pub(crate) const RAIL_W: f32 = 76.0;
 
 pub(crate) const TABLE_HEAD_H: f32 = 30.0;
 

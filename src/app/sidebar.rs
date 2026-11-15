@@ -1,7 +1,10 @@
-//! The sidebar: connection picker, database tree and the jump palette.
+//! The sidebar: the active connection's identity card, the database tree and the jump palette.
 
 use super::*;
 use crate::ui::fold;
+
+/// A connection with more databases than this lists its recently opened ones above them.
+const RECENT_MIN_DBS: usize = 8;
 
 /// The id a database's open and close animation in the explorer goes by.
 fn db_fold_id(conn: u64, db: &str) -> egui::Id {
@@ -120,7 +123,6 @@ pub(super) fn tag_color(tag: &str) -> Color32 {
 
 /// The color that marks a connection as risky: red for production-like tags, amber for staging-like ones, none for
 /// the rest. Matches the same words as `tag_color`.
-#[allow(dead_code)] // used by the navigation workstreams that build on this commit
 pub(super) fn tag_level(tag: &str) -> Option<Color32> {
     let t = tag.trim().to_ascii_lowercase();
     match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
@@ -132,7 +134,6 @@ pub(super) fn tag_level(tag: &str) -> Option<Color32> {
 
 /// What a connection is called, what it runs and where it lives, for headers and pickers. The version is left out
 /// until the server has answered.
-#[allow(dead_code)] // used by the navigation workstreams that build on this commit
 pub(super) fn conn_label(c: &Conn) -> (String, String, String) {
     let (_, product) = super::rail::engine_mark(c.meta.engine, &c.server.product);
     let product = if c.server.version.is_empty() { product.to_string() } else { format!("{product} {}", c.server.version) };
@@ -255,10 +256,22 @@ impl App {
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test-sidebar-rect"), shown.response.rect));
     }
 
-    /// The database explorer: connection picker, tree filter and the tree of the active connection.
+    /// The Tables and Scripts switch that heads the explorer and the library. Neither panel is closed by it: it only says
+    /// which one the sidebar shows, so the rail's tiles stay the one way to change connection.
+    pub(super) fn side_switch(&mut self, ui: &mut egui::Ui) {
+        let was = self.prefs.side_mode();
+        let mut mode = was;
+        segmented_fill(ui, &mut mode, &[(SideMode::Explorer, "Tables", true), (SideMode::Library, "Scripts", library::panel::READY)]);
+        if mode != was {
+            self.prefs.set_side_mode(mode);
+            self.save_prefs();
+        }
+    }
+
+    /// The database explorer: the Tables and Scripts switch, the active connection's card, tree filter and the tree.
     pub(super) fn explorer_panel(&mut self, ui: &mut egui::Ui) {
-        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
-        ui.add_space(6.0);
+        self.side_switch(ui);
+        ui.add_space(8.0);
         self.conn_picker(ui);
         ui.add_space(8.0);
         let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
@@ -307,114 +320,103 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
     }
 
+    /// The identity card of the active connection: logo, name, the whole tag, product with its version and host, and a menu
+    /// for what can be done to the connection. Changing connection is the rail's job, so the card lists none.
     pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
-        // Looked up on the field, not through `conn`, so the popup below can borrow other fields of the app mutably.
+        // Looked up on the field, not through `conn`, so the actions below can borrow other fields of the app mutably.
         let cur = self.active.and_then(|id| self.conns.iter().find(|c| c.meta.id == id));
-        let demo_picker = std::mem::take(&mut self.conns_ui.demo_picker);
-        let (name, tag, dot) = match cur {
-            Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
-            None => ("Add a connection".to_string(), String::new(), FAINT()),
+        let width = ui.available_width();
+        let Some(c) = cur else {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 40.0), Sense::click());
+            field_frame(ui, rect, &resp, false);
+            let g = ui.painter().layout_no_wrap("Add a connection".into(), FontId::proportional(TXT_TITLE), BRIGHT());
+            ui.painter().galley(egui::pos2(rect.left() + 14.0, rect.center().y - g.size().y / 2.0), g, BRIGHT());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add a connection"));
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.new_conn_modal();
+            }
+            return;
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::click());
-        field_frame(ui, rect, &resp, false);
+        let (name, product, host) = conn_label(c);
+        let tag = c.meta.tag.clone();
+        let id = c.meta.id;
+        let h = if tag.is_empty() { 64.0 } else { 80.0 };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, h), Sense::hover());
         let p = ui.painter();
-        p.circle_filled(egui::pos2(rect.left() + 14.0, rect.center().y), 4.0, dot);
-        chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
-        paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
-        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connections"));
-        if demo_picker {
-            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+        p.rect(rect, R_LG, RAISED(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        let (mark, _) = super::rail::engine_mark(c.meta.engine, &c.server.product);
+        let color = super::rail::mark_color(mark);
+        let logo = egui::Rect::from_min_size(rect.left_top() + egui::vec2(12.0, 14.0), egui::vec2(32.0, 32.0));
+        p.rect_filled(logo, R_MD, tint(color, 48));
+        if let Some(tex) = super::rail::engine_logo(ui.ctx(), mark) {
+            p.image(tex.id(), egui::Rect::from_center_size(logo.center(), egui::vec2(20.0, 20.0)), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), color);
         }
-        if cur.is_none() && resp.clicked() {
-            return self.new_conn_modal();
+        let dot = logo.right_bottom() - egui::vec2(1.0, 1.0);
+        p.circle_filled(dot, 4.5, RAISED());
+        p.circle_filled(dot, 3.0, status_color(&c.status));
+        let x = logo.right() + 10.0;
+        // The menu button takes the right end of the first line.
+        let text_w = rect.right() - x - 38.0;
+        let mut job = LayoutJob::single_section(name.clone(), ui_fmt(TXT_TITLE + 1.0, BRIGHT(), W_SEMIBOLD, 0.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(text_w.max(0.0));
+        let g = p.layout_job(job);
+        p.galley(egui::pos2(x, rect.top() + 24.0 - g.size().y / 2.0), g, BRIGHT());
+        let mut cy = rect.top() + 24.0;
+        if !tag.is_empty() {
+            cy += 22.0;
+            let g = truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, rect.right() - x - 26.0);
+            let chip = egui::Rect::from_min_size(egui::pos2(x, cy - 9.0), egui::vec2(g.size().x + 14.0, 18.0));
+            paint_chip(p, chip, g, tag_color(&tag), true, 0);
         }
-        let mut pick = None;
-        let mut new = false;
-        let mut cloud = false;
-        let mut remove = None;
+        cy += 20.0;
+        let info = if host.is_empty() { product } else { format!("{product} \u{b7} {host}") };
+        let g = truncated(p, &info, FontId::monospace(TXT_CAPTION), FAINT(), rect.right() - x - 10.0);
+        p.galley(egui::pos2(x, cy - g.size().y / 2.0), g, FAINT());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Group, true, format!("Connection {name}")));
         let mut edit = None;
         let mut refresh = None;
         let mut users = None;
-        let mut manage = false;
-        // The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
-        let mongo_active = self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql());
-        // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
-        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width().max(320.0)).show(|ui| {
-            menu_look(ui);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(10.0);
-                caption(ui, "CONNECTIONS");
-            });
-            ui.add_space(2.0);
-            // Only the list scrolls, so the actions below stay reachable however many connections there are.
-            let room = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 260.0).max(4.0 * 34.0);
-            // The menu was not drawn last frame, so it just opened: bring the active connection into view once.
-            let seen = egui::Id::unique("conn-menu-frame");
-            let frame = ui.ctx().cumulative_frame_nr();
-            let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
-            ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
-            if opened {
-                self.conns_ui.picker_filter.clear();
-            }
-            conns_panel::picker_filter(ui, &mut self.conns_ui.picker_filter, opened);
-            egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, opened) {
-                    pick = Some(id);
-                    ui.close();
-                }
-            });
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(2.0);
-            if ui.button("+  New connection…").clicked() {
-                new = true;
-                ui.close();
-            }
-            if !mongo_active && ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
-                cloud = true;
-                ui.close();
-            }
-            if ui.button("Manage groups…").on_hover_text("Open the Connections panel").clicked() {
-                manage = true;
-                ui.close();
-            }
-            if let Some(c) = cur {
-                if ui.button(format!("Edit \"{}\"…", c.meta.name)).clicked() {
-                    edit = Some(c.meta.id);
+        let mut server = None;
+        let mut disconnect = None;
+        let mut remove = None;
+        let menu = egui::Rect::from_min_size(egui::pos2(rect.right() - 34.0, rect.top() + 8.0), egui::vec2(28.0, BUTTON_H));
+        ui.put(menu, |ui: &mut egui::Ui| {
+            let r = dots_menu(ui, |ui| {
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+                if ui.button("Edit connection\u{2026}").clicked() {
+                    edit = Some(id);
                     ui.close();
                 }
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
-                    refresh = Some(c.meta.id);
+                    refresh = Some(id);
                     ui.close();
                 }
                 let (label, act) = match c.meta.engine {
-                    db::sql::Engine::MySql => ("Users and privileges…", SideAct::SqlUsers),
-                    db::sql::Engine::Postgres => ("Roles and privileges…", SideAct::SqlUsers),
-                    db::sql::Engine::Mongo => ("Users and roles…", SideAct::Users),
+                    db::sql::Engine::MySql => ("Users and privileges\u{2026}", SideAct::SqlUsers),
+                    db::sql::Engine::Postgres => ("Roles and privileges\u{2026}", SideAct::SqlUsers),
+                    db::sql::Engine::Mongo => ("Users and roles\u{2026}", SideAct::Users),
                 };
                 if c.status == Status::Ready && ui.button(label).clicked() {
-                    users = Some((c.meta.id, act));
+                    users = Some((id, act));
                     ui.close();
                 }
-                ui.add_space(2.0);
+                if ui.button("Server status").clicked() {
+                    server = Some(id);
+                    ui.close();
+                }
                 ui.separator();
-                ui.add_space(2.0);
-                if danger(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
-                    remove = Some((c.meta.id, c.meta.name.clone()));
+                if danger_item(ui, "Disconnect").clicked() {
+                    disconnect = Some(id);
                     ui.close();
                 }
-            }
-            ui.add_space(2.0);
+                if danger_item(ui, format!("Remove \"{}\"\u{2026}", c.meta.name)).clicked() {
+                    remove = Some((id, c.meta.name.clone()));
+                    ui.close();
+                }
+            });
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connection menu"));
+            r
         });
-        if manage {
-            self.prefs.set_side_mode(SideMode::Connections);
-            self.prefs.sidebar_hidden = false;
-            self.save_prefs();
-        }
         if let Some(id) = edit {
             self.edit_conn(id);
         }
@@ -424,14 +426,11 @@ impl App {
         if let Some(id) = refresh && !self.demo {
             self.connect(id);
         }
-        if let Some(id) = pick {
-            self.activate(id);
+        if let Some(id) = server {
+            self.open_server(id);
         }
-        if new {
-            self.new_conn_modal();
-        }
-        if cloud {
-            self.open_cloud_browser(false);
+        if let Some(id) = disconnect {
+            self.disconnect(id);
         }
         if let Some((id, name)) = remove {
             self.modal = Some(Modal::Typed {
@@ -543,6 +542,7 @@ impl App {
         let filter = self.tree_filter.to_lowercase();
         let cur_sel = self.t().map(|t| t.sel.clone());
         let mut toggle = None;
+        let mut open_recent: Option<String> = None;
         let mut open = None;
         let mut side: Vec<SideAct> = Vec::new();
         let mut routine_acts: Vec<RAct> = Vec::new();
@@ -587,6 +587,30 @@ impl App {
             let pg = c.meta.engine == db::sql::Engine::Postgres;
             let engine = c.meta.engine;
             let writable = c.writable;
+            // Quick switching for a long list: the databases opened last, above the full list. A filter is looking for
+            // something else, and a short list has them all in sight.
+            let recent: Vec<&String> = if filter.is_empty() && c.dbs.len() > RECENT_MIN_DBS { self.prefs.recent_dbs(id).iter().filter(|d| c.dbs.iter().any(|(n, _)| n == *d)).take(3).collect() } else { Vec::new() };
+            if !recent.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    caption(ui, "RECENT");
+                });
+                for d in &recent {
+                    let r = side_row(ui, SIDE_ROW_H, 0.0, false, &format!("Recent {d}"), |p, r| {
+                        paint_clock(p, egui::pos2(r.left() + 11.0, r.center().y), FAINT());
+                        p.text(egui::pos2(r.left() + 26.0, r.center().y), egui::Align2::LEFT_CENTER, d.as_str(), FontId::proportional(TXT_TITLE), TEXT());
+                    });
+                    if r.clicked() {
+                        open_recent = Some((*d).clone());
+                    }
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    caption(ui, "ALL DATABASES");
+                });
+            }
             for (db_name, colls) in &c.dbs {
                 // A PostgreSQL database lists the tables of the schema picked in its switcher; `colls` holds its schemas.
                 let picked = self.ns_of(id, db_name);
@@ -956,6 +980,12 @@ impl App {
         }
         if let Some((d, schema)) = pick_schema {
             self.pg_set_schema(id, &d, schema);
+        }
+        if let Some(d) = open_recent {
+            // Like a click on the database in the tree, except that it never closes one that is open, and the tree scrolls to it.
+            fold::start(ui.ctx(), db_fold_id(id, &d), true);
+            self.reveal = Some((id, d.clone(), None));
+            self.open_dbs.insert((id, d));
         }
         if let Some(d) = toggle {
             let open = !self.open_dbs.remove(&(id, d.clone()));

@@ -202,7 +202,8 @@ fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
     let Some(mut ui) = demo_ui(crowded) else { return };
     ui.show("Switch to c39");
     let rect = |ui: &UiApp, label: &str| ui.h.get_by_label_contains(label).rect();
-    let (top, bottom) = (rect(&ui, "Server status").bottom(), rect(&ui, "Settings (Cmd+,)").top());
+    // The tiles scroll between the top of the rail and the Connect tile, which stays pinned above Settings.
+    let (top, bottom) = (rect(&ui, "Switch to c0").top() - 1.0, rect(&ui, "Connect").top());
     let settings = rect(&ui, "Settings (Cmd+,)");
     assert!(settings.bottom() <= 900.0, "Settings is off screen at {settings:?}");
     let first = rect(&ui, "Switch to c0");
@@ -220,6 +221,7 @@ fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
     assert!(last.top() >= top && last.bottom() <= bottom, "the last tile scrolled into view, at {last:?} between {top} and {bottom}");
     assert!(rect(&ui, "Switch to c0").bottom() < top, "the first tile scrolled out of view");
     assert_eq!(rect(&ui, "Settings (Cmd+,)"), settings, "Settings stays put");
+    assert_eq!(rect(&ui, "Connect").top(), bottom, "Connect stays put");
     // And back up.
     for _ in 0..10 {
         ui.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 400.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown, modifiers: egui::Modifiers::NONE });
@@ -254,4 +256,41 @@ fn the_status_bar_server_button_opens_the_server_window() {
     let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };
     ui.click("Server");
     assert!(ui.app().server.is_some(), "Server in the status bar opened nothing");
+}
+
+/// The Mongo demo, the MySQL demo and the saved but closed connections of the Connections panel demo, with the explorer showing.
+fn with_saved(a: &mut App) {
+    a.load_demo();
+    a.demo_conns("panel");
+    a.prefs.set_side_mode(SideMode::Explorer);
+}
+
+#[test]
+fn connect_lists_the_saved_connections_and_activates_a_closed_one() {
+    let Some(mut ui) = demo_ui(with_saved) else { return };
+    let closed = ui.app().conns.iter().find(|c| c.status == Status::Idle).map(|c| (c.meta.id, c.meta.name.clone())).expect("a closed connection");
+    assert!(ui.h.query_all_by_label(&format!("Switch to {}", closed.1)).next().is_none(), "a closed connection has no tile");
+    ui.click("Connect");
+    ui.show("Filter connections");
+    ui.show("Manage\u{2026}");
+    ui.show("New connection\u{2026}");
+    ui.click(&closed.1);
+    assert_eq!(ui.app().active, Some(closed.0), "picking a saved connection did not activate it");
+}
+
+#[test]
+fn connect_manage_opens_the_connections_panel() {
+    let Some(mut ui) = demo_ui(with_saved) else { return };
+    ui.click("Connect");
+    ui.click("Manage\u{2026}");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    assert!(!ui.app().prefs.sidebar_hidden);
+}
+
+#[test]
+fn a_tile_menu_opens_the_server_window_of_its_connection() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    right_click(&mut ui, &format!("Switch to {}", ui.app().conns[0].meta.name));
+    ui.click("Server status");
+    assert!(ui.app().sql_server.is_some(), "Server status in the tile menu opened nothing");
 }

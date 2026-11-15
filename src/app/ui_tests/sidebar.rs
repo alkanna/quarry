@@ -57,6 +57,16 @@ fn an_open_mysql_database_shows_loading_then_a_failure_with_retry() {
 }
 
 #[test]
+fn the_identity_card_menu_opens_the_server_window() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let name = ui.app().conn(ui.app().active.expect("an active connection")).map(|c| c.meta.name.clone()).unwrap_or_default();
+    ui.show(&format!("Connection {name}"));
+    ui.click("Connection menu");
+    ui.click("Server status");
+    assert!(ui.app().sql_server.is_some(), "Server status in the card menu opened nothing");
+}
+
+#[test]
 fn database_menus_open_a_mongo_shell_and_the_sql_server_window() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let conn = ui.app().tabs[0].sel.conn;
