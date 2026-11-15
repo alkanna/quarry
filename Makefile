@@ -25,12 +25,13 @@ PGBOUNCER = postgres://postgres:quarry@$(ADDR):$(call P,56432)/postgres
 MYSQL = mysql://root:quarry@$(ADDR):$(call P,53306)
 MARIADB = mariadb://root:quarry@$(ADDR):$(call P,53307)
 MONGO = mongodb://$(ADDR):$(call P,57017)/?directConnection=true
-# The live tests mostly wait on the servers, so they run on 32 threads, which takes PostgreSQL past its default of 100
-# connections. The servers hold only test data, so they skip flushing to disk.
+# The live tests mostly wait on the servers, so they run on 32 threads, which takes PostgreSQL and MySQL past their default
+# connection limits. Not 500 for MySQL: a test proves SET GLOBAL max_connections = 500 was refused. The servers hold only
+# test data, so they skip flushing to disk.
 LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)'
 
-PG_FAST = -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=300
-MY_FAST = --innodb-flush-log-at-trx-commit=0 --sync-binlog=0
+PG_FAST = -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=500
+MY_FAST = --innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --max-connections=400
 
 # Starts a stopped container again, or creates it. One left in "created" never started (its port was taken, say) and
 # would come up without its port, so it is made again.
