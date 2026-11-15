@@ -452,6 +452,45 @@ pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool)
     .inner
 }
 
+/// The Run of a query line: on the accent while the line holds a query the rows below did not come from (`loud`), else a quiet
+/// outlined button of the same size, so the line does not reflow. The tip is named "Run options" and opens a menu of other ways
+/// to run or copy the query. Returns the button, then the tip.
+pub(crate) fn run_split_state(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool) -> (egui::Response, egui::Response) {
+    if loud {
+        let (main, tip) = run_split(ui, text, keys, true);
+        tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Run options"));
+        return (main, tip);
+    }
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        const TRI: f32 = 8.0;
+        let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, TEXT(), W_SEMIBOLD, 0.0)));
+        let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, FAINT(), 400.0)));
+        let content = TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
+        let (rect, main) = ui.allocate_exact_size(egui::vec2((content + 28.0).max(96.0), 26.0), Sense::click());
+        let p = ui.painter();
+        p.rect(rect, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, shade_fill(PANEL(), state_of(&main)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        let (cy, mut x) = (rect.center().y, rect.center().x - content / 2.0);
+        p.add(egui::Shape::convex_polygon(vec![egui::pos2(x, cy - TRI * 0.62), egui::pos2(x + TRI, cy), egui::pos2(x, cy + TRI * 0.62)], MUTED(), Stroke::NONE));
+        x += TRI + 8.0;
+        let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
+        p.galley(centered(&label, x), label.clone(), TEXT());
+        x += label.size().x + 10.0;
+        p.galley(centered(&hint, x), hint, FAINT());
+        focus_ring(ui, &main, rect, R_MD as f32);
+        let enabled = ui.is_enabled();
+        main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+        let (rect, tip) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
+        let p = ui.painter();
+        p.rect(rect, egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, shade_fill(PANEL(), state_of(&tip)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, MUTED());
+        focus_ring(ui, &tip, rect, R_MD as f32);
+        tip.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Run options"));
+        (main.on_hover_cursor(egui::CursorIcon::PointingHand), tip.on_hover_cursor(egui::CursorIcon::PointingHand))
+    })
+    .inner
+}
+
 fn run_face(ui: &mut egui::Ui, text: &str, keys: &str, corners: egui::CornerRadius) -> egui::Response {
     const TRI: f32 = 8.0;
     let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ON_PRIMARY(), W_SEMIBOLD, 0.0)));

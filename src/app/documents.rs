@@ -326,69 +326,125 @@ impl App {
         let fid = query_id("QUERY");
         let focused = ui.memory(|m| m.has_focus(fid));
         let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-        let edge = if t.bar_err.is_some() { ALERT() } else if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+        // A tab this bar has not drawn before takes the texts it opens with as what ran, which also covers the demo and restored tabs.
+        if t.ran_txt.is_none() {
+            t.ran_txt = Some(super::run::bar_texts(t));
+        }
+        let dirty = super::run::query_dirty(t);
+        let edge = if t.bar_err.is_some() { ALERT() } else if dirty || focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+        let bar_err = t.bar_err.clone();
+        let (mut set, mut picked) = ([false; 6], None);
+        // The option chips: the name each shows, the label of its editor, and whether it is set.
+        const OPTS: [(&str, &str); 6] = [("sort", "SORT"), ("project", "PROJECT"), ("limit", "limit"), ("skip", "skip"), ("hint", "HINT"), ("collation", "COLLATION")];
+        for (i, text) in [&t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt].into_iter().enumerate() {
+            set[i] = !text.is_empty();
+        }
         let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                // Room for the history and library icons and Run, but never so little the box vanishes.
-                let w = (ui.available_width() - 150.0).max(120.0);
-                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                // Room for the edited note, the history and library icons and Run with its tip.
+                let left_w = (ui.available_width() - 290.0).max(240.0);
+                ui.allocate_ui_with_layout(egui::vec2(left_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                    let w = (left_w * 0.6).clamp(220.0, left_w);
+                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                    // A pasted shell query carries its own sort, projection, limit and skip.
+                    if shell {
+                        return;
+                    }
+                    let fit = |ui: &egui::Ui, s: &str, hint: &str| {
+                        let s = if s.is_empty() { hint } else { s.lines().max_by_key(|l| l.len()).unwrap_or(s) };
+                        (text_w(ui, s, mono.clone()) + 8.0).clamp(24.0, 420.0)
+                    };
+                    // Some(kind) is a query box with completion; hint gets the sort box's, since index
+                    // keys are written like a sort. None is a plain one-line box. An option shows as a chip while it is set
+                    // or its editor has focus, which is how the "+" menu starts an empty one.
+                    for (name, label, kind, text, hint) in [
+                        ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
+                        ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
+                        ("limit", "limit", None, &mut t.limit_txt, "0"),
+                        ("skip", "skip", None, &mut t.skip_txt, "0"),
+                        ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
+                        ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
+                    ] {
+                        let id = query_id(label);
+                        if text.is_empty() && !ui.memory(|m| m.has_focus(id)) {
+                            continue;
+                        }
+                        run |= opt_chip(ui, name, id, text, |ui, text| {
+                            let w = fit(ui, text, hint);
+                            if let Some(kind) = kind {
+                                return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                            }
+                            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
+                            if r.changed() && matches!(name, "limit" | "skip") {
+                                text.retain(|c| c.is_ascii_digit());
+                            }
+                            r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                        });
+                    }
+                    let plus = super::sql::bar::add_button(ui);
+                    let items: Vec<_> = OPTS.iter().zip(set).map(|((name, _), on)| super::sql::bar::AddItem { label: *name, note: "", group: "OPTIONS", on, keyword: false }).collect();
+                    picked = super::sql::bar::add_menu(&plus, &items, &mut help);
+                });
                 // A fixed height, or a right-to-left layout takes all the height left in the bar.
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
+                    let (main, tip) = run_split_state(ui, "Run", "↵", dirty);
+                    if main.on_hover_text("Enter").clicked() {
                         run = true;
                     }
+                    egui::Popup::menu(&tip).width(220.0).show(|ui| {
+                        menu_list(ui);
+                        if super::sql::bar::run_item(ui, "Run", "↵").clicked() {
+                            run = true;
+                            ui.close();
+                        }
+                        popover_divider(ui);
+                        if super::sql::bar::run_item(ui, "Explain", "⌘E").on_hover_text("Explain the query that ran").clicked() {
+                            explain = true;
+                            ui.close();
+                        }
+                        ui.menu_button("Copy as code", |ui| {
+                            menu_look(ui);
+                            for l in db::Lang::ALL {
+                                if ui.button(l.name()).clicked() {
+                                    code_lang = Some(l);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     vsep(ui, 6.0);
                     let button = picker_button(ui, &pick, true, &mut pick_acts);
                     demo_pick.get_or_insert(button);
                     history_menu(ui, &hist, &index_sorts, None, &mut qacts);
+                    if dirty {
+                        ui.label(RichText::new("edited").size(TXT_SMALL).color(PRIMARY()));
+                    }
                 });
             });
+            // Nothing was sent, so the rows below are still those of the last query that ran.
+            if let Some(e) = &bar_err {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                    paint_alert(ui.painter(), r.center(), ALERT());
+                    ui.add(egui::Label::new(RichText::new(e.as_str()).size(TXT_SMALL).color(TEXT())).wrap());
+                });
+            }
         });
         if focused {
             ui.painter().rect_stroke(bar.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
         }
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            // A pasted shell query carries its own sort, projection, limit and skip.
-            if !shell {
-                let fit = |ui: &egui::Ui, s: &str, hint: &str| {
-                    let s = if s.is_empty() { hint } else { s.lines().max_by_key(|l| l.len()).unwrap_or(s) };
-                    (text_w(ui, s, mono.clone()) + 8.0).clamp(24.0, 420.0)
-                };
-                // Some(kind) is a query box with completion; hint gets the sort box's, since index
-                // keys are written like a sort. None is a plain one-line box.
-                for (name, label, kind, text, hint) in [
-                    ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
-                    ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
-                    ("limit", "limit", None, &mut t.limit_txt, "0"),
-                    ("skip", "skip", None, &mut t.skip_txt, "0"),
-                    ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
-                    ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
-                ] {
-                    let id = query_id(label);
-                    run |= opt_chip(ui, name, id, text, |ui, text| {
-                        let w = fit(ui, text, hint);
-                        if let Some(kind) = kind {
-                            return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
-                        }
-                        let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
-                        if r.changed() && matches!(name, "limit" | "skip") {
-                            text.retain(|c| c.is_ascii_digit());
-                        }
-                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-                    });
-                }
-            }
-            right_group(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                help |= quiet(ui, "?").on_hover_text("Query shortcuts and syntax").clicked();
-                code_menu(ui, &mut code_lang);
-                explain |= quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
-            });
-        });
+        if let Some(name) = picked && let Some((_, label)) = OPTS.iter().find(|(n, _)| *n == name) {
+            ui.memory_mut(|m| m.request_focus(query_id(label)));
+        }
+        if dirty {
+            ui.add_space(8.0);
+            run |= super::sql::bar::stale_note(ui);
+        }
         t.paths = paths;
         t.field_info = fields;
         // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
@@ -433,15 +489,6 @@ impl App {
         }
         if let Some(l) = code_lang {
             self.show_code(l, true);
-        }
-        // Nothing was sent, so the rows below are still those of the last query that ran.
-        if let Some(e) = self.t().and_then(|t| t.bar_err.clone()) {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-                paint_alert(ui.painter(), r.center(), ALERT());
-                ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(TEXT())).wrap());
-            });
         }
         self.agent_notice(ui);
         ui.add_space(10.0);
@@ -594,7 +641,7 @@ impl App {
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
-        let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some());
+        let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some() || super::run::query_dirty(t));
         if let (true, true, Some((id, ..))) = (docs.is_empty(), conn_failed, &closed) {
             self.conn_failed_card(ui, *id);
         } else if docs.is_empty() && self.failed_panel(ui, view) {

@@ -43,6 +43,7 @@ mod sql_checks;
 mod sql_create;
 mod sql_dump;
 mod sql_edit;
+mod queryline;
 mod sql_explain;
 mod sql_format;
 mod sql_import;
