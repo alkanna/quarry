@@ -116,6 +116,8 @@ pub(super) struct UiPrefs {
     pub(super) keep_toasts: bool,
     /// The database explorer collapsed from the activity rail.
     pub(super) sidebar_hidden: bool,
+    /// Per connection id: the databases most recently opened, newest first, for quick switching.
+    pub(super) recent_dbs: HashMap<u64, Vec<String>>,
     /// Height the person dragged the SQL Query and Shell editors to; 0 sizes them to their text.
     pub(super) query_editor_h: f32,
     pub(super) shell_editor_h: f32,
@@ -281,9 +283,34 @@ pub(super) struct SavedStage {
     pub(super) on: bool,
 }
 
+/// How many databases are remembered per connection.
+const RECENT_DBS: usize = 5;
+
+impl UiPrefs {
+    #[allow(dead_code)] // used by the navigation workstreams that build on this commit
+    pub(super) fn recent_dbs(&self, conn: u64) -> &[String] {
+        self.recent_dbs.get(&conn).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Moves `db` to the front of the connection's list. Returns whether the list changed, so a caller saves only then.
+    pub(super) fn note_recent_db(&mut self, conn: u64, db: &str) -> bool {
+        if db.is_empty() {
+            return false;
+        }
+        let list = self.recent_dbs.entry(conn).or_default();
+        if list.first().is_some_and(|d| d == db) {
+            return false;
+        }
+        list.retain(|d| d != db);
+        list.insert(0, db.to_string());
+        list.truncate(RECENT_DBS);
+        true
+    }
+}
+
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, vim: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, dark_theme: String::new(), light_theme: String::new(), ui_font: String::new(), data_font: String::new(), soft: false, accent: String::new(), reading_line: false, group_digits: false, lock_scroll_axis: true, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new(), side_panel: String::new(), lib_scope_all: false, lib_preview_h: 0.0 }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, vim: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, dark_theme: String::new(), light_theme: String::new(), ui_font: String::new(), data_font: String::new(), soft: false, accent: String::new(), reading_line: false, group_digits: false, lock_scroll_axis: true, keep_toasts: false, sidebar_hidden: false, recent_dbs: HashMap::new(), query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new(), side_panel: String::new(), lib_scope_all: false, lib_preview_h: 0.0 }
     }
 }
 
@@ -547,6 +574,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_databases_keep_the_newest_five_first() {
+        let mut p = UiPrefs::default();
+        assert!(p.recent_dbs(1).is_empty());
+        for d in ["a", "b", "c", "d", "e", "f"] {
+            assert!(p.note_recent_db(1, d));
+        }
+        assert_eq!(p.recent_dbs(1), ["f", "e", "d", "c", "b"]);
+        // An older one moves to the front instead of repeating, and the front one is not a change.
+        assert!(p.note_recent_db(1, "c"));
+        assert_eq!(p.recent_dbs(1), ["c", "f", "e", "d", "b"]);
+        assert!(!p.note_recent_db(1, "c"));
+        assert!(!p.note_recent_db(1, ""));
+        assert!(p.recent_dbs(2).is_empty());
+    }
+
+    #[test]
+    fn prefs_saved_before_recent_databases_still_load() {
+        let p: UiPrefs = serde_json::from_str(r#"{"sidebar_hidden":true}"#).unwrap();
+        assert!(p.sidebar_hidden && p.recent_dbs.is_empty());
+    }
 
     #[test]
     fn saved_tabs_without_the_run_target_still_load() {

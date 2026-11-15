@@ -118,6 +118,28 @@ pub(super) fn tag_color(tag: &str) -> Color32 {
     }
 }
 
+/// The color that marks a connection as risky: red for production-like tags, amber for staging-like ones, none for
+/// the rest. Matches the same words as `tag_color`.
+#[allow(dead_code)] // used by the navigation workstreams that build on this commit
+pub(super) fn tag_level(tag: &str) -> Option<Color32> {
+    let t = tag.trim().to_ascii_lowercase();
+    match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
+        "production" | "prod" | "live" => Some(ALERT()),
+        "staging" | "preprod" | "uat" => Some(WARNING()),
+        _ => None,
+    }
+}
+
+/// What a connection is called, what it runs and where it lives, for headers and pickers. The version is left out
+/// until the server has answered.
+#[allow(dead_code)] // used by the navigation workstreams that build on this commit
+pub(super) fn conn_label(c: &Conn) -> (String, String, String) {
+    let (_, product) = super::rail::engine_mark(c.meta.engine, &c.server.product);
+    let product = if c.server.version.is_empty() { product.to_string() } else { format!("{product} {}", c.server.version) };
+    let host = if c.server.host.is_empty() { host_of(&c.masked_uri) } else { c.server.host.clone() };
+    (c.meta.name.clone(), product, host)
+}
+
 pub(super) fn status_color(s: &Status) -> Color32 {
     match s {
         Status::Ready => SUCCESS(),
@@ -1199,6 +1221,19 @@ fn rows_short(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_production_and_staging_tags_have_a_level() {
+        assert_eq!(tag_level("Production"), Some(ALERT()));
+        assert_eq!(tag_level(" prod-eu"), Some(ALERT()));
+        assert_eq!(tag_level("live"), Some(ALERT()));
+        assert_eq!(tag_level("Staging"), Some(WARNING()));
+        assert_eq!(tag_level("UAT"), Some(WARNING()));
+        assert_eq!(tag_level("dev"), None);
+        assert_eq!(tag_level("local"), None);
+        assert_eq!(tag_level("internal"), None);
+        assert_eq!(tag_level(""), None);
+    }
 
     #[test]
     fn row_estimates_are_short() {

@@ -103,6 +103,9 @@ impl App {
     /// `open_collection` without the first read, for a caller that sets the query before reading. True when the
     /// tab is a new one, which has nothing to show yet.
     pub(super) fn open_tab(&mut self, sel: Sel, how: Open) -> bool {
+        if self.prefs.note_recent_db(sel.conn, &sel.db) {
+            self.save_prefs();
+        }
         // Before reset_doc_state, which closes the editors holds_work checks for.
         let keep = self.holds_work(self.cur);
         let shown = match how {

@@ -229,3 +229,29 @@ fn the_rail_scrolls_its_tiles_and_keeps_settings_on_screen() {
     let first = rect(&ui, "Switch to c0");
     assert!(first.top() >= top && first.bottom() <= bottom, "the first tile scrolled back, at {first:?}");
 }
+
+#[test]
+fn the_title_bar_toggle_hides_and_shows_the_sidebar() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let was = ui.app().prefs.sidebar_hidden;
+    ui.click("Toggle sidebar");
+    assert_eq!(ui.app().prefs.sidebar_hidden, !was);
+    ui.click("Toggle sidebar");
+    assert_eq!(ui.app().prefs.sidebar_hidden, was);
+}
+
+#[test]
+fn the_status_bar_server_button_waits_for_a_connection() {
+    // The demo has no live session, so the button is there but does nothing.
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    ui.show("Server");
+    assert!(ui.h.get_by_label("Server").accesskit_node().is_disabled());
+    assert!(ui.app().server.is_none());
+}
+
+#[test]
+fn the_status_bar_server_button_opens_the_server_window() {
+    let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };
+    ui.click("Server");
+    assert!(ui.app().server.is_some(), "Server in the status bar opened nothing");
+}
