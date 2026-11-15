@@ -53,13 +53,14 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
       # The SQL engines the live tests cover, oldest and newest PostgreSQL included, so the read-only guards and
       # writes run against real servers on every CI run instead of only on a developer's machine.
+      # They hold only test data, so they skip flushing to disk, as in the Makefile.
       - name: SQL servers for the live tests
         if: matrix.os == 'ubuntu-22.04'
         run: |
-          docker run -d --name mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=quarry mysql:8.4
-          docker run -d --name mariadb -p 3307:3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4
-          docker run -d --name pg18 -p 5432:5432 -e POSTGRES_PASSWORD=quarry postgres:18
-          docker run -d --name pg13 -p 5433:5432 -e POSTGRES_PASSWORD=quarry postgres:13
+          docker run -d --name mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=quarry mysql:8.4 --innodb-flush-log-at-trx-commit=0 --sync-binlog=0
+          docker run -d --name mariadb -p 3307:3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4 --innodb-flush-log-at-trx-commit=0 --sync-binlog=0
+          docker run -d --name pg18 -p 5432:5432 -e POSTGRES_PASSWORD=quarry postgres:18 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=300
+          docker run -d --name pg13 -p 5433:5432 -e POSTGRES_PASSWORD=quarry postgres:13 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=300
           # Over TCP: on first start the image runs a temporary server on the socket only, then restarts, so a socket ping
           # answers before the real server is up.
           until docker exec mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent; do sleep 1; done
@@ -73,7 +74,7 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           docker network create pgb
-          docker run -d --name pgb-pg --network pgb -e POSTGRES_PASSWORD=quarry postgres:18
+          docker run -d --name pgb-pg --network pgb -e POSTGRES_PASSWORD=quarry postgres:18 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=300
           until docker exec pgb-pg pg_isready -U postgres -q; do sleep 1; done
           docker run -d --name pgbouncer --network pgb -p 6432:5432 -e DB_HOST=pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer
           until docker run --rm --network pgb -e PGPASSWORD=quarry postgres:18 psql -h pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
