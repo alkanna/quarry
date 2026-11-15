@@ -103,9 +103,13 @@ impl App {
         }
         match res {
             Ok(p) => {
-                // A column picked from its menu may be one the dialog cannot set, such as a generated column.
+                // A column picked from its menu may be one the dialog cannot set, and another column must never stand in for it.
                 let ok = settable(&p);
-                f.pairs.retain(|x| ok.iter().any(|c| c.name == x.col));
+                if let Some(x) = f.pairs.iter().find(|x| !ok.iter().any(|c| c.name == x.col)) {
+                    let why = format!("{} cannot be changed here: it is part of the key, generated or a geometry.", x.col);
+                    self.modal = None;
+                    return self.warn(why);
+                }
                 if f.update && f.pairs.is_empty() && let Some(c) = ok.first() {
                     f.pairs.push(Pair { col: c.name.clone(), ..Default::default() });
                 }

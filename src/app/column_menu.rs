@@ -206,10 +206,9 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir:
                 }
             }).response.on_disabled_hover_text(why);
         });
-        item(ui, "Update values to…", HeadAct::Update, acts);
     }
-    // SQL rows are written through the bulk update dialog, which counts the rows and keeps an undo.
-    if !agg && sql {
+    // On SQL it opens the bulk update dialog, which counts the rows and keeps an undo.
+    if !agg {
         item(ui, "Update values to…", HeadAct::Update, acts);
     }
     ui.separator();

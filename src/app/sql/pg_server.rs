@@ -148,7 +148,7 @@ impl PgServerWin {
         rows.sort_by(|a, b| a.name.cmp(&b.name));
         s.settings = Some(Ok(Settings { rows, user: "reporting".into(), database: "analytics".into() }));
         s.set_sel = Some("max_connections".into());
-        let cnt = |db: &str, n: [u64; 10]| Counters { db: db.into(), sessions: Some(n[0]), commits: Some(n[1]), rollbacks: Some(n[2]), reads: Some(n[3]), hits: Some(n[4]), inserted: Some(n[5]), updated: Some(n[6]), deleted: Some(n[7]), deadlocks: Some(n[8]), conflicts: Some(0), temp_bytes: Some(n[9]), reset: "2026-11-01 04:00 UTC".into() };
+        let cnt = |db: &str, n: [u64; 10]| Counters { db: db.into(), sessions: Some(n[0]), commits: Some(n[1]), rollbacks: Some(n[2]), reads: Some(n[3]), hits: Some(n[4]), inserted: Some(n[5]), updated: Some(n[6]), deleted: Some(n[7]), deadlocks: Some(n[8]), temp_bytes: Some(n[9]), reset: if db == "shop" { "2026-11-01".into() } else { String::new() } };
         s.counters = Some(Ok(vec![
             cnt("shop", [34, 18_204_311, 4_120, 2_310_544, 912_004_118, 3_401_220, 1_288_419, 40_118, 2, 734_003_200]),
             cnt("analytics", [6, 2_481_007, 311, 48_220_931, 401_118_220, 12_004, 2_104, 88, 0, 18_253_611_008]),
@@ -804,7 +804,8 @@ fn counters_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
     };
     let int = |n: Option<u64>| n.map(|n| group(&n.to_string())).unwrap_or_default();
     let w = ui.available_width();
-    let cols: [(&str, f32, bool); 10] = [("Database", 0.16, false), ("Sessions", 0.08, true), ("Commits", 0.11, true), ("Rollbacks", 0.09, true), ("Cache hit", 0.08, true), ("Inserted", 0.1, true), ("Updated", 0.1, true), ("Deleted", 0.1, true), ("Deadlocks", 0.08, true), ("Temp files", 0.1, true)];
+    // Each database keeps its own reset date, so it is a column rather than one note for all.
+    let cols: [(&str, f32, bool); 11] = [("Database", 0.13, false), ("Sessions", 0.07, true), ("Commits", 0.1, true), ("Rollbacks", 0.08, true), ("Cache hit", 0.08, true), ("Inserted", 0.09, true), ("Updated", 0.09, true), ("Deleted", 0.08, true), ("Deadlocks", 0.08, true), ("Temp written", 0.1, true), ("Since", 0.1, true)];
     let cols = cols.map(|(n, f, r)| (n, w * f, r));
     header(ui, &cols);
     let gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
@@ -814,22 +815,18 @@ fn counters_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
             let c = &v[i];
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
             ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });
-            let cells = [c.db.clone(), int(c.sessions), int(c.commits), int(c.rollbacks), c.hit().map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_default(), int(c.inserted), int(c.updated), int(c.deleted), int(c.deadlocks), c.temp_bytes.map(|b| human_bytes(b as usize)).unwrap_or_default()];
+            let cells = [c.db.clone(), int(c.sessions), int(c.commits), int(c.rollbacks), c.hit().map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_default(), int(c.inserted), int(c.updated), int(c.deleted), int(c.deadlocks), c.temp_bytes.map(|b| human_bytes(b as usize)).unwrap_or_default(), if c.reset.is_empty() { "server start".into() } else { c.reset.clone() }];
             let mut x = rect.left();
             for (j, t) in cells.iter().enumerate() {
-                let color = if j == 0 { BRIGHT() } else if j == 8 && c.deadlocks.is_some_and(|d| d > 0) { WARNING() } else { C_NUMBER() };
+                let color = if j == 0 { BRIGHT() } else if j == 8 && c.deadlocks.is_some_and(|d| d > 0) { WARNING() } else if j == 10 { MUTED() } else { C_NUMBER() };
                 paint_cell(ui, rect, x, cols[j].1, t, color, true, cols[j].2);
                 x += cols[j].1;
             }
         }
     });
     ui.spacing_mut().item_spacing.y = gap;
-    let reset = v.iter().map(|c| c.reset.as_str()).find(|r| !r.is_empty());
     ui.add_space(8.0);
-    ui.label(RichText::new(match reset {
-        Some(r) => format!("Counted since the statistics were reset on {r}."),
-        None => "Counted since the server started.".into(),
-    }).size(TXT_SMALL).color(MUTED()));
+    ui.label(RichText::new("Totals since each database's statistics were last reset, or since the server started.").size(TXT_SMALL).color(MUTED()));
 }
 
 fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {

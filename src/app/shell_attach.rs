@@ -23,6 +23,11 @@ pub(super) struct Attached {
 /// The schema a PostgreSQL script starts in when none was picked, as a new database has it.
 pub(super) const PG_SCHEMA: &str = "public";
 
+/// The schema a PostgreSQL attachment runs in. Its columns are cached under this name too, so every user of it must agree.
+pub(super) fn pg_schema(schema: &str) -> &str {
+    if schema.is_empty() { PG_SCHEMA } else { schema }
+}
+
 /// The state of the Attach dialog.
 #[derive(Default)]
 pub(super) struct AttachForm {
@@ -275,7 +280,7 @@ async function run() {
             // The schema is the attachment's own, so each PostgreSQL attachment of this tab on `db` asks for its tables.
             let schemas: Vec<String> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.conn == conn && a.db == db).map(|a| a.schema.clone()).collect()).unwrap_or_default();
             for s in schemas {
-                let s = if s.is_empty() { PG_SCHEMA.to_string() } else { s };
+                let s = pg_schema(&s).to_string();
                 // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
                 if self.sql_schema_asked.insert((conn, ns_key(db, &s))) {
                     self.worker.sql_schema(conn, sql.at(db), s.clone());
@@ -349,7 +354,7 @@ async function run() {
                 // A PostgreSQL connection belongs to one database, so the database picks the pool and the schema is the search_path.
                 if pg {
                     sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": a.tables, "dialect": "postgres" }));
-                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: if a.schema.is_empty() { PG_SCHEMA.into() } else { a.schema.clone() }, read_only, conn_id: Default::default() }));
+                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: pg_schema(&a.schema).into(), read_only, conn_id: Default::default() }));
                     continue;
                 }
                 sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": list, "dialect": "mysql" }));
@@ -377,7 +382,7 @@ async function run() {
                 let names: Vec<String> = if pg { a.tables.clone() } else { c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default() };
                 // A PostgreSQL schema is cached per schema of its database; until it arrives the tables are typed loosely.
                 let typed = if pg {
-                    AttTyped::Sql(self.sql_schema.get(&(a.conn, ns_key(&a.db, if a.schema.is_empty() { PG_SCHEMA } else { &a.schema }))).cloned())
+                    AttTyped::Sql(self.sql_schema.get(&(a.conn, ns_key(&a.db, pg_schema(&a.schema)))).cloned())
                 } else if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
                 Some(AttachedInfo { name: a.name.clone(), names, typed })
             })

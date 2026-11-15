@@ -485,7 +485,7 @@ impl App {
             if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
                 // A PostgreSQL schema is read on a session of its own database and cached under that database and schema.
                 let (key, space, db) = if db.dialect == db::sql::Dialect::Postgres {
-                    let s = if a.schema.is_empty() { super::shell_attach::PG_SCHEMA.to_string() } else { a.schema.clone() };
+                    let s = super::shell_attach::pg_schema(&a.schema).to_string();
                     (ns_key(&a.db, &s), s, db.at(&a.db))
                 } else {
                     (a.db.clone(), a.db.clone(), db)

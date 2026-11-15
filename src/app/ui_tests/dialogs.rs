@@ -239,5 +239,5 @@ fn the_server_windows_show_database_sizes_and_postgresql_counters() {
         return;
     };
     ui.click("Counters");
-    ui.show("Counted since the statistics were reset on 2026-11-01 04:00 UTC.");
+    ui.show("Totals since each database's statistics were last reset, or since the server started.");
 }

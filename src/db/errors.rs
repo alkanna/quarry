@@ -262,6 +262,11 @@ pub fn stopped(mut raw: String) -> String {
 }
 
 /// What went wrong, without the wording: cheap enough for a label drawn every frame.
+/// A SQL server saying the database itself is gone (MySQL 1049, PostgreSQL 3D000): only a reconnect reloads the database list.
+pub fn database_gone(raw: &str) -> bool {
+    mysql_code(raw) == Some(1049) || pg_code(raw).as_deref() == Some("3D000")
+}
+
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
     let n = mongo_code(raw).map(|m| m.0).or(mysql_code(raw));
@@ -600,6 +605,14 @@ fn sentence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_missing_database_is_gone() {
+        assert!(super::database_gone("error returned from database: 1049 (42000): Unknown database 'shop'"));
+        assert!(super::database_gone("error returned from database: 3D000: database \"shop\" does not exist"));
+        assert!(!super::database_gone("error returned from database: 1146 (42S02): Table 'shop.t' doesn't exist"));
+        assert!(!super::database_gone("error returned from database: 42P01: relation \"t\" does not exist"));
+    }
+
     #[test]
     fn a_lock_timeout_says_the_wait_that_applied() {
         assert!(lock_held("\"s\".\"t\"", 3).contains("within 3 seconds") && lock_held("t", 3).contains("Nothing was changed"));

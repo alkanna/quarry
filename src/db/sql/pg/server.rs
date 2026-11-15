@@ -624,7 +624,7 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
     res
 }
 
-/// One database's totals from pg_stat_database, counted since `reset` (or since the server started when it was never reset).
+/// One database's totals from pg_stat_database, counted since `reset` (its own date; empty when never reset, so since the server started).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Counters {
     pub db: String,
@@ -636,7 +636,6 @@ pub struct Counters {
     pub inserted: Option<u64>,
     pub updated: Option<u64>,
     pub deleted: Option<u64>,
-    pub conflicts: Option<u64>,
     pub deadlocks: Option<u64>,
     pub temp_bytes: Option<u64>,
     pub reset: String,
@@ -652,12 +651,12 @@ impl Counters {
 
 /// Databases with the most transactions first. The shared row (datname NULL) holds only the shared catalogs, so it is left out.
 const COUNTERS: &str = "SELECT datname::text, numbackends::text, xact_commit::text, xact_rollback::text, blks_read::text, blks_hit::text, tup_inserted::text, \
-tup_updated::text, tup_deleted::text, conflicts::text, deadlocks::text, temp_bytes::text, COALESCE(to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC', '') \
+tup_updated::text, tup_deleted::text, deadlocks::text, temp_bytes::text, COALESCE(to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '') \
 FROM pg_stat_database WHERE datname IS NOT NULL ORDER BY xact_commit + xact_rollback DESC, datname";
 
 async fn counters(db: &Db) -> Res<Vec<Counters>> {
     let list = read(db, async |c| rows(c, COUNTERS).await).await?;
-    Ok(list.iter().map(|r| Counters { db: txt(r, 0), sessions: num_at(r, 1), commits: num_at(r, 2), rollbacks: num_at(r, 3), reads: num_at(r, 4), hits: num_at(r, 5), inserted: num_at(r, 6), updated: num_at(r, 7), deleted: num_at(r, 8), conflicts: num_at(r, 9), deadlocks: num_at(r, 10), temp_bytes: num_at(r, 11), reset: txt(r, 12) }).collect())
+    Ok(list.iter().map(|r| Counters { db: txt(r, 0), sessions: num_at(r, 1), commits: num_at(r, 2), rollbacks: num_at(r, 3), reads: num_at(r, 4), hits: num_at(r, 5), inserted: num_at(r, 6), updated: num_at(r, 7), deleted: num_at(r, 8), deadlocks: num_at(r, 9), temp_bytes: num_at(r, 10), reset: txt(r, 11) }).collect())
 }
 
 /// What the PostgreSQL Server window asked for and got.

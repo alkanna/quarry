@@ -436,7 +436,8 @@ impl App {
             Act::Fix(Fix::Refresh) => {
                 let Some(c) = conn else { return };
                 // Reloading the one database's list keeps the connection, its tabs and an unlock; reconnecting is the fallback.
-                if !e.and_then(|e| e.sel.clone()).is_some_and(|s| self.refresh_db(c, &s.db)) {
+                // A dropped database would stay listed, since only connecting reads the list of databases.
+                if e.is_some_and(|e| db::database_gone(&e.raw)) || !e.and_then(|e| e.sel.clone()).is_some_and(|s| self.refresh_db(c, &s.db)) {
                     self.connect(c);
                 }
             }

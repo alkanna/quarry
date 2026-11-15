@@ -145,9 +145,9 @@ fn update_values_from_a_column_menu_starts_on_that_column() {
     let Some(mut ui) = demo() else { return };
     open_on(&mut ui, true, "", 4410, "InnoDB", Some("note"));
     assert_eq!(pair(&ui), ["note"], "the dialog did not start on the column of the menu");
-    // The primary key cannot be set, so the dialog starts on a column it can set instead.
+    // The primary key cannot be set, and no other column may stand in for it, so the dialog closes and says why.
     let Some(mut ui) = demo() else { return };
     open_on(&mut ui, true, "", 4410, "InnoDB", Some("id"));
-    assert_eq!(pair(&ui).len(), 1);
-    assert_ne!(pair(&ui)[0], "id", "the key column was offered for an update");
+    assert!(ui.app().modal.is_none(), "the dialog stayed open on a column it cannot set");
+    assert!(ui.app().last_problem().contains("id cannot be changed here"), "no notice says why: {}", ui.app().last_problem());
 }
