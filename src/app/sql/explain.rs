@@ -245,6 +245,8 @@ fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
         return;
     }
     let heads: &[&str] = if p.analyzed { &["NODE", "ROWS", "COST", "ACTUAL ROWS", "LOOPS", "MS"] } else { &["NODE", "ROWS", "COST"] };
+    // A grid cell wraps at the column's last width, which starts tiny, so the node column takes what the number columns leave.
+    let node_w = (ui.available_width() - (heads.len() - 1) as f32 * 90.0).max(240.0);
     egui::Grid::new("sql-explain-plan").num_columns(heads.len()).spacing([16.0, 6.0]).striped(true).show(ui, |ui| {
         for h in heads {
             caption(ui, *h);
@@ -252,6 +254,7 @@ fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
         ui.end_row();
         for n in &p.nodes {
             ui.vertical(|ui| {
+                ui.set_width(node_w);
                 let c = match n.access {
                     Access::Scan => ALERT(),
                     Access::Index => SUCCESS(),
