@@ -102,18 +102,6 @@ fn crumb_row(ui: &mut egui::Ui, kind: &str, name: &str, current: &str) -> Option
     r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked().then(|| name.to_string())
 }
 
-/// A small padlock painted from shapes, since the glyph font's lock sits off center.
-fn paint_lock(p: &egui::Painter, c: egui::Pos2, locked: bool, color: Color32) {
-    let s = Stroke::new(1.3, color);
-    let body = egui::Rect::from_center_size(c + egui::vec2(0.0, 2.0), egui::vec2(9.0, 6.0));
-    p.rect_filled(body, 1, color);
-    let (l, r, top) = (c.x - 2.5, c.x + 2.5, c.y - 3.0);
-    // An open shackle lifts on its right side.
-    p.line_segment([egui::pos2(l, body.top()), egui::pos2(l, top)], s);
-    p.line_segment([egui::pos2(l, top), egui::pos2(r, top)], s);
-    p.line_segment([egui::pos2(r, top), egui::pos2(r, if locked { body.top() } else { top + 2.0 })], s);
-}
-
 fn mono_label(text: &str, color: Color32, weight: f32) -> LayoutJob {
     LayoutJob::single_section(text.to_string(), mono_fmt(TXT_SMALL, color, weight))
 }
@@ -165,9 +153,9 @@ impl App {
         }
         ui.add_space(6.0);
         if !tag.is_empty() {
-            let w = (ui.painter().layout_no_wrap(tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER).size().x + 14.0).min(154.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 18.0), Sense::hover());
-            paint_tag(ui.painter(), rect.right(), rect.center().y, &tag, w);
+            let g = tag_text(ui.painter(), &tag, 140.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 14.0, 18.0), Sense::hover());
+            paint_chip(ui.painter(), rect, g, tag_color(&tag), true, 0);
             ui.add_space(6.0);
         }
         if self.prefs.always_writable {
@@ -243,7 +231,7 @@ fn lock_chip(ui: &mut egui::Ui, writes: bool) -> egui::Response {
     let p = ui.painter();
     let (fill, line) = if writes { (fg.lerp_to_gamma(Color32::WHITE, [0.0, 0.1, 0.0][state]), fg) } else { (tint(fg, [31, 51, 71][state]), tint(fg, 90)) };
     p.rect(rect, rect.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
-    paint_lock(p, egui::pos2(rect.left() + 15.0, rect.center().y), !writes, ink);
+    glyphs::padlock(p, egui::pos2(rect.left() + 15.0, rect.center().y), !writes, ink);
     let x = rect.left() + 28.0;
     let lx = x + g.size().x + 10.0;
     p.galley(egui::pos2(x, rect.center().y - g.size().y / 2.0 + optical_dy(&g)), g, ink);

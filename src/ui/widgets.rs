@@ -707,6 +707,35 @@ pub(crate) fn expand_button() -> impl egui::Widget {
     }
 }
 
+/// One line of text cut with an ellipsis at `w`.
+pub(crate) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
+}
+
+/// `truncated` with the byte ranges in `hl` on a highlight background. The ranges are sorted and sit on char boundaries.
+pub(crate) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32, hl: &[(usize, usize)]) -> std::sync::Arc<egui::Galley> {
+    if hl.is_empty() {
+        return truncated(p, text, font, color, w);
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let marked = egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() };
+    let mut at = 0;
+    for &(a, b) in hl {
+        if a < at || b > text.len() || a >= b {
+            continue;
+        }
+        job.append(&text[at..a], 0.0, plain.clone());
+        job.append(&text[a..b], 0.0, marked.clone());
+        at = b;
+    }
+    job.append(&text[at..], 0.0, plain);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
+}
+
 /// A painted icon to put before a button's text, in the text's color so it follows the button's hover and press.
 pub(crate) fn icon_atom(paint: fn(&egui::Painter, egui::Pos2, Color32)) -> egui::Atom<'static> {
     egui::Atom::paint(egui::vec2(16.0, 16.0), move |ui, a| paint(ui.painter(), a.rect.center(), a.fallback_text_color))
@@ -789,10 +818,7 @@ pub(crate) fn close_x(ui: &mut egui::Ui) -> egui::Response {
     let state = state_of(&r);
     ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill_on(ui, state));
     let color = if state > 0 { BRIGHT() } else { FAINT() };
-    let (c, d) = (rect.center(), 3.0);
-    for (a, b) in [(egui::vec2(-d, -d), egui::vec2(d, d)), (egui::vec2(-d, d), egui::vec2(d, -d))] {
-        ui.painter().line_segment([c + a, c + b], Stroke::new(1.3, color));
-    }
+    paint_x(ui.painter(), rect.center(), 3.0, Stroke::new(1.3, color));
     focus_ring(ui, &r, rect, CLOSE_W / 2.0);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1296,6 +1322,12 @@ pub(crate) fn paint_plus(p: &egui::Painter, c: egui::Pos2, arm: f32, color: Colo
     p.rect_filled(bar(x0 - arm, y0, len, t), 0.0, color);
     p.rect_filled(bar(x0, y0 - arm, t, arm), 0.0, color);
     p.rect_filled(bar(x0, y0 + t, t, arm), 0.0, color);
+}
+
+/// An X of two strokes reaching `d` from `c` along each axis.
+pub(crate) fn paint_x(p: &egui::Painter, c: egui::Pos2, d: f32, s: Stroke) {
+    p.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], s);
+    p.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], s);
 }
 
 pub(crate) fn paint_search(p: &egui::Painter, c: egui::Pos2, color: Color32) {

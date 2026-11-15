@@ -327,7 +327,7 @@ impl App {
             }
             let win = self.win_buttons;
             ui.horizontal_centered(|ui| {
-                if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), sidebar_glyph, "Toggle sidebar", "Show or hide the sidebar").clicked() {
+                if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), glyphs::sidebar, "Toggle sidebar", "Show or hide the sidebar").clicked() {
                     self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
                     self.save_prefs();
                 }
@@ -807,14 +807,6 @@ fn process_usage() -> (Option<u64>, Duration) {
 }
 
 /// The app icon, decoded once and kept as a texture in egui's memory.
-/// A window outline with a divider near the left edge, painted as shapes because fallback glyphs sit off center.
-fn sidebar_glyph(p: &egui::Painter, c: egui::Pos2, color: Color32) {
-    let s = Stroke::new(1.3, color);
-    let r = egui::Rect::from_center_size(c, egui::vec2(14.0, 11.0));
-    p.rect_stroke(r, 2, s, egui::StrokeKind::Inside);
-    p.vline(r.left() + 5.0, r.y_range(), s);
-}
-
 fn app_mark(ui: &mut egui::Ui) {
     let id = egui::Id::unique("quarry-logo");
     let tex = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {

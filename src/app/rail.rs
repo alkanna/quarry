@@ -49,9 +49,7 @@ impl App {
         let corners = [boxed.left_top(), boxed.right_top(), boxed.right_bottom(), boxed.left_bottom(), boxed.left_top()];
         p.extend(egui::Shape::dashed_line(&corners, Stroke::new(1.0, edge), 3.0, 3.0));
         // The plus is painted: the glyph comes from a fallback font and sits off center.
-        let (c, s) = (boxed.center(), Stroke::new(1.4, if open || state > 0 { BRIGHT() } else { MUTED() }));
-        p.line_segment([c - egui::vec2(5.0, 0.0), c + egui::vec2(5.0, 0.0)], s);
-        p.line_segment([c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)], s);
+        paint_plus(p, boxed.center(), 5.0, if open || state > 0 { BRIGHT() } else { MUTED() });
         let label = p.layout_no_wrap("Connect".into(), FontId::proportional(TXT_CAPTION), MUTED());
         p.galley(egui::pos2(rect.center().x - label.size().x / 2.0, boxed.bottom() + 4.0), label, MUTED());
         focus_ring(ui, &r, boxed, R_MD as f32);

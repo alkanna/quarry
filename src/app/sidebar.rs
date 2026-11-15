@@ -166,16 +166,14 @@ pub(super) fn status_color(s: &Status) -> Color32 {
     }
 }
 
-/// One line of text cut with an ellipsis at `w`.
-pub(super) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
-    p.layout_job(job)
+/// A tag's text as its badge shows it, cut at `w`, for `paint_chip` in `tag_color`. The badge is 14 wider.
+pub(super) fn tag_text(p: &egui::Painter, tag: &str, w: f32) -> std::sync::Arc<egui::Galley> {
+    truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, w)
 }
 
 /// Paints a tag badge at most `max_w` wide whose right edge is at `right`, and returns its left edge.
 pub(super) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w: f32) -> f32 {
-    let g = truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, (max_w - 14.0).min(140.0));
+    let g = tag_text(p, tag, (max_w - 14.0).min(140.0));
     let r = egui::Rect::from_min_max(egui::pos2(right - g.size().x - 14.0, cy - 9.0), egui::pos2(right, cy + 9.0));
     paint_chip(p, r, g, tag_color(tag), true, 0);
     r.left()
@@ -192,28 +190,6 @@ pub(super) fn paint_name_tag_hl(p: &egui::Painter, x: egui::Rangef, cy: f32, nam
     let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, tag_room(x.span())) - 8.0 };
     let g = truncated_hl(p, name, font, color, name_right - x.min, hl);
     p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
-}
-
-/// `truncated` with the byte ranges in `hl` on a highlight background. The ranges are sorted and sit on char boundaries.
-pub(super) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32, hl: &[(usize, usize)]) -> std::sync::Arc<egui::Galley> {
-    if hl.is_empty() {
-        return truncated(p, text, font, color, w);
-    }
-    let mut job = LayoutJob::default();
-    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
-    let marked = egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() };
-    let mut at = 0;
-    for &(a, b) in hl {
-        if a < at || b > text.len() || a >= b {
-            continue;
-        }
-        job.append(&text[at..a], 0.0, plain.clone());
-        job.append(&text[a..b], 0.0, marked.clone());
-        at = b;
-    }
-    job.append(&text[at..], 0.0, plain);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
-    p.layout_job(job)
 }
 
 /// Typing "none" means no tag, the same as the None chip.
@@ -375,7 +351,7 @@ impl App {
         let mut cy = rect.top() + 24.0;
         if !tag.is_empty() {
             cy += 22.0;
-            let g = truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, rect.right() - x - 26.0);
+            let g = tag_text(p, &tag, rect.right() - x - 26.0);
             let chip = egui::Rect::from_min_size(egui::pos2(x, cy - 9.0), egui::vec2(g.size().x + 14.0, 18.0));
             paint_chip(p, chip, g, tag_color(&tag), true, 0);
         }

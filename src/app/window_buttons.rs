@@ -67,10 +67,7 @@ pub(super) fn window_buttons(ui: &mut egui::Ui, full: egui::Rect) {
             1 => {
                 p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)), 1.0, s, egui::StrokeKind::Middle);
             }
-            _ => {
-                p.line_segment([egui::pos2(c.x - 5.0, c.y - 5.0), egui::pos2(c.x + 5.0, c.y + 5.0)], s);
-                p.line_segment([egui::pos2(c.x - 5.0, c.y + 5.0), egui::pos2(c.x + 5.0, c.y - 5.0)], s);
-            }
+            _ => paint_x(p, c, 5.0, s),
         }
         focus_ring(ui, &r, rect, 0.0);
         if r.clicked() {

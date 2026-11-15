@@ -210,3 +210,22 @@ pub(crate) fn stack(p: &egui::Painter, c: Pos2, col: Color32) {
 pub(crate) fn play(p: &egui::Painter, c: Pos2, col: Color32) {
     p.add(egui::Shape::convex_polygon(vec![at(c, 5.0, 3.0), at(c, 12.5, 8.0), at(c, 5.0, 13.0)], col, Stroke::NONE));
 }
+
+/// A window outline with a divider near the left edge, for the sidebar toggle.
+pub(crate) fn sidebar(p: &egui::Painter, c: Pos2, col: Color32) {
+    let s = Stroke::new(1.3, col);
+    let r = egui::Rect::from_center_size(c, egui::vec2(14.0, 11.0));
+    p.rect_stroke(r, 2, s, egui::StrokeKind::Inside);
+    p.vline(r.left() + 5.0, r.y_range(), s);
+}
+
+/// A small filled padlock for a chip, smaller and solider than `lock`. An open one lifts its shackle on the right.
+pub(crate) fn padlock(p: &egui::Painter, c: Pos2, locked: bool, col: Color32) {
+    let s = Stroke::new(1.3, col);
+    let body = egui::Rect::from_center_size(c + egui::vec2(0.0, 2.0), egui::vec2(9.0, 6.0));
+    p.rect_filled(body, 1, col);
+    let (l, r, top) = (c.x - 2.5, c.x + 2.5, c.y - 3.0);
+    p.line_segment([egui::pos2(l, body.top()), egui::pos2(l, top)], s);
+    p.line_segment([egui::pos2(l, top), egui::pos2(r, top)], s);
+    p.line_segment([egui::pos2(r, top), egui::pos2(r, if locked { body.top() } else { top + 2.0 })], s);
+}

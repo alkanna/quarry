@@ -413,9 +413,7 @@ fn plus_named(ui: &mut egui::Ui, enabled: bool, name: &str) -> egui::Response {
     let state = if enabled { state_of(&r) } else { 0 };
     ui.painter().rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let color = if !enabled { FAINT() } else if state > 0 { BRIGHT() } else { MUTED() };
-    let c = rect.center();
-    ui.painter().line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], Stroke::new(1.3, color));
-    ui.painter().line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], Stroke::new(1.3, color));
+    paint_plus(ui.painter(), rect.center(), 4.0, color);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default })
@@ -1523,8 +1521,7 @@ fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
     let state = state_of(&r);
     ui.painter().rect(rect, R_MD, if state > 0 { HOVER() } else { PANEL() }, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
     let c = egui::pos2(rect.left() + 16.0, rect.top() + 15.0);
-    let tri = if b.fold_open { vec![c + egui::vec2(-4.0, -2.5), c + egui::vec2(4.0, -2.5), c + egui::vec2(0.0, 3.0)] } else { vec![c + egui::vec2(-2.5, -4.0), c + egui::vec2(-2.5, 4.0), c + egui::vec2(3.0, 0.0)] };
-    ui.painter().add(egui::Shape::convex_polygon(tri, MUTED(), Stroke::NONE));
+    chevron(ui.painter(), c, b.fold_open, MUTED());
     ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 7.0), g, TEXT());
     focus_ring(ui, &r, rect, R_MD as f32);
     if r.on_hover_text(if b.fold_open { "Fold the statement" } else { "Show the whole statement" }).clicked() {

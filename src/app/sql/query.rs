@@ -99,8 +99,7 @@ fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, quer
         let p = ui.painter();
         if current == Some(i + 1) {
             p.circle_filled(c, 6.0, if hot { shade(PRIMARY(), 0.10) } else { PRIMARY() });
-            let t = 2.5;
-            p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(-t * 0.6, -t), c + egui::vec2(t, 0.0), c + egui::vec2(-t * 0.6, t)], ON_PRIMARY(), Stroke::NONE));
+            play_mark(p, c - egui::vec2(1.5, 0.0), 4.0, 2.5, ON_PRIMARY());
         } else {
             p.circle_stroke(c, 4.0, Stroke::new(1.0, if hot { PRIMARY() } else { FAINT() }));
         }
