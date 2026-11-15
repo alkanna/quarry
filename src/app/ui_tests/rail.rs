@@ -290,7 +290,8 @@ fn connect_manage_opens_the_connections_panel() {
 #[test]
 fn a_tile_menu_opens_the_server_window_of_its_connection() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    right_click(&mut ui, &format!("Switch to {}", ui.app().conns[0].meta.name));
+    let tile = format!("Switch to {}", ui.app().conns[0].meta.name);
+    right_click(&mut ui, &tile);
     ui.click("Server status");
     assert!(ui.app().sql_server.is_some(), "Server status in the tile menu opened nothing");
 }

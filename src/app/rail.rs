@@ -674,7 +674,7 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, name: &str, color: Color32, 
         if state > 0 {
             p.rect_filled(rect, R_MD, tint(color, [0, 40, 64][state]));
         }
-        let g = truncated(p, &name.to_uppercase(), ui_fmt(TXT_SECTION, color, W_SEMIBOLD, 0.4), w);
+        let g = truncated(p, &name.to_uppercase(), FontId::proportional(TXT_SECTION), color, w);
         p.galley(rect.center() - g.size() / 2.0, g, color);
     } else {
         p.rect_filled(rect, R_MD, tint(color, [28, 48, 68][state]));
