@@ -73,6 +73,9 @@ pub(in crate::app) struct Bar {
     adding: Option<Add>,
     /// Whether the bar has taken the page it first showed as the one that ran.
     ran_seen: bool,
+    /// Whether the bar holds another query than the page's, worked out once a frame by `bar` so the results need not
+    /// build the query again.
+    pub(in crate::app) dirty: bool,
     /// A WHERE text as it ran and as the rules respelled it.
     respelled: Option<(String, String)>,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
@@ -90,12 +93,11 @@ impl Bar {
 
     /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
     /// the text as it ran, so only this comparison reads the other spelling.
-    pub(in crate::app) fn ran_as_shown(&self, ran: &PageQuery) -> PageQuery {
-        let mut r = ran.clone();
-        if let Some((from, to)) = &self.respelled && r.filter == *from {
-            r.filter = to.clone();
+    pub(in crate::app) fn ran_as_shown<'a>(&self, ran: &'a PageQuery) -> std::borrow::Cow<'a, PageQuery> {
+        match &self.respelled {
+            Some((from, to)) if ran.filter == *from => std::borrow::Cow::Owned(PageQuery { filter: to.clone(), ..ran.clone() }),
+            _ => std::borrow::Cow::Borrowed(ran),
         }
-        r
     }
 }
 
@@ -981,25 +983,53 @@ pub(in crate::app) fn add_menu(plus: &egui::Response, items: &[AddItem], help: &
         ui.add_space(4.0);
         let q = needle.trim().to_lowercase();
         let mut group = "";
+        let mut picks = Vec::new();
         for it in items.iter().filter(|i| q.is_empty() || i.label.to_lowercase().contains(&q)) {
             if it.group != group {
                 group = it.group;
                 caption(ui, group);
             }
-            if menu_row_in(ui, it.label, if it.keyword { C_KEYWORD() } else { TEXT() }, it.on, it.note, needle.trim(), false).clicked() {
-                pick = Some(it.label);
-                needle.clear();
-                ui.close();
-            }
+            menu_act(ui, &mut picks, it.label, |ui| add_item(ui, it, needle.trim()));
         }
         popover_divider(ui);
-        if menu_row(ui, "Query help", MUTED(), false, "").clicked() {
-            *help = true;
-            ui.close();
+        let mut helps = Vec::new();
+        menu_act(ui, &mut helps, (), |ui| ui.button(RichText::new("Query help").color(MUTED())));
+        *help |= !helps.is_empty();
+        pick = picks.pop();
+        if pick.is_some() {
+            needle.clear();
         }
         ui.data_mut(|d| d.insert_temp(needle_id, needle));
     });
     pick
+}
+
+/// A row of the "+" menu: the label with the typed part in the accent, its note or a check on the right. Named by its bare label,
+/// so the note does not become part of the name.
+fn add_item(ui: &mut egui::Ui, it: &AddItem, hl: &str) -> egui::Response {
+    let color = if it.keyword { C_KEYWORD() } else { TEXT() };
+    let fmt = |c: Color32| egui::TextFormat::simple(FontId::monospace(TXT_SMALL), c);
+    let mut job = LayoutJob::default();
+    match find_ci(it.label, hl) {
+        Some((i, j)) => {
+            job.append(&it.label[..i], 0.0, fmt(color));
+            job.append(&it.label[i..j], 0.0, fmt(PRIMARY()));
+            job.append(&it.label[j..], 0.0, fmt(color));
+        }
+        None => job.append(it.label, 0.0, fmt(color)),
+    }
+    let mut b = egui::Button::new(job);
+    if !it.note.is_empty() {
+        b = b.right_text(RichText::new(it.note).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
+    }
+    let r = ui.add(b);
+    if it.on {
+        // Painted, since the check glyph comes from a fallback font and sits off center.
+        paint_check(ui.painter(), egui::pos2(r.rect.right() - 14.0, r.rect.center().y), PRIMARY());
+    }
+    let (enabled, on, label) = (ui.is_enabled(), it.on, it.label);
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, enabled, on, label));
+    r
 }
 
 /// A row of a Run menu, named by its bare label so the shortcut hint does not become part of the name.
@@ -1073,7 +1103,8 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         }
         q.filter = out;
     }
-    let dirty = q != b.ran_as_shown(&s.ran);
+    let dirty = q != *b.ran_as_shown(&s.ran);
+    b.dirty = dirty;
     let (mut copy, mut save_view) = (false, false);
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);

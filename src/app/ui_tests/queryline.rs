@@ -85,3 +85,16 @@ fn the_mongo_run_menu_has_explain_and_copy_as_code() {
     ui.show("Explain");
     ui.show("Copy as code");
 }
+
+#[test]
+fn a_mongo_header_sort_leaves_the_line_clean() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    ui.h.run_steps(3);
+    assert!(!dirty(&ui), "an untouched bar is out of date");
+    let a = ui.app();
+    let col = crate::app::table::visible_cols(a.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())[3].clone();
+    ui.mouse_hold(&col, 0);
+    ui.click("Sort ascending");
+    assert!(ui.app().t().is_some_and(|t| t.sort_txt.contains(&col)), "the header menu did not sort on {col}");
+    assert!(!dirty(&ui), "a header sort marked the line edited");
+}

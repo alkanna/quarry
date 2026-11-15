@@ -32,6 +32,8 @@ pub(in crate::app) struct CaretInfo {
     key: (usize, u64, usize),
     pub(in crate::app) line_col: (usize, usize),
     pub(in crate::app) stmt: Option<(Range<usize>, usize, usize)>,
+    /// Every statement's byte range, kept so the gutter does not lex the script again each frame.
+    pub(in crate::app) stmts: std::sync::Arc<Vec<Range<usize>>>,
 }
 
 impl SqlTab {
@@ -46,7 +48,8 @@ impl SqlTab {
         match &*slot {
             Some(c) if c.key == key => c.clone(),
             _ => {
-                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_pos(&self.query, self.caret, d) };
+                let stmts: Vec<Range<usize>> = lex::split_statements(&self.query, d).into_iter().map(|(r, _)| r).collect();
+                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_in(&stmts, &self.query, self.caret, d), stmts: std::sync::Arc::new(stmts) };
                 *slot = Some(c.clone());
                 c
             }
@@ -56,15 +59,20 @@ impl SqlTab {
 
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
 pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
+    let all: Vec<Range<usize>> = lex::split_statements(text, d).into_iter().map(|(r, _)| r).collect();
+    statement_in(&all, text, caret, d)
+}
+
+/// `statement_pos` with the statements of `text` already split.
+fn statement_in(all: &[Range<usize>], text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
     let r = lex::statement_at(text, byte_at(text, caret), d)?;
-    let all = lex::split_statements(text, d);
-    let i = all.iter().position(|(a, _)| *a == r)?;
+    let i = all.iter().position(|a| *a == r)?;
     Some((r, i + 1, all.len()))
 }
 
 /// One marker per statement in the gutter, at its first line: a ring, or the accent with a play mark for the statement
 /// under the caret. A click returns the text of the statement to run.
-fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, query: &str, d: db::sql::Dialect, current: Option<usize>, busy: bool) -> Option<String> {
+fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, query: &str, stmts: &[Range<usize>], current: Option<usize>, busy: bool) -> Option<String> {
     // The galley row each logical line starts on.
     let mut line_rows = Vec::new();
     let mut fresh = true;
@@ -76,7 +84,8 @@ fn gutter_markers(ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, quer
     }
     let (gp, rect) = (out.galley_pos, out.response.rect);
     let mut run = None;
-    for (i, (r, text)) in lex::split_statements(query, d).into_iter().enumerate() {
+    for (i, r) in stmts.iter().enumerate() {
+        let text = &query[r.clone()];
         // A statement's range can open on the blank lines after the previous one, so its line is its first code.
         let start = r.start + (query[r.start..].len() - query[r.start..].trim_start().len());
         let line = query[..start].matches('\n').count();
@@ -727,7 +736,6 @@ impl App {
             self.script_banners(ui);
         }
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick, mut save_view, mut run_sel) = (false, false, false, false, false, None, false, None);
-        let selection = self.editor_selection(ui.ctx());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // The right side is laid out first, so a narrow window clips the tools and never History or Library.
@@ -768,8 +776,10 @@ impl App {
                         let tip = tip.on_hover_text("Choose what to run");
                         egui::Popup::menu(&tip).width(420.0).show(|ui| {
                             menu_look(ui);
+                            // Read only while the menu is open, since it copies the selected text.
+                            let selection = self.editor_selection(ui.ctx());
                             if selection.is_some() && ui.add(egui::Button::new("Run selection")).on_hover_text("Run only the selected text").clicked() {
-                                run_sel = selection.clone();
+                                run_sel = selection;
                                 ui.close();
                             }
                             if ui.add(egui::Button::new("Explain")).on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked() {
@@ -904,7 +914,8 @@ impl App {
             })
         };
         let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
+            let mut caret = None;
+            let shown = egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
                 if s.bar.preset.ac {
@@ -937,12 +948,13 @@ impl App {
                     ui.painter().set(band, egui::Shape::rect_filled(band_rect, 0.0, tint(PRIMARY(), 22)));
                 }
                 paint_gutter(ui, &out, Some(info.line_col.0));
-                gutter_run = gutter_markers(ui, &out, &s.query, dialect, info.stmt.as_ref().map(|p| p.1), s.run_req != 0);
+                gutter_run = gutter_markers(ui, &out, &s.query, &info.stmts, info.stmt.as_ref().map(|p| p.1), s.run_req != 0);
+                caret = Some(info);
             });
             // Inside the frame, so the position reads as part of the editor and not of the toolbar.
             ui.horizontal(|ui| {
                 ui.set_height(FOOTER_H);
-                let info = s.caret_info(dialect);
+                let info = caret.take().unwrap_or_else(|| s.caret_info(dialect));
                 let place = info.stmt.as_ref().map_or(String::new(), |(_, i, n)| format!("statement {i} of {n}  \u{b7}  "));
                 let faint = |t: String| RichText::new(t).font(FontId::monospace(TXT_CAPTION)).color(FAINT());
                 ui.add_space(10.0);
@@ -954,11 +966,14 @@ impl App {
                     });
                 }
             });
+            // The editor's own height, which a drag starts from. The frame also holds the stroke, the spacing and the footer.
+            // inner_rect is the room offered before the area shrank, so the content is read instead.
+            shown.content_size.y.min(h)
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
         self.sql_serve(conn, &db, &schema, wants);
         let bar = splitter(ui);
-        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.response.rect.height() - FOOTER_H, lo, hi) {
+        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.inner, lo, hi) {
             self.save_prefs();
         }
         // The same path as picking the statement from the Run menu.

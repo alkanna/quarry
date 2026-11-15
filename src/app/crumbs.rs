@@ -16,7 +16,7 @@ const CRUMB_MENU_W: f32 = 260.0;
 
 /// A path segment that opens a menu. Returns the response to anchor the popup on.
 fn crumb(ui: &mut egui::Ui, text: &str, color: Color32, label: &str) -> egui::Response {
-    let mut job = LayoutJob::single_section(text.to_string(), mono_fmt(12.0, color, W_SEMIBOLD));
+    let mut job = LayoutJob::single_section(text.to_string(), mono_fmt(TXT_SMALL, color, W_SEMIBOLD));
     job.wrap = egui::text::TextWrapping::truncate_at_width(220.0);
     let g = ui.painter().layout_job(job);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 30.0, 24.0), Sense::click());
@@ -29,8 +29,9 @@ fn crumb(ui: &mut egui::Ui, text: &str, color: Color32, label: &str) -> egui::Re
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The menu under a crumb: a filter, the recent names, then all of them. Returns the name picked.
-fn crumb_menu(resp: &egui::Response, kind: &str, current: &str, recent: &[String], all: &[String]) -> Option<String> {
+/// The menu under a crumb: a filter, the recent names, then all of them. Returns the name picked. The names are read only
+/// while the menu is open, since the crumbs are drawn every frame.
+fn crumb_menu(resp: &egui::Response, kind: &str, current: &str, recent: &[String], all: impl FnOnce() -> Vec<String>) -> Option<String> {
     let id = resp.id.with("filter");
     if resp.clicked() {
         resp.ctx.data_mut(|d| d.insert_temp(id, String::new()));
@@ -39,6 +40,8 @@ fn crumb_menu(resp: &egui::Response, kind: &str, current: &str, recent: &[String
     let mut picked = None;
     egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(CRUMB_MENU_W).show(|ui| {
         menu_look(ui);
+        let all = all();
+        let all = all.as_slice();
         ui.set_min_width(CRUMB_MENU_W);
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut q = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
@@ -112,7 +115,7 @@ fn paint_lock(p: &egui::Painter, c: egui::Pos2, locked: bool, color: Color32) {
 }
 
 fn mono_label(text: &str, color: Color32, weight: f32) -> LayoutJob {
-    LayoutJob::single_section(text.to_string(), mono_fmt(12.0, color, weight))
+    LayoutJob::single_section(text.to_string(), mono_fmt(TXT_SMALL, color, weight))
 }
 
 impl App {
@@ -128,22 +131,22 @@ impl App {
         let run = query.as_ref().map_or(s.db.clone(), |q| q.0.clone());
         // A PostgreSQL path has a schema level between the database and the table.
         let place = if query.is_some() || s.schema.is_empty() || s.coll.is_empty() { run.clone() } else { format!("{} / {}", s.db, s.schema) };
-        let dbs: Vec<String> = self.conn(s.conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default();
-        let recent: Vec<String> = self.prefs.recent_dbs(s.conn).to_vec();
         let r = crumb(ui, &place, if s.coll.is_empty() { BRIGHT() } else { TEXT() }, "Database crumb");
-        if let Some(db) = crumb_menu(&r, "Database", &run, &recent, &dbs) {
+        let dbs = || self.conn(s.conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect::<Vec<String>>()).unwrap_or_default();
+        if let Some(db) = crumb_menu(&r, "Database", &run, self.prefs.recent_dbs(s.conn), dbs) {
             self.pick_crumb_db(s.conn, db);
         }
         // The Query view has no schema field, so a PostgreSQL one picks the schema its statements run in here.
         if let (true, Some((run, typed))) = (pg, query) {
             let now = if typed.is_empty() { self.sel_schema(&Sel { db: run.clone(), schema: String::new(), ..s.clone() }) } else { typed };
-            let listed = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == run)).map(|d| d.1.clone());
-            if matches!(listed, Some(None)) && !self.sql_asked.contains(&(s.conn, run.clone())) {
+            let unlisted = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == run)).is_some_and(|d| d.1.is_none());
+            if unlisted && !self.sql_asked.contains(&(s.conn, run.clone())) {
                 self.pg_ask_schemas(s.conn, &run);
             }
             ui.label(mono_label("/", FAINT(), 400.0));
             let r = crumb(ui, &now, TEXT(), "Schema crumb");
-            if let Some(schema) = crumb_menu(&r, "Schema", &now, &[], &listed.flatten().unwrap_or_default()) {
+            let listed = || self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == run)).and_then(|d| d.1.clone()).unwrap_or_default();
+            if let Some(schema) = crumb_menu(&r, "Schema", &now, &[], listed) {
                 self.pick_crumb_schema(s.conn, &run, schema);
             }
         }
@@ -151,13 +154,12 @@ impl App {
             // A query tab has no table, so its own name ends the path. One label with the slash, so no widget
             // carries the bare tab name that tests and the tab strip look up.
             let mut job = mono_label("/ ", FAINT(), 400.0);
-            job.append(&self.tab_name(self.cur), 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
+            job.append(&self.tab_name(self.cur), 0.0, mono_fmt(TXT_SMALL, BRIGHT(), W_SEMIBOLD));
             ui.label(job);
         } else {
             ui.label(mono_label("/", FAINT(), 400.0));
-            let tables = self.tables_of(&Sel { coll: String::new(), ..s.clone() });
             let r = crumb(ui, &self.tab_name(self.cur), BRIGHT(), "Table crumb");
-            if let Some(t) = crumb_menu(&r, "Table", &s.coll, &[], &tables) {
+            if let Some(t) = crumb_menu(&r, "Table", &s.coll, &[], || self.tables_of(&Sel { coll: String::new(), ..s.clone() })) {
                 self.open_collection(Sel { coll: t, ..s.clone() }, Open::Here);
             }
         }
@@ -218,7 +220,8 @@ impl App {
         let Some(t) = self.tm() else { return };
         let free = t.sel.coll.is_empty();
         let Some(q) = t.sql.as_mut() else { return };
-        if free {
+        // A run target in another database is where the statements run, so the tab's own schema would not reach them.
+        if free && (q.run_db.is_empty() || q.run_db == t.sel.db) {
             // A schema left from a script or a saved tab would win over the pick.
             q.run_schema.clear();
             t.sel.schema = schema;

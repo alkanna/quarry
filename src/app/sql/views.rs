@@ -18,6 +18,7 @@ impl App {
         let q = crate::app::sql::bar::page_query(t);
         if let Some(s) = t.sql.as_mut() {
             s.ran = q.clone();
+            s.bar.dirty = false;
         }
         self.worker.sql_page(req, db, space, t.sel.coll.clone(), q, size, t.page * size);
     }

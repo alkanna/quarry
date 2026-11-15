@@ -116,7 +116,11 @@ impl App {
 
 /// The texts of the Documents bar, in the order `Tab::ran_txt` keeps them.
 pub(super) fn bar_texts(t: &Tab) -> [String; 7] {
-    [&t.filter_txt, &t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt].map(|s| s.clone())
+    bar_refs(t).map(|s| s.clone())
+}
+
+fn bar_refs(t: &Tab) -> [&String; 7] {
+    [&t.filter_txt, &t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt]
 }
 
 /// Whether the query bar of a Content or Documents tab holds something other than what the rows below came from. The rows stay
@@ -126,8 +130,9 @@ pub(super) fn query_dirty(t: &Tab) -> bool {
         return false;
     }
     match &t.sql {
-        Some(s) => s.bar.ran_seen() && sql::bar::page_query(t) != s.bar.ran_as_shown(&s.ran),
-        None => t.ran_txt.as_ref().is_some_and(|r| *r != bar_texts(t)),
+        // The SQL bar builds its query once a frame and keeps the answer, so the results do not build it again.
+        Some(s) => s.bar.ran_seen() && s.bar.dirty,
+        None => t.ran_txt.as_ref().is_some_and(|r| r.iter().zip(bar_refs(t)).any(|(a, b)| a != b)),
     }
 }
 

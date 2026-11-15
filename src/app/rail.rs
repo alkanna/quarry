@@ -80,7 +80,8 @@ impl App {
             ui.add_space(4.0);
             // Only the list scrolls, so the actions below stay reachable however many connections there are.
             let room = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 200.0).max(4.0 * 34.0);
-            // The menu was not drawn last frame, so it just opened: clear the filter and focus it once.
+            // The menu was not drawn last frame, so it just opened: clear the filter, focus it and bring the active connection
+            // into view once.
             let seen = egui::Id::unique("conn-menu-frame");
             let frame = ui.ctx().cumulative_frame_nr();
             let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
@@ -90,7 +91,7 @@ impl App {
             }
             conns_panel::picker_filter(ui, &mut self.conns_ui.picker_filter, opened);
             egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, false) {
+                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, opened) {
                     pick = Some(id);
                     ui.close();
                 }

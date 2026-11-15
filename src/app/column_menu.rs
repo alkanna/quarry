@@ -304,6 +304,11 @@ impl App {
                 let t = self.tm().unwrap();
                 t.query.sort = next.map(|d| doc! { c: d });
                 t.sort_txt = t.query.sort.as_ref().map(|s| db::shell_text(&Bson::Document(s.clone()))).unwrap_or_default();
+                // The page now runs this sort, so the bar is not edited by it. Only the sort slot is recorded, since the other
+                // boxes may hold edits that did not run.
+                if let Some(r) = &mut t.ran_txt {
+                    r[1] = t.sort_txt.clone();
+                }
                 t.page = 0;
                 self.reload();
             }
