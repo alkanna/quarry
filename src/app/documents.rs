@@ -1,5 +1,7 @@
 //! The documents view: layout, row selection and actions on selected documents.
 
+use super::results_bar::BarInfo;
+use super::sql::bar::{line_frame, line_ring, LINE_GAP};
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -133,7 +135,8 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
     let edge = if focused { PRIMARY() } else if hovered { BORDER() } else { LINE() };
     let (mut clear, mut enter) = (false, false);
-    egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
+    // A frame is a group of widgets, which egui does not move to the next row of a wrapping line by itself.
+    flow_item(ui, id, |ui| egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             // Painted and centered on its ink like the other chips, because a label sits about 1 px high.
@@ -148,7 +151,7 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
                 clear = close_x(ui).on_hover_text(format!("Remove {name}")).clicked();
             });
         });
-    });
+    }));
     if clear {
         text.clear();
     }
@@ -197,41 +200,10 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() && t.view != View::Shell {
             return self.sql_query_view(ui);
         }
-        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
-        // What the collection holds: documents, data size and indexes. The whole collection's
-        // count, not the filter's, which the results line shows. Without statistics only an
-        // unfiltered count says what the collection holds.
-        let mut stats = Vec::new();
-        match t.stats {
-            Some((count, size, nidx)) => {
-                stats.push(format!("{} docs", group(&count.to_string())));
-                stats.push(human_bytes(size as usize));
-                stats.push(format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" }));
-            }
-            None if t.query.filter.is_empty() && t.query.limit.is_none() && t.query.skip == 0 => stats.push(format!("{} docs", group(&t.count.to_string()))),
-            None => {}
-        }
+        let (coll, view) = (t.sel.coll.clone(), t.view);
         let nidx = t.stats.map(|s| s.2);
         let sql = t.sql.is_some();
-        if sql {
-            stats.clear();
-            if t.filter_txt.is_empty() {
-                stats.push(format!("{} rows", group(&t.count.to_string())));
-            }
-        }
-        ui.horizontal(|ui| {
-            let heading = if coll.is_empty() { "Shell" } else { coll.as_str() };
-            ui.label(semibold(RichText::new(heading).size(TXT_HEADING).color(BRIGHT())));
-            ui.add_space(6.0);
-            ui.label(RichText::new(&db).font(FontId::monospace(TXT_SMALL)).color(FAINT()));
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CHIP_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for s in stats.iter().rev() {
-                    stat_chip(ui, s);
-                }
-            });
-        });
-        ui.add_space(4.0);
+        // The collection's name and place are in the tab and the breadcrumb, and its size is in the results bar.
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
@@ -249,13 +221,12 @@ impl App {
                     stat_chip(ui, &n.to_string());
                 }
             }
-            if sql && view == View::Documents {
-                right_group(ui, |ui| self.columns_menu(ui, false));
-            } else if !sql && matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
+            // Documents and the SQL Content view carry Table | JSON and Columns in their results bar.
+            if !sql && matches!(view, View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
                     if self.prefs.table {
-                        self.columns_menu(ui, view != View::Documents);
+                        self.columns_menu(ui, true);
                     }
                     let mut table = self.prefs.table;
                     segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
@@ -321,74 +292,115 @@ impl App {
         let mut typed = Typed::default();
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
-        let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 4.0;
         // The bar is the filter's frame: it reads the filter's focus and hover from the last frame.
-        let fid = query_id("QUERY");
-        let focused = ui.memory(|m| m.has_focus(fid));
-        let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-        let edge = if t.bar_err.is_some() { ALERT() } else if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
-        let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
+        let dirty = super::run::query_dirty(t);
+        let (frame, focused) = line_frame(ui, query_id("QUERY"), t.bar_err.is_some(), dirty, 12, 6);
+        let bar_err = t.bar_err.clone();
+        let (mut set, mut picked) = ([false; 6], None);
+        // The option chips: the name each shows, the label of its editor, and whether it is set.
+        const OPTS: [(&str, &str); 6] = [("sort", "SORT"), ("project", "PROJECT"), ("limit", "limit"), ("skip", "skip"), ("hint", "HINT"), ("collation", "COLLATION")];
+        for (i, text) in [&t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt].into_iter().enumerate() {
+            set[i] = !text.is_empty();
+        }
+        let bar = frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                // Room for the history and library icons and Run, but never so little the box vanishes.
-                let w = (ui.available_width() - 150.0).max(120.0);
-                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
-                // A fixed height, or a right-to-left layout takes all the height left in the bar.
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing = LINE_GAP;
+                // The edited note, the history and library icons and Run with its tip. Drawn first, in a child over the first row
+                // that claims no room, so the filter and the options get the width it leaves.
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
+                let mut right = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Min)));
+                right.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
-                        run = true;
-                    }
+                    run |= super::sql::bar::line_run(ui, dirty, |ui| {
+                        if super::sql::bar::run_item(ui, "Explain", "⌘E").on_hover_text("Explain the query that ran").clicked() {
+                            explain = true;
+                            ui.close();
+                        }
+                        ui.menu_button("Copy as code", |ui| {
+                            menu_look(ui);
+                            for l in db::Lang::ALL {
+                                if ui.button(l.name()).clicked() {
+                                    code_lang = Some(l);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     vsep(ui, 6.0);
                     let button = picker_button(ui, &pick, true, &mut pick_acts);
                     demo_pick.get_or_insert(button);
                     history_menu(ui, &hist, &index_sorts, None, &mut qacts);
+                    edited_note(ui, dirty);
+                });
+                let left_w = (ui.available_width() - right.min_rect().width() - 16.0).max(240.0);
+                ui.allocate_ui_with_layout(egui::vec2(left_w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                    ui.spacing_mut().item_spacing = LINE_GAP;
+                    // As wide as its longest line, up to most of the line, so the options can follow it on the same row.
+                    let hint = "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])";
+                    let longest = if t.filter_txt.is_empty() { hint } else { t.filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
+                    let w = (text_w(ui, longest, mono.clone()) + 24.0).clamp(220.0, (left_w * 0.6).max(220.0)).min(left_w);
+                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, hint, w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                    // A pasted shell query carries its own sort, projection, limit and skip.
+                    if shell {
+                        return;
+                    }
+                    let fit = |ui: &egui::Ui, s: &str, hint: &str| {
+                        let s = if s.is_empty() { hint } else { s.lines().max_by_key(|l| l.len()).unwrap_or(s) };
+                        (text_w(ui, s, mono.clone()) + 8.0).clamp(24.0, 420.0)
+                    };
+                    // Some(kind) is a query box with completion; hint gets the sort box's, since index
+                    // keys are written like a sort. None is a plain one-line box. An option shows as a chip while it is set
+                    // or its editor has focus, which is how the "+" menu starts an empty one.
+                    for (name, label, kind, text, hint) in [
+                        ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
+                        ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
+                        ("limit", "limit", None, &mut t.limit_txt, "0"),
+                        ("skip", "skip", None, &mut t.skip_txt, "0"),
+                        ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
+                        ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
+                    ] {
+                        let id = query_id(label);
+                        if text.is_empty() && !ui.memory(|m| m.has_focus(id)) {
+                            continue;
+                        }
+                        run |= opt_chip(ui, name, id, text, |ui, text| {
+                            let w = fit(ui, text, hint);
+                            if let Some(kind) = kind {
+                                return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                            }
+                            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
+                            if r.changed() && matches!(name, "limit" | "skip") {
+                                text.retain(|c| c.is_ascii_digit());
+                            }
+                            r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                        });
+                    }
+                    let plus = super::sql::bar::add_button(ui);
+                    let items: Vec<_> = OPTS.iter().zip(set).map(|((name, _), on)| super::sql::bar::AddItem { label: *name, note: "", group: "OPTIONS", on, keyword: false }).collect();
+                    picked = super::sql::bar::add_menu(&plus, &items, &mut help);
                 });
             });
+            // Nothing was sent, so the rows below are still those of the last query that ran.
+            if let Some(e) = &bar_err {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                    paint_alert(ui.painter(), r.center(), ALERT());
+                    ui.add(egui::Label::new(RichText::new(e.as_str()).size(TXT_SMALL).color(TEXT())).wrap());
+                });
+            }
         });
         if focused {
-            ui.painter().rect_stroke(bar.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
+            line_ring(ui, bar.response.rect);
         }
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            // A pasted shell query carries its own sort, projection, limit and skip.
-            if !shell {
-                let fit = |ui: &egui::Ui, s: &str, hint: &str| {
-                    let s = if s.is_empty() { hint } else { s.lines().max_by_key(|l| l.len()).unwrap_or(s) };
-                    (text_w(ui, s, mono.clone()) + 8.0).clamp(24.0, 420.0)
-                };
-                // Some(kind) is a query box with completion; hint gets the sort box's, since index
-                // keys are written like a sort. None is a plain one-line box.
-                for (name, label, kind, text, hint) in [
-                    ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
-                    ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
-                    ("limit", "limit", None, &mut t.limit_txt, "0"),
-                    ("skip", "skip", None, &mut t.skip_txt, "0"),
-                    ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
-                    ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
-                ] {
-                    let id = query_id(label);
-                    run |= opt_chip(ui, name, id, text, |ui, text| {
-                        let w = fit(ui, text, hint);
-                        if let Some(kind) = kind {
-                            return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
-                        }
-                        let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
-                        if r.changed() && matches!(name, "limit" | "skip") {
-                            text.retain(|c| c.is_ascii_digit());
-                        }
-                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-                    });
-                }
-            }
-            right_group(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                help |= quiet(ui, "?").on_hover_text("Query shortcuts and syntax").clicked();
-                code_menu(ui, &mut code_lang);
-                explain |= quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
-            });
-        });
+        if let Some(name) = picked && let Some((_, label)) = OPTS.iter().find(|(n, _)| *n == name) {
+            ui.memory_mut(|m| m.request_focus(query_id(label)));
+        }
+        if dirty {
+            ui.add_space(8.0);
+            run |= super::sql::bar::stale_note(ui);
+        }
         t.paths = paths;
         t.field_info = fields;
         // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
@@ -434,115 +446,77 @@ impl App {
         if let Some(l) = code_lang {
             self.show_code(l, true);
         }
-        // Nothing was sent, so the rows below are still those of the last query that ran.
-        if let Some(e) = self.t().and_then(|t| t.bar_err.clone()) {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-                paint_alert(ui.painter(), r.center(), ALERT());
-                ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(TEXT())).wrap());
-            });
-        }
         self.agent_notice(ui);
         ui.add_space(10.0);
         let t = self.t().unwrap();
-        let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
-        let pages = count.div_ceil(self.page_size()).max(1);
-        let mut go: Option<u64> = None;
-        ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(format!("{} docs", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
-            ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
-            if loading {
-                spin(ui);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                dots_menu(ui, |ui| {
-                    if ui.button("Open query in Shell").clicked() {
-                        let t = &self.tabs[self.cur];
-                        self.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
-                        ui.close();
-                    }
-                    let t = self.t().unwrap();
-                    let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
-                    if ui.button("Update matching…").clicked() {
-                        self.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
-                        ui.close();
-                    }
-                    ui.separator();
-                    if danger_item(ui, "Delete all matching documents…").clicked() {
-                        self.modal = Some(Modal::Typed {
-                            title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
-                            expect: coll.clone(),
-                            typed: String::new(),
-                            action: Danger::DeleteMatching(scope),
-                        });
-                        ui.close();
-                    }
-                    if danger_item(ui, "Drop collection…").clicked() {
-                        self.modal = Some(Modal::Typed {
-                            title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
-                            expect: coll,
-                            typed: String::new(),
-                            action: Danger::DropCollection,
-                        });
-                        ui.close();
-                    }
-                })
-                .on_hover_text("More actions");
-                if quiet(ui, "Export").on_hover_text("Export these documents").clicked() {
-                    self.export();
+        // The collection's data size and index count, which the header used to carry.
+        let stats = t.stats.map(|(_, size, nidx)| [human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]);
+        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: false, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
+        let out = self.results_bar(ui, &info, |app, ui| {
+            dots_menu(ui, |ui| {
+                if ui.button("Export").on_hover_text("Export these documents").clicked() {
+                    app.export();
+                    ui.close();
                 }
-                if quiet(ui, "+ Insert").clicked() {
-                    let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
-                    if self.sel_writable() { open(self) } else { self.ask_unlock_then(open) }
+                if ui.button("Open query in Shell").clicked() {
+                    let t = &app.tabs[app.cur];
+                    app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
+                    ui.close();
                 }
-                vsep(ui, 4.0);
-                if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
-                    go = Some(page);
+                let t = app.t().unwrap();
+                let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
+                if ui.button("Update matching…").clicked() {
+                    app.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
+                    ui.close();
                 }
-                // The pager reads left to right, so it gets its own layout at last frame's width.
-                let id = ui.scope_id().with("pager-w");
-                let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(150.0);
-                let r = ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| pager(ui, page as usize, pages as usize));
-                if r.response.rect.width() != w {
-                    ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
-                    ui.ctx().request_repaint();
-                }
-                if let Some(p) = r.inner {
-                    go = Some(p as u64);
-                }
-                let mut size = self.page_size();
-                ui.scope(|ui| {
-                    quiet_look(ui);
-                    egui::ComboBox::from_id_salt("page-size").selected_text(format!("{size} / page")).show_ui(ui, |ui| {
-                        menu_look(ui);
-                        for n in [db::PAGE_SIZE, 100, 200, db::PAGE_SIZE_MAX] {
-                            ui.selectable_value(&mut size, n, format!("{n} per page"));
-                        }
+                ui.separator();
+                if danger_item(ui, "Delete all matching documents…").clicked() {
+                    app.modal = Some(Modal::Typed {
+                        title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
+                        expect: coll.clone(),
+                        typed: String::new(),
+                        action: Danger::DeleteMatching(scope),
                     });
-                });
-                // Remembered for every tab; the others reload when shown, see the top of this function.
-                if size != self.page_size() {
-                    self.prefs.page_size = size;
-                    self.save_prefs();
-                    go = Some(0);
+                    ui.close();
                 }
-                let pending = self.tab_drafts();
-                if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
-                    if !self.sel_writable() {
-                        self.ask_unlock();
-                    } else if self.prefs.confirm_save && !self.prefs.always_writable {
-                        self.modal = Some(Modal::SaveAll(pending));
-                    } else {
-                        for k in &pending {
-                            self.write_draft(k);
-                        }
+                if danger_item(ui, "Drop collection…").clicked() {
+                    app.modal = Some(Modal::Typed {
+                        title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
+                        expect: coll,
+                        typed: String::new(),
+                        action: Danger::DropCollection,
+                    });
+                    ui.close();
+                }
+            })
+            .on_hover_text("More actions");
+            if app.prefs.table {
+                app.columns_menu(ui, false);
+            }
+            let mut table = app.prefs.table;
+            segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
+            if table != app.prefs.table {
+                app.prefs.table = table;
+                app.save_prefs();
+            }
+            if quiet(ui, "+ Insert").clicked() {
+                let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
+                if app.sel_writable() { open(app) } else { app.ask_unlock_then(open) }
+            }
+            let pending = app.tab_drafts();
+            if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
+                if !app.sel_writable() {
+                    app.ask_unlock();
+                } else if app.prefs.confirm_save && !app.prefs.always_writable {
+                    app.modal = Some(Modal::SaveAll(pending));
+                } else {
+                    for k in &pending {
+                        app.write_draft(k);
                     }
                 }
-            });
+            }
         });
-        if let Some(p) = go {
+        if let Some(p) = out.go {
             self.tm().unwrap().page = p;
             self.reload();
         }
@@ -594,7 +568,7 @@ impl App {
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
-        let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some());
+        let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some() || super::run::query_dirty(t));
         if let (true, true, Some((id, ..))) = (docs.is_empty(), conn_failed, &closed) {
             self.conn_failed_card(ui, *id);
         } else if docs.is_empty() && self.failed_panel(ui, view) {
@@ -782,7 +756,6 @@ impl App {
             DocsAct::Filter => {
                 let t = self.tm().unwrap();
                 t.filter_txt = db::shell_text(&by_id());
-                t.page = 0;
                 self.run_query();
             }
             DocsAct::Update => {

@@ -19,10 +19,7 @@ impl App {
                 push_history(&mut h.sort, &so);
                 push_history(&mut h.project, &p);
                 self.save_prefs();
-                let t = self.tm().unwrap();
-                t.query = q;
-                t.page = 0;
-                t.bar_err = None;
+                self.tm().unwrap().apply_find(q);
                 self.reload();
             }
             // Nothing ran, so the message goes under the bar and the rows stay.
@@ -78,8 +75,7 @@ impl App {
                 t.view = View::Documents;
                 t.filter_txt = text.trim().to_string();
                 t.clear_options();
-                t.query = q;
-                t.page = 0;
+                t.apply_find(q);
                 self.reload();
             }
             ShellKind::Aggregate(p) => {
@@ -109,6 +105,51 @@ impl App {
                 None => self.warn_offline(),
             }
         }
+    }
+}
+
+impl Tab {
+    /// Shows the rows of a find query read from the bar: the page starts over and the bar's texts are what ran.
+    pub(super) fn apply_find(&mut self, q: Query) {
+        self.query = q;
+        self.page = 0;
+        self.bar_err = None;
+        self.ran_txt = bar_refs(self).map(|s| s.clone());
+    }
+
+    /// A header sort runs the new sort with the rest of the query that ran before, so only the sort is recorded as run: the
+    /// other boxes may hold edits that did not run.
+    pub(super) fn ran_sort(&mut self) {
+        self.ran_txt[1] = self.sort_txt.clone();
+    }
+
+    /// Takes what the query line holds as what ran, for a tab whose texts were set without a run: restored, duplicated or
+    /// built by the demo. A run or a page load records what ran itself.
+    pub(super) fn seed_ran(&mut self) {
+        self.ran_txt = bar_refs(self).map(|s| s.clone());
+        if self.sql.is_some() {
+            let q = super::sql::bar::page_query(self);
+            if let Some(s) = self.sql.as_mut() {
+                s.ran = q;
+            }
+        }
+    }
+}
+
+fn bar_refs(t: &Tab) -> [&String; 7] {
+    [&t.filter_txt, &t.sort_txt, &t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt]
+}
+
+/// Whether the query bar of a Content or Documents tab holds something other than what the rows below came from. The rows stay
+/// until Run, so the bar says so.
+pub(super) fn query_dirty(t: &Tab) -> bool {
+    if t.view != View::Documents {
+        return false;
+    }
+    match &t.sql {
+        // The SQL bar builds its query once a frame and keeps the answer, so the results do not build it again.
+        Some(s) => s.bar.dirty,
+        None => t.ran_txt.iter().zip(bar_refs(t)).any(|(a, b)| a != b),
     }
 }
 
@@ -157,5 +198,19 @@ mod tests {
         assert_eq!(find_query(&t).unwrap().hint, Some(Bson::Document(doc! { "status": 1 })));
         t.collation_txt = "{ strength: 'x' }".into();
         assert!(find_query(&t).err().unwrap().starts_with("Collation: "));
+    }
+
+    #[test]
+    fn texts_set_without_a_run_are_edits_until_seeded() {
+        let mut t = Tab::new(Sel { conn: 0, db: "d".into(), coll: "c".into(), ..Default::default() });
+        assert!(!query_dirty(&t), "a new tab is out of date");
+        t.filter_txt = "{ a: 1 }".into();
+        assert!(query_dirty(&t), "a typed filter is not an edit");
+        t.seed_ran();
+        assert!(!query_dirty(&t), "a seeded tab is out of date");
+        t.sort_txt = "{ a: -1 }".into();
+        t.filter_txt = "{ a: 2 }".into();
+        t.ran_sort();
+        assert!(query_dirty(&t), "a header sort hid a filter that did not run");
     }
 }

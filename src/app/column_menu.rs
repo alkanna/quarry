@@ -304,6 +304,7 @@ impl App {
                 let t = self.tm().unwrap();
                 t.query.sort = next.map(|d| doc! { c: d });
                 t.sort_txt = t.query.sort.as_ref().map(|s| db::shell_text(&Bson::Document(s.clone()))).unwrap_or_default();
+                t.ran_sort();
                 t.page = 0;
                 self.reload();
             }

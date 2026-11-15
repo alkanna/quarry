@@ -325,44 +325,29 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
+            let win = self.win_buttons;
             ui.horizontal_centered(|ui| {
+                if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), glyphs::sidebar, "Toggle sidebar", "Show or hide the sidebar").clicked() {
+                    self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
+                    self.save_prefs();
+                }
+                ui.add_space(4.0);
                 app_mark(ui);
                 ui.add_space(-2.0);
                 ui.label(semibold(RichText::new("quarry").size(TXT_TITLE).color(BRIGHT())));
                 ui.add_space(22.0);
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                    let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
-                    let mut job = LayoutJob::default();
-                    // A query tab has no table, so its own name ends the path.
-                    let last = self.tab_name(self.cur);
-                    // A PostgreSQL path has a schema level between the database and the table.
-                    let place = if s.schema.is_empty() || s.coll.is_empty() { s.db.clone() } else { format!("{} / {}", s.db, s.schema) };
-                    job.append(&format!("{name} / {place} / "), 0.0, mono_fmt(12.0, MUTED(), 400.0));
-                    job.append(&last, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
-                    ui.label(job);
-                    ui.add_space(4.0);
-                    if self.prefs.always_writable {
-                        // No lock to toggle: writes are always on.
-                    } else if writable {
-                        if badge(ui, "WRITES ON", ALERT()).on_hover_text("Click to lock this connection again").clicked() {
-                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
-                                c.writable = false;
-                            }
-                            self.ok("Writes locked");
-                        }
-                    } else if badge(ui, "READ-ONLY", PRIMARY()).on_hover_text("Click to allow edits on this connection for this session").clicked() {
-                        self.modal = Some(Modal::Unlock(s.conn, None));
-                    }
+                    self.crumbs(ui, &s);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if win {
+                        ui.add_space(window_buttons::BUTTONS_W - 4.0);
+                    }
                     self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
                     let n = self.undo.len();
                     let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
                     if quiet_enabled(ui, n > 0, undo).on_hover_text("Recent writes you can take back").clicked() {
                         self.modal = Some(Modal::Undo);
-                    }
-                    if quiet(ui, "Settings").on_hover_text("Cmd+,").clicked() {
-                        self.modal = Some(Modal::Settings);
                     }
                     ui.add_space(12.0);
                     if search_pill(ui).clicked() {
@@ -380,6 +365,9 @@ impl App {
                     }
                 });
             });
+            if win {
+                window_buttons::window_buttons(ui, full);
+            }
         });
     }
 
@@ -453,6 +441,13 @@ impl App {
                     if quiet(ui, if self.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
                         self.log.open = !self.log.open;
                     }
+                    let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
+                    let tip = if connected { "Server status" } else { "Server status (connect first)" };
+                    if quiet_enabled(ui, connected, RichText::new("Server").size(TXT_CAPTION)).on_hover_text(tip).clicked()
+                        && let Some(conn) = self.active
+                    {
+                        self.open_server(conn);
+                    }
                     ui.add_space(8.0);
                     ui.label(RichText::new("⌘K jump   ↵ run   ⌘/ keys").font(FontId::monospace(TXT_CAPTION)).color(FAINT())).on_hover_text("Cmd+K jumps to a collection, Enter runs the query, double-click a value to edit it, Cmd+/ lists every shortcut");
                     ui.add_space(10.0);
@@ -483,7 +478,11 @@ impl App {
         // Move left or Move right picked in a tab's menu.
         let mut menu_move: Option<dnd::Move> = None;
         let has_closed = !self.closed.is_empty();
-        const TAB_MIN_W: f32 = 120.0;
+        const TAB_MIN_W: f32 = 146.0;
+        // Left of the name: the engine logo and its gap. Right: the close cross.
+        const TAB_PAD_L: f32 = 38.0;
+        // Right of the text: the cross, and the gap where the second line is cut, with a pixel to spare for rounding.
+        const TAB_PAD_R: f32 = 34.0;
         const PLUS_W: f32 = 32.0;
         const LIST_W: f32 = 84.0;
         let n = self.tabs.len();
@@ -491,7 +490,6 @@ impl App {
         let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
             job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
-            job.append(t.sel.scope_label(), 6.0, mono_fmt(10.0, FAINT(), 400.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
                 View::Indexes => Some("indexes"),
@@ -508,9 +506,11 @@ impl App {
                 View::Documents => None,
             };
             if let Some(v) = v {
-                job.append(v, 6.0, mono_fmt(10.0, C_LINK(), 400.0));
+                job.append(v, 6.0, mono_fmt(TXT_MICRO, C_LINK(), 400.0));
             }
-            ui.fonts_mut(|f| f.layout_job(job))
+            let line2 = crumbs::tab_second_line(self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str()), t.sel.scope_label());
+            let sub = LayoutJob::single_section(line2, mono_fmt(TXT_MICRO, FAINT(), 400.0));
+            ui.fonts_mut(|f| (f.layout_job(job), f.layout_job(sub)))
         }).collect();
         let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 });
         egui::Panel::top("tabs").exact_size(TAB_STRIP_H).show_separator_line(false).frame(frame).show(ui, |ui| {
@@ -520,7 +520,7 @@ impl App {
         // Like a browser, tabs narrow down to TAB_MIN_W before the strip has to scroll.
         let full = ui.available_width();
         let cap = ((full - PLUS_W) / n.max(1) as f32).max(TAB_MIN_W);
-        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 48.0).clamp(TAB_MIN_W, 260.0).min(cap)).collect();
+        let widths: Vec<f32> = titles.iter().map(|g| (g.0.size().x.max(g.1.size().x) + TAB_PAD_L + TAB_PAD_R).clamp(TAB_MIN_W, 260.0).min(cap)).collect();
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
@@ -541,7 +541,7 @@ impl App {
                     let keys: Vec<egui::Id> = self.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
                     tab_move = dnd::reorder(ui, egui::Id::unique("tab-strip"), dnd::Items::horizontal(&widths, TAB_STRIP_H).keys(&keys), |ui, i, st| {
                         let t = &self.tabs[i];
-                        let title = titles[i].clone();
+                        let (title, sub) = titles[i].clone();
                         let active = i == self.cur;
                         let rect = ui.max_rect();
                         let resp = ui.interact(rect, ui.scope_id().with("tab"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -562,9 +562,28 @@ impl App {
                         if !st.lifted {
                             p.vline(rect.right() - 0.5, rect.shrink2(egui::vec2(0.0, 7.0)).y_range(), Stroke::new(1.0, LINE()));
                         }
+                        let conn = self.conn(t.sel.conn);
+                        // The tag's edge on top reads before the name does: red for production, amber for staging.
+                        if let Some(edge) = conn.and_then(|c| tag_level(&c.meta.tag)) {
+                            p.rect_filled(rect.with_max_y(rect.top() + 3.0), 0, if active || hovered { edge } else { tint(edge, 170) });
+                        }
+                        if let Some(c) = conn {
+                            let (mark, _) = rail::engine_mark(c.meta.engine, &c.server.product);
+                            if let Some(tex) = rail::engine_logo(ui.ctx(), mark) {
+                                let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+                                p.image(tex.id(), egui::Rect::from_center_size(egui::pos2(rect.left() + 22.0, rect.center().y + 1.0), egui::vec2(16.0, 16.0)), uv, if active || hovered { rail::mark_color(mark) } else { tint(rail::mark_color(mark), 150) });
+                            }
+                        }
                         let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
                         let name = if active { BRIGHT() } else if hovered || st.lifted { TEXT() } else { MUTED() };
-                        p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 14.0, rect.center().y - title.size().y / 2.0), title, name);
+                        let tx = rect.left() + TAB_PAD_L;
+                        // Cut with an ellipsis at the cross, so the database goes first and the connection stays.
+                        let sub = truncated(p, &sub.job.text, FontId::monospace(TXT_MICRO), FAINT(), clip.right() - tx - 4.0);
+                        let top = rect.center().y + 1.0 - (title.size().y + sub.size().y + 1.0) / 2.0;
+                        let below = top + title.size().y + 1.0;
+                        let pc = p.with_clip_rect(clip.intersect(p.clip_rect()));
+                        pc.galley(egui::pos2(tx, top), title, name);
+                        pc.galley(egui::pos2(tx, below), sub, FAINT());
                         if st.lifted {
                             return resp;
                         }
@@ -586,9 +605,13 @@ impl App {
                             ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
                             ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                         }
-                        let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
                         let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
-                        let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
+                        let (conn_name, product, host) = conn.map(conn_label).unwrap_or_default();
+                        let mut tip = format!("{conn_name} / {place} / {}\n{product} on {host}", self.tab_name(i));
+                        if let Some(c) = conn.filter(|c| !c.meta.tag.is_empty()) {
+                            tip += &format!("\nTag: {}", c.meta.tag);
+                        }
+                        let resp = resp.on_hover_text(format!("{tip}\nDrag to reorder, middle-click closes, right-click for more"));
                         resp.context_menu(|ui| {
                             menu_look(ui);
                             ui.set_min_width(190.0);
@@ -694,6 +717,7 @@ impl App {
             let t = &self.tabs[self.cur];
             let mut n = Tab::new(t.sel.clone());
             (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
+            n.seed_ran();
             self.tabs.insert(self.cur + 1, n);
             self.set_cur(self.cur + 1);
             self.reset_doc_state();
@@ -811,7 +835,7 @@ fn search_pill(ui: &mut egui::Ui) -> egui::Response {
     p.rect(rect, R_MD, fill, Stroke::new(1.0, if r.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
     let hint = p.layout_no_wrap("Search or jump to…".into(), FontId::proportional(TXT_SMALL), if r.hovered() { MUTED() } else { FAINT() });
     p.galley(egui::pos2(rect.left() + 12.0, rect.center().y - hint.size().y / 2.0), hint, Color32::PLACEHOLDER);
-    let k = p.layout_job(LayoutJob::single_section(keys(false, false, "K"), mono_fmt(10.0, MUTED(), 400.0)));
+    let k = p.layout_job(LayoutJob::single_section(keys(false, false, "K"), mono_fmt(TXT_MICRO, MUTED(), 400.0)));
     let kr = egui::Rect::from_min_size(egui::pos2(rect.right() - 6.0 - (k.size().x + 10.0), rect.center().y - 8.0), egui::vec2(k.size().x + 10.0, 16.0));
     paint_kbd(p, kr, k);
     r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Jump to a connection, database or collection")

@@ -39,10 +39,12 @@ pub(super) struct ConnsUi {
     pub(super) picker_filter: String,
     /// Groups the picker shows folded. Apart from `Group.open`, so folding in the picker never changes the panel.
     pub(super) picker_closed: HashSet<u64>,
-    /// Demo states: the group menu drawn open, a connection shown hovering inside a group, and the picker opened.
+    /// Demo states: the group menu drawn open, a connection shown hovering inside a group, and the rail's Connect popover opened.
     pub(super) demo_menu: Option<u64>,
     pub(super) demo_drop: Option<u64>,
     pub(super) demo_picker: bool,
+    /// The rail's connection tile menu drawn open, for QUARRY_TEST_RAIL=menu.
+    pub(super) demo_tile_menu: Option<u64>,
 }
 
 /// One row of the panel or of the picker.
@@ -210,6 +212,9 @@ impl App {
     /// The body of the sidebar in Connections mode.
     pub(super) fn conns_panel(&mut self, ui: &mut egui::Ui) {
         let mut acts: Vec<PanelAct> = Vec::new();
+        // Neither segment is lit here: Manage opened this panel, and a click on either goes back to its panel.
+        self.side_switch(ui);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(LayoutJob::single_section("CONNECTIONS".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

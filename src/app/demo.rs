@@ -5,7 +5,7 @@ use super::*;
 impl App {
     /// QUARRY_TEST_RAIL=<state>: the MySQL demo connection and a connecting one beside the Mongo demo. groups folds the two
     /// SQL connections into a Production folder, open shows it open, and tip is the closed folder, which a
-    /// QUARRY_TEST_POINTER over it shows the tooltip of. Apart from `load_demo` so a test can load each state.
+    /// QUARRY_TEST_POINTER over it shows the tooltip of. connect opens the Connect popover and menu draws the context menu of a tile. Apart from `load_demo` so a test can load each state.
     pub(super) fn demo_rail(&mut self, state: &str) {
         // The SQL demo replaces the tabs, which the Mongo demo keeps.
         let tabs = std::mem::take(&mut self.tabs);
@@ -14,6 +14,12 @@ impl App {
         self.cur = 1;
         self.active = Some(1);
         self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+        match state {
+            // The Connect popover over the rail, and the menu of the MySQL tile.
+            "connect" => self.conns_ui.demo_picker = true,
+            "menu" => self.conns_ui.demo_tile_menu = Some(3),
+            _ => {}
+        }
         if matches!(state, "groups" | "open" | "tip") {
             let gid = self.groups.new_group("Production");
             let all = self.conn_ids();
@@ -27,6 +33,8 @@ impl App {
     }
 
     pub(super) fn load_demo(&mut self) {
+        // QUARRY_TEST_WINFRAME shows the Windows window buttons on any platform, for screenshots.
+        self.win_buttons |= std::env::var("QUARRY_TEST_WINFRAME").is_ok();
         let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
         let status = ["paid", "shipped", "pending", "refunded"];
         let docs: Vec<Document> = (0..50)
@@ -82,6 +90,7 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        self.demo_seed_ran();
         // QUARRY_TEST_CROWD=1 adds long collection names and thirty connections, for the one-line rows and the scrolling connections menu.
         if std::env::var("QUARRY_TEST_CROWD").is_ok() {
             if let Some((_, Some(c))) = self.conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
@@ -402,7 +411,7 @@ impl App {
         });
     }
 
-    fn demo_error(&mut self, which: &str) {
+    pub(super) fn demo_error(&mut self, which: &str) {
         const REFUSED: &str = r#"Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command { find: "orders", filter: { status: "paid" }, limit: 50, lsid: { id: UUID("3f1c9e2a-41c8-4bb4-9b1e-6f3c2d1a0b7e") }, $db: "shop" }"#;
         const DUP: &str = r#"An error occurred when trying to execute a write operation: WriteError(WriteError { code: 11000, code_name: None, message: "E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 10402 }", details: None })"#;
         let i = self.cur;
@@ -420,6 +429,8 @@ impl App {
             "bar" => {
                 self.tabs[i].filter_txt = "{ status: 'paid', total: { $gt: 50 } }}".into();
                 self.run_query();
+                // The picture is of the refused query alone, not of a line edited since the rows below.
+                self.tabs[i].seed_ran();
             }
             "toast" => {
                 self.err(DUP);
@@ -447,9 +458,13 @@ impl App {
 
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
     pub(super) fn load_sql_demo(&mut self) {
-        use db::sql::{Col, value::Kind};
         let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
-        let which = which.as_str();
+        self.sql_demo(&which);
+    }
+
+    /// `load_sql_demo` on the view `which` names, apart so a test can draw each one without the environment.
+    pub(super) fn sql_demo(&mut self, which: &str) {
+        use db::sql::{Col, value::Kind};
         let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
         shop.sort();
         self.conns.push(Conn {
@@ -594,6 +609,14 @@ impl App {
         // QUARRY_TEST_SQL=routines opens a function; routines-edit, routines-run, routines-drop and routines-new show the other panes.
         if let Some(v) = which.strip_prefix("routines") {
             self.demo_routines(3, "shop", "shop", false, v.trim_start_matches('-'));
+        }
+        self.demo_seed_ran();
+    }
+
+    /// The demo's tabs set their query lines without running them, so what they hold is what the rows below came from.
+    pub(super) fn demo_seed_ran(&mut self) {
+        for t in &mut self.tabs {
+            t.seed_ran();
         }
     }
 

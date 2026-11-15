@@ -434,15 +434,16 @@ fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
     let on = ui.app().runs_on(&ScriptRef::Saved(10));
     assert!(on.contains("Runs on shop-prod") && on.contains("shop") && on.contains("read-only"), "{on}");
     ui.show(&on);
-    // The active connection is another one, but the tab on screen is on shop-prod: the panel scopes to the tab's.
+    // Picking another connection in the rail moves the panel to it, even though the tab on screen is on shop-prod:
+    // the whole sidebar belongs to the rail's connection.
     {
         let a = ui.h.state_mut();
         a.conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
         a.active = Some(1);
     }
     ui.settle();
-    assert_eq!(ui.app().lib_conn(), Some(3));
-    ui.show("Monthly revenue");
+    assert_eq!(ui.app().lib_conn(), Some(1));
+    assert!(ui.h.query_by_label("Monthly revenue").is_none(), "a shop-prod script still shows under Local sample");
 }
 
 #[test]

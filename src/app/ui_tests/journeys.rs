@@ -71,7 +71,7 @@ impl UiApp {
 
     fn show_library(&mut self) {
         if self.app().prefs.side_mode() != SideMode::Library || self.app().prefs.sidebar_hidden {
-            self.click("Script library");
+            self.click("Scripts");
         }
     }
 
@@ -93,7 +93,8 @@ fn mysql_a_query_saved_in_a_new_folder_reopens_from_the_library_and_runs() {
     let mut ui = ui_app(MY).unwrap();
 
     // A group for the connection, made in the Connections panel, and the connection dragged into it.
-    ui.click("Saved connections");
+    ui.click("Connect");
+    ui.click("Manage\u{2026}");
     ui.click("New group");
     ui.show("New group name");
     ui.type_text("Journey");

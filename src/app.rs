@@ -20,6 +20,7 @@ mod compare;
 pub(crate) mod config;
 mod conn_form;
 mod conns_panel;
+mod crumbs;
 mod conn_pg_advanced;
 mod danger;
 mod demo;
@@ -37,12 +38,14 @@ mod indexes;
 mod library;
 mod log;
 mod mem;
+mod window_buttons;
 mod modals;
 mod mongo_create;
 mod palette;
 mod poll;
 mod query;
 mod relations;
+mod results_bar;
 mod restore;
 mod run;
 mod schema;
@@ -288,6 +291,9 @@ pub struct App {
     demo: bool,
     /// Nothing is read from or written to disk or the keychain. True in the demo and in tests; `demo` alone means fake offline data.
     ephemeral: bool,
+    /// Whether the header draws the window buttons: on Windows once the native title bar is gone, and in the demo's
+    /// QUARRY_TEST_WINFRAME switch.
+    win_buttons: bool,
     tool: Option<ToolRun>,
     /// AI agents: saved settings, the link listener and connected sessions.
     agents: agents::AgentsState,
@@ -440,6 +446,7 @@ impl App {
             tab_seen: None,
             demo,
             ephemeral: demo,
+            win_buttons: false,
             tool: None,
             agents: Default::default(),
             width_cache: HashMap::new(),
@@ -476,6 +483,7 @@ impl App {
         let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
         // Screenshot runs stay off the real menu bar.
         let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
+        app.win_buttons = window_buttons::install(cc);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
             (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);
@@ -625,6 +633,7 @@ impl App {
                 if let Some(r) = st.script {
                     t.script = app.rebind(&t, r);
                 }
+                t.seed_ran();
                 app.tabs.push(t);
             }
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));

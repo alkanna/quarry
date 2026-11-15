@@ -353,6 +353,9 @@ pub(super) struct Tab {
     pub(super) skip_txt: String,
     pub(super) hint_txt: String,
     pub(super) collation_txt: String,
+    /// The seven texts of the Documents bar as the last run read them. The bar is out of date when they differ from what it
+    /// holds now. A tab whose texts are set without a run takes them as what ran through `seed_ran`.
+    pub(super) ran_txt: [String; 7],
     pub(super) query: Query,
     pub(super) page: u64,
     pub(super) docs: Vec<db::Row>,
@@ -825,6 +828,7 @@ impl Tab {
             skip_txt: String::new(),
             hint_txt: String::new(),
             collation_txt: String::new(),
+            ran_txt: Default::default(),
             query: Query::default(),
             page: 0,
             docs: Vec::new(),

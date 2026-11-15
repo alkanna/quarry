@@ -553,8 +553,9 @@ impl App {
             Some(Node::Script(id)) => self.library.scripts.iter().find(|s| s.id == *id).and_then(|s| tree::live_parent(&self.library, s.folder)),
             _ => None,
         };
+        self.side_switch(ui);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(LayoutJob::single_section("LIBRARY".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = dots_menu(ui, |ui| {
                     menu_list(ui);

@@ -1,4 +1,5 @@
-//! Every state of the QUARRY_TEST_CONNS, QUARRY_TEST_LIBRARY and QUARRY_TEST_RAIL switches, loaded headlessly and drawn for
+//! Every state of the QUARRY_TEST_CONNS, QUARRY_TEST_LIBRARY and QUARRY_TEST_RAIL switches, and the SQL, PostgreSQL and
+//! error views the screenshots use, loaded headlessly and drawn for
 //! a few frames, so a screenshot switch never breaks unseen: the loaders place connections and scripts by id and open
 //! dialogs, which a change elsewhere can leave pointing at nothing.
 
@@ -6,7 +7,7 @@ use super::*;
 
 const CONNS: [&str; 7] = ["panel", "filter", "menu", "new", "edit", "drag", "picker"];
 const LIBRARY: [&str; 16] = ["panel", "all", "search", "empty", "menu", "folder-menu", "drag", "linked", "missing", "link", "save-linked", "conflict", "save", "picker", "picker-docs", "picker-shell"];
-const RAIL: [&str; 4] = ["1", "groups", "open", "tip"];
+const RAIL: [&str; 6] = ["1", "groups", "open", "tip", "connect", "menu"];
 
 /// The demo as the app builds it for a switch: `load_demo`, then `then`, then a few frames.
 fn draw(then: impl FnOnce(&mut App)) -> Option<UiApp> {
@@ -42,6 +43,30 @@ fn every_library_state_draws() {
         let a = ui.app();
         assert!(a.library.links.iter().all(|l| a.lib_ui.scans.contains_key(&l.id)), "{s}: a demo link has no made-up scan, so it would read the disk");
     }
+}
+
+/// The README and design screenshots of the SQL views, which the query line and results bar redesign touched.
+#[test]
+fn the_sql_and_postgres_screenshot_views_draw() {
+    for which in ["content", "rules", "grouped", "query"] {
+        let Some(mut ui) = demo_ui(|_| {}) else { return };
+        ui.h.state_mut().sql_demo(which);
+        ui.settle();
+        assert!(ui.h.query_by_label("Database crumb").is_some(), "QUARRY_TEST_SQL={which} has no title bar path");
+        if which == "grouped" {
+            ui.show("Ungroup");
+        }
+    }
+    let Some(mut ui) = demo_ui(|a| a.pg_demo("content")) else { return };
+    ui.settle();
+    ui.show("Page size");
+}
+
+#[test]
+fn the_query_error_state_draws_in_the_query_line() {
+    let Some(mut ui) = draw(|a| a.demo_error("bar")) else { return };
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| t.bar_err.is_some()), "QUARRY_TEST_ERR=bar shows no parse error");
 }
 
 #[test]

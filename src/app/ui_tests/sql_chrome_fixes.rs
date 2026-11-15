@@ -72,13 +72,13 @@ fn the_palette_hints_the_view_digits_of_each_engine() {
 fn add_from_cloud_sql_is_offered_on_sql_connections_and_hidden_on_mongodb() {
     let Some(mut sql) = demo_ui(App::load_sql_demo) else { return };
     assert!(sql.app().command_hints().iter().any(|(n, _)| n.starts_with("Add from Cloud SQL")), "the palette lost the Cloud SQL command on a SQL connection");
-    sql.click("Connections");
+    sql.click("Connect");
     sql.show("Add from Cloud SQL\u{2026}");
 
     let Some(mut mongo) = demo_ui(App::load_demo) else { return };
     assert!(!mongo.app().command_hints().iter().any(|(n, _)| n.starts_with("Add from Cloud SQL")), "the palette offers Cloud SQL on a MongoDB connection");
-    mongo.click("Connections");
-    mongo.show("+  New connection\u{2026}");
+    mongo.click("Connect");
+    mongo.show("New connection\u{2026}");
     assert!(mongo.h.query_all_by_label("Add from Cloud SQL\u{2026}").next().is_none(), "the connection menu offers Cloud SQL on a MongoDB connection");
 }
 
@@ -159,7 +159,8 @@ fn postgresql_info_offers_vacuum_analyze_and_reindex_with_a_confirm_for_the_slow
 #[test]
 fn the_question_mark_on_the_content_bar_opens_this_dialects_filter_help() {
     let Some(mut ui) = demo_ui(App::load_pg_demo) else { return };
-    ui.click("?");
+    ui.click("Add a condition or clause");
+    ui.click("Query help");
     let Some(Modal::Text { title, body, .. }) = &ui.app().modal else { panic!("no help opened") };
     assert_eq!(title, "Query help");
     assert!(body.contains("ILIKE"), "{body}");
@@ -180,5 +181,30 @@ fn arrows_and_page_keys_move_the_content_grid() {
     ui.key(egui::Modifiers::NONE, egui::Key::PageDown);
     assert_eq!(ui.app().t().map(|t| t.page), Some(1));
     ui.key(egui::Modifiers::NONE, egui::Key::PageUp);
+    assert_eq!(ui.app().t().map(|t| t.page), Some(0));
+}
+
+// Duplicate and Delete belong to the floating selection bar, not to the results bar.
+#[test]
+fn the_results_bar_has_no_duplicate_or_delete_but_the_selection_bar_has() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.settle();
+    assert!(ui.h.query_all_by_label("Duplicate").next().is_none() && ui.h.query_all_by_label("Delete").next().is_none(), "the results bar still has row buttons");
+    assert!(ui.h.query_all_by_label("+ Row").next().is_some(), "+ Row is gone from the results bar");
+    ui.click("Select row 1");
+    ui.show("Duplicate");
+    assert!(ui.h.query_all_by_label("Delete…").next().is_some(), "the selection bar has no Delete");
+}
+
+// The count is the page-size control: a pick is remembered and starts again from the first page.
+#[test]
+fn the_page_size_menu_changes_the_size_and_goes_to_the_first_page() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let app = ui.h.state_mut();
+    let cur = app.cur;
+    app.tabs[cur].page = 1;
+    ui.click("Page size");
+    ui.click("200 per page");
+    assert_eq!(ui.app().prefs.page_size, 200);
     assert_eq!(ui.app().t().map(|t| t.page), Some(0));
 }

@@ -87,3 +87,18 @@ fn the_columns_stepper_is_one_field_high_and_steps() {
     ui.click("Decrease");
     assert_eq!(ui.app().prefs.default_cols, n);
 }
+
+/// The identity card of the active connection ends above the tree filter, so its tag and host line are not drawn under it.
+fn check_identity_card(load: fn(&mut App)) {
+    let Some(ui) = demo_ui(load) else { return };
+    let name = ui.app().active.and_then(|id| ui.app().conn(id)).map(|c| c.meta.name.clone()).expect("an active connection");
+    let card = ui.h.get_by_label(Box::leak(format!("Connection {name}").into_boxed_str())).rect();
+    let filter = ui.h.query_all_by(|n| n.role() == egui::Role::TextInput).map(|n| n.rect()).filter(|r| r.x_range().intersects(card.x_range()) && r.top() > card.top()).min_by(|a, b| a.top().total_cmp(&b.top())).expect("the tree filter");
+    assert!(filter.top() >= card.bottom(), "the tree filter at {filter:?} is laid over the identity card at {card:?}");
+}
+
+#[test]
+fn the_tree_filter_sits_under_the_identity_card() {
+    check_identity_card(App::load_demo);
+    check_identity_card(App::load_sql_demo);
+}

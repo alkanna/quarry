@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke};
 
 /// A menu that stays open while you type or click inside it, closing on a click outside or Esc.
 /// Plain egui menus close on any click inside, which made their text boxes unusable.
-pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+pub(crate) fn sticky_menu<'a>(ui: &mut egui::Ui, title: impl egui::IntoAtoms<'a>, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
@@ -429,49 +429,88 @@ pub(crate) fn danger_item(ui: &mut egui::Ui, text: impl Into<String>) -> egui::R
 /// a baseline there, so the triangle (from a fallback font) and the hint sat off center. Here
 /// each part is centered on its own.
 pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Response {
-    run_face(ui, text, keys, egui::CornerRadius::same(R_MD))
+    let (label, hint, w) = run_text(ui, text, keys, true);
+    run_face(ui, text, label, hint, w, egui::CornerRadius::same(R_MD), true)
 }
 
-/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip opens a menu of what to run.
-/// Returns the button, then the tip.
-pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool) -> (egui::Response, egui::Response) {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let main = run_face(ui, text, keys, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 });
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), if tip_on { Sense::click() } else { Sense::hover() });
+/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip, named `tip_name`, opens a menu of what to
+/// run. A query line passes `loud` only while it holds a query the rows below did not come from; otherwise its Run is a quiet
+/// outlined button of the same size, so the line does not reflow. Returns the button, then the tip.
+pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool, tip_name: &str) -> (egui::Response, egui::Response) {
+    let (label, hint, w) = run_text(ui, text, keys, loud);
+    split_row(ui, w, |ui| {
+        let main = run_face(ui, text, label, hint, w, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, loud);
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), Sense::click());
         let p = ui.painter();
-        let fill = if tip_on { [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)] } else { PRIMARY() };
-        p.rect_filled(rect, egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, fill);
-        p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 5.0)).y_range(), Stroke::new(1.0, tint(ON_PRIMARY(), 70)));
-        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, if tip_on { ON_PRIMARY() } else { tint(ON_PRIMARY(), 110) });
+        let corners = egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD };
+        if loud {
+            p.rect_filled(rect, corners, run_fill(state_of(&r)));
+            p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 5.0)).y_range(), Stroke::new(1.0, tint(ON_PRIMARY(), 70)));
+        } else {
+            // Over the button's right edge by a pixel, so the two outlines meet as one divider and not a double line.
+            p.rect(rect.with_min_x(rect.min.x - 1.0), corners, shade_fill(PANEL(), state_of(&r)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        }
+        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, if loud { ON_PRIMARY() } else { MUTED() });
         focus_ring(ui, &r, rect, R_MD as f32);
-        let enabled = ui.is_enabled() && tip_on;
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Choose what to run"));
-        (main, if tip_on { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r })
+        let enabled = ui.is_enabled();
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip_name));
+        (main, r.on_hover_cursor(egui::CursorIcon::PointingHand))
     })
-    .inner
 }
 
-fn run_face(ui: &mut egui::Ui, text: &str, keys: &str, corners: egui::CornerRadius) -> egui::Response {
-    const TRI: f32 = 8.0;
-    let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ON_PRIMARY(), W_SEMIBOLD, 0.0)));
-    let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, tint(ON_PRIMARY(), 170), 400.0)));
-    let content = TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
-    let (rect, r) = ui.allocate_exact_size(egui::vec2((content + 28.0).max(96.0), 26.0), Sense::click());
-    let fill = [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)];
+const RUN_TRI: f32 = 8.0;
+
+/// The label and key hint of a Run, laid out once for both its width and its face, and the width of the button part.
+fn run_text(ui: &egui::Ui, text: &str, keys: &str, loud: bool) -> (std::sync::Arc<egui::Galley>, std::sync::Arc<egui::Galley>, f32) {
+    let (ink, faint) = if loud { (ON_PRIMARY(), tint(ON_PRIMARY(), 170)) } else { (TEXT(), FAINT()) };
+    let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ink, W_SEMIBOLD, 0.0)));
+    let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, faint, 400.0)));
+    let w = (RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x + 28.0).max(96.0);
+    (label, hint, w)
+}
+
+/// The accent fill of a loud Run for its state.
+fn run_fill(state: usize) -> Color32 {
+    [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state]
+}
+
+/// Lays the button and the tip of a split Run left to right in one rect, so the tip stays on the right inside a right-to-left
+/// row, where a scope would have put it left of the button.
+fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let (_, rect) = ui.allocate_space(egui::vec2(main_w + 22.0, 26.0));
+    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    row.spacing_mut().item_spacing.x = 0.0;
+    add(&mut row)
+}
+
+/// The button part of a Run: on the accent when `loud`, else outlined on the panel.
+fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, hint: std::sync::Arc<egui::Galley>, w: f32, corners: egui::CornerRadius, loud: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 26.0), Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, corners, fill);
+    let (mark, ink) = if loud {
+        p.rect_filled(rect, corners, run_fill(state_of(&r)));
+        (ON_PRIMARY(), ON_PRIMARY())
+    } else {
+        p.rect(rect, corners, shade_fill(PANEL(), state_of(&r)), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        (MUTED(), TEXT())
+    };
+    let (lw, content) = (label.size().x, RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x);
     let (cy, mut x) = (rect.center().y, rect.center().x - content / 2.0);
-    p.add(egui::Shape::convex_polygon(vec![egui::pos2(x, cy - TRI * 0.62), egui::pos2(x + TRI, cy), egui::pos2(x, cy + TRI * 0.62)], ON_PRIMARY(), Stroke::NONE));
-    x += TRI + 8.0;
+    play_mark(p, egui::pos2(x, cy), RUN_TRI, RUN_TRI * 0.62, mark);
+    x += RUN_TRI + 8.0;
     let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
-    p.galley(centered(&label, x), label.clone(), ON_PRIMARY());
-    x += label.size().x + 10.0;
-    p.galley(centered(&hint, x), hint, ON_PRIMARY());
+    p.galley(centered(&label, x), label, ink);
+    x += lw + 10.0;
+    p.galley(centered(&hint, x), hint, ink);
     focus_ring(ui, &r, rect, R_MD as f32);
     let enabled = ui.is_enabled();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A filled triangle pointing right, its left edge centered on `left`, `w` wide and `half_h` above and below its middle.
+pub(crate) fn play_mark(p: &egui::Painter, left: egui::Pos2, w: f32, half_h: f32, color: Color32) {
+    p.add(egui::Shape::convex_polygon(vec![left - egui::vec2(0.0, half_h), left + egui::vec2(w, 0.0), left + egui::vec2(0.0, half_h)], color, Stroke::NONE));
 }
 
 pub(crate) fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
@@ -668,6 +707,46 @@ pub(crate) fn expand_button() -> impl egui::Widget {
     }
 }
 
+/// One line of text cut with an ellipsis at `w`.
+pub(crate) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
+}
+
+/// `truncated` with the byte ranges in `hl` on a highlight background. The ranges are sorted and sit on char boundaries.
+pub(crate) fn truncated_hl(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32, hl: &[(usize, usize)]) -> std::sync::Arc<egui::Galley> {
+    if hl.is_empty() {
+        return truncated(p, text, font, color, w);
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let marked = egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() };
+    let mut at = 0;
+    for &(a, b) in hl {
+        if a < at || b > text.len() || a >= b {
+            continue;
+        }
+        job.append(&text[at..a], 0.0, plain.clone());
+        job.append(&text[a..b], 0.0, marked.clone());
+        at = b;
+    }
+    job.append(&text[at..], 0.0, plain);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
+}
+
+/// Names a painted widget for screen readers and the UI tests, which find widgets by these names. The name is only
+/// formatted when accessibility asks for it.
+pub(crate) fn a11y(r: &egui::Response, role: egui::Role, name: impl std::fmt::Display) {
+    r.widget_info(|| egui::WidgetInfo::labeled(role, true, &name));
+}
+
+/// A painted icon to put before a button's text, in the text's color so it follows the button's hover and press.
+pub(crate) fn icon_atom(paint: fn(&egui::Painter, egui::Pos2, Color32)) -> egui::Atom<'static> {
+    egui::Atom::paint(egui::vec2(16.0, 16.0), move |ui, a| paint(ui.painter(), a.rect.center(), a.fallback_text_color))
+}
+
 pub(crate) fn paint_clock(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     let s = Stroke::new(1.5, color);
     p.circle_stroke(c, 6.5, s);
@@ -702,6 +781,37 @@ pub(crate) fn paint_bolt(p: &egui::Painter, left: egui::Pos2) {
 }
 
 /// A short vertical rule between groups of toolbar buttons, with `pad` on each side.
+/// Adds a group of widgets (a frame, a scope) to a wrapping row. egui moves a single widget that does not fit to the next row
+/// but lets a group run past the right edge, so the group starts a new row itself when its width from the last frame does not
+/// fit what is left of this one. `salt` keeps the group's ids, and the popovers hung on them, the same whatever comes before.
+pub(crate) fn flow_item<R>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let key = ui.scope_id().with("flow-w").with(&salt);
+    let w = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(0.0);
+    let x = ui.cursor().min.x;
+    if x > ui.max_rect().left() + 0.5 && x + w > ui.max_rect().right() + 0.5 {
+        ui.end_row();
+    }
+    let r = ui.push_id(salt, add);
+    // Whole pixels, so a width that wobbles by a fraction as text is laid out does not ask for frame after frame.
+    let now = r.response.rect.width().round();
+    if now != w {
+        ui.data_mut(|d| d.insert_temp(key, now));
+        // The row is decided from this width, so a group that changed size is laid out again at once.
+        ui.ctx().request_repaint();
+    }
+    r.inner
+}
+
+/// The "edited" note of a query line. Its room is kept while it is hidden, so the line does not reflow as typing starts.
+pub(crate) fn edited_note(ui: &mut egui::Ui, on: bool) {
+    let g = ui.painter().layout_no_wrap("edited".into(), FontId::proportional(TXT_SMALL), PRIMARY());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(g.size().x, BUTTON_H), Sense::hover());
+    if on {
+        let dy = optical_dy(&g);
+        ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy), g, PRIMARY());
+    }
+}
+
 pub(crate) fn vsep(ui: &mut egui::Ui, pad: f32) {
     ui.add_space(pad);
     let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, BUTTON_H * 0.75), Sense::hover());
@@ -715,10 +825,7 @@ pub(crate) fn close_x(ui: &mut egui::Ui) -> egui::Response {
     let state = state_of(&r);
     ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill_on(ui, state));
     let color = if state > 0 { BRIGHT() } else { FAINT() };
-    let (c, d) = (rect.center(), 3.0);
-    for (a, b) in [(egui::vec2(-d, -d), egui::vec2(d, d)), (egui::vec2(-d, d), egui::vec2(d, -d))] {
-        ui.painter().line_segment([c + a, c + b], Stroke::new(1.3, color));
-    }
+    paint_x(ui.painter(), rect.center(), 3.0, Stroke::new(1.3, color));
     focus_ring(ui, &r, rect, CLOSE_W / 2.0);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1222,6 +1329,12 @@ pub(crate) fn paint_plus(p: &egui::Painter, c: egui::Pos2, arm: f32, color: Colo
     p.rect_filled(bar(x0 - arm, y0, len, t), 0.0, color);
     p.rect_filled(bar(x0, y0 - arm, t, arm), 0.0, color);
     p.rect_filled(bar(x0, y0 + t, t, arm), 0.0, color);
+}
+
+/// An X of two strokes reaching `d` from `c` along each axis.
+pub(crate) fn paint_x(p: &egui::Painter, c: egui::Pos2, d: f32, s: Stroke) {
+    p.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], s);
+    p.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], s);
 }
 
 pub(crate) fn paint_search(p: &egui::Painter, c: egui::Pos2, color: Color32) {

@@ -157,11 +157,11 @@ fn the_connections_menu_keeps_its_actions_on_screen_with_many_connections() {
     }) else {
         return;
     };
-    ui.h.get_by_label("Connections").click();
+    ui.h.get_by_label("Connect").click();
     ui.settle();
-    ui.show("+  New connection…");
+    ui.show("New connection…");
     let screen = ui.h.ctx.content_rect();
-    let action = ui.h.get_by_label("+  New connection…").rect();
+    let action = ui.h.get_by_label("New connection…").rect();
     assert!(screen.contains_rect(action), "New connection is off screen at {action:?} in {screen:?}");
     // The far end of the list is still reachable, by scrolling the list.
     ui.click("cluster-39");
