@@ -888,7 +888,7 @@ impl App {
                             continue;
                         }
                         let key = (id, ns.clone(), is_view);
-                        let gid = egui::Id::new(("side-group", &key));
+                        let gid = egui::Id::unique(("side-group", &key));
                         let unfolded = !group_hidden[is_view as usize];
                         let t = fold::openness(ui.ctx(), gid, unfolded);
                         let n = if is_view { n_views } else { matches_len - n_views };

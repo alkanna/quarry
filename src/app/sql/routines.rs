@@ -157,7 +157,7 @@ impl App {
         }
         // A filter shows the group open whatever its fold, and opens it at once rather than animating.
         let open = !filter.is_empty() || !self.routines.folded.contains(&key);
-        let gid = egui::Id::new(("side-routines", &key));
+        let gid = egui::Id::unique(("side-routines", &key));
         let t = crate::ui::fold::openness(ui.ctx(), gid, open);
         let cap = crate::app::sidebar::group_caption(ui, "ROUTINES", "Routines", shown.len(), t);
         if cap.clicked() {
