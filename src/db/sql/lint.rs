@@ -185,7 +185,7 @@ mod tests {
         let f = PgFixture::new(l, schema, "CREATE TABLE things (id int PRIMARY KEY);");
         let go = |s: &str| l.w.rt.block_on(check(&f.db, schema, s)).unwrap_or_else(|_| panic!("{var}: the check did not run for {s}"));
         assert_eq!(go("SELCT ( FRO things").map(|e| (e.span.start, e.warn)), Some((0, false)), "{var}");
-        assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((27, false)), "{var}: the end of input");
+        assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((22, false)), "{var}: the end of input marks the last token");
         assert_eq!(go("CREATE TABLE (id int)").map(|e| (e.span.start, e.warn)), Some((13, false)), "{var}: DDL");
         assert_eq!(go("SELECT nope FROM things").map(|e| (e.span.start, e.warn)), Some((7, true)), "{var}");
         assert_eq!(go("SELECT * FROM nothings").map(|e| (e.span.start, e.warn)), Some((14, true)), "{var}");
@@ -223,7 +223,7 @@ mod tests {
             let go = |s: &str| l.w.rt.block_on(check(&l.db, &f.name, s)).unwrap_or_else(|_| panic!("{var}: the check did not run for {s}"));
             let e = go("SELCT ( FRO things").unwrap_or_else(|| panic!("{var}: no syntax error"));
             assert_eq!((e.span.start, e.warn, e.msg.as_str()), (0, false, "Syntax error near 'SELCT ( FRO things'"), "{var}");
-            assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((27, false)), "{var}: the end of input");
+            assert_eq!(go("SELECT id FROM things WHERE").map(|e| (e.span.start, e.warn)), Some((22, false)), "{var}: the end of input marks the last token");
             assert_eq!(go("SELECT id\nFROM things\nWHER id = 1").map(|e| e.span.start), Some(27), "{var}: a later line");
             assert_eq!(go("SELECT nope FROM things").map(|e| (e.span.start, e.warn)), Some((7, true)), "{var}");
             assert_eq!(go("SELECT * FROM nothings").map(|e| (e.span.start, e.warn)), Some((14, true)), "{var}");
