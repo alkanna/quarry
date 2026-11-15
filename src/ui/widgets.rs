@@ -1214,7 +1214,8 @@ pub(crate) fn section_head(ui: &mut egui::Ui, left: &str, right: Option<&str>) -
 }
 
 /// A full-width clickable popover row, filled while hovered or pressed. Hover-only buttons go over
-/// it afterwards, so they take the click before the row does.
+/// it afterwards, so they take the click before the row does. The fill runs 6 past each side, into the popover body's
+/// padding; a bare combo box or menu has none, so its rows need side padding of their own.
 pub(crate) fn pop_row(ui: &mut egui::Ui, height: f32) -> (egui::Response, bool) {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);

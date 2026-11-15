@@ -1312,11 +1312,9 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let room = (inner.right() - tools_w - (x + 33.0)).max(20.0);
         let dot_w = if look.dot && !show_tools { 12.0 } else { 0.0 };
         let pad = 8.0 + if look.pill { 10.0 } else { 0.0 };
-        let name_w = p.layout_job(job.clone()).size().x;
-        let right_room = (room - dot_w - pad - name_w).max(room / 3.0 - pad);
-        let rg = (!right.is_empty() && right_room >= 24.0).then(|| {
+        let rg = (!right.is_empty()).then(|| (room - dot_w - pad - p.layout_job(job.clone()).size().x).max(room / 3.0 - pad)).filter(|w| *w >= 24.0).map(|w| {
             let mut rj = LayoutJob::single_section(right, mono_fmt(TXT_SECTION, right_col, 400.0));
-            rj.wrap = egui::text::TextWrapping::truncate_at_width(right_room);
+            rj.wrap = egui::text::TextWrapping::truncate_at_width(w);
             p.layout_job(rj)
         });
         // The pill and the changed dot take a little more room than the bare text.

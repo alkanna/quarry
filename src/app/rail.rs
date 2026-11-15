@@ -4,11 +4,6 @@ use super::*;
 use crate::ui::dnd::{self, Zone};
 use crate::ui::fold;
 
-/// Where the rail's panel puts its top-right corner this frame, for the page's rounded corner beside it.
-fn corner_id() -> egui::Id {
-    egui::Id::unique("rail-corner")
-}
-
 /// The id a rail folder's open and close animation goes by.
 fn fold_id(gid: u64) -> egui::Id {
     egui::Id::unique(("rail-fold", gid))
@@ -21,7 +16,8 @@ pub(super) enum RailIcon {
 }
 
 impl App {
-    pub(super) fn rail(&mut self, ui: &mut egui::Ui) {
+    /// Returns the rail's top-right corner, where the page's rounded corner goes.
+    pub(super) fn rail(&mut self, ui: &mut egui::Ui) -> egui::Pos2 {
         let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 10 });
         let shown = egui::Panel::left("rail").exact_size(RAIL_W).resizable(false).show_separator_line(false).frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -33,13 +29,12 @@ impl App {
                 }
             });
         });
-        ui.ctx().data_mut(|d| d.insert_temp(corner_id(), shown.response.rect.right_top()));
+        shown.response.rect.right_top()
     }
 
     /// Rounds the top-left corner of the page beside the rail, so the page reads as set into the header and the rail,
     /// which share one color and no longer have a divider. Called after every panel has drawn, on the panels' own layer.
-    pub(super) fn page_corner(&self, ctx: &egui::Context) {
-        let Some(o) = ctx.data(|d| d.get_temp::<egui::Pos2>(corner_id())) else { return };
+    pub(super) fn page_corner(&self, ctx: &egui::Context, o: egui::Pos2) {
         let r = R_LG as f32;
         let c = o + egui::vec2(r, r);
         let arc = |radius: f32| -> Vec<egui::Pos2> {
@@ -56,7 +51,7 @@ impl App {
     /// The pinned Connect tile and its popover: every saved connection under its group, open ones marked by their status
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, CONNECT_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
         let state = state_of(&r);
         let demo_open = std::mem::take(&mut self.conns_ui.demo_picker);
         if demo_open {
@@ -162,7 +157,7 @@ impl App {
             return;
         }
         // Leaves room for the Connect tile and the Settings button, which stay pinned below the scrolling tiles.
-        let room = (ui.available_height() - 36.0 - CONNECT_H - 8.0).max(SLOT);
+        let room = (ui.available_height() - 36.0 - RAIL_TILE - 8.0).max(SLOT);
         let items = rail_items(&self.rail_order, &self.groups);
         let ctx = ui.ctx().clone();
         // How far open each folder is drawn. Its slot grows with it, so the reorder engine moves the tiles below smoothly.
@@ -177,7 +172,7 @@ impl App {
             .iter()
             .zip(&opens)
             .map(|(it, e)| match it {
-                RailItem::Folder { members, .. } => shelf_slot(1) + (shelf_slot(members.len()) - shelf_slot(1)) * e,
+                RailItem::Folder { members, .. } => shelf_h(members.len(), *e) + 8.0,
                 RailItem::Conn(_) => SLOT,
             })
             .collect();
@@ -202,7 +197,7 @@ impl App {
             ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(6.0, 0.0)));
             outer = dnd::reorder(ui, egui::Id::unique("rail-tiles"), dnd::Items::vertical(&sizes).keys(&keys).into(&into), |ui, k, st| {
                 let slot = ui.max_rect();
-                let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(TILE_W, TILE_H));
+                let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(TILE_W, RAIL_TILE));
                 match &items[k] {
                     RailItem::Conn(id) => {
                         dnd::carry(ui.ctx(), st, || DragItem::Conn(*id));
@@ -222,17 +217,17 @@ impl App {
                         // The shelf grows from one tile to all the members as the folder opens; the folder's own button
                         // shrinks from the name row and the folder tile to the name row alone.
                         let top = slot.min + egui::vec2(0.0, 2.0);
-                        let shelf = egui::Rect::from_min_size(top - egui::vec2(3.0, 0.0), egui::vec2(TILE_W + 6.0, CAP_H + MEMBER_SLOT + (full - MEMBER_SLOT) * e + 4.0));
+                        let shelf = egui::Rect::from_min_size(top - egui::vec2(3.0, 0.0), egui::vec2(TILE_W + 6.0, shelf_h(members.len(), e)));
                         let tile = egui::Rect::from_min_size(top, egui::vec2(TILE_W, CAP_H + MEMBER_SLOT * (1.0 - e)));
                         // The preview shows only while the folder is not fully open.
                         let marks: Vec<&'static str> = if e < 1.0 { members.iter().filter_map(|m| self.conn(*m)).map(|c| engine_mark(c.meta.engine, &c.server.product).0).take(4).collect() } else { Vec::new() };
-                        let (r, rect) = folder_tile(ui, tile, shelf, &g.name, color, &marks, (!open_now).then_some(worst).flatten(), holds_active && !open_now, e);
+                        let r = folder_tile(ui, tile, shelf, &g.name, color, &marks, (!open_now).then_some(worst).flatten(), holds_active && !open_now, e);
                         let r = r.on_hover_ui(|ui| self.folder_tip(ui, g, members));
                         let tile = egui::Rect::from_min_size(top, egui::vec2(TILE_W, CAP_H));
                         if st.lifted {
                             if open_now {
                                 for (i, m) in members.iter().enumerate() {
-                                    let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT), egui::vec2(TILE_W, TILE_H));
+                                    let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT), egui::vec2(TILE_W, RAIL_TILE));
                                     self.conn_tile(ui, at, *m, true, None, &mut pick, &mut act, &mut drops);
                                 }
                             }
@@ -256,7 +251,7 @@ impl App {
                         });
                         if !st.busy {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
-                            tile_drop(ui, &r, rect, top, &self.groups, &self.rail_order, &mut drops);
+                            tile_drop(ui, &r, r.rect, top, &self.groups, &self.rail_order, &mut drops);
                         }
                         if e > 0.0 && e < 1.0 {
                             // Opening or closing: the members slide out from under the tile as the capsule grows, and
@@ -269,7 +264,7 @@ impl App {
                             child.disable();
                             child.set_opacity(e);
                             for (i, m) in members.iter().enumerate() {
-                                let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT - (1.0 - e) * full), egui::vec2(TILE_W, TILE_H));
+                                let at = egui::Rect::from_min_size(egui::pos2(tile.left(), tile.bottom() + 2.0 + i as f32 * MEMBER_SLOT - (1.0 - e) * full), egui::vec2(TILE_W, RAIL_TILE));
                                 self.conn_tile(&mut child, at, *m, true, None, &mut pick, &mut act, &mut drops);
                             }
                         } else if open_now {
@@ -290,7 +285,7 @@ impl App {
                                     {
                                         ghost_tile(ui, p, c);
                                     }
-                                    let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 2.0), egui::vec2(TILE_W, TILE_H));
+                                    let at = egui::Rect::from_min_size(ui.max_rect().min + egui::vec2(0.0, 2.0), egui::vec2(TILE_W, RAIL_TILE));
                                     let target = (!mst.busy).then_some(DropOn::Member { id: m, gid: *gid });
                                     self.conn_tile(ui, at, m, mst.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
                                 })
@@ -382,7 +377,7 @@ impl App {
                 let active = self.active == Some(c.meta.id);
                 ui.label(RichText::new(&c.meta.name).color(if active { BRIGHT() } else { TEXT() }));
                 if let Status::Failed(why) = &c.status {
-                    ui.label(RichText::new("failed").size(TXT_MICRO).color(ALERT())).on_hover_text(why.as_str());
+                    ui.label(RichText::new("failed").size(TXT_MICRO).color(status_color(&c.status))).on_hover_text(why.as_str());
                 } else if !c.meta.tag.is_empty() {
                     ui.label(RichText::new(&c.meta.tag).size(TXT_MICRO).color(tag_color(&c.meta.tag)));
                 }
@@ -744,10 +739,9 @@ fn folder_status<'a>(st: impl Iterator<Item = &'a Status>) -> Option<&'a Status>
 /// A folded group: a shelf in the group's color under its name, holding either the members (open) or one app-folder tile
 /// that previews up to four of their logos (closed). `rect` is the button, the name row and, while closed, the folder tile;
 /// `shelf` is the tinted surface, which grows with `e` as the folder opens. The closed tile shows the worst status of the
-/// members and the active ring when it holds the active connection, which is otherwise out of sight. Returns the click
-/// response and the button's rect.
+/// members and the active ring when it holds the active connection, which is otherwise out of sight.
 #[allow(clippy::too_many_arguments)]
-fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, shelf: egui::Rect, name: &str, color: Color32, marks: &[&'static str], status: Option<&Status>, active: bool, e: f32) -> (egui::Response, egui::Rect) {
+fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, shelf: egui::Rect, name: &str, color: Color32, marks: &[&'static str], status: Option<&Status>, active: bool, e: f32) -> egui::Response {
     let r = ui.interact(rect, ui.scope_id().with("folder-tile"), Sense::click());
     let state = state_of(&r);
     let p = ui.painter();
@@ -761,7 +755,7 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, shelf: egui::Rect, name: &st
     p.galley(head.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, color);
     // The folder tile fades out as the members slide in under it.
     if e < 1.0 {
-        let tile = icon_rect(egui::Rect::from_min_size(egui::pos2(rect.left(), head.bottom() + 2.0), egui::vec2(rect.width(), TILE_H)));
+        let tile = icon_rect(egui::Rect::from_min_size(egui::pos2(rect.left(), head.bottom() + 2.0), egui::vec2(rect.width(), RAIL_TILE)));
         let fade = |c: Color32| c.gamma_multiply(1.0 - e);
         p.rect(tile, R_TILE, fade(tint(TEXT(), [18, 26, 32][state])), Stroke::new(1.0, fade(tile_edge())), egui::StrokeKind::Inside);
         for (i, mark) in marks.iter().take(4).enumerate() {
@@ -781,7 +775,7 @@ fn folder_tile(ui: &mut egui::Ui, rect: egui::Rect, shelf: egui::Rect, name: &st
     }
     focus_ring(ui, &r, rect, R_TILE as f32);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} folder")));
-    (r.on_hover_cursor(egui::CursorIcon::PointingHand), rect)
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The 40 px square of an app-icon tile, centered in its slot's column.
@@ -867,19 +861,17 @@ fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
 
 /// A connection or folder tile's column: the rail's width less its margins. The tile itself is a `RAIL_TILE` square in it.
 const TILE_W: f32 = RAIL_W - 16.0;
-const TILE_H: f32 = RAIL_TILE;
 /// A tile's slot in the rail list: the tile and the 8 px gap, half above and half below it.
-const SLOT: f32 = TILE_H + 8.0;
+const SLOT: f32 = RAIL_TILE + 8.0;
 /// A member's slot on an open shelf: its tile and a 6 px gap.
-const MEMBER_SLOT: f32 = TILE_H + 6.0;
+const MEMBER_SLOT: f32 = RAIL_TILE + 6.0;
 /// The name row at the top of a group's shelf.
 const CAP_H: f32 = 20.0;
-const CONNECT_H: f32 = RAIL_TILE;
 
-/// The slot of a shelf showing `rows` tiles (1 for a closed folder): 2 above it, the name row, the tiles, 4 of padding
-/// at its bottom and 6 below it.
-fn shelf_slot(rows: usize) -> f32 {
-    CAP_H + rows as f32 * MEMBER_SLOT + 12.0
+/// The height of a shelf with `rows` members, open by `e`: the name row, one tile closed or every member open, and 4 of
+/// padding at its bottom. Its slot in the rail adds 2 above it and 6 below.
+fn shelf_h(rows: usize, e: f32) -> f32 {
+    CAP_H + MEMBER_SLOT * (1.0 + (rows as f32 - 1.0) * e) + 4.0
 }
 
 /// The rail order once item `m.from` of `items` moves to `m.to`: each folder brings its open members in the order they
