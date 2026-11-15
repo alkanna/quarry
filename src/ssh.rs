@@ -262,14 +262,14 @@ impl Via {
         let mut last = String::new();
         for k in 0..self.addrs.len() {
             let i = (start + k) % self.addrs.len();
-            let mut conf = fast_socks5::client::Config::default();
-            conf.set_connect_timeout(self.timeout.as_secs().max(1));
-            let (host, port) = self.to.clone();
             let dial = async {
-                match &self.auth {
-                    None => fast_socks5::client::Socks5Stream::connect(self.addrs[i], host, port, conf).await,
-                    Some((user, password)) => fast_socks5::client::Socks5Stream::connect_with_password(self.addrs[i], host, port, user.clone(), password.clone(), conf).await,
-                }
+                // Connected here and not by fast_socks5, which reports a refused connect as the same ReplyError a proxy
+                // sends when the destination refuses, so a closed ::1 would end the dial before 127.0.0.1 got its turn.
+                let tcp = tokio::net::TcpStream::connect(self.addrs[i]).await?;
+                let auth = self.auth.clone().map(|(username, password)| fast_socks5::AuthenticationMethod::Password { username, password });
+                let mut s = fast_socks5::client::Socks5Stream::use_stream(tcp, auth, fast_socks5::client::Config::default()).await?;
+                s.request(fast_socks5::Socks5Command::TCPConnect, fast_socks5::util::target_addr::ToTargetAddr::to_target_addr(&(self.to.0.as_str(), self.to.1))?).await?;
+                Ok::<_, fast_socks5::SocksError>(s)
             };
             match tokio::time::timeout(self.timeout, dial).await {
                 Ok(Ok(s)) => {
@@ -569,5 +569,13 @@ mod tests {
         let p = crate::db::Proxy { host: "localhost".into(), port: server, user: String::new(), password: None };
         let t = socks_forward(&p, ("127.0.0.1".into(), echo), false, std::time::Duration::from_secs(5)).await.unwrap();
         round_trip(tokio::net::TcpStream::connect(("127.0.0.1", t.port)).await.unwrap()).await;
+        // Whether "localhost" gives ::1 first depends on the machine, so a refused first address is also set up directly.
+        // Bound but never listening, so it refuses connects and no parallel test can take the port meanwhile.
+        let closed = tokio::net::TcpSocket::new_v4().unwrap();
+        closed.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let addrs = vec![closed.local_addr().unwrap(), ([127, 0, 0, 1], server).into()];
+        let via = Via { name: "two".into(), to: ("127.0.0.1".into(), echo), auth: None, addrs, timeout: std::time::Duration::from_secs(5), last_ok: Default::default() };
+        round_trip(via.dial().await.unwrap()).await;
+        assert_eq!(via.last_ok.load(std::sync::atomic::Ordering::Relaxed), 1, "the open address is tried first next time");
     }
 }
