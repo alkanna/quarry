@@ -13,7 +13,7 @@
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
-use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Gen, Plan, Pos, RefCheck, Sim, TableOpt, ORPHAN_SAMPLE};
+use crate::db::sql::ddl::{fk_action, fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Gen, Plan, Pos, RefCheck, Sim, TableOpt, ORPHAN_SAMPLE};
 use crate::db::sql::exec::{bound_pg, sql_state, Conn, Tx};
 use crate::db::sql::lex::{every_reading, Tok};
 use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, pg_checks, CheckConstraint, Column, ForeignKey, Structure};
@@ -777,7 +777,7 @@ pub(in crate::db::sql) fn fk_refs(schema: &str, k: &ForeignKey) -> Result<String
     if k.cols.len() > 32 {
         return Err("A foreign key can have at most 32 columns.".into());
     }
-    let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
+    let action = |a: &str| fk_action(&FK_ACTIONS, a);
     if k.deferred && !k.deferrable {
         return Err("INITIALLY DEFERRED needs the key to be DEFERRABLE.".into());
     }

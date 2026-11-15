@@ -32,7 +32,6 @@ pub(in crate::app) struct TableForm {
 /// The plan of the options as they stand, kept until a field changes.
 struct TableView {
     key: [String; 4],
-    changes_empty: bool,
     /// The form did not parse, which is a mistake to point at and not a form left alone.
     invalid: bool,
     /// Nothing differs from the server any more, but options were staged before: staging then takes them back.
@@ -45,14 +44,12 @@ struct TableView {
 
 impl App {
     pub(in crate::app) fn open_table_opts(&mut self) {
-        let Some(st) = self.structure().cloned() else { return };
+        let Some(was) = self.structure().map(|st| (st.status.comment.clone(), st.status.engine.clone(), st.status.collation.clone(), st.status.auto_increment)) else { return };
         let Some((conn, schema)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone())) else { return };
         let pg = self.alter_env().0 == Dialect::Postgres;
         if !pg {
             self.ask_meta(conn, &schema);
         }
-        let s = &st.status;
-        let was = (s.comment.clone(), s.engine.clone(), s.collation.clone(), s.auto_increment);
         let mut auto = was.3.map(|n| n.to_string()).unwrap_or_default();
         let (mut comment, mut engine, mut collation) = (was.0.clone(), was.1.clone(), was.2.clone());
         // Start from what is staged, not from what the server holds, or a second visit would show the old values and stage them again.
@@ -119,7 +116,7 @@ impl App {
             None => self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all)),
         };
         let warnings = self.structure().map(|st| ddl::warnings(st, &all)).unwrap_or_default();
-        TableView { key, changes_empty: changes.is_empty(), invalid, removes, new: changes, text, warnings }
+        TableView { key, invalid, removes, new: changes, text, warnings }
     }
 
     pub(in crate::app) fn table_dialog(&mut self, ui: &mut egui::Ui, f: &mut TableForm, keep: &mut bool) {
@@ -186,12 +183,12 @@ impl App {
         }
 
         // The plan walks the whole structure, so it runs when a field changes and not on every frame.
-        let key = [f.comment.clone(), f.engine.clone(), f.collation.clone(), f.auto.clone()];
-        if f.view.as_ref().is_none_or(|v| v.key != key) {
+        // Compared in place, so a frame with nothing typed copies no text.
+        if f.view.as_ref().is_none_or(|v| v.key[0] != f.comment || v.key[1] != f.engine || v.key[2] != f.collation || v.key[3] != f.auto) {
             f.view = Some(self.table_view(f));
         }
         let v = f.view.as_ref().unwrap();
-        let (text, changes_empty, invalid, removes) = (&v.text, v.changes_empty, v.invalid, v.removes);
+        let (text, changes_empty, invalid, removes) = (&v.text, v.new.is_empty(), v.invalid, v.removes);
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);

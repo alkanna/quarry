@@ -43,6 +43,12 @@ pub struct Column {
 }
 
 impl Column {
+    /// A MySQL or MariaDB generated column (MariaDB says PERSISTENT for a stored one in older versions).
+    pub fn is_generated(&self) -> bool {
+        let x = self.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
+        x.contains("GENERATED") || x.contains("PERSISTENT")
+    }
+
     /// "INT" for "int unsigned", "DECIMAL" for "decimal(10,2)".
     pub fn base_type(&self) -> String {
         split_type(&self.full_type).0
@@ -860,7 +866,7 @@ pub(super) fn create_auto(create: &str) -> u64 {
 /// `GENERATED ALWAYS AS` (or after `AS` on a MariaDB that predates that spelling). Quoted strings and names are skipped, so a
 /// bracket inside one does not end the expression.
 pub(super) fn generation_of(create: &str, name: &str) -> Option<String> {
-    let head = format!("\n  `{}` ", name.replace('`', "``"));
+    let head = format!("\n  {} ", Dialect::MySql.quote_ident(name));
     let rest = &create[create.find(&head)? + head.len()..];
     // Up to the next column or key, so the expression of a later column is never taken for this one's.
     let line = rest.split("\n  ").next().unwrap_or(rest);
@@ -932,14 +938,12 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     };
     if d != Dialect::Postgres {
         let create = st.create.clone();
-        for c in st.columns.iter_mut().filter(|c| { let x = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", ""); x.contains("GENERATED") || x.contains("PERSISTENT") }) {
+        for c in st.columns.iter_mut().filter(|c| c.is_generated()) {
             if let Some(e) = generation_of(&create, &c.name) {
                 c.generation = e;
             }
         }
-    }
-    // The statistics read NULL for a table the server has just rebuilt, so whether there is a counter is told by the columns.
-    if d != Dialect::Postgres {
+        // The statistics read NULL for a table the server has just rebuilt, so whether there is a counter is told by the columns.
         let counted = st.columns.iter().any(|c| c.extra.to_ascii_lowercase().contains("auto_increment"));
         st.status.auto_increment = counted.then(|| create_auto(&st.create));
     }

@@ -39,6 +39,13 @@ impl Maint {
     }
 }
 
+/// The first three numbers of a server's version text, with MariaDB's replication prefix `5.5.5-` taken off. Missing ones are 0.
+fn version3(v: &str) -> (u32, u32, u32) {
+    let v = v.strip_prefix("5.5.5-").unwrap_or(v);
+    let mut n = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0));
+    (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0))
+}
+
 impl Dialect {
     /// The statement for `what` on a table, or None where the engine has no such command.
     pub fn maintenance(self, what: Maint, space: &str, table: &str) -> Option<String> {
@@ -258,36 +265,30 @@ impl Dialect {
 
     /// RENAME INDEX exists from MySQL 5.7 and MariaDB 10.5.2. Older servers need a drop and an add in one ALTER.
     pub fn can_rename_index(self, version: &str) -> bool {
-        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
-        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
-        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        let v = version3(version);
         match self {
-            Dialect::MySql => (at(0), at(1)) >= (5, 7),
-            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 5, 2),
+            Dialect::MySql => v >= (5, 7, 0),
+            Dialect::MariaDb => v >= (10, 5, 2),
             Dialect::Postgres => true,
         }
     }
 
     /// INVISIBLE columns exist from MySQL 8.0.23 and MariaDB 10.3.3. PostgreSQL has none.
     pub fn can_invisible_column(self, version: &str) -> bool {
-        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
-        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
-        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        let v = version3(version);
         match self {
-            Dialect::MySql => (at(0), at(1), at(2)) >= (8, 0, 23),
-            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 3, 3),
+            Dialect::MySql => v >= (8, 0, 23),
+            Dialect::MariaDb => v >= (10, 3, 3),
             Dialect::Postgres => false,
         }
     }
 
     /// MySQL keeps and enforces a CHECK from 8.0.16 and parses and ignores it before. MariaDB enforces it from 10.2.1.
     pub fn enforces_checks(self, version: &str) -> bool {
-        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
-        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
-        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        let v = version3(version);
         match self {
-            Dialect::MySql => (at(0), at(1), at(2)) >= (8, 0, 16),
-            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 2, 1),
+            Dialect::MySql => v >= (8, 0, 16),
+            Dialect::MariaDb => v >= (10, 2, 1),
             Dialect::Postgres => true,
         }
     }

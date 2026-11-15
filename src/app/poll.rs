@@ -40,19 +40,7 @@ impl App {
                         continue;
                     }
                     // So does the New table dialog, for the parent of each of its foreign keys. MySQL and PostgreSQL each have their own.
-                    let own_key = match self.modal.as_mut() {
-                        Some(Modal::PgNewTable(f)) => f.keys.parent_loaded(req, &res),
-                        Some(Modal::SqlNewTable(f)) => {
-                            let hit = f.keys.parent_loaded(req, &res);
-                            // The built statement and the key check hang on the parent, which the spec does not carry.
-                            if hit {
-                                f.built = None;
-                            }
-                            hit
-                        }
-                        _ => false,
-                    };
-                    if own_key {
+                    if let Some(keys) = self.modal.as_mut().and_then(Modal::new_keys_mut) && keys.parent_loaded(req, &res) {
                         continue;
                     }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {

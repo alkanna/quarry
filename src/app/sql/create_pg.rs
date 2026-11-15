@@ -4,7 +4,7 @@
 //! and a table is built from the structure editor's column model.
 
 use crate::app::sql::create::{list_and, plural, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
-use crate::app::sql::new_keys::{KeyEnv, NewKeys, PgFk};
+use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
 use crate::app::*;
 use db::sql::create::{Ddl, DropInfo};
 use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
@@ -74,20 +74,11 @@ impl PgNewTable {
     fn spec(&self) -> TableSpec {
         let cols: Vec<ColDef> = self.cols.iter().map(|c| ColDef { nullable: c.def.nullable && !c.pk && !c.def.auto_increment, ..c.def.clone() }).collect();
         let marked = self.cols.iter().filter(|c| c.unique).map(|c| Unique { name: String::new(), cols: vec![c.def.name.clone()] });
-        let fks = self
-            .keys
-            .fks
-            .iter()
-            .map(|k| {
-                let mut key = k.key.clone();
-                if k.own {
-                    (key.ref_db, key.ref_table) = (self.schema.clone(), self.name.clone());
-                }
-                // The parent as the dialog saw it, so the transaction can refuse when it changed before the table was made.
-                key.ref_seen = k.parent.as_ref().filter(|p| !k.own && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &key.ref_cols)).unwrap_or_default();
-                key
-            })
-            .collect();
+        let mut fks = self.keys.fk_keys(&self.schema, &self.name);
+        for (key, k) in fks.iter_mut().zip(&self.keys.fks) {
+            // The parent as the dialog saw it, so the transaction can refuse when it changed before the table was made.
+            key.ref_seen = k.parent.as_ref().filter(|p| !k.own && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &key.ref_cols)).unwrap_or_default();
+        }
         TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: marked.chain(self.keys.uniques.iter().cloned()).collect(), checks: self.keys.checks.clone(), fks, indexes: self.keys.indexes.clone(), comment: self.comment.clone() }
     }
 
@@ -99,17 +90,12 @@ impl PgNewTable {
 
     /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its.
     fn col_renamed(&mut self, from: &str, to: &str) {
-        if from.is_empty() || self.cols.iter().any(|c| c.def.name == from) {
-            return;
-        }
-        self.keys.renamed(from, to);
+        self.keys.renamed(self.cols.iter().map(|c| c.def.name.as_str()), from, to);
     }
 
     fn remove_col(&mut self, i: usize) {
         let gone = self.cols.remove(i).def.name;
-        if !self.cols.iter().any(|c| c.def.name == gone) {
-            self.keys.forget(&gone);
-        }
+        self.keys.removed(self.cols.iter().map(|c| c.def.name.as_str()), &gone);
     }
 }
 
@@ -479,7 +465,7 @@ impl App {
                 f.keys.checks.push(Check::default());
             }
             if add_chip(ui, "Foreign key").clicked() {
-                f.keys.fks.push(PgFk::new(&f.schema, Dialect::Postgres));
+                f.keys.fks.push(NewFk::new(&f.schema, Dialect::Postgres));
             }
             if add_chip(ui, "Index").clicked() {
                 f.keys.indexes.push(NewIndex::default());
@@ -831,10 +817,10 @@ mod tests {
         t.cols.extend([col("price"), col("qty")]);
         let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         t.keys.uniques = vec![Unique { name: String::new(), cols: v(&["price", "qty"]) }];
-        t.keys.indexes = vec![NewIndex { name: String::new(), cols: v(&["qty", "price"]), unique: false, ..Default::default() }];
-        let mut other = PgFk::new("public", Dialect::Postgres);
+        t.keys.indexes = vec![NewIndex { name: String::new(), cols: v(&["qty", "price"]), ..Default::default() }];
+        let mut other = NewFk::new("public", Dialect::Postgres);
         (other.key.ref_table, other.key.cols, other.key.ref_cols) = ("parent".into(), v(&["price"]), v(&["price"]));
-        let mut own = PgFk::new("public", Dialect::Postgres);
+        let mut own = NewFk::new("public", Dialect::Postgres);
         own.own = true;
         (own.key.cols, own.key.ref_cols) = (v(&["qty"]), v(&["price"]));
         t.keys.fks = vec![other, own];

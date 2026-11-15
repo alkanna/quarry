@@ -237,11 +237,11 @@ impl App {
     fn show_col_form(&mut self, from: Option<String>, def: ColDef, pos: Pos, rest: Vec<Change>) {
         let Some(st) = self.structure() else { return };
         let order: Vec<String> = ddl::columns_after(st, &rest).into_iter().filter(|n| Some(n) != from.as_ref()).collect();
-        let (mut dmode, mut dtext) = mode_of(&def.default);
+        let (dmode, dtext) = match &def.generated {
+            Some(g) => (DMode::Generated, g.expr.clone()),
+            None => mode_of(&def.default),
+        };
         let stored = def.generated.as_ref().is_none_or(|g| g.stored);
-        if let Some(g) = &def.generated {
-            (dmode, dtext) = (DMode::Generated, g.expr.clone());
-        }
         let orig = from.is_some().then(|| (def.clone(), pos.clone()));
         self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, stored, pos, rest, order, memo: None })));
     }
@@ -645,10 +645,12 @@ impl App {
             }
 
             form_label(ui, "Options");
+            // The mode as the frame starts: the Default row below can change it, and these boxes follow on the next frame.
+            let generated = f.dmode == DMode::Generated;
             ui.horizontal_wrapped(|ui| {
                 if pg {
                     ui.checkbox(&mut f.def.nullable, "Allow NULL");
-                    ui.add_enabled(db::sql::pg::ddl::identity_type(&f.def.ty) && f.dmode != DMode::Generated, egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
+                    ui.add_enabled(db::sql::pg::ddl::identity_type(&f.def.ty) && !generated, egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
                     // An identity is never NULL.
                     if f.def.auto_increment {
                         f.def.nullable = false;
@@ -657,17 +659,17 @@ impl App {
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.unsigned, "Unsigned"));
                 // MariaDB has no NULL or NOT NULL after a generated column and the column is always nullable, so the statement
                 // would silently drop a NOT NULL.
-                let maria_generated = dialect == Dialect::MariaDb && f.dmode == DMode::Generated;
+                let maria_generated = dialect == Dialect::MariaDb && generated;
                 if maria_generated {
                     f.def.nullable = true;
                 }
                 ui.add_enabled(!maria_generated, egui::Checkbox::new(&mut f.def.nullable, "Allow NULL")).on_disabled_hover_text("A generated column on MariaDB always allows NULL.");
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.zerofill, "Zero fill"));
-                ui.add_enabled(ddl::is_integer(&t) && f.dmode != DMode::Generated, egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
+                ui.add_enabled(ddl::is_integer(&t) && !generated, egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
                 let can_hide = dialect.can_invisible_column(&version);
                 ui.add_enabled(can_hide, egui::Checkbox::new(&mut f.def.invisible, "Invisible")).on_hover_text("Left out of SELECT * and of an INSERT that names no columns").on_disabled_hover_text("Invisible columns need MySQL 8.0.23 or newer, or MariaDB 10.3.3.");
                 }
-                if f.dmode == DMode::Generated {
+                if generated {
                     f.def.auto_increment = false;
                 }
             });

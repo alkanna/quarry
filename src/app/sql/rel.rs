@@ -146,7 +146,7 @@ fn edit_changes(old: &ForeignKey, new: &ForeignKey) -> Vec<Change> {
 }
 
 /// The actions the dialog offers, in the order of the buttons. PostgreSQL also has SET DEFAULT.
-fn actions(pg: bool) -> &'static [&'static str] {
+pub(in crate::app) fn actions(pg: bool) -> &'static [&'static str] {
     const PG: [&str; 5] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION", "SET DEFAULT"];
     if pg { &PG } else { &FK_ACTIONS }
 }

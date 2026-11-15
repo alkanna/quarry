@@ -135,7 +135,7 @@ impl ColDef {
         }
         let extra = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
         // MariaDB says PERSISTENT for a stored column in older versions and STORED in newer ones.
-        let generated = if extra.contains("GENERATED") || extra.contains("PERSISTENT") {
+        let generated = if c.is_generated() {
             if c.generation.trim().is_empty() {
                 return Err(format!("Column {} is generated and the server did not give its expression.", c.name));
             }
@@ -542,3 +542,8 @@ pub(super) fn is_number(s: &str) -> bool {
 
 /// The actions a foreign key can take, as the server writes them.
 pub const FK_ACTIONS: [&str; 4] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION"];
+
+/// `a` as one of `list` in the server's spelling, so only a known action word is ever written into a statement.
+pub(in crate::db::sql) fn fk_action(list: &[&'static str], a: &str) -> Result<&'static str, String> {
+    list.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."))
+}

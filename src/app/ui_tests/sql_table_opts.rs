@@ -2,7 +2,7 @@
 
 use super::sql_structure::replace;
 use super::*;
-use crate::app::sql::new_keys::PgFk;
+use crate::app::sql::new_keys::NewFk;
 use db::sql::ddl::{Change, TableOpt};
 use db::sql::structure::Structure;
 use db::sql::Dialect;
@@ -56,7 +56,7 @@ fn the_parent_of_a_foreign_key_reaches_the_mysql_new_table_dialog() {
         a.sql_create_demo("newtable");
     }) else { return };
     let Some(Modal::SqlNewTable(f)) = ui.h.state_mut().modal.as_mut() else { panic!("the New table dialog is not open") };
-    let mut k = PgFk::new("shop", Dialect::MySql);
+    let mut k = NewFk::new("shop", Dialect::MySql);
     k.req = 9001;
     f.keys.fks.push(k);
     ui.app().worker.send(Msg::SqlStructure { req: 9001, res: Ok(Structure::default()) });

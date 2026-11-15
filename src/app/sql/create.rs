@@ -2,11 +2,11 @@
 //! statement previews, and the typed confirmations for drops. The statements come from `db::sql::create`.
 
 use crate::app::*;
-use crate::app::sql::new_keys::{KeyEnv, NewKeys, PgFk};
+use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
 use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TableSpec, TYPES};
 use db::sql::ddl::{IdxCol, IndexDef, IndexKind};
 use db::sql::pg::create::{Check, NewIndex, Unique};
-use db::sql::structure::CheckConstraint;
+use db::sql::structure::{CheckConstraint, ForeignKey};
 use db::sql::Dialect;
 
 pub(in crate::app) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
@@ -47,19 +47,9 @@ pub(in crate::app) struct NewTable {
     pub(in crate::app) meta: Option<Meta>,
     pub(in crate::app) load_err: Option<String>,
     pub(in crate::app) show_sql: bool,
-    /// The statement and the key check of the form as it was last built. They walk the spec and the parents, so they are made again
-    /// only when the form changed, or when a parent's structure arrived (the poll clears this then, since the spec does not carry it).
-    pub(in crate::app) built: Option<NewBuilt>,
-}
-
-/// What `NewTable` last built, with the form it came from.
-pub(in crate::app) struct NewBuilt {
-    spec: TableSpec,
-    version: String,
-    has_meta: bool,
-    /// None until the server's lists arrived.
-    sql: Option<db::Res<String>>,
-    problem: Option<(String, bool)>,
+    /// The statement of the form as it was last built, with the spec it came from, made again only when the spec changed. None
+    /// inside until the server's lists arrived. The key check is not kept: it reads the parents as they are and is cheap.
+    pub(in crate::app) built: Option<(TableSpec, Option<db::Res<String>>)>,
 }
 
 impl NewTable {
@@ -68,25 +58,12 @@ impl NewTable {
     pub(in crate::app) fn spec(&self) -> TableSpec {
         let cols = |v: &[String]| v.iter().map(|n| IdxCol { name: n.clone(), prefix: None, desc: false }).collect::<Vec<_>>();
         let uniques = self.keys.uniques.iter().map(|u| IndexDef { name: u.name.clone(), kind: IndexKind::Unique, cols: cols(&u.cols), ..Default::default() });
-        let indexes = self.keys.indexes.iter().map(|x| IndexDef { name: x.name.clone(), kind: if x.unique { IndexKind::Unique } else { x.kind }, cols: cols(&x.cols), ..Default::default() });
+        let indexes = self.keys.indexes.iter().map(|x| IndexDef { name: x.name.clone(), kind: x.kind, cols: cols(&x.cols), ..Default::default() });
         let checks = self.keys.checks.iter().map(|c| CheckConstraint { name: c.name.clone(), expr: c.expr.trim().to_string(), ..Default::default() }).collect();
-        let fks = self.keys.fks.iter().map(|k| {
-            let mut key = k.key.clone();
-            if k.own {
-                (key.ref_db, key.ref_table) = (self.schema.clone(), self.name.clone());
-            }
-            key.db = self.schema.clone();
-            key
-        }).collect();
+        let fks = self.keys.fk_keys(&self.schema, &self.name).into_iter().map(|key| ForeignKey { db: self.schema.clone(), ..key }).collect();
         TableSpec { schema: self.schema.clone(), name: self.name.clone(), engine: self.engine.clone(), collation: self.collation.clone(), columns: self.cols.clone(), fks, checks, indexes: uniques.chain(indexes).collect(), comment: self.comment.clone() }
     }
 
-    /// A column was renamed from `from`; the picks of the keys follow, unless another column still has that name.
-    fn col_renamed(&mut self, from: &str, to: &str) {
-        if !from.is_empty() && !self.cols.iter().any(|c| c.name == from) {
-            self.keys.renamed(from, to);
-        }
-    }
 }
 
 pub(in crate::app) struct DropForm {
@@ -456,7 +433,7 @@ impl App {
                 f.keys.checks.push(Check::default());
             }
             if add_chip(ui, "Foreign key").clicked() {
-                f.keys.fks.push(PgFk::new(&f.schema, Dialect::MySql));
+                f.keys.fks.push(NewFk::new(&f.schema, Dialect::MySql));
             }
             if add_chip(ui, "Index").clicked() {
                 f.keys.indexes.push(NewIndex::default());
@@ -468,17 +445,13 @@ impl App {
         });
         let spec = f.spec();
         let version = self.conn(f.conn).and_then(|c| c.sql.as_ref()).map_or_else(|| "8.4.0".to_string(), |s| s.version.clone());
-        let fresh = f.built.as_ref().is_some_and(|b| b.spec == spec && b.version == version && b.has_meta == f.meta.is_some());
-        if !fresh {
-            let sql = f.meta.as_ref().map(|m| create::create_table_sql(d, mode, &spec, m));
-            // The keys' own problems: a table that cannot hold a key, a key over a column without a prefix, a CHECK the server would
-            // ignore, a parent not read yet or one that does not fit. Each is said before the server's "cannot add a foreign key constraint".
-            let problem = create::spec_problem(d, &version, &spec).map(|e| (e, false)).or_else(|| f.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, db::sql::ddl::fk_whole_key_default(d, &version), Some(&spec.engine)));
-            f.built = Some(NewBuilt { spec, version, has_meta: f.meta.is_some(), sql, problem });
+        if !f.built.as_ref().is_some_and(|(s, sql)| *s == spec && sql.is_some() == f.meta.is_some()) {
+            f.built = Some((spec.clone(), f.meta.as_ref().map(|m| create::create_table_sql(d, mode, &spec, m))));
         }
-        // Taken out for the frame so the foot can change the form, and put back after it.
-        let Some(b) = f.built.take() else { return };
-        let (built, problem) = (&b.sql, &b.problem);
+        let built = f.built.as_ref().and_then(|b| b.1.as_ref());
+        // The keys' own problems: a table that cannot hold a key, a key over a column without a prefix, a CHECK the server would
+        // ignore, a parent not read yet or one that does not fit. Each is said before the server's "cannot add a foreign key constraint".
+        let problem = create::spec_problem(d, &version, &spec).map(|e| (e, false)).or_else(|| f.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, db::sql::ddl::fk_whole_key_default(d, &version), Some(&spec.engine)));
         if f.show_sql || (matches!(&built, Some(Err(_))) || problem.is_some()) && !f.name.is_empty() {
             dialog_pane(ui, |ui| {
                 if f.show_sql {
@@ -513,7 +486,6 @@ impl App {
             }
             foot_note(ui, if writable { &summary } else { NOTE_TABLE });
         });
-        f.built = Some(b);
     }
 
     fn sql_create_table_run(&mut self, f: &NewTable) {
@@ -618,14 +590,12 @@ impl App {
         for (i, from) in names.iter().enumerate() {
             if f.cols[i].name != *from {
                 let to = f.cols[i].name.clone();
-                f.col_renamed(from, &to);
+                f.keys.renamed(f.cols.iter().map(|c| c.name.as_str()), from, &to);
             }
         }
         if let Some(i) = remove {
             let gone = f.cols.remove(i).name;
-            if !f.cols.iter().any(|c| c.name == gone) {
-                f.keys.forget(&gone);
-            }
+            f.keys.removed(f.cols.iter().map(|c| c.name.as_str()), &gone);
         }
     }
 

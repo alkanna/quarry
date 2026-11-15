@@ -1,7 +1,7 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
 //! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
-use crate::db::sql::ddl::{check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, TableOpt, FK_ACTIONS};
+use crate::db::sql::ddl::{fk_action, check_expr, check_expr_of, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, TableOpt, FK_ACTIONS};
 use crate::db::sql::structure::{CheckConstraint, ForeignKey};
 use crate::db::sql::value::lit;
 use crate::db::sql::Dialect;
@@ -164,7 +164,7 @@ pub(in crate::db::sql) fn fk_clause(d: Dialect, k: &ForeignKey) -> Result<String
     if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
         return Err("Pick the same number of columns on both sides.".into());
     }
-    let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
+    let action = |a: &str| fk_action(&FK_ACTIONS, a);
     let names = |v: &[String]| v.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
     let target = if k.ref_db.is_empty() || k.ref_db == k.db { d.quote_ident(&k.ref_table) } else { d.qualified(&k.ref_db, &k.ref_table) };
     let name = if k.name.is_empty() { String::new() } else { format!("CONSTRAINT {}\n    ", d.quote_ident(&k.name)) };

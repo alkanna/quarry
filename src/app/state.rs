@@ -992,6 +992,17 @@ pub(super) enum Modal {
     LinkFolder(Box<super::library::link_dialog::LinkForm>),
 }
 
+impl Modal {
+    /// The keys of a New table dialog, whichever dialect's, which a parent table's structure is handed to.
+    pub(super) fn new_keys_mut(&mut self) -> Option<&mut super::sql::new_keys::NewKeys> {
+        match self {
+            Modal::PgNewTable(f) => Some(&mut f.keys),
+            Modal::SqlNewTable(f) => Some(&mut f.keys),
+            _ => None,
+        }
+    }
+}
+
 /// A value being edited in place in the document tree.
 pub(super) struct Inline {
     pub(super) path: Vec<String>,
