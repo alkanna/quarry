@@ -66,7 +66,8 @@ impl App {
             t.bar_err = None;
         }
         if sh.coll != cur.coll {
-            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, Open::Replace);
+            // Open::Link never takes a tab that holds work, so another collection's own query is not overwritten.
+            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, Open::Link);
         }
         let t = self.tm().unwrap();
         t.selected = None;
