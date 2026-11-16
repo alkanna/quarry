@@ -290,7 +290,7 @@ fn live_undo_is_refused_after_an_outside_change_and_runs_once_it_is_put_back() {
         // The primary key changed: the rows could not be told apart.
         f.sql("ALTER TABLE o DROP CONSTRAINT o_pkey, ADD PRIMARY KEY (id, v)");
         let (res, back) = f.undo(undo, &pk_of(&plan));
-        assert!(res.err().unwrap().contains("Undo refused: the primary key of o"), "{var}");
+        assert!(res.err().unwrap().contains("Undo refused: the key of o"), "{var}");
         undo = back.unwrap();
         f.sql("ALTER TABLE o DROP CONSTRAINT o_pkey, ADD PRIMARY KEY (id)");
         let (res, _) = f.undo(undo, &pk_of(&plan));

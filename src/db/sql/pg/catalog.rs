@@ -88,7 +88,7 @@ pub const INDEXES: &str = "SELECT ic.relname::text AS name, (NOT i.indisunique):
      NULL::bigint AS cardinality, NULL::bigint AS sub_part, upper(am.amname)::text AS index_type, \
      CASE WHEN a.attnotnull THEN '' ELSE 'YES' END AS nullable, COALESCE(obj_description(ic.oid, 'pg_class'), '') AS comment, \
      CASE WHEN i.indkey[k.n - 1] = 0 THEN pg_get_indexdef(i.indexrelid, k.n, true) END AS expr, \
-     pg_get_indexdef(i.indexrelid) AS def, i.indisprimary::int AS is_primary, \
+     pg_get_indexdef(i.indexrelid) AS def, i.indisprimary::int AS is_primary, i.indisvalid::int AS valid, \
      (cc.oid IS NOT NULL)::int AS backs_constraint, COALESCE(cc.condeferrable, false)::int AS defer_ok, COALESCE(cc.condeferred, false)::int AS defer_init, \
      COALESCE(obj_description(cc.oid, 'pg_constraint'), '') AS con_comment, \
      pg_get_expr(i.indpred, i.indrelid) AS pred, \

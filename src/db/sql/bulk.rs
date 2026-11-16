@@ -205,12 +205,7 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
             cols = make_cols_kinds(&first.cols(), &meta, &kinds, true);
         }
         for r in &rows {
-            let doc = to_row(&cols, r, &pk)?.owned();
-            if pk_of(&doc).len() != pk.len() {
-                let _ = tx.rollback().await;
-                return Err("Nothing was changed: a row could not be read with its whole key, so undo could not be kept.".into());
-            }
-            old.push(doc);
+            old.push(to_row(&cols, r, &pk)?.owned());
         }
     }
     // Bound with no values: a prepared statement is one statement to the server, whatever the lexer read.
@@ -224,9 +219,11 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         let _ = tx.rollback().await;
         return Err(moved(&row_count(n), p.expected));
     }
-    let ids = if p.undo { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
+    // A unique key lets rows hold NULL, and such a row could not be found again, so the change runs without undo.
+    let kept_undo = p.undo && old.iter().all(|doc| pk_of(doc).len() == pk.len());
+    let ids = if kept_undo { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
-    let undo = p.undo.then(|| match &p.op {
+    let undo = kept_undo.then(|| match &p.op {
         BulkOp::Delete => SqlUndo::Delete(old),
         BulkOp::Update(sets) => SqlUndo::Update(old.iter().map(|r| RowEdit { pk: pk_of(r), changes: sets.iter().map(|(name, new)| (name.clone(), r.get(name).cloned().unwrap_or(Bson::Null), new.clone())).collect() }).collect()),
     });
@@ -235,11 +232,13 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         BulkOp::Delete => format!("Deleted {} from {table}", row_count(n)),
     };
     let msg = if kept {
-        format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", row_count(p.expected), p.engine, if p.undo { " Undo puts back the rows read before it." } else { "" })
-    } else if p.undo {
+        format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", row_count(p.expected), p.engine, if kept_undo { " Undo puts back the rows read before it." } else { "" })
+    } else if kept_undo {
         what
+    } else if p.undo {
+        format!("{what}. No undo was kept: some of the rows have no key value.")
     } else if p.pk.is_empty() {
-        format!("{what}. No undo was kept: the table has no primary key.")
+        format!("{what}. No undo was kept: the table has no primary key or unique key.")
     } else {
         format!("{what}. No undo was kept for a change this large.")
     };
@@ -381,6 +380,26 @@ mod tests {
             assert!(matches!(r.undo, Some((SqlUndo::Delete(ref rows), _)) if rows.len() == 3), "{var}");
             assert_eq!(l.count("quarry_bulk.moved"), 0, "{var}");
             l.sql("DROP TABLE quarry_bulk.moved");
+        });
+    }
+
+    #[test]
+    fn live_rows_with_a_null_unique_key_change_without_undo() {
+        super::super::testing::every_server(|l, var| {
+            l.sql("CREATE DATABASE IF NOT EXISTS quarry_bulk");
+            l.sql("DROP TABLE IF EXISTS quarry_bulk.nullkey");
+            l.sql("CREATE TABLE quarry_bulk.nullkey (u INT UNIQUE, qty INT)");
+            l.sql("INSERT INTO quarry_bulk.nullkey VALUES (1, 10), (NULL, 20), (NULL, 30)");
+            let plan = |p: &BulkPrep, filter: &str| BulkPlan { op: BulkOp::Update(vec![("qty".into(), Bson::Int64(0))]), filter: filter.into(), cols: p.cols.clone(), pk: p.pk.clone(), bs: true, expected: p.count, undo: p.keeps_undo(), engine: p.engine.clone() };
+            let p = l.w.rt.block_on(prep(&l.db, "quarry_bulk", "nullkey", "qty > 15")).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(p.pk == ["u"] && p.keeps_undo(), "{var}: {:?}", p.pk);
+            // Rows whose key is NULL could not be found again, so the change runs and says it kept no undo.
+            let r = l.w.rt.block_on(run(&l.db, "quarry_bulk", "nullkey", &plan(&p, "qty > 15"), false)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(r.undo.is_none() && r.msg.contains("no key value"), "{var}: {}", r.msg);
+            let p = l.w.rt.block_on(prep(&l.db, "quarry_bulk", "nullkey", "u = 1")).unwrap_or_else(|x| panic!("{var}: {x}"));
+            let r = l.w.rt.block_on(run(&l.db, "quarry_bulk", "nullkey", &plan(&p, "u = 1"), false)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(r.undo.is_some(), "{var}: {}", r.msg);
+            l.sql("DROP TABLE quarry_bulk.nullkey");
         });
     }
 

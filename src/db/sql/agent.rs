@@ -349,8 +349,8 @@ pub(in crate::db) async fn prepare(db: &Db, call: &Call, l: &Limits) -> Res<Snap
     if let Some(bad) = named.into_iter().find(|c| !known(c)) {
         return Err(format!("{schema}.{table} has no column `{bad}`. Call describe for its columns."));
     }
-    let pk = super::write::primary_key(db, schema, table).await?;
-    let no_key = || format!("{schema}.{table} has no primary key, so Quarry can't tell its rows apart to undo this change.");
+    let pk = super::write::key_columns(db, schema, table).await?;
+    let no_key = || format!("{schema}.{table} has no primary key or unique key, so Quarry can't tell its rows apart to undo this change.");
     if let Call::SqlInsertRows { rows, .. } = call {
         let matched = rows.len() as u64;
         let bytes = rows.iter().map(|r| Value::Object(r.clone()).to_string().len() as u64).sum();
