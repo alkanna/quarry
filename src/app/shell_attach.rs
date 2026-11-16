@@ -34,9 +34,9 @@ pub(super) struct AttachForm {
     filter: String,
     conn: Option<u64>,
     db: String,
-    /// PostgreSQL only: the schema to attach, and the schemas of `db` once they are listed.
+    /// PostgreSQL only: the schema to attach, and the schemas of `db`: None while listing, an error when that failed.
     schema: String,
-    schemas: Vec<String>,
+    schemas: Option<Result<Vec<String>, String>>,
     /// The (connection, database) whose schemas were asked for, so each is asked once.
     asked: Option<(u64, String)>,
     name: String,
@@ -439,10 +439,11 @@ async function run() {
         // The schemas of a PostgreSQL database are listed once per picked database; they arrive in `shell_pg_listed`.
         if pg && ready && !f.db.is_empty() && f.asked != f.conn.map(|c| (c, f.db.clone())) {
             f.asked = f.conn.map(|c| (c, f.db.clone()));
-            f.schemas.clear();
+            f.schemas = None;
             f.schema.clear();
-            if let (Some(conn), Some(sql)) = (f.conn, chosen.and_then(|c| c.sql.clone())) {
-                self.worker.pg_shell_list(conn, sql, f.db.clone(), String::new());
+            match (f.conn, chosen.and_then(|c| c.sql.clone())) {
+                (Some(conn), Some(sql)) => self.worker.pg_shell_list(conn, sql, f.db.clone(), String::new()),
+                _ => f.schemas = Some(Err("not connected".into())),
             }
         }
         if !f.name_set {
@@ -480,20 +481,34 @@ async function run() {
             ui.end_row();
             if pg && ready {
                 form_label(ui, "Schema");
-                if f.schemas.is_empty() {
-                    ui.horizontal(|ui| {
-                        spin(ui);
-                        ui.label(RichText::new("Listing schemas").color(MUTED()));
-                    });
-                } else {
-                    egui::ComboBox::from_id_salt("attach-schema").selected_text(&f.schema).width(220.0).show_ui(ui, |ui| {
-                        menu_look(ui);
-                        for s in &f.schemas {
-                            if ui.selectable_label(f.schema == *s, s).clicked() {
-                                f.schema = s.clone();
+                match &f.schemas {
+                    None => {
+                        ui.horizontal(|ui| {
+                            spin(ui);
+                            ui.label(RichText::new("Listing schemas").color(MUTED()));
+                        });
+                    }
+                    Some(Err(e)) => {
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(RichText::new(format!("Could not list schemas: {e}")).color(ALERT())).wrap());
+                            if quiet(ui, "Try again").clicked() {
+                                f.asked = None;
                             }
-                        }
-                    });
+                        });
+                    }
+                    Some(Ok(list)) if list.is_empty() => {
+                        ui.label(RichText::new("No schemas to attach").color(FAINT()));
+                    }
+                    Some(Ok(list)) => {
+                        egui::ComboBox::from_id_salt("attach-schema").selected_text(&f.schema).width(220.0).show_ui(ui, |ui| {
+                            menu_look(ui);
+                            for s in list {
+                                if ui.selectable_label(f.schema == *s, s).clicked() {
+                                    f.schema = s.clone();
+                                }
+                            }
+                        });
+                    }
                 }
                 ui.end_row();
             }
@@ -541,18 +556,24 @@ async function run() {
     /// tab that match, so a script run after this has its table helpers.
     pub(super) fn shell_pg_listed(&mut self, d: Document) {
         let (conn, database, schema) = (d.get_i64("conn").unwrap_or_default() as u64, d.get_str("database").unwrap_or_default().to_string(), d.get_str("schema").unwrap_or_default().to_string());
-        if let Ok(e) = d.get_str("error") {
-            return self.err_quiet(e.to_string(), Some(conn), None, format!("List schemas · {database}"));
-        }
+        let err = d.get_str("error").ok().map(|e| self.log_err(e, Some(conn), None, format!("List schemas · {database}"), "").ex.title);
         let names = |k: &str| d.get_array(k).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
         if let Some(Modal::Attach(f)) = &mut self.modal && f.conn == Some(conn) && f.db == database && schema.is_empty() {
-            f.schemas = names("schemas");
-            // Where a new database starts, else the first one a person would look at.
-            if !f.schemas.contains(&f.schema) {
-                f.schema = if f.schemas.iter().any(|s| s == PG_SCHEMA) { PG_SCHEMA.to_string() } else { f.schemas.first().cloned().unwrap_or_default() };
+            match err {
+                // Only a pending list takes an error, so a slow failed answer never hides schemas a newer one listed.
+                Some(e) if f.schemas.is_none() => f.schemas = Some(Err(e)),
+                Some(_) => {}
+                None => {
+                    let list = names("schemas");
+                    // Where a new database starts, else the first one a person would look at.
+                    if !list.contains(&f.schema) {
+                        f.schema = if list.iter().any(|s| s == PG_SCHEMA) { PG_SCHEMA.to_string() } else { list.first().cloned().unwrap_or_default() };
+                    }
+                    f.schemas = Some(Ok(list));
+                }
             }
         }
-        if !schema.is_empty() {
+        if !schema.is_empty() && !d.contains_key("error") {
             let tables = names("tables");
             for t in &mut self.tabs {
                 for a in t.shell.attached.iter_mut().filter(|a| a.conn == conn && a.db == database && (a.schema == schema || a.schema.is_empty() && schema == PG_SCHEMA)) {

@@ -310,6 +310,7 @@ fn repeated_name<'a>(names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
 }
 
 /// The longest line the runner may print. A script that prints more would otherwise grow this buffer until memory runs out.
+/// shell_runner.mjs refuses a result at the same size, so keep the two equal.
 const LINE_MAX: usize = 64 << 20;
 
 /// The next line of the runner's stdout, ended by an error when it passes `LINE_MAX`.
