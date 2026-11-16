@@ -15,15 +15,10 @@ import { createRequire } from "module";
 // Packages added in Quarry are installed next to this file; scripts load them with require() or import().
 const require = createRequire(import.meta.url);
 
-// JSON.stringify writes a lone surrogate as an escape serde_json refuses, which would lose the whole line. Paired
-// surrogates are written as they are, so an escaped one in the output is always lone; only then is the line redone.
+// JSON.stringify writes a lone surrogate as an escape serde_json refuses, which would lose the whole line. Keys here
+// are fixed names, so the values are all there is to mend; SQL values are refused in wire() instead of changed.
 const wellFormed = (_, v) => (typeof v === "string" ? v.toWellFormed() : v);
-const lone = /\\ud[89a-f][0-9a-f]{2}/i;
-const line = (o) => {
-  const s = JSON.stringify(o);
-  return lone.test(s) ? JSON.stringify(o, wellFormed) : s;
-};
-const write = (o) => new Promise((r) => process.stdout.write(line(o) + "\n", r));
+const write = (o) => new Promise((r) => process.stdout.write(JSON.stringify(o, wellFormed) + "\n", r));
 const out = (o) => void write(o);
 
 // The app stops reading a line at LINE_MAX (src/db/shell.rs), so a bigger result is refused here, with its size and a way out.

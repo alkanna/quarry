@@ -967,7 +967,7 @@ impl App {
         dialog_foot(ui, |ui| {
             let address_ok = if let Some(c) = f.cloud_on() {
                 crate::cloudsql::valid_instance(&c.instance) && !f.addr.user.trim().is_empty()
-            } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.trim().starts_with("mongodb://") || f.uri.trim().starts_with("mongodb+srv://") };
+            } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { db::mongo_uri::MongoUri::parse(f.uri.trim()).is_some() };
             let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_active() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
             test |= ui.add_enabled(valid, egui::Button::new("Test")).clicked();

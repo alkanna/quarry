@@ -42,6 +42,9 @@ impl App {
             }
         }
 
+        if self.modal.is_none() {
+            self.modal = self.late_modal.take();
+        }
         // Settings looks for gcloud each time it opens, so it forgets the answer once closed.
         if self.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
             self.gcloud_forget();

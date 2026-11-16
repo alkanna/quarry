@@ -188,21 +188,9 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
         // stays but is dead, instead of quietly opening a new session that has lost the script's transaction.
         let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(line) = next_line(&mut lines).await? {
-            let v = match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(v) => v,
-                Err(err) => {
-                    // A query left unanswered would hang the script until Stop.
-                    if let Some(id) = unread_sql_id(&line) {
-                        if let Some(w) = stdin.as_mut() {
-                            let answer = serde_json::json!({ "type": "sqlres", "id": id, "ok": false, "error": format!("Quarry could not read this query: {err}") });
-                            let _ = w.write_all(format!("{answer}\n").as_bytes()).await;
-                            let _ = w.flush().await;
-                        }
-                    } else {
-                        send(Msg::ShellLog { req, level: "log".into(), text: line });
-                    }
-                    continue;
-                }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                send(Msg::ShellLog { req, level: "log".into(), text: line });
+                continue;
             };
             let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
             match v.get("type").and_then(|t| t.as_str()) {
@@ -322,16 +310,6 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
             Err("Stopped.".into())
         }
     }
-}
-
-/// The id of a SQL query line serde_json refused, such as one with a lone surrogate. The runner writes type, conn and id
-/// first, and `"id":` cannot occur inside a JSON string, where every quote is escaped.
-fn unread_sql_id(line: &str) -> Option<u64> {
-    if !line.starts_with(r#"{"type":"sql","#) {
-        return None;
-    }
-    let rest = &line[line.find(r#""id":"#)? + 5..];
-    rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())].parse().ok()
 }
 
 /// The value in the runner's `{"v": ...}` Extended JSON. Parsed on the worker, since a result can be 64 MB.
@@ -643,6 +621,20 @@ pub fn shell_text(b: &Bson) -> String {
     }
 }
 
+/// Runs a script to its end for a live test, with the queries it sent, as the Shell tab would see them.
+#[cfg(test)]
+pub(crate) fn run_shell_blocking(w: &super::Worker, job: &ShellJob) -> (Vec<super::ShellQuery>, Res<(String, Option<u64>)>) {
+    let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    let queries = std::sync::Mutex::new(Vec::new());
+    let send = |m: Msg| {
+        if let Msg::ShellQuery { q, .. } = m {
+            queries.lock().unwrap().push(q);
+        }
+    };
+    let res = w.rt.block_on(run_shell(5, job, &send, cancel_rx));
+    (queries.into_inner().unwrap(), res)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,15 +645,6 @@ mod tests {
         assert_eq!(sql_args(Some(&v), sql::Dialect::Postgres).unwrap()[0], sql::Arg::Bool(true));
         // On MySQL the same object is a plain value, as it was before PostgreSQL support.
         assert_eq!(sql_args(Some(&v), sql::Dialect::MySql).unwrap()[0], sql::Arg::Val(sql_param(&v[0]).unwrap()));
-    }
-
-    #[test]
-    fn an_unreadable_sql_line_still_gives_its_id() {
-        let line = r#"{"type":"sql","conn":"shop","id":42,"text":"SELECT ?","params":["\ud83d"]}"#;
-        assert!(serde_json::from_str::<serde_json::Value>(line).is_err());
-        assert_eq!(unread_sql_id(line), Some(42));
-        assert_eq!(unread_sql_id(r#"{"type":"log","text":"\"id\":7"}"#), None);
-        assert_eq!(unread_sql_id("plain output"), None);
     }
 
     #[test]

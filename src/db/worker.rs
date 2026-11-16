@@ -514,27 +514,25 @@ impl Worker {
     /// Runs a user undo. A failed one hands the action back in the answer so it stays in the list, like the SQL undo does.
     pub fn undo_doc(&self, t: Target, a: UndoAction) {
         self.write(t.at(), async move {
-            let (conn, kind) = (a.conn, &a.kind);
-            let (res, redo) = match kind {
-                UndoKind::Insert { id } => delete_one_id(&t, id.clone()).await,
-                UndoKind::InsertMany { ids } => delete_many_ids(&t, ids.clone()).await,
-                UndoKind::Delete { old } => insert_doc(conn, t, old.clone()).await,
-                UndoKind::DeleteMany { old } => import_docs(conn, t, old.clone(), None).await,
-                UndoKind::Update { old, new } => replace_doc(conn, t, new.clone(), old.clone(), false).await,
+            let c = t.c();
+            let (res, redo) = match &a.kind {
+                UndoKind::Insert { id } => (c.delete_one(doc! { "_id": id.clone() }).await.map(|r| format!("Undo removed {} document", r.deleted_count)).map_err(e), None),
+                UndoKind::InsertMany { ids } => (c.delete_many(doc! { "_id": { "$in": ids.clone() } }).await.map(|r| format!("Undo removed {} imported documents", r.deleted_count)).map_err(e), None),
+                UndoKind::Delete { old } => insert_doc(a.conn, t, old.clone()).await,
+                UndoKind::DeleteMany { old } => import_docs(a.conn, t, old.clone(), None).await,
+                UndoKind::Update { old, new } => replace_doc(a.conn, t, new.clone(), old.clone(), false).await,
                 UndoKind::Sql { .. } => (Err("Not a MongoDB change".into()), None),
             };
-            let back = match (res.is_err(), redo) {
-                (false, redo) => redo,
-                // Restoring many documents can stop partway; what was put back must not be inserted again on a retry,
-                // and what was not must stay undoable.
-                (true, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) if matches!(a.kind, UndoKind::DeleteMany { .. }) => {
-                    let UndoKind::DeleteMany { old } = a.kind else { unreachable!() };
-                    let rest = old.into_iter().filter(|d| !d.get("_id").is_some_and(|i| ids.contains(i))).collect();
-                    Some(UndoAction { kind: UndoKind::DeleteMany { old: rest }, ..a })
-                }
-                (true, _) => Some(a),
+            if res.is_ok() {
+                return (res, redo);
+            }
+            // A many-document restore can stop partway: what was put back must not be inserted again on a retry, and
+            // what was not must stay undoable.
+            let kind = match (a.kind, redo) {
+                (UndoKind::DeleteMany { old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => UndoKind::DeleteMany { old: old.into_iter().filter(|d| !d.get("_id").is_some_and(|i| ids.contains(i))).collect() },
+                (kind, _) => kind,
             };
-            (res, back)
+            (res, Some(UndoAction { kind, ..a }))
         });
     }
 
@@ -1104,20 +1102,6 @@ async fn insert_doc(conn: u64, t: Target, d: Document) -> (Res<String>, Option<U
             Ok(format!("Inserted document {}", short(&r.inserted_id))),
             Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
         ),
-        Err(err) => (Err(e(err)), None),
-    }
-}
-
-async fn delete_one_id(t: &Target, id: Bson) -> (Res<String>, Option<UndoAction>) {
-    match t.c().delete_one(doc! { "_id": id }).await {
-        Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
-        Err(err) => (Err(e(err)), None),
-    }
-}
-
-async fn delete_many_ids(t: &Target, ids: Vec<Bson>) -> (Res<String>, Option<UndoAction>) {
-    match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
-        Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
         Err(err) => (Err(e(err)), None),
     }
 }
