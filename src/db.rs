@@ -21,6 +21,8 @@ mod log;
 pub mod mongo_uri;
 pub(crate) mod pct;
 mod shell;
+#[cfg(test)]
+mod conn_tests;
 pub mod sql;
 pub mod collopts;
 pub mod copy;

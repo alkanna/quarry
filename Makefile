@@ -28,10 +28,15 @@ MONGO = mongodb://$(ADDR):$(call P,57017)/?directConnection=true
 # A SOCKS5 proxy that asks for quarry:quarry. It reaches the other servers through the host's published ports, as
 # host.docker.internal (the tests' QUARRY_TEST_SOCKS_TARGET default).
 SOCKS = quarry:quarry@$(ADDR):$(call P,51080)
+# For the Shell's connection tests: a TLS-only server with a certificate it makes itself, a replica set the driver
+# discovers (its member is named by an address the tests reach), and an SSH server that forwards to the host's ports.
+MONGO_TLS = mongodb://$(ADDR):$(call P,57018)/?directConnection=true&tls=true&tlsAllowInvalidCertificates=true
+MONGO_SET = mongodb://$(ADDR):$(call P,57019)/?replicaSet=rs1
+SSH = root:quarry@$(ADDR):$(call P,52222)
 # The live tests mostly wait on the servers, so they run on 32 threads, which takes PostgreSQL and MySQL past their default
 # connection limits. Not 500 for MySQL: a test proves SET GLOBAL max_connections = 500 was refused. The servers hold only
 # test data, so they skip flushing to disk.
-LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)' QUARRY_TEST_SOCKS='$(SOCKS)'
+LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)' QUARRY_TEST_SOCKS='$(SOCKS)' QUARRY_TEST_MONGO_TLS='$(MONGO_TLS)' QUARRY_TEST_MONGO_SET='$(MONGO_SET)' QUARRY_TEST_SSH='$(SSH)'
 
 PG_FAST = -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=500
 MY_FAST = --innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --max-connections=400
@@ -135,6 +140,9 @@ servers-up:
 	@$(call UP,$(N)-mariadb,-p $(call P,53307):3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4 $(MY_FAST))
 	@$(call UP,$(N)-mongo,-p $(call P,57017):27017 mongo:8 --replSet rs0)
 	@$(call UP,$(N)-socks,--add-host host.docker.internal:host-gateway -p $(call P,51080):1080 -e PROXY_USER=quarry -e PROXY_PASSWORD=quarry serjs/go-socks5-proxy)
+	@$(call UP,$(N)-mongo-tls,-p $(call P,57018):27017 --entrypoint bash mongo:8 -c 'openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=localhost -keyout /tmp/k.pem -out /tmp/c.pem 2>/dev/null && cat /tmp/k.pem /tmp/c.pem > /tmp/s.pem && exec mongod --bind_ip_all --tlsMode requireTLS --tlsCertificateKeyFile /tmp/s.pem --tlsCAFile /tmp/c.pem --tlsAllowConnectionsWithoutCertificates')
+	@$(call UP,$(N)-mongo-set,-p $(call P,57019):$(call P,57019) mongo:8 --replSet rs1 --port $(call P,57019))
+	@$(call UP,$(N)-ssh,--add-host host.docker.internal:host-gateway -p $(call P,52222):22 alpine:3.20 sh -c 'apk add --no-cache openssh >/dev/null && ssh-keygen -A >/dev/null && echo root:quarry | chpasswd && exec /usr/sbin/sshd -D -e -o PermitRootLogin=yes -o PasswordAuthentication=yes -o AllowTcpForwarding=yes')
 	@$(DOCKER) network create $(N)-pgb >/dev/null 2>&1 || true
 	@$(call UP,$(N)-pgb-pg,--network $(N)-pgb -e POSTGRES_PASSWORD=quarry postgres:18 $(PG_FAST))
 	@$(call UP,$(N)-pgbouncer,--network $(N)-pgb -p $(call P,56432):5432 -e DB_HOST=$(N)-pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer)
@@ -142,6 +150,10 @@ servers-up:
 	@# Over TCP: on first start the MySQL and MariaDB images run a temporary server on the socket only, then restart,
 	@# so a socket ping answers before the real server is up.
 	@until $(DOCKER) exec $(N)-mongo mongosh --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mongo-set mongosh --port $(call P,57019) --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs1", members: [{ _id: 0, host: "$(ADDR):$(call P,57019)" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do sleep 1; done
+	@# MongoDB 8 will not start TLS without a CA file, so a server that exits says why instead of being waited on forever.
+	@until $(DOCKER) exec $(N)-mongo-tls mongosh 'mongodb://localhost/?tls=true&tlsAllowInvalidCertificates=true' --quiet --eval 'quit(db.hello().ok ? 0 : 1)' >/dev/null 2>&1; do [ "$$($(DOCKER) inspect -f '{{.State.Running}}' $(N)-mongo-tls)" = true ] || { $(DOCKER) logs --tail 3 $(N)-mongo-tls; exit 1; }; sleep 1; done
+	@until $(DOCKER) exec $(N)-ssh pgrep sshd >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-mariadb mariadb-admin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-pg18 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pg13 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pgb-pg pg_isready -U postgres -q; do sleep 1; done
@@ -150,7 +162,7 @@ servers-up:
 
 # -v also removes their anonymous data volumes, which would otherwise pile up unused.
 servers-down:
-	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-socks $(N)-pgbouncer $(N)-pgb-pg
+	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-mongo-tls $(N)-mongo-set $(N)-ssh $(N)-socks $(N)-pgbouncer $(N)-pgb-pg
 	-$(DOCKER) network rm $(N)-pgb
 
 servers-status:

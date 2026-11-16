@@ -462,7 +462,9 @@ try {
   const open = (m) => {
     // SSH-only servers are reached through Quarry's tunnel (a local SOCKS5 port) or the connection's
     // own proxy; the driver needs the "socks" package for that, installed as a built-in.
-    const options = { appName: "quarry-shell", serverSelectionTimeoutMS: input.timeoutMs, monitorCommands: monitor };
+    // The socket timeout bounds a reply that never comes: a tunnel, VPN or port forward that stalls after the handshake
+    // otherwise leaves the run waiting forever, since server selection only covers connecting.
+    const options = { appName: "quarry-shell", serverSelectionTimeoutMS: input.timeoutMs, socketTimeoutMS: input.timeoutMs, monitorCommands: monitor };
     if (m.proxy) {
       options.proxyHost = m.proxy.host;
       options.proxyPort = m.proxy.port;
