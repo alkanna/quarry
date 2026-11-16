@@ -14,6 +14,7 @@ mod dialogs;
 mod journeys;
 mod layout;
 mod dnd;
+mod filter_panel;
 mod fit;
 mod fold;
 mod conn_advanced;

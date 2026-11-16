@@ -81,6 +81,8 @@ pub(in crate::app) struct Panel {
     pub(in crate::app) sel: Option<u32>,
     /// A row just added, whose column picker opens on its first frame.
     pub(in crate::app) pick: Option<u32>,
+    /// A row whose operator menu opens on its first frame; only the demo of the menu sets it.
+    pub(in crate::app) ops: Option<u32>,
     /// How many rows the whole WHERE matches.
     pub(in crate::app) count: Count,
     /// The row under the pointer, whose own count shows at its end.
@@ -491,7 +493,7 @@ fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
 }
 
 /// The id a row's cells keep wherever the row moves.
-fn row_salt(id: u32) -> egui::Id {
+pub(in crate::app) fn row_salt(id: u32) -> egui::Id {
     egui::Id::unique(("sql-filter-row", id))
 }
 
@@ -527,7 +529,32 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
     if pick.is_some() {
         p.pick = None;
     }
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+    let ops = p.ops == Some(id);
+    // The menu at the right end is drawn in a child that takes no room, and the cells stop before it.
+    let end = egui::Rect::from_min_max(egui::pos2(rect.right() - 6.0 - BUTTON_H, rect.top()), egui::pos2(rect.right() - 6.0, rect.bottom()));
+    let mut menu = ui.new_child(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    dots_menu(&mut menu, |ui| {
+        menu_list(ui);
+        let mut picks = Vec::new();
+        menu_act(ui, &mut picks, Act::Duplicate(id), |ui| ui.button("Duplicate"));
+        menu_act(ui, &mut picks, Act::Negate(id), |ui| ui.button("Negate"));
+        menu_act(ui, &mut picks, Act::Wrap(id), |ui| ui.button("Convert to group"));
+        menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
+        menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
+        popover_divider(ui);
+        menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete"));
+        acts.extend(picks);
+    })
+    .on_hover_text("Condition actions");
+    // The hovered row's own count, faint before the menu.
+    if p.hover == Some(id) && c.on && c.rule.complete() && let Some(Ok(n)) = p.hover_cache.get(&crate::db::sql::rules::rule_sql(&c.rule, cx.d, cx.bs)) {
+        let label = format!("{}{}", if n.estimated { "\u{2248} " } else { "" }, grouped(n.n));
+        let g = ui.painter().layout_no_wrap(label, FontId::monospace(TXT_CAPTION), FAINT());
+        let dy = optical_dy(&g);
+        ui.painter().galley(egui::pos2(end.left() - 6.0 - g.size().x, rect.center().y - g.size().y / 2.0 + dy), g, FAINT());
+    }
+    let cells = egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), egui::pos2(end.left() - 4.0, rect.bottom()));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(cells).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         ui.set_min_height(h);
         ui.spacing_mut().item_spacing.x = 6.0;
         // Room for the grip dots.
@@ -539,34 +566,10 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
         if on.on_hover_text(if c.on { "Leave this condition out" } else { "Use this condition" }).clicked() {
             acts.push(Act::Toggle(id));
         }
-        // The right end first, so the cells cannot push it out of the row.
-        let end = egui::Rect::from_min_max(egui::pos2(rect.right() - 6.0 - BUTTON_H, rect.top()), egui::pos2(rect.right() - 6.0, rect.bottom()));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-            dots_menu(ui, |ui| {
-                menu_list(ui);
-                let mut picks = Vec::new();
-                menu_act(ui, &mut picks, Act::Duplicate(id), |ui| ui.button("Duplicate"));
-                menu_act(ui, &mut picks, Act::Negate(id), |ui| ui.button("Negate"));
-                menu_act(ui, &mut picks, Act::Wrap(id), |ui| ui.button("Convert to group"));
-                menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
-                menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
-                popover_divider(ui);
-                menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete"));
-                acts.extend(picks);
-            })
-            .on_hover_text("Condition actions");
-        });
-        // The hovered row's own count, faint before the cross.
-        if p.hover == Some(id) && c.on && c.rule.complete() && let Some(Ok(n)) = p.hover_cache.get(&crate::db::sql::rules::rule_sql(&c.rule, cx.d, cx.bs)) {
-            let label = format!("{}{}", if n.estimated { "\u{2248} " } else { "" }, grouped(n.n));
-            let g = ui.painter().layout_no_wrap(label, FontId::monospace(TXT_CAPTION), FAINT());
-            let dy = optical_dy(&g);
-            ui.painter().galley(egui::pos2(end.left() - 6.0 - g.size().x, rect.center().y - g.size().y / 2.0 + dy), g, FAINT());
-        }
         if !c.on {
             ui.multiply_opacity(0.5);
         }
-        let (changed, enter) = rule_editor(ui, &mut c.rule, cx.cols, row_salt(id), cx.d, pick, hints);
+        let (changed, enter) = rule_editor(ui, &mut c.rule, cx.cols, row_salt(id), cx.d, pick, ops, hints);
         out.changed |= changed;
         out.run |= enter;
     });

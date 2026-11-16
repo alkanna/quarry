@@ -171,10 +171,13 @@ pub(super) fn op_cat(op: Op) -> (u8, &'static str) {
 
 /// The operator picker for a column type, grouped by meaning with the SQL each one sends on the right. A text column
 /// reaches its regex operators through the cell's .* toggle instead.
-pub(super) fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, case: bool, min: f32, d: Dialect) -> Option<Op> {
+pub(super) fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, case: bool, min: f32, d: Dialect, open: bool) -> Option<Op> {
     let label = rules::label(cur, kind);
     let w = combo_w(ui, label, "", min);
     let r = pill_combo(ui, label, "", w, if rules::is_keyword(cur) { C_KEYWORD() } else { TEXT() });
+    if open {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
+    }
     let mut pick = None;
     egui::Popup::menu(&r).width(380.0).show(|ui| {
         menu_look(ui);
@@ -578,14 +581,16 @@ pub(super) fn set_op(r: &mut Rule, op: Op, d: Dialect) {
 }
 
 /// `pick` opens the column picker with that text typed, for a row just added.
-pub(super) fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, d: Dialect, pick: Option<String>, hints: &mut Hints) -> (bool, bool) {
+/// `ops` opens the operator menu, as the demo of the menu does.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, d: Dialect, pick: Option<String>, ops: bool, hints: &mut Hints) -> (bool, bool) {
     let mut changed = false;
     if let Some(p) = col_pick(ui, salt.with("col"), &r.col, cols, 130.0, pick) && p != r.col {
         let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
         set_col(r, p, kind, d);
         changed = true;
     }
-    if let Some(op) = op_pick(ui, r.kind, r.op, r.case, 90.0, d) && op != r.op {
+    if let Some(op) = op_pick(ui, r.kind, r.op, r.case, 90.0, d, ops) && op != r.op {
         set_op(r, op, d);
         changed = true;
     }

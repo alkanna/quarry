@@ -514,8 +514,14 @@ pub fn filter_help(d: Dialect) -> String {
     if d == Dialect::Postgres {
         s += &row("", "Text search and regex ignore case until Aa is on, like MySQL's default collations; = matches it");
     }
+    s += "\nThe filter panel (Filters, in Rules mode)\n";
+    s += &row("Up / Down", "select a condition or group");
+    s += &row("Enter, Space", "add a condition below, turn the selected one on or off");
+    s += &row("Cmd+G, Cmd+Shift+G", "put the selection in a group, take it out");
+    s += &row("Cmd+Backspace", "remove the selection");
+    s += &row("Cmd+Enter, Esc", "apply and close, close keeping the edits");
     s += "\nShortcuts\n";
-    s += &row("Cmd+F", "focus the WHERE box");
+    s += &row("Cmd+F", "open the filter panel, or focus the WHERE box in SQL mode");
     s += &row("Cmd+E", "explain the filter's query");
     s += &row("Up / Down", "move between rows");
     s += &row("PageUp / PageDown", "previous and next page");

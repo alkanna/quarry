@@ -511,7 +511,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
             if !aliases.iter().any(|a| a.name == r.col) {
                 r.col = aliases.first().map(|a| a.name.clone()).unwrap_or_default();
             }
-            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, None, &mut Hints::default());
+            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, None, false, &mut Hints::default());
             if close_x(ui).on_hover_text("Remove condition").clicked() {
                 g.having = None;
             }
@@ -883,8 +883,11 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         }
                         run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                     } else {
-                        if super::filter_line::filters_button(ui, &b.tree, b.panel.open).clicked() {
+                        let f = super::filter_line::filters_button(ui, &b.tree, b.panel.open);
+                        if f.clicked() {
                             b.panel.toggle(ui.ctx());
+                            // Space and Enter belong to the panel's rows, not to the button they would press again.
+                            ui.memory_mut(|m| m.surrender_focus(f.id));
                         }
                         // ponytail: the summary gets a fixed share of the line, so the clause chips after it keep theirs.
                         let room = (ui.available_width() * 0.55).max(120.0);
