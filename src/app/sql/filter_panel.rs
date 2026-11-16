@@ -9,6 +9,7 @@ use crate::db::sql::{
     rules::Rule,
     Col, Dialect,
 };
+use crate::ui::dnd::{drag_cancelled, drag_source_with, grip_dots, paint_spot, y_frac, zone_at, Spot, Zone};
 use crate::ui::fold;
 
 /// The pause after the last edit before a count is asked again, as long as the Query editor's live check waits.
@@ -164,6 +165,8 @@ pub(super) struct Out {
     pub(super) save: bool,
     /// Edit as SQL was clicked.
     pub(super) as_sql: bool,
+    /// Where a dragged node may land, gathered while the rows draw.
+    targets: Vec<Target>,
 }
 
 /// What every row of one frame reads: the columns, the server's dialect and escapes, and the row an error points into.
@@ -174,11 +177,48 @@ struct Cx<'a> {
     bad: Option<u32>,
 }
 
+/// A row or group dragged in the panel, by id.
+#[derive(Clone, Copy)]
+struct FilterDrag(u32);
+
+/// A place a drop can land: a row (before or after it), a group's header (before it, or at the top inside it), or the
+/// end of a group's list.
+#[derive(Clone, Copy)]
+struct Target {
+    rect: egui::Rect,
+    parent: u32,
+    index: usize,
+    depth: usize,
+    kind: Place,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    Row,
+    Head(u32),
+    End,
+}
+
 enum Act {
     Remove(u32),
     Toggle(u32),
     /// A row, or a group holding one, added at the end of a group (0 the root).
     Add(u32, bool),
+    Duplicate(u32),
+    Negate(u32),
+    Wrap(u32),
+    Ungroup(u32),
+    MoveBy(u32, isize),
+    /// A row taken out of its group to just after it.
+    Unwrap(u32),
+    /// A dragged node dropped into group `parent` before the child at `index`.
+    Move(u32, u32, usize),
+}
+
+/// The word a new group takes inside `parent`: the other one than its parent's, so wrapping says something.
+fn other_word(tree: &Tree, parent: u32) -> Match {
+    let outer = if parent == 0 { Some(tree.root.mode) } else { tree.find(parent).and_then(|n| if let Item::Group(g) = &n.item { Some(g.mode) } else { None }) };
+    if outer == Some(Match::All) { Match::Any } else { Match::All }
 }
 
 const MODES: [(Match, &str); 3] = [(Match::All, "all"), (Match::Any, "any"), (Match::None, "none")];
@@ -192,8 +232,7 @@ pub(super) fn add(tree: &mut Tree, p: &mut Panel, parent: u32, group: bool, cols
     let Some(c) = cols.first() else { return };
     let row = Item::Cond(Cond { rule: Rule::new(&c.name, c.kind, d), on: true });
     let id = if group {
-        let outer = if parent == 0 { Some(tree.root.mode) } else { tree.find(parent).and_then(|n| if let Item::Group(g) = &n.item { Some(g.mode) } else { None }) };
-        let mode = if outer == Some(Match::All) { Match::Any } else { Match::All };
+        let mode = other_word(tree, parent);
         tree.push(parent, Item::Group(Block { mode, kids: vec![] })).and_then(|g| tree.push(g, row))
     } else {
         tree.push(parent, row)
@@ -214,6 +253,9 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
         _ => None,
     };
     p.hover = None;
+    // Sampled before anything draws: a field that gives up its focus on Enter this frame still had it.
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    let drag = egui::DragAndDrop::payload::<FilterDrag>(ui.ctx()).filter(|_| !drag_cancelled(ui.ctx())).map(|d| d.0);
     let cx = Cx { cols, d, bs, bad };
     let t = fold::openness(ui.ctx(), fold_id(), p.open);
     let mut acts = Vec::new();
@@ -256,21 +298,10 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
             });
         });
     });
-    for a in acts {
-        match a {
-            Act::Remove(id) => {
-                tree.remove(id);
-                if p.sel == Some(id) {
-                    p.sel = None;
-                }
-            }
-            Act::Toggle(id) => {
-                tree.toggle(id);
-            }
-            Act::Add(parent, group) => add(tree, p, parent, group, cols, d),
-        }
-        out.changed = true;
+    if let Some(id) = drag {
+        drop_at(ui, &out.targets, tree, id, &mut acts);
     }
+    out.targets.clear();
     if p.open && keys {
         // A menu or a picker of the panel owns Esc while it is open.
         let popup = egui::Popup::is_any_open(ui.ctx());
@@ -279,6 +310,48 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
         if esc {
             p.close(ui.ctx());
         }
+        if !typing && !popup {
+            row_keys(ui, tree, p, &mut acts);
+        }
+    }
+    for a in acts {
+        match a {
+            Act::Remove(id) => {
+                // The selection moves on to the next row, so ⌘⌫ can be pressed again.
+                let order = tree.rows_in_order();
+                let next = order.iter().position(|x| *x == id).and_then(|i| order.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| order.get(j)))).copied();
+                tree.remove(id);
+                if p.sel == Some(id) {
+                    p.sel = next.filter(|n| tree.find(*n).is_some());
+                }
+            }
+            Act::Toggle(id) => {
+                tree.toggle(id);
+            }
+            Act::Add(parent, group) => add(tree, p, parent, group, cols, d),
+            Act::Duplicate(id) => p.sel = tree.duplicate(id).or(p.sel),
+            Act::Negate(id) => {
+                tree.negate(id, d);
+            }
+            Act::Wrap(id) => {
+                let mode = other_word(tree, tree.parent_of(id).unwrap_or(0));
+                p.sel = tree.wrap(id, mode).or(p.sel);
+            }
+            Act::Ungroup(id) => {
+                tree.ungroup(id);
+            }
+            Act::MoveBy(id, by) => {
+                tree.move_by(id, by);
+            }
+            Act::Unwrap(id) => {
+                tree.unwrap(id);
+            }
+            Act::Move(id, parent, index) => {
+                tree.move_to(id, parent, index);
+                p.sel = Some(id);
+            }
+        }
+        out.changed = true;
     }
     if apply {
         out.run = true;
@@ -305,12 +378,14 @@ fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cx: &Cx, acts: 
     if tree.root.kids.is_empty() {
         ui.label(RichText::new("No conditions yet: every row shows.").size(TXT_SMALL).color(FAINT()));
     }
-    block(ui, &mut tree.root, p, cx, acts, out, hints);
-    add_buttons(ui, 0, acts);
+    block(ui, &mut tree.root, 0, 0, p, cx, acts, out, hints);
+    let n = tree.root.kids.len();
+    add_buttons(ui, 0, n, 0, acts, out);
 }
 
-fn add_buttons(ui: &mut egui::Ui, parent: u32, acts: &mut Vec<Act>) {
-    ui.horizontal(|ui| {
+/// The buttons that add to group `parent`, whose row also takes drops at the end of its `n` children.
+fn add_buttons(ui: &mut egui::Ui, parent: u32, n: usize, depth: usize, acts: &mut Vec<Act>, out: &mut Out) {
+    let r = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if quiet(ui, RichText::new("+ Condition").size(TXT_SMALL).color(PRIMARY())).clicked() {
             acts.push(Act::Add(parent, false));
@@ -319,16 +394,99 @@ fn add_buttons(ui: &mut egui::Ui, parent: u32, acts: &mut Vec<Act>) {
             acts.push(Act::Add(parent, true));
         }
     });
+    out.targets.push(Target { rect: r.response.rect.with_max_x(ui.max_rect().right()), parent, index: n, depth, kind: Place::End });
 }
 
+/// The children of group `parent` (0 the root), `depth` groups deep.
 #[allow(clippy::too_many_arguments)]
-fn block(ui: &mut egui::Ui, b: &mut Block, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
-    for n in &mut b.kids {
+fn block(ui: &mut egui::Ui, b: &mut Block, parent: u32, depth: usize, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+    for (index, n) in b.kids.iter_mut().enumerate() {
         let id = n.id;
+        let at = Target { rect: egui::Rect::NOTHING, parent, index, depth, kind: Place::Row };
         ui.push_id(id, |ui| match &mut n.item {
-            Item::Cond(c) => row(ui, id, c, p, cx, acts, out, hints),
-            Item::Group(g) => card(ui, id, g, p, cx, acts, out, hints),
+            Item::Cond(c) => row(ui, id, c, at, p, cx, acts, out, hints),
+            Item::Group(g) => card(ui, id, g, at, p, cx, acts, out, hints),
         });
+    }
+}
+
+/// Marks where the node `id` being dragged would land under the pointer, and moves it there on release. A group never
+/// lands in itself or in a group inside it.
+fn drop_at(ui: &egui::Ui, targets: &[Target], tree: &Tree, id: u32, acts: &mut Vec<Act>) {
+    let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
+    // Rows and headers do not overlap, so the last one holding the pointer is the one under it.
+    let Some(t) = targets.iter().rev().find(|t| t.rect.contains(pos)) else { return };
+    let frac = y_frac(t.rect, Some(pos));
+    let (parent, index, zone) = match t.kind {
+        Place::Row => {
+            let z = zone_at(1.0, frac, false);
+            (t.parent, if z == Zone::Before { t.index } else { t.index + 1 }, z)
+        }
+        Place::Head(g) => match zone_at(1.0, frac, true) {
+            Zone::Before => (t.parent, t.index, Zone::Before),
+            z => (g, 0, z),
+        },
+        Place::End => (t.parent, t.index, Zone::Before),
+    };
+    if parent != 0 && tree.holds(id, parent) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+        return;
+    }
+    let depth = if matches!(t.kind, Place::Head(_)) && zone != Zone::Before { t.depth + 1 } else { t.depth };
+    paint_spot(ui.painter(), t.rect, Spot { zone, depth }, t.rect.left() + 8.0, 16.0);
+    if ui.input(|i| i.pointer.any_released()) {
+        acts.push(Act::Move(id, parent, index));
+        egui::DragAndDrop::clear_payload(ui.ctx());
+    }
+}
+
+/// The keys of the panel while no field has the focus: Up and Down select, Enter adds a row below, Space turns a row on
+/// or off, Cmd+G groups, Cmd+Shift+G takes out of the group, Cmd+Backspace removes.
+fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
+    let none = egui::Modifiers::NONE;
+    let (down, up, enter, space, unwrap, wrap, del) = ui.input_mut(|i| {
+        (
+            i.consume_key(none, Key::ArrowDown),
+            i.consume_key(none, Key::ArrowUp),
+            i.consume_key(none, Key::Enter),
+            i.consume_key(none, Key::Space),
+            // Checked first: Cmd+G would also match Cmd+Shift+G.
+            i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::G),
+            i.consume_key(egui::Modifiers::COMMAND, Key::G),
+            i.consume_key(egui::Modifiers::COMMAND, Key::Backspace),
+        )
+    });
+    let order = tree.rows_in_order();
+    let at = p.sel.and_then(|s| order.iter().position(|x| *x == s));
+    if down || up {
+        p.sel = match (at, down) {
+            (Some(i), true) => order.get(i + 1).or(order.get(i)).copied(),
+            (Some(i), false) => order.get(i.saturating_sub(1)).copied(),
+            (None, true) => order.first().copied(),
+            (None, false) => order.last().copied(),
+        };
+    }
+    let Some(sel) = p.sel.filter(|s| tree.find(*s).is_some()) else {
+        if enter {
+            acts.push(Act::Add(0, false));
+        }
+        return;
+    };
+    let group = matches!(tree.find(sel).map(|n| &n.item), Some(Item::Group(_)));
+    if enter {
+        // A row is followed by a new one in its group; a group gets one at its end.
+        acts.push(Act::Add(if group { sel } else { tree.parent_of(sel).unwrap_or(0) }, false));
+    }
+    if space && !group {
+        acts.push(Act::Toggle(sel));
+    }
+    if unwrap {
+        acts.push(if group { Act::Ungroup(sel) } else { Act::Unwrap(sel) });
+    } else if wrap {
+        acts.push(Act::Wrap(sel));
+    }
+    if del {
+        acts.push(Act::Remove(sel));
     }
 }
 
@@ -339,11 +497,19 @@ fn row_salt(id: u32) -> egui::Id {
 
 /// A condition: its on box, column, operator, values and a cross. A click on the row's background selects it.
 #[allow(clippy::too_many_arguments)]
-fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let h = BUTTON_H + 8.0;
     let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
-    // Registered before the cells, so they take the clicks they are under.
-    let bg = ui.interact(rect, row_salt(id).with("row"), Sense::click());
+    out.targets.push(Target { rect, ..at });
+    // Registered before the cells, so they take the clicks and drags they are under; the rest of the row is the handle.
+    let bg = ui.interact(rect, row_salt(id).with("row"), Sense::click_and_drag());
+    let ghost = format!("{} {}", c.rule.col, crate::db::sql::rules::label(c.rule.op, c.rule.kind));
+    drag_source_with(ui, &bg, FilterDrag(id), |p, r| {
+        p.text(r.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, &ghost, FontId::monospace(TXT_SMALL), TEXT());
+    });
+    if bg.hovered() || bg.dragged() {
+        grip_dots(ui.painter(), egui::pos2(rect.left() + 5.0, rect.center().y), FAINT());
+    }
     let sel = p.sel == Some(id);
     if sel || bg.hovered() {
         ui.painter().rect_filled(rect, R_SM, if sel { tint(PRIMARY(), 22) } else { HOVER() });
@@ -364,6 +530,8 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cx: &Cx, acts: &
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         ui.set_min_height(h);
         ui.spacing_mut().item_spacing.x = 6.0;
+        // Room for the grip dots.
+        ui.add_space(6.0);
         let (cb, _) = ui.allocate_exact_size(egui::vec2(16.0, BUTTON_H), Sense::hover());
         let on = check_box(ui, cb.center(), row_salt(id).with("on"), c.on, false);
         let state = c.on;
@@ -372,10 +540,22 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cx: &Cx, acts: &
             acts.push(Act::Toggle(id));
         }
         // The right end first, so the cells cannot push it out of the row.
-        let end = egui::Rect::from_min_max(egui::pos2(rect.right() - 6.0 - CLOSE_W - 4.0, rect.top()), egui::pos2(rect.right() - 6.0, rect.bottom()));
-        if ui.scope_builder(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| close_x(ui).on_hover_text("Remove condition").clicked()).inner {
-            acts.push(Act::Remove(id));
-        }
+        let end = egui::Rect::from_min_max(egui::pos2(rect.right() - 6.0 - BUTTON_H, rect.top()), egui::pos2(rect.right() - 6.0, rect.bottom()));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+            dots_menu(ui, |ui| {
+                menu_list(ui);
+                let mut picks = Vec::new();
+                menu_act(ui, &mut picks, Act::Duplicate(id), |ui| ui.button("Duplicate"));
+                menu_act(ui, &mut picks, Act::Negate(id), |ui| ui.button("Negate"));
+                menu_act(ui, &mut picks, Act::Wrap(id), |ui| ui.button("Convert to group"));
+                menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
+                menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
+                popover_divider(ui);
+                menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete"));
+                acts.extend(picks);
+            })
+            .on_hover_text("Condition actions");
+        });
         // The hovered row's own count, faint before the cross.
         if p.hover == Some(id) && c.on && c.rule.complete() && let Some(Ok(n)) = p.hover_cache.get(&crate::db::sql::rules::rule_sql(&c.rule, cx.d, cx.bs)) {
             let label = format!("{}{}", if n.estimated { "\u{2248} " } else { "" }, grouped(n.n));
@@ -394,7 +574,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cx: &Cx, acts: &
 
 /// A group as a tinted card: its own word, its rows and groups, and the buttons that add to it.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, at: Target, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let (fill, edge) = match g.mode {
         Match::Any => (tint(C_LINK(), 18), tint(C_LINK(), 70)),
         Match::None => (tint(ALERT(), 18), tint(ALERT(), 70)),
@@ -404,6 +584,16 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cx: &Cx, acts:
     ui.add_space(2.0);
     egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, edge)).corner_radius(R_MD).inner_margin(egui::Margin { left: 10, right: 6, top: 6, bottom: 4 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        let head = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), BUTTON_H));
+        out.targets.push(Target { rect: head, kind: Place::Head(id), ..at });
+        // The header's empty part drags the group and selects it, under its controls like a row's background.
+        let bg = ui.interact(head, row_salt(id).with("head"), Sense::click_and_drag());
+        drag_source_with(ui, &bg, FilterDrag(id), |p, r| {
+            p.text(r.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "group", FontId::monospace(TXT_SMALL), TEXT());
+        });
+        if bg.clicked() {
+            p.sel = Some(id);
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let before = g.mode;
@@ -411,13 +601,23 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cx: &Cx, acts:
             out.changed |= g.mode != before;
             ui.label(RichText::new("of these").size(TXT_SMALL).color(MUTED()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if close_x(ui).on_hover_text("Remove the group and its conditions").clicked() {
-                    acts.push(Act::Remove(id));
-                }
+                dots_menu(ui, |ui| {
+                    menu_list(ui);
+                    let mut picks = Vec::new();
+                    menu_act(ui, &mut picks, Act::Duplicate(id), |ui| ui.button("Duplicate"));
+                    menu_act(ui, &mut picks, Act::Ungroup(id), |ui| ui.button("Ungroup"));
+                    menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
+                    menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
+                    popover_divider(ui);
+                    menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete group"));
+                    acts.extend(picks);
+                })
+                .on_hover_text("Group actions");
             });
         });
-        block(ui, g, p, cx, acts, out, hints);
-        add_buttons(ui, id, acts);
+        block(ui, g, id, at.depth + 1, p, cx, acts, out, hints);
+        let n = g.kids.len();
+        add_buttons(ui, id, n, at.depth + 1, acts, out);
     });
     ui.add_space(2.0);
 }

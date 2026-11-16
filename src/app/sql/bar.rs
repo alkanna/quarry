@@ -99,6 +99,15 @@ pub(in crate::app) struct Bar {
 }
 
 impl Bar {
+    /// Cmd+F in Rules mode: the filter panel, with a new row when it has none.
+    pub(in crate::app) fn open_filters(&mut self, ctx: &egui::Context, cols: &[Col], d: Dialect) {
+        if self.tree.root.kids.is_empty() {
+            super::filter_panel::add(&mut self.tree, &mut self.panel, 0, false, cols, d);
+        }
+        let at = self.panel.sel;
+        self.panel.show(ctx, at);
+    }
+
     /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
     /// the text as it ran, so only this comparison reads the other spelling.
     pub(in crate::app) fn ran_as_shown<'a>(&self, ran: &'a PageQuery) -> std::borrow::Cow<'a, PageQuery> {

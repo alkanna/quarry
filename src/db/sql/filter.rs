@@ -393,6 +393,11 @@ impl Tree {
         Some(parent)
     }
 
+    /// Whether `id` is `outer` or inside it.
+    pub fn holds(&self, outer: u32, id: u32) -> bool {
+        matches!((self.path(outer), self.path(id)), (Some(a), Some(b)) if b.starts_with(&a))
+    }
+
     /// Every row and group in the order the panel draws them.
     pub fn rows_in_order(&self) -> Vec<u32> {
         let mut out = Vec::new();
@@ -473,7 +478,7 @@ impl Tree {
     /// Moves `id` into group `parent` (0 for the root) before the child at `index`, counted as the list stood before the
     /// move. A group never moves into itself or a group inside it.
     pub fn move_to(&mut self, id: u32, parent: u32, index: usize) -> Option<()> {
-        if parent == id || (parent != 0 && self.path(parent)?.starts_with(&self.path(id)?)) {
+        if parent != 0 && self.holds(id, parent) {
             return None;
         }
         // A target that is not a group is refused before anything moves.

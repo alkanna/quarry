@@ -159,7 +159,9 @@ impl App {
         if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
             t.record = false;
         }
-        if self.window_open() || self.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() {
+        // The filter panel moves through its own rows and fields with the keys.
+        let panel = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open);
+        if self.window_open() || self.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || panel {
             return;
         }
         let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.record_row()) else { return };
