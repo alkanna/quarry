@@ -361,7 +361,7 @@ fn every_filter_rule_runs_on_postgres() {
              INSERT INTO t VALUES (1, 5.5, 'ann', gen_random_uuid(), now(), now(), 'a', 'a,b', true, '{\"a\": {\"b\": \"v\"}}', '\\x5a3f');");
         let cols = [("id", Kind::Int), ("total", Kind::Decimal), ("name", Kind::Text), ("u", Kind::Uuid), ("created_at", Kind::DateTime), ("status", Kind::Enum), ("tags", Kind::Set), ("ok", Kind::Bool), ("data", Kind::Json), ("blob", Kind::Binary)];
         for (col, kind) in cols {
-            for &op in rules::ops_for(kind) {
+            for &op in rules::ops_for(kind, crate::db::sql::Dialect::Postgres) {
                 let g = rules::group_of(kind);
                 let values: Vec<String> = match op {
                     Op::Between if g == Group::Number => vec!["1".into(), "9".into()],
@@ -371,21 +371,23 @@ fn every_filter_rule_runs_on_postgres() {
                     Op::In | Op::NotIn | Op::NotInOrNull => vec!["a".into(), "50%_off\\".into()],
                     Op::Last => vec!["3".into(), "weeks".into()],
                     Op::AfterCol => vec!["seen_at".into()],
-                    Op::JsonPathEq => vec!["$.a.b".into(), "v".into()],
+                    Op::JsonPathEq | Op::JsonPathNe => vec!["$.a.b".into(), "v".into()],
+                    Op::JsonPathGt | Op::JsonPathLt => vec!["$.n".into(), "5".into()],
+                    Op::JsonHasKey => vec!["a".into()],
                     Op::JsonContains => vec!["{\"a\": {}}".into()],
                     Op::JsonHasPath => vec!["$.a".into()],
                     Op::LenEq | Op::LenGt | Op::LenLt => vec!["3".into()],
                     Op::Eq | Op::Ne if kind == Kind::Binary => vec!["0x5A3F".into()],
                     Op::Eq | Op::Ne if kind == Kind::Json => vec!["{\"a\": 1}".into()],
-                    Op::Eq | Op::Ne | Op::Gt | Op::Lt | Op::Ge | Op::Le if g == Group::Number => vec!["5.5".into()],
-                    Op::Eq | Op::Ne | Op::Gt | Op::Lt if g == Group::Date => vec!["2024-01-02 03:04:05".into()],
-                    Op::Eq | Op::Ne if kind == Kind::Uuid => vec!["00000000-0000-0000-0000-000000000000".into()],
-                    Op::Eq | Op::Ne if kind == Kind::Bool => vec!["true".into()],
+                    Op::Eq | Op::Ne | Op::Gt | Op::Lt | Op::Ge | Op::Le | Op::Distinct if g == Group::Number => vec!["5.5".into()],
+                    Op::Eq | Op::Ne | Op::Gt | Op::Lt | Op::Distinct if g == Group::Date => vec!["2024-01-02 03:04:05".into()],
+                    Op::Eq | Op::Ne | Op::Distinct if kind == Kind::Uuid => vec!["00000000-0000-0000-0000-000000000000".into()],
+                    Op::Eq | Op::Ne | Op::Distinct if kind == Kind::Bool => vec!["true".into()],
                     // A quote, wildcards and, for the LIKE rules that escape it, a backslash.
                     Op::Contains | Op::NotContains | Op::StartsWith | Op::NotStartsWith | Op::EndsWith | Op::NotEndsWith => vec!["a%b_c'd\\".into()],
                     _ => rules::default_values(op).into_iter().map(|_| "a%b_c'd".to_string()).collect(),
                 };
-                let r = Rule { join: false, col: col.into(), kind, op, values };
+                let r = Rule { join: false, col: col.into(), kind, op, values, case: rules::default_case(op, crate::db::sql::Dialect::Postgres) };
                 let sql = rules::to_sql(std::slice::from_ref(&r), false, crate::db::sql::Dialect::Postgres, false);
                 let q = format!("SELECT count(*)::text FROM t4_rules.t WHERE {sql}");
                 let ran = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(q.as_str())).fetch_all(&pool).await });

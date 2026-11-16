@@ -44,12 +44,13 @@ pub fn hex_digits(b: &[u8], upper: bool) -> String {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Kind {
     Int,
     UInt,
     Float,
     Decimal,
+    #[default]
     Text,
     Binary,
     Date,

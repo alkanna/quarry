@@ -368,22 +368,23 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32, start_text: Op
 fn op_cat(op: Op) -> u8 {
     use Op::*;
     match op {
-        Eq | Ne | Gt | Lt | Ge | Le => 0,
+        Eq | Ne | Gt | Lt | Ge | Le | Distinct => 0,
         Contains | NotContains | StartsWith | NotStartsWith | EndsWith | NotEndsWith => 1,
         Like | NotLike | Regexp | NotRegexp => 2,
         In | NotIn | NotInOrNull | Between => 3,
         Empty | NotEmpty => 4,
         IsNull | NotNull => 5,
-        LenEq | LenGt | LenLt => 6,
-        Today | Last | ThisWeek | ThisMonth => 7,
+        LenEq | LenGt | LenLt | ArrayLenEq | ArrayLenGt | ArrayLenLt => 6,
+        Today | Yesterday | Last | ThisWeek | ThisMonth | LastMonth => 7,
         AfterCol => 8,
         SetContains => 9,
-        JsonPathEq | JsonContains | JsonHasPath => 10,
+        JsonPathEq | JsonPathNe | JsonPathGt | JsonPathLt | JsonContains | JsonHasPath | JsonHasKey => 10,
+        ArrayHasAll | ArrayHasAny => 11,
     }
 }
 
 /// The operator picker for a column type.
-fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
+fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32, d: Dialect) -> Option<Op> {
     let label = rules::label(cur, kind);
     let w = combo_w(ui, label, "", min);
     let r = pill_combo(ui, label, "", w, if rules::is_keyword(cur) { C_KEYWORD() } else { TEXT() });
@@ -391,7 +392,7 @@ fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
     egui::Popup::menu(&r).width(190.0).show(|ui| {
         menu_look(ui);
         let mut last = None;
-        for &op in rules::ops_for(kind) {
+        for &op in rules::ops_for(kind, d) {
             if last.is_some_and(|l| l != op_cat(op)) {
                 ui.separator();
             }
@@ -578,20 +579,20 @@ fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -
 }
 
 /// An editable rule: column, operator and values. Returns (changed, Enter pressed).
-fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -> (bool, bool) {
+fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, d: Dialect) -> (bool, bool) {
     let mut changed = false;
     if let Some(p) = col_pick(ui, &r.col, cols, 130.0, None) && p != r.col {
         let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
         r.col = p;
         // Keep the operator when the new column offers it, else start over with its first one.
-        if !rules::ops_for(kind).contains(&r.op) || rules::group_of(kind) != rules::group_of(r.kind) {
-            r.op = rules::ops_for(kind)[0];
+        if !rules::ops_for(kind, d).contains(&r.op) || rules::group_of(kind) != rules::group_of(r.kind) {
+            r.op = rules::ops_for(kind, d)[0];
             r.values = rules::default_values(r.op);
         }
         r.kind = kind;
         changed = true;
     }
-    if let Some(op) = op_pick(ui, r.kind, r.op, 90.0) && op != r.op {
+    if let Some(op) = op_pick(ui, r.kind, r.op, 90.0, d) && op != r.op {
         let keep: Vec<String> = r.values.iter().filter(|v| !v.is_empty()).cloned().collect();
         r.op = op;
         r.values = rules::default_values(op);
@@ -850,13 +851,13 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     ui.horizontal(|ui| {
         if g.having.is_none() {
             if quiet(ui, RichText::new("+ Condition").color(PRIMARY())).clicked() && let Some(a) = aliases.first() {
-                g.having = Some(Rule::new(&a.name, Kind::Decimal));
+                g.having = Some(Rule::new(&a.name, Kind::Decimal, d));
             }
         } else if let Some(r) = g.having.as_mut() {
             if !aliases.iter().any(|a| a.name == r.col) {
                 r.col = aliases.first().map(|a| a.name.clone()).unwrap_or_default();
             }
-            rule_editor(ui, r, &aliases, ui.scope_id().with("having"));
+            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d);
             if close_x(ui).on_hover_text("Remove condition").clicked() {
                 g.having = None;
             }
@@ -935,7 +936,7 @@ fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d
         b.src = text.to_string();
     }
     if !b.c.sql && b.draft.is_none() && let Some(c) = cols.first() {
-        b.draft = Some(Rule::new(&c.name, c.kind));
+        b.draft = Some(Rule::new(&c.name, c.kind, d));
     }
     read
 }
@@ -1237,7 +1238,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         let parens = joins.iter().skip(1).any(|j| !j);
                         let opens = |k: usize| parens && (k == 0 || !joins[k]) && joins.get(k + 1) == Some(&true);
                         let closes = |k: usize| parens && k > 0 && joins[k] && joins.get(k + 1) != Some(&true);
-                        let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
+                        let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind, d));
                         for k in 0..joins.len() {
                             if shown && k == at {
                                 let Some(dr) = b.draft.as_mut() else { continue };
@@ -1245,7 +1246,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                                 if opens(k) {
                                     paren(ui, "(");
                                 }
-                                let (changed, enter) = rule_editor(ui, dr, &cols, ui.scope_id().with("draft"));
+                                let (changed, enter) = rule_editor(ui, dr, &cols, ui.scope_id().with("draft"), d);
                                 run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
                                 keep = (keep_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() || enter) && dr.complete();
                                 drop_draft = close_x(ui).on_hover_text("Remove this condition").clicked();
@@ -1493,7 +1494,7 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
         Some("Column condition") => {
             b.show_draft = true;
             if b.draft.is_none() {
-                b.draft = cols.first().map(|c| Rule::new(&c.name, c.kind));
+                b.draft = cols.first().map(|c| Rule::new(&c.name, c.kind, d));
             }
         }
         Some("ORDER BY") if sql => focus(ui, "SQL-ORDER"),
@@ -1665,7 +1666,7 @@ pub(in crate::app) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
                 // The row reader makes no other value; a guessed condition would show the wrong rows, so the drill stops.
                 let Some(text) = bson_text(v) else { return };
                 match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
-                    Some(c) => rules::rule_sql(&Rule { join: false, col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
+                    Some(c) => rules::rule_sql(&Rule { join: false, col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text], case: rules::default_case(Op::Eq, d) }, d, bs),
                     None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
                 }
             }
