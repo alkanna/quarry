@@ -597,7 +597,7 @@ impl App {
                     title: format!("Rename {from} to {} in every document of {coll} matching the current filter ({reach})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
                     expect: coll,
                     typed: String::new(),
-                    action: self.here(Danger::RenameMany { scope, from: from.clone(), to: to.join(".") }),
+                    action: self.pinned(Danger::RenameMany { scope, from: from.clone(), to: to.join(".") }),
                 });
                 *keep = false;
             }
@@ -660,7 +660,7 @@ impl App {
                     title: format!("Update every document in {coll} matching the current filter ({n})?"),
                     expect: coll,
                     typed: String::new(),
-                    action: self.here(Danger::UpdateMany { scope: scope.clone(), stages: stages.clone().unwrap_or_default() }),
+                    action: self.pinned(Danger::UpdateMany { scope: scope.clone(), stages: stages.clone().unwrap_or_default() }),
                 });
                 *keep = false;
             }

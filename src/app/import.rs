@@ -134,7 +134,7 @@ impl App {
                         title: format!("Upsert {n} documents into {coll} by {key}? Matching documents are updated with the imported fields."),
                         expect: coll,
                         typed: String::new(),
-                        action: self.here(Danger::Upsert { key }),
+                        action: self.pinned(Danger::Upsert { key }),
                     });
                 } else {
                     self.modal = Some(Modal::ImportInsert(n));

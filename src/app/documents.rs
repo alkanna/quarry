@@ -480,7 +480,7 @@ impl App {
                         title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
                         expect: coll.clone(),
                         typed: String::new(),
-                        action: app.here(Danger::DeleteMatching(scope)),
+                        action: app.pinned(Danger::DeleteMatching(scope)),
                     });
                     ui.close();
                 }
@@ -489,7 +489,7 @@ impl App {
                         title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
                         expect: coll,
                         typed: String::new(),
-                        action: app.here(Danger::DropCollection),
+                        action: app.pinned(Danger::DropCollection),
                     });
                     ui.close();
                 }

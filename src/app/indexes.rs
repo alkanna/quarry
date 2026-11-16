@@ -331,7 +331,7 @@ impl App {
                     title: format!("Drop the index {name}? Queries that rely on it may become slow."),
                     expect: name.clone(),
                     typed: String::new(),
-                    action: self.here(Danger::DropIndex(name)),
+                    action: self.pinned(Danger::DropIndex(name)),
                 });
             }
         }

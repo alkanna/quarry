@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     /// Ties a tab-scoped action to the current tab, so a tab switch before Confirm cannot redirect it.
-    pub(super) fn here(&self, d: Danger) -> Danger {
+    pub(super) fn pinned(&self, d: Danger) -> Danger {
         match self.t() {
             Some(t) => Danger::At(t.sel.clone(), Box::new(d)),
             None => d,
