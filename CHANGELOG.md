@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.50.0](https://github.com/alkanna/quarry/compare/v0.49.0...v0.50.0) (2026-11-16)
+
+
+### Features
+
+* Cloud SQL for MySQL instances can sign in with IAM, with the user cut at the @ as MySQL wants it ([#254](https://github.com/alkanna/quarry/issues/254)) ([d239ce9](https://github.com/alkanna/quarry/commit/d239ce924d21a9fc7503193bfa34a3aec3aba6b6))
+* the library's scope control reads All and shares its row with the folder and menu buttons ([#255](https://github.com/alkanna/quarry/issues/255)) ([a2a67e7](https://github.com/alkanna/quarry/commit/a2a67e7e5e141e34bf280dd31c13c8e23dfc7d65))
+* the SQL Query editor marks syntax errors and unknown names as you type ([#258](https://github.com/alkanna/quarry/issues/258)) ([a163b7e](https://github.com/alkanna/quarry/commit/a163b7e8e746cbb77cda6b49ca5ace81881304f7))
+
+
+### Bug Fixes
+
+* the breadcrumb pickers center their filter text and placeholder in the field ([#257](https://github.com/alkanna/quarry/issues/257)) ([a102be7](https://github.com/alkanna/quarry/commit/a102be70007cdc748508785c479a7c9ef9eb5a00))
+* the Cloud SQL browser's gcloud account no longer overlaps the header's context line ([#253](https://github.com/alkanna/quarry/issues/253)) ([a5d3cb9](https://github.com/alkanna/quarry/commit/a5d3cb95ef2a36287719d8ba2180c98e8ab34334))
+* the connection form's engine cards show the rail's engine logos instead of two-letter marks ([#252](https://github.com/alkanna/quarry/issues/252)) ([5eddd4d](https://github.com/alkanna/quarry/commit/5eddd4d59ce55c59592c7769c0670421a365ee57))
+* the Explain plan's node column uses the dialog width instead of wrapping every word ([#250](https://github.com/alkanna/quarry/issues/250)) ([f9e4fde](https://github.com/alkanna/quarry/commit/f9e4fde78f99f8583af4b8245b32734c4cbc9b83))
+* the Library menu leaves room for the tick of a checked item ([#256](https://github.com/alkanna/quarry/issues/256)) ([2b053b4](https://github.com/alkanna/quarry/commit/2b053b43a7eb99054f9e18d97d57cb5af0c74c4f))
+
 ## [0.49.0](https://github.com/alkanna/quarry/compare/v0.48.1...v0.49.0) (2026-11-15)
 
 
