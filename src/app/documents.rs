@@ -453,7 +453,7 @@ impl App {
         let stats = t.stats.map(|(_, size, nidx)| [human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]);
         let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", about: if t.count_approx { "at least " } else { "" }, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
         let out = self.results_bar(ui, &info, |app, ui| {
-            dots_menu(ui, |ui| {
+            let more = dots_menu(ui, |ui| {
                 if ui.button("Export").on_hover_text("Export these documents").clicked() {
                     app.export();
                     ui.close();
@@ -497,6 +497,8 @@ impl App {
                 }
             })
             .on_hover_text("More actions");
+            // The button shows only painted dots, so screen readers and the UI tests need a name.
+            a11y(&more, egui::Role::Button, "Document actions");
             if app.prefs.table {
                 app.columns_menu(ui, false);
             }
