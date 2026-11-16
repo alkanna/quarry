@@ -153,7 +153,8 @@ fn aws_and_kerberos_sign_in_are_named_as_not_built_in_on_the_failed_card() {
 #[test]
 fn reconnect_from_the_rail_locks_writes_again() {
     let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };
-    ui.unlock();
+    // The READ-ONLY badge needs a tab, and this test is about the rail.
+    ui.h.state_mut().conns[0].writable = true;
     let tile = "Switch to test";
     ui.show(tile);
     let at = ui.h.get_by_label(tile).rect().center();
@@ -174,6 +175,9 @@ fn disconnect_stops_a_running_watch_of_that_connection() {
         coll.drop().await.unwrap();
         coll.insert_one(mongodb::bson::doc! { "_id": 0 }).await.unwrap();
     });
+    // The sidebar lists databases from the connect, so connect again to see the one just made.
+    ui.h.state_mut().connect_uri(CONN, std::env::var("QUARRY_TEST_MONGO_RS").unwrap());
+    ui.wait("the reconnect", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
     ui.open_table(DB, "", "watch_disconnect");
     ui.h.state_mut().tm().unwrap().view = View::Watch;
     ui.settle();
