@@ -157,7 +157,7 @@ impl Book {
         let mut wb = Workbook::new();
         let f = Formats::new();
         {
-            let ws = wb.add_worksheet_with_constant_memory();
+            let ws = wb.add_worksheet_with_constant_memory().map_err(err)?;
             ws.set_name(sheet_name(sheet)).map_err(err)?;
             for (i, c) in cols.iter().enumerate() {
                 ws.write_string_with_format(0, i as u16, &c.name, &f.header).map_err(err)?;
@@ -365,7 +365,7 @@ mod tests {
                 let mut f = z.by_index(i).unwrap();
                 let mut s = String::new();
                 std::io::Read::read_to_string(&mut f, &mut s).unwrap_or_default();
-                (f.name().to_string(), s)
+                (f.name().unwrap().to_string(), s)
             })
             .collect()
     }
