@@ -94,7 +94,7 @@ impl App {
             self.reopen_tab();
         }
         if k(cmd, Key::W) {
-            self.close_tab(self.cur);
+            self.ask_close_tab(self.cur);
         }
         if k(cmd, Key::K) {
             self.open_palette();
@@ -214,7 +214,7 @@ impl App {
             }
             // The Query grid keeps its own selection, so the arrows move that one.
             if (up || down) && let Some(s) = self.tm().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_mut()).filter(|s| !s.text_mode) {
-                let len = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))).map_or(0, |x| x.rows.len());
+                let len = s.cur_set().map_or(0, |x| x.rows.len());
                 if len > 0 {
                     s.qsel = Some(step(s.qsel, down, len));
                     self.scroll_sel = true;
@@ -714,7 +714,7 @@ impl App {
             self.set_cur(self.cur);
             self.reset_doc_state();
         } else if let Some(i) = close {
-            self.close_tab(i);
+            self.ask_close_tab(i);
         } else if let Some(i) = pick {
             self.go_tab(i);
         }

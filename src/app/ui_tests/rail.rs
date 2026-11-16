@@ -295,3 +295,21 @@ fn a_tile_menu_opens_the_server_window_of_its_connection() {
     ui.click("Server status");
     assert!(ui.app().sql_server.is_some(), "Server status in the tile menu opened nothing");
 }
+
+#[test]
+fn the_manage_tile_toggles_the_connections_panel_and_the_rail_menu_starts_a_group() {
+    let Some(mut ui) = demo_ui(with_saved) else { return };
+    ui.h.state_mut().prefs.set_side_mode(SideMode::Explorer);
+    ui.click("Manage connections");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    ui.click("Manage connections");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
+    // Empty rail below the pinned tiles.
+    let at = ui.h.get_by_label("Manage connections").rect().center() + egui::vec2(0.0, 80.0);
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+    ui.show("New connection\u{2026}");
+    ui.click("New group\u{2026}");
+    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    assert!(ui.app().conns_ui.adding.is_some());
+}

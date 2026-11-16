@@ -261,7 +261,7 @@ impl App {
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
         if let Some(t) = self.tm() {
-            t.script = Some(Bound { r: r.clone(), view, base, disk: None, conflict: None });
+            bind(t, Bound { r: r.clone(), view, base, disk: None, conflict: None });
         }
         self.library.push_recent(r);
         self.save_library();
@@ -271,6 +271,20 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
+        // A script already open in another tab is switched to: a second copy comes only from New tab or a duplicated tab.
+        // Opened again on the tab it is in, it takes its saved text back, and Undo keeps the edits it replaced.
+        if how == How::Here
+            && let Some(i) = self.tabs.iter().position(|t| t.script.as_ref().is_some_and(|b| &b.r == r))
+        {
+            if i != self.cur || !self.tab_edited(i) {
+                return self.set_cur(i);
+            }
+            if let ScriptRef::Saved(id) = r
+                && let Some(s) = self.library.scripts.iter().find(|s| s.id == *id).cloned()
+            {
+                return self.reload_bound(i, &s);
+            }
+        }
         match self.script_target(r) {
             Target::On(c) => self.open_script_on(r, how, c),
             Target::Ask(conns) => {
@@ -545,6 +559,74 @@ impl App {
         }
     }
 
+    /// Puts saved script `s` back in tab `i`, which is bound to it, with a toast whose Undo restores the replaced text.
+    fn reload_bound(&mut self, i: usize, s: &crate::library::Script) {
+        let t = &mut self.tabs[i];
+        let mine = super::linked::bound_text(t).map(String::from);
+        super::linked::set_bound_text(t, &s.body, None);
+        if t.script.as_ref().is_some_and(|b| b.view == View::Documents) {
+            (t.sort_txt, t.proj_txt) = (s.sort.clone(), s.project.clone());
+        }
+        if let Some(b) = t.script.as_mut() {
+            b.base = s.body.clone();
+        }
+        let uid = t.uid;
+        match mine {
+            Some(text) => self.toast_restore(format!("\"{}\" reloaded from the library.", s.name), crate::app::restore::Restore::TabText { uid, text }),
+            None => self.ok(format!("\"{}\" reloaded from the library.", s.name)),
+        }
+    }
+
+    /// Closes tab `i`, or asks first when it holds changes to its script that are not saved.
+    pub(in crate::app) fn ask_close_tab(&mut self, i: usize) {
+        match self.tabs.get(i) {
+            Some(t) if self.tab_edited(i) => self.modal = Some(Modal::CloseEdited(t.uid)),
+            _ => self.close_tab(i),
+        }
+    }
+
+    /// Close a tab with unsaved script changes: save them first, close anyway, or keep the tab.
+    pub(in crate::app) fn close_edited_dialog(&mut self, ui: &mut egui::Ui, uid: u64, keep: &mut bool) {
+        let Some(i) = self.tab_by_uid(uid) else {
+            *keep = false;
+            return;
+        };
+        let name = self.tab_name(i);
+        ui.set_width(fit_width(ui.ctx(), 460.0));
+        dialog_head(ui, &Head::new(format!("Close \"{name}\"?")).sub("Its changes to the script are not saved").glyph(glyphs::warn).tone(WARNING()));
+        dialog_body(ui, |ui| {
+            ui.label(RichText::new("Closed without saving, it comes back with its text from Reopen closed tab until Quarry quits.").color(MUTED()));
+        });
+        let (mut save, mut discard) = (false, false);
+        dialog_foot(ui, |ui| {
+            if primary(ui, "Save and close", PRIMARY()).clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
+            foot_left(ui, |ui| {
+                if danger(ui, "Close without saving").clicked() {
+                    discard = true;
+                }
+            });
+        });
+        if save {
+            *keep = false;
+            self.set_cur(i);
+            self.save_script();
+            // A linked file is written in the background and a script the library lost asks where to save: both leave
+            // the tab open, still edited, so nothing closes before it is saved.
+            if !self.tab_edited(i) && self.modal.is_none() {
+                self.close_tab(i);
+            }
+        }
+        if discard {
+            *keep = false;
+            self.close_tab(i);
+        }
+    }
+
     /// Whether tab `i` holds changes to the script it is bound to that are not saved to it yet.
     pub(in crate::app) fn tab_edited(&self, i: usize) -> bool {
         self.tabs.get(i).is_some_and(|t| t.script.as_ref().is_some_and(|b| super::linked::bound_text(t).is_some_and(|x| x != b.base)))
@@ -671,4 +753,14 @@ impl App {
             self.open_script_on(&r, how, c);
         }
     }
+}
+
+/// Ties tab `t` to script binding `b`, the one place a tab is bound. A SQL tab bound to a Query script becomes a plain
+/// query tab, as one opened from the library is: its table's views would otherwise stay under the script's name, with
+/// nothing saying which table they show.
+pub(in crate::app) fn bind(t: &mut Tab, b: Bound) {
+    if b.view == View::Sql && t.sql.is_some() {
+        t.sel.coll.clear();
+    }
+    t.script = Some(b);
 }

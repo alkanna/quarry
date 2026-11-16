@@ -68,7 +68,7 @@ fn live_dumps_exports_and_structure_ignore_the_session_charset_and_row_limit() {
             let odd = l.with_session(set);
             let st = l.w.rt.block_on(crate::db::sql::structure::load(&odd, db, "t")).unwrap();
             assert_eq!(st.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "s"], "{var} {set}: structure");
-            let out = l.w.rt.block_on(export_to(&odd, db, "SELECT id, s FROM t ORDER BY id", &Plan { fmt: Fmt::Csv, header: false, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
+            let out = l.w.rt.block_on(export_to(&odd, db, "SELECT id, s FROM t ORDER BY id", &Plan { target: crate::db::sql::export::Target::Text(Fmt::Csv), header: false, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
             assert_eq!(out.rows, 3, "{var} {set}: export");
             assert_eq!(out.text.unwrap_or_default().trim_end(), "1,a\u{1F600}b\n2,d\u{e9}\n3,x", "{var} {set}: export");
             let path = tmp(var, &format!("cs{i}.sql"));

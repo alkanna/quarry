@@ -21,8 +21,16 @@ impl App {
         let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 10 });
         let shown = egui::Panel::left("rail").exact_size(RAIL_W).resizable(false).show_separator_line(false).frame(frame).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
+            // Sensed before the tiles, so they win the clicks on themselves and this one only gets the empty space.
+            let bg = ui.interact(ui.max_rect(), ui.scope_id().with("rail-bg"), Sense::click());
             self.conn_shortcuts(ui);
             self.connect_tile(ui);
+            self.manage_tile(ui);
+            let mut acts = Vec::new();
+            bg.context_menu(|ui| self.rail_menu(ui, &mut acts));
+            for a in acts {
+                self.rail_act(a);
+            }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 if rail_button(ui, RailIcon::Settings, matches!(self.modal, Some(Modal::Settings)), true, "Settings (Cmd+,)").clicked() {
                     self.modal = Some(Modal::Settings);
@@ -52,26 +60,18 @@ impl App {
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
-        let state = state_of(&r);
         let demo_open = std::mem::take(&mut self.conns_ui.demo_picker);
         if demo_open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
-        let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
-        let p = ui.painter();
-        p.rect_filled(boxed, R_TILE, if open { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
         // The plus is painted: the glyph comes from a fallback font and sits off center.
-        paint_plus(p, boxed.center(), 6.0, if open || state > 0 { BRIGHT() } else { MUTED() });
-        focus_ring(ui, &r, boxed, R_TILE as f32);
+        pinned_face(ui, &r, rect, open, |p, c, ink| paint_plus(p, c, 6.0, ink));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connect"));
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Connect");
         let mut pick = None;
-        let mut new = false;
-        let mut cloud = false;
-        let mut manage = false;
-        // The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
-        let mongo_active = self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql());
+        let mut act = None;
+        let mongo_active = self.mongo_active();
         // The filter field and the group captions are clicked inside the popup, so it closes on an outside click or an explicit pick only.
         egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).align(egui::RectAlign::RIGHT_START).width(340.0).show(|ui| {
             menu_look(ui);
@@ -109,15 +109,15 @@ impl App {
             ui.separator();
             ui.add_space(2.0);
             if ui.button("New connection\u{2026}").clicked() {
-                new = true;
+                act = Some(RailAct::New);
                 ui.close();
             }
             if !mongo_active && ui.button("Add from Cloud SQL\u{2026}").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
-                cloud = true;
+                act = Some(RailAct::Cloud);
                 ui.close();
             }
             if ui.button("Manage\u{2026}").on_hover_text("Open the Connections panel to edit groups").clicked() {
-                manage = true;
+                act = Some(RailAct::Manage);
                 ui.close();
             }
             ui.add_space(2.0);
@@ -129,18 +129,95 @@ impl App {
                 self.connect(id);
             }
         }
-        if manage {
-            self.prefs.set_side_mode(SideMode::Connections);
-            self.prefs.sidebar_hidden = false;
-            self.save_prefs();
-        }
-        if new {
-            self.new_conn_modal();
-        }
-        if cloud {
-            self.open_cloud_browser(false);
+        if let Some(a) = act {
+            self.rail_act(a);
         }
     }
+
+    /// The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
+    fn mongo_active(&self) -> bool {
+        self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql())
+    }
+
+    /// The pinned Manage tile under Connect, like Discord's under its add button: it opens the Connections panel, and
+    /// closes it again while it shows.
+    fn manage_tile(&mut self, ui: &mut egui::Ui) {
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
+        let on = self.manages();
+        pinned_face(ui, &r, rect, on, glyphs::sliders);
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Manage connections"));
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Manage connections").clicked() {
+            if on {
+                // Back to the panel and sidebar state Manage was opened from.
+                let (mode, hidden) = self.conns_ui.manage_back.take().unwrap_or((SideMode::Explorer, false));
+                self.prefs.set_side_mode(mode);
+                self.prefs.sidebar_hidden = hidden;
+                self.save_prefs();
+            } else {
+                self.rail_act(RailAct::Manage);
+            }
+        }
+    }
+
+    /// Whether the Connections panel is on screen.
+    fn manages(&self) -> bool {
+        self.prefs.side_mode() == SideMode::Connections && !self.prefs.sidebar_hidden
+    }
+
+    /// The menu of the rail's empty space.
+    fn rail_menu(&self, ui: &mut egui::Ui, acts: &mut Vec<RailAct>) {
+        menu_list(ui);
+        menu_act(ui, acts, RailAct::New, |ui| ui.button("New connection\u{2026}"));
+        if !self.mongo_active() {
+            menu_act(ui, acts, RailAct::Cloud, |ui| ui.button("Add from Cloud SQL\u{2026}"));
+        }
+        menu_act(ui, acts, RailAct::NewGroup, |ui| ui.button("New group\u{2026}"));
+        ui.separator();
+        menu_act(ui, acts, RailAct::Manage, |ui| ui.button("Manage connections"));
+    }
+
+    fn rail_act(&mut self, a: RailAct) {
+        match a {
+            RailAct::New => self.new_conn_modal(),
+            RailAct::Cloud => self.open_cloud_browser(false),
+            RailAct::Manage => self.open_manage(),
+            RailAct::NewGroup => {
+                self.open_manage();
+                // The panel's own New group field, at the end of its groups.
+                self.conns_ui.adding = Some(String::new());
+                self.conns_ui.focus_edit = true;
+            }
+        }
+    }
+
+    /// Shows the Connections panel, remembering what the sidebar showed so closing it from the Manage tile goes back.
+    fn open_manage(&mut self) {
+        if !self.manages() {
+            self.conns_ui.manage_back = Some((self.prefs.side_mode(), self.prefs.sidebar_hidden));
+        }
+        self.prefs.set_side_mode(SideMode::Connections);
+        self.prefs.sidebar_hidden = false;
+        self.save_prefs();
+    }
+}
+
+/// A pinned tile under the connections: a quiet square, filled while `on`, with `glyph` bright on hover, press or on.
+fn pinned_face(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: bool, glyph: impl FnOnce(&egui::Painter, egui::Pos2, Color32)) {
+    let state = state_of(r);
+    let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
+    let p = ui.painter();
+    p.rect_filled(boxed, R_TILE, if on { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
+    glyph(p, boxed.center(), if on || state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, r, boxed, R_TILE as f32);
+}
+
+/// What the Connect popover and the rail's menu ask for.
+#[derive(Clone, Copy)]
+enum RailAct {
+    New,
+    Cloud,
+    Manage,
+    NewGroup,
 }
 
 impl App {
@@ -156,8 +233,8 @@ impl App {
         if self.rail_order.is_empty() {
             return;
         }
-        // Leaves room for the Connect tile and the Settings button, which stay pinned below the scrolling tiles.
-        let room = (ui.available_height() - 36.0 - RAIL_TILE - 8.0).max(SLOT);
+        // Leaves room for the Connect and Manage tiles and the Settings button, which stay pinned below the scrolling tiles.
+        let room = (ui.available_height() - 36.0 - 2.0 * (RAIL_TILE + 8.0)).max(SLOT);
         let items = rail_items(&self.rail_order, &self.groups);
         let ctx = ui.ctx().clone();
         // How far open each folder is drawn. Its slot grows with it, so the reorder engine moves the tiles below smoothly.
@@ -349,6 +426,7 @@ impl App {
             }
             Some((id, TileAct::Server)) => self.open_server(id),
             Some((id, TileAct::Edit)) => self.edit_conn(id),
+            Some((id, TileAct::Icon)) => self.modal = Some(Modal::ConnIcon(Box::new(super::conn_icon::IconForm::new(id)))),
             Some((id, TileAct::Disconnect)) => self.disconnect(id),
             None => {}
         }
@@ -539,6 +617,9 @@ fn tile_menu(ui: &mut egui::Ui, id: u64, act: &mut Option<(u64, TileAct)>) {
     if ui.button("Edit connection\u{2026}").clicked() {
         *act = Some((id, TileAct::Edit));
     }
+    if ui.button("Change icon\u{2026}").clicked() {
+        *act = Some((id, TileAct::Icon));
+    }
     if danger_item(ui, "Disconnect").clicked() {
         *act = Some((id, TileAct::Disconnect));
     }
@@ -572,6 +653,7 @@ enum TileAct {
     Reconnect,
     Server,
     Edit,
+    Icon,
     Disconnect,
 }
 
@@ -794,6 +876,21 @@ fn tile_edge() -> Color32 {
     if is_light() { tint(Color32::BLACK, 20) } else { tint(Color32::WHITE, 26) }
 }
 
+/// A connection tile's face: its own icon when it has one, else the engine's color with its logo `logo_size` wide in
+/// `ink`. `alpha` is how strong the engine color is.
+pub(super) fn tile_face(p: &egui::Painter, rect: egui::Rect, icon: Option<&egui::TextureHandle>, mark: &str, alpha: u8, logo_size: f32, ink: Color32) {
+    match icon {
+        Some(tex) => {
+            let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+            p.add(egui::epaint::RectShape::filled(rect, R_TILE, ink).with_texture(tex.id(), uv));
+        }
+        None => {
+            gradient_rect(p, rect, R_TILE as f32, tint(mark_color(mark), alpha));
+            logo(p, rect.center(), logo_size, mark, ink);
+        }
+    }
+}
+
 /// The engine's logo, `size` points wide, centered on `c` in `color`.
 pub(super) fn logo(p: &egui::Painter, c: egui::Pos2, size: f32, mark: &str, color: Color32) {
     if let Some(tex) = engine_logo(p.ctx(), mark) {
@@ -854,9 +951,8 @@ fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
     painter.add(ui.visuals().popup_shadow.as_shape(rect, R_TILE));
     let mark = engine_mark(c.meta.engine, &c.server.product).0;
     painter.rect_filled(rect, R_TILE, RAISED());
-    gradient_rect(&painter, rect, R_TILE as f32, tint(mark_color(mark), tile_alpha(1)));
+    tile_face(&painter, rect, super::conn_icon::texture(ctx, &c.meta).as_ref(), mark, tile_alpha(1), 22.0, Color32::WHITE);
     painter.rect_stroke(rect, R_TILE, Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Inside);
-    logo(&painter, rect.center(), 22.0, mark, Color32::WHITE);
 }
 
 /// A connection or folder tile's column: the rail's width less its margins. The tile itself is a `RAIL_TILE` square in it.
@@ -938,12 +1034,17 @@ pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::Textu
     };
     let id = egui::Id::unique(name);
     ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
-        let icon = eframe::icon_data::from_png_bytes(png).ok()?;
-        let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-        let tex = ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
+        let tex = png_texture(ctx, name, png)?;
         ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
         Some(tex)
     })
+}
+
+/// A PNG as a texture named `name`, None when it does not decode.
+pub(super) fn png_texture(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<egui::TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(png).ok()?;
+    let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }
 
 /// A connection's tile: an app icon in the engine's color with the logo in white, a dash in the tag color at its foot for a
@@ -956,10 +1057,15 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
     let state = state_of(&r);
     let (mark, _) = engine_mark(c.meta.engine, &c.server.product);
     let p = ui.painter();
-    gradient_rect(p, tile, R_TILE as f32, tint(mark_color(mark), tile_alpha(state)));
-    p.rect_stroke(tile, R_TILE, Stroke::new(1.0, tile_edge()), egui::StrokeKind::Inside);
     // A connection that is not ready yet dims its logo under the spinner.
-    logo(p, tile.center(), 22.0, mark, if c.status == Status::Connecting { Color32::WHITE.gamma_multiply(0.45) } else { Color32::WHITE });
+    let ink = if c.status == Status::Connecting { Color32::WHITE.gamma_multiply(0.45) } else { Color32::WHITE };
+    let icon = super::conn_icon::texture(p.ctx(), &c.meta);
+    tile_face(p, tile, icon.as_ref(), mark, tile_alpha(state), 22.0, ink);
+    // A picture has no engine color to brighten, so hover and press lay a light veil over it.
+    if icon.is_some() {
+        p.rect_filled(tile, R_TILE, tint(Color32::WHITE, [0, 22, 36][state]));
+    }
+    p.rect_stroke(tile, R_TILE, Stroke::new(1.0, tile_edge()), egui::StrokeKind::Inside);
     if let Some(level) = tag_level(&c.meta.tag) {
         p.rect_filled(egui::Rect::from_center_size(egui::pos2(tile.center().x, tile.bottom() - 4.0), egui::vec2(10.0, 2.0)), 1, level);
     }

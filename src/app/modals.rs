@@ -61,6 +61,8 @@ impl App {
                 Modal::Conn(f) => self.conn_dialog(ui, f, &mut keep),
                 Modal::Attach(f) => self.attach_dialog(ui, f, &mut keep),
                 Modal::GroupEdit(f) => self.group_dialog(ui, f, &mut keep),
+                Modal::ConnIcon(f) => self.icon_dialog(ui, f, &mut keep),
+                Modal::CloseEdited(uid) => self.close_edited_dialog(ui, *uid, &mut keep),
                 Modal::SaveScript(f) => self.save_dialog(ui, f, &mut keep),
                 Modal::OpenOn(f) => self.open_on_dialog(ui, f, &mut keep),
                 Modal::LinkFolder(f) => self.link_dialog(ui, f, &mut keep),

@@ -1032,6 +1032,7 @@ impl App {
                         proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
                         cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
                         advanced: f.advanced().unwrap_or_default(),
+                        icon: self.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
                     };
                     match self.conns.iter_mut().find(|c| c.meta.id == id) {
                         Some(c) => {

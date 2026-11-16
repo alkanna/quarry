@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Format {
     T(Fmt),
+    /// An Excel workbook: a typed, banded table with a frozen header.
+    Xlsx,
     MongoJs,
     MongoJson,
     MongoLines,
@@ -28,6 +30,7 @@ impl Format {
             Format::T(Fmt::Html) => "HTML table",
             Format::T(Fmt::Values) => "Values only",
             Format::MongoJs => "JS",
+            Format::Xlsx => "Excel workbook (xlsx)",
         }
     }
 
@@ -42,6 +45,7 @@ impl Format {
             Format::T(Fmt::Html) => "html",
             Format::T(Fmt::Values) => "txt",
             Format::MongoJs => "js",
+            Format::Xlsx => "xlsx",
         }
     }
 }
@@ -96,6 +100,10 @@ pub(super) struct ExportForm {
     pub(super) single: bool,
     /// The result is one page of a longer one.
     pub(super) paged: bool,
+    /// An xlsx file gets an About sheet with where its rows came from.
+    pub(super) about: bool,
+    /// The table SQL INSERT and UPDATE write to.
+    pub(super) table: String,
 }
 
 /// A Query result streaming to a file or the clipboard, with what Cancel needs.
@@ -134,7 +142,7 @@ impl App {
     fn shown_rows(&self, src: Src) -> Vec<Document> {
         let Some(t) = self.t() else { return Vec::new() };
         match src {
-            Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.rows.iter().map(db::Row::owned).collect()).unwrap_or_default(),
+            Src::Query => t.sql.as_ref().and_then(|s| s.cur_set()).map(|x| x.rows.iter().map(db::Row::owned).collect()).unwrap_or_default(),
             Src::Shell => t.shell.docs.iter().map(db::Row::owned).collect(),
             Src::Content => t.docs.iter().map(db::Row::owned).collect(),
         }
@@ -159,19 +167,35 @@ impl App {
         self.checks().iter().filter_map(|i| all.get(base + i).cloned()).collect()
     }
 
-    /// Columns, table name and key for writing `rows` of `src` as text.
+    /// Columns, table name and key for writing `rows` of `src` as text. The table is `insert_table`'s, so Copy as and
+    /// Export agree on it.
     fn export_sheet(&self, src: Src, rows: &[Document]) -> (Vec<CopyCol>, String, Vec<String>) {
         let Some(t) = self.t() else { return Default::default() };
-        let named = |c: &str| if c.is_empty() { "result".to_string() } else { c.to_string() };
+        let table = self.insert_table(src);
         match src {
             Src::Query => {
-                let set = t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))));
+                let set = t.sql.as_ref().and_then(|s| s.cur_set());
                 let cols = set.map(|s| s.cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
-                (cols, named(&t.sel.coll), Vec::new())
+                (cols, table, Vec::new())
             }
-            Src::Shell => (keys_of(rows).into_iter().map(|n| CopyCol { numeric: infer_numeric(rows, &n), src: n.clone(), name: n }).collect(), named(&t.sel.coll), Vec::new()),
-            Src::Content => (self.copy_cols(rows), t.sel.coll.clone(), t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
+            Src::Shell => (keys_of(rows).into_iter().map(|n| CopyCol { numeric: infer_numeric(rows, &n), src: n.clone(), name: n }).collect(), table, Vec::new()),
+            Src::Content => (self.copy_cols(rows), table, t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
         }
+    }
+
+    /// The table a SQL INSERT of `src`'s rows writes to. A Content grid writes its own table. A Query result writes the
+    /// base table of the saved script the tab is bound to, else the first table its statement reads, else the tab's table.
+    pub(in crate::app) fn insert_table(&self, src: Src) -> String {
+        let Some(t) = self.t() else { return "result".into() };
+        if src == Src::Content && !t.sel.coll.is_empty() {
+            return t.sel.coll.clone();
+        }
+        let base = match t.script.as_ref().map(|b| &b.r) {
+            Some(crate::library::ScriptRef::Saved(id)) => self.library.scripts.iter().find(|s| s.id == *id && s.kind == "sql").map(|s| s.coll.clone()),
+            _ => None,
+        };
+        let stmt = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.cur_set()).map(|x| x.stmt.as_str()).unwrap_or_default();
+        [base, db::sql::source::first_table(stmt, self.sql_dialect()), Some(t.sel.coll.clone())].into_iter().flatten().find(|n| !n.trim().is_empty()).unwrap_or_else(|| "result".into())
     }
 
     /// Opens the dialog for the current grid. `selected` are the rows to offer as "Selected rows".
@@ -179,7 +203,7 @@ impl App {
         let src = self.grid_src();
         let Some(t) = self.t() else { return };
         let sql = t.sql.is_some();
-        let set = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))));
+        let set = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.cur_set());
         let shown = shown_count(t, src);
         let paged = set.is_some_and(|x| x.page.is_some());
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
@@ -198,7 +222,7 @@ impl App {
         });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
-        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged })));
+        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged, about: false, table: self.insert_table(src) })));
     }
 
     /// Every row of a SQL Content grid: the SELECT of the last page asked for, never the bar text being typed, with its WHERE,
@@ -247,10 +271,12 @@ impl App {
             if f.src == Src::Content && f.scope != Scope::All {
                 v.push(Format::T(Fmt::SqlUpdate));
             }
-            v.extend([Fmt::Csv, Fmt::Tsv, Fmt::Json, Fmt::JsonLines, Fmt::Markdown, Fmt::Html, Fmt::Values].map(Format::T));
+            v.push(Format::T(Fmt::Csv));
+            v.push(Format::Xlsx);
+            v.extend([Fmt::Tsv, Fmt::Json, Fmt::JsonLines, Fmt::Markdown, Fmt::Html, Fmt::Values].map(Format::T));
             v
         } else {
-            vec![Format::MongoJs, Format::MongoJson, Format::MongoLines, Format::T(Fmt::Csv), Format::T(Fmt::Tsv), Format::T(Fmt::Markdown), Format::T(Fmt::Html)]
+            vec![Format::MongoJs, Format::MongoJson, Format::MongoLines, Format::T(Fmt::Csv), Format::Xlsx, Format::T(Fmt::Tsv), Format::T(Fmt::Markdown), Format::T(Fmt::Html)]
         };
         let noun = if f.sql { "rows" } else { "documents" };
         // Which rows: one radio card each, with why a choice is not available under it.
@@ -262,7 +288,7 @@ impl App {
             }
             ui.add_space(6.0);
         };
-        let table = matches!(f.fmt, Format::T(_));
+        let table = matches!(f.fmt, Format::T(_) | Format::Xlsx);
         ui.add_enabled_ui(!f.selected.is_empty(), |ui| radio(ui, f, f.scope == Scope::Selected, Scope::Selected, &format!("Selected {noun}"), &format!("{} picked in the grid", group(&f.selected.len().to_string()))));
         let shown = if f.paged { "This page" } else { "Shown" };
         radio(ui, f, f.scope == Scope::Shown, Scope::Shown, &format!("{shown} {noun}"), &format!("{} as they are on screen", group(&f.shown.to_string())));
@@ -298,22 +324,48 @@ impl App {
                     }
                 });
             });
-            let has_header = !matches!(f.fmt, Format::MongoJs | Format::MongoJson | Format::MongoLines);
-            rows.row("Column names", if has_header { "A header row first" } else { "This format has no header row" }, |ui| {
-                ui.add_enabled_ui(has_header, |ui| toggle(ui, &mut f.header));
+            let has_header = !matches!(f.fmt, Format::MongoJs | Format::MongoJson | Format::MongoLines | Format::Xlsx);
+            let hint = match f.fmt {
+                Format::Xlsx => "The table's header row, always there",
+                _ if has_header => "A header row first",
+                _ => "This format has no header row",
+            };
+            rows.row("Column names", hint, |ui| {
+                // A spreadsheet table always has its header, so the toggle shows on and cannot change.
+                let mut on = f.header || f.fmt == Format::Xlsx;
+                ui.add_enabled_ui(has_header, |ui| toggle(ui, if has_header { &mut f.header } else { &mut on }));
             });
+            if matches!(f.fmt, Format::T(Fmt::SqlInsert | Fmt::SqlUpdate)) {
+                let bound = f.src == Src::Query && self.t().is_some_and(|t| matches!(t.script.as_ref().map(|b| &b.r), Some(crate::library::ScriptRef::Saved(_))));
+                rows.row("Table", if bound { "Kept as the script's base table" } else { "The statements write to it" }, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.table).desired_width(ui.available_width()).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Insert table"));
+                });
+            }
+            if f.fmt == Format::Xlsx {
+                rows.row("About sheet", "A second sheet with the source, filter and statement", |ui| {
+                    let on = f.about;
+                    toggle(ui, &mut f.about).widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "About sheet"));
+                });
+            }
             if f.scope == Scope::Script {
                 let one_ok = matches!(f.fmt, Format::T(x) if db::sql::export::can_single(x));
                 if !one_ok {
                     f.single = false;
                 }
-                rows.row("One file", if one_ok { "A section for each statement, instead of name-1, name-2…" } else { "CSV, TSV and Values only: the others have no place for a second header" }, |ui| {
+                let hint = match f.fmt {
+                    _ if one_ok => "A section for each statement, instead of name-1, name-2…",
+                    // ponytail: one workbook per statement; a sheet per statement in one workbook if asked for.
+                    Format::Xlsx => "Excel writes a workbook for each statement",
+                    _ => "CSV, TSV and Values only: the others have no place for a second header",
+                };
+                rows.row("One file", hint, |ui| {
                     ui.add_enabled_ui(one_ok, |ui| toggle(ui, &mut f.single));
                 });
             }
         });
         // A format only the Shell and Documents know cannot come from a statement.
-        if matches!(f.scope, Scope::All | Scope::Script) && !matches!(f.fmt, Format::T(_)) {
+        if matches!(f.scope, Scope::All | Scope::Script) && !table {
             f.scope = Scope::Shown;
         }
         if f.scope == Scope::All && f.fmt == Format::T(Fmt::SqlUpdate) {
@@ -349,6 +401,19 @@ impl App {
     }
 
     fn export_name(&self, src: Src) -> String {
+        // A tab bound to a saved script exports that script's view under the script's name, which says more than the table's.
+        let view = match src {
+            Src::Query => View::Sql,
+            Src::Shell => View::Shell,
+            Src::Content => View::Documents,
+        };
+        if let Some(name) = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == view).map(|b| match &b.r {
+            crate::library::ScriptRef::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            r => self.script_name(r),
+        }) && !name.trim().is_empty()
+        {
+            return crate::library::disk::file_name(&name, "");
+        }
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         match (src, coll.is_empty()) {
             (Src::Query, true) => "query-result".into(),
@@ -359,24 +424,96 @@ impl App {
         }
     }
 
+    /// The sheet name and About lines of an xlsx export.
+    fn xlsx_opts(&self, f: &ExportForm) -> db::xlsx::Opts {
+        db::xlsx::Opts { sheet: self.export_name(f.src), about: f.about.then(|| self.xlsx_about(f.src)) }
+    }
+
+    /// Where the rows come from, for the About sheet: the connection, its server, the database and table or collection,
+    /// and the filter and sort a Content grid ran with.
+    fn xlsx_about(&self, src: Src) -> Vec<(String, String)> {
+        let Some(t) = self.t() else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut put = |k: &str, v: &str| {
+            if !v.trim().is_empty() {
+                out.push((k.to_string(), v.trim().to_string()));
+            }
+        };
+        if let Some(c) = self.conn(t.sel.conn) {
+            put("Connection", &c.meta.name);
+            let (_, product) = super::rail::engine_mark(c.meta.engine, &c.server.product);
+            put("Server", &format!("{product} {}", c.server.version));
+        }
+        put("Database", &t.sel.db);
+        put("Schema", &t.sel.schema);
+        put(if t.sql.is_some() { "Table" } else { "Collection" }, &t.sel.coll);
+        // What the rows ran with, never the bar's text, which may hold edits that did not run.
+        if src == Src::Content {
+            put("Filter", &t.ran_txt[0]);
+            put("Sort", &t.ran_txt[1]);
+            if t.sql.is_none() {
+                put("Projection", &t.ran_txt[2]);
+            }
+        }
+        out
+    }
+
+    /// The columns of an xlsx export with their SQL kinds, which say how to write text such as dates and DECIMAL. Mongo
+    /// columns have none and are written by each value's own type.
+    fn xlsx_cols(&self, src: Src, cols: &[CopyCol]) -> Vec<db::xlsx::XCol> {
+        let t = self.t();
+        let sql_cols: &[db::sql::Col] = match (src, t.and_then(|t| t.sql.as_ref())) {
+            (Src::Query, Some(s)) => s.cur_set().map_or(&[], |x| x.cols.as_slice()),
+            (Src::Content, Some(s)) => s.cols.as_slice(),
+            _ => &[],
+        };
+        cols.iter().map(|c| db::xlsx::XCol { name: c.name.clone(), kind: sql_cols.iter().find(|s| s.name == c.name).map(|s| s.kind) }).collect()
+    }
+
     fn export_run(&mut self, f: &ExportForm, path: PathBuf) {
-        let table = self.export_sheet(f.src, &[]).1;
+        let table = if f.table.trim().is_empty() { self.insert_table(f.src) } else { f.table.trim().to_string() };
+        if matches!(f.fmt, Format::T(Fmt::SqlInsert | Fmt::SqlUpdate)) {
+            self.keep_base_table(f.src, &table);
+        }
+        // The text format to stream, or for a workbook the CSV slot it leaves unused.
+        use db::sql::export::Target;
+        let target = match f.fmt {
+            Format::T(fmt) => Some(Target::Text(fmt)),
+            Format::Xlsx => Some(Target::Xlsx(self.xlsx_opts(f))),
+            _ => None,
+        };
         if f.scope == Scope::All {
-            let (Some(a), Format::T(fmt)) = (&f.all, f.fmt) else { return };
-            let plan = db::sql::export::Plan { fmt, header: f.header, table, bs: self.sql_bs() };
+            let (Some(a), Some(target)) = (&f.all, target) else { return };
+            let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
             self.start_stream(a, plan, Sink::File(path), false);
             return;
         }
         if f.scope == Scope::Script {
-            let (Some(sc), Format::T(fmt)) = (&f.script, f.fmt) else { return };
+            let (Some(sc), Some(target)) = (&f.script, target) else { return };
             let Ok(stmts) = &sc.stmts else { return };
-            let ap = db::sql::export::AllPlan { plan: Plan { fmt, header: f.header, table, bs: self.sql_bs() }, single: f.single };
-            return self.start_script(sc, stmts.clone(), ap, path);
+            let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
+            // Only text formats with room for several results go in one file.
+            let single = f.single && plan.text().is_some_and(db::sql::export::can_single);
+            return self.start_script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
         }
         let rows = if f.scope == Scope::Selected { f.selected.clone() } else { self.shown_rows(f.src) };
+        if let Some(Target::Xlsx(opts)) = target {
+            let (cols, _, _) = self.export_sheet(f.src, &rows);
+            // A Query result's statement goes on the About sheet; a Content grid's filter is there already.
+            let stmt = self.t().and_then(|t| t.sql.as_ref()).filter(|_| f.src == Src::Query).and_then(|s| s.cur_set()).map(|x| x.stmt.clone());
+            let mut bytes = Vec::new();
+            let book = db::xlsx::Book::new(&opts.sheet, self.xlsx_cols(f.src, &cols), opts.about).and_then(|mut b| {
+                b.rows(&rows)?;
+                b.finish(stmt.as_deref(), &mut bytes)
+            });
+            if let Err(e) = book {
+                return self.err(e);
+            }
+            return self.write_export(&path, &bytes, rows.len());
+        }
         let text = match f.fmt {
             Format::T(fmt) => {
-                let (cols, table, pk) = self.export_sheet(f.src, &rows);
+                let (cols, _, pk) = self.export_sheet(f.src, &rows);
                 let text = copy::format(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
                     return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
@@ -386,10 +523,25 @@ impl App {
             Format::MongoJs => db::pretty_shell(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())),
             Format::MongoJson => db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())),
             Format::MongoLines => rows.iter().map(|d| db::to_edit_line(&Bson::Document(d.clone()))).collect::<Vec<_>>().join("\n"),
+            Format::Xlsx => return,
         };
+        self.write_export(&path, format!("{text}\n").as_bytes(), rows.len());
+    }
+
+    /// A Query result exported as SQL to another table than its script's base table makes that table the new base table,
+    /// so the next Copy as SQL INSERT writes to it.
+    fn keep_base_table(&mut self, src: Src, table: &str) {
+        let Some(Some(crate::library::ScriptRef::Saved(id))) = self.t().filter(|_| src == Src::Query).map(|t| t.script.as_ref().map(|b| b.r.clone())) else { return };
+        if let Some(s) = self.library.scripts.iter_mut().find(|s| s.id == id && s.kind == "sql" && s.coll != table) {
+            s.coll = table.to_string();
+            self.save_library();
+        }
+    }
+
+    fn write_export(&mut self, path: &std::path::Path, bytes: &[u8], n: usize) {
         let (dir, name) = (path.parent().map(|p| p.to_path_buf()).unwrap_or_default(), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        match write_atomic(&dir, &name, format!("{text}\n").as_bytes()) {
-            Ok(()) => self.ok(format!("Exported {} {} to {}", rows.len(), if rows.len() == 1 { "row" } else { "rows" }, path.display())),
+        match write_atomic(&dir, &name, bytes) {
+            Ok(()) => self.ok(format!("Exported {n} {} to {}", if n == 1 { "row" } else { "rows" }, path.display())),
             Err(e) => self.err(format!("Could not write {}: {e}", path.display())),
         }
     }
@@ -420,7 +572,7 @@ impl App {
     pub(super) fn copy_all_pages(&mut self, fmt: Fmt, header: bool) {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
-        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let Some(set) = s.cur_set() else { return };
         if let Err(why) = lex_check_msg(&set.stmt, self.sql_dialect()) {
             return self.warn(why);
         }
@@ -428,7 +580,7 @@ impl App {
         let (db, schema) = super::sql::query::ran_target(t, db);
         let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
-        let plan = Plan { fmt, header, table, bs: self.sql_bs() };
+        let plan = Plan { target: crate::db::sql::export::Target::Text(fmt), header, table, bs: self.sql_bs() };
         self.start_stream(&a, plan, Sink::Clipboard, true);
     }
 
@@ -476,7 +628,7 @@ struct Ask {
 /// The rows of `src` on screen: the selected Query result, the Shell's results or the Content page.
 fn shown_count(t: &Tab, src: Src) -> usize {
     match src {
-        Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map_or(0, |x| x.rows.len()),
+        Src::Query => t.sql.as_ref().and_then(|s| s.cur_set()).map_or(0, |x| x.rows.len()),
         Src::Shell => t.shell.docs.len(),
         Src::Content => t.docs.len(),
     }

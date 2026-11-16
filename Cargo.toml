@@ -29,7 +29,10 @@ rfd = "0.18"
 # Deleting a file of a linked folder moves it to the Trash; its bytes are kept for the Undo toast.
 trash = "5"
 dirs = "7"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Excel export. constant_memory streams a sheet of any size through a temp file.
+rust_xlsxwriter = { version = "0.93", default-features = false, features = ["constant_memory"] }
+# Custom rail icons are imported from any of these and stored as PNG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 sha2 = "0.11"
 # Already in the build through sqlx; signs agents.json, proves both ends of the AI agents link and keys the scrub hash.
 hmac = "0.13"
@@ -68,6 +71,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+# Already in the build through rust_xlsxwriter; the xlsx tests read the file back.
+zip = { version = "7", default-features = false, features = ["deflate"] }
 # Drives the real App without a window in the tests under src/app/ui_tests.
 egui_kittest = { version = "0.37", features = ["eframe"] }
 

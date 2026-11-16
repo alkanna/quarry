@@ -343,3 +343,39 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     let t = ui.app().t().unwrap();
     assert_eq!((t.sel.coll.as_str(), t.filter_txt.as_str(), t.sort_txt.as_str()), ("orders", filter.as_str(), sort.as_str()));
 }
+
+#[test]
+fn saving_a_query_from_a_table_tab_turns_it_into_a_query_tab() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    assert!(!ui.app().t().unwrap().sel.coll.is_empty(), "the demo opens on a table");
+    {
+        let a = ui.h.state_mut();
+        let c = a.cur;
+        a.tabs[c].view = View::Sql;
+    }
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    ui.click("Save");
+    let t = ui.app().t().unwrap();
+    assert!(t.script.is_some() && t.sel.coll.is_empty(), "the bound tab kept its table");
+    assert!(ui.h.query_all_by_label("Structure").next().is_none(), "the table's views still show");
+}
+
+#[test]
+fn closing_a_tab_with_unsaved_script_changes_asks_first() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    ui.click("Save");
+    let n = ui.app().tabs.len();
+    set_query(&mut ui, "SELECT 2");
+    ui.settle();
+    ui.key(CMD, egui::Key::W);
+    assert!(matches!(ui.app().modal, Some(Modal::CloseEdited(_))), "an edited script closed without asking");
+    ui.click("Cancel");
+    assert_eq!(ui.app().tabs.len(), n);
+    ui.key(CMD, egui::Key::W);
+    ui.click("Save and close");
+    assert_eq!(ui.app().tabs.len(), n - 1);
+    assert_eq!(ui.app().library.scripts[0].body, "SELECT 2", "Save and close did not save");
+}

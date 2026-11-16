@@ -84,6 +84,11 @@ pub(in crate::app) struct CaretInfo {
 }
 
 impl SqlTab {
+    /// The result set shown, clamped to the ones there are.
+    pub(in crate::app) fn cur_set(&self) -> Option<&db::sql::ResultSet> {
+        self.sets.get(self.set_sel.min(self.sets.len().saturating_sub(1)))
+    }
+
     /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
     /// until the text or the caret changes.
     pub(in crate::app) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
@@ -698,7 +703,7 @@ impl App {
     /// A cell menu pick in the shown result.
     pub(in crate::app) fn sql_query_cell_act(&mut self, ctx: &egui::Context, row: usize, col: &str, act: CellAct) {
         let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
-        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let Some(set) = s.cur_set() else { return };
         let v = Rows::Raw(&set.rows).key(row, col).unwrap_or(Bson::Null);
         match act {
             CellAct::CopyValue => {
@@ -716,7 +721,7 @@ impl App {
     fn sql_query_filter(&mut self, col: &str, v: Bson) {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
-        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let Some(set) = s.cur_set() else { return };
         let d = self.sql_dialect();
         let Some((ns, table)) = db::sql::source::single_table(&set.stmt, d) else { return self.warn("This result did not come from a single table.") };
         // The namespace the run used, which the person may have changed since.
@@ -1359,7 +1364,6 @@ impl App {
                 }
             }
         }
-        let tab_coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         let set_rows = |app: &App, idx: &Option<Vec<usize>>| -> Vec<Document> {
             let Some(s) = app.t().and_then(|t| t.sql.as_ref()) else { return Vec::new() };
             let rows = &s.sets[sel.min(s.sets.len().saturating_sub(1))].rows;
@@ -1386,7 +1390,7 @@ impl App {
         if let Some((fmt, idx)) = copy {
             let rows = set_rows(self, &idx);
             let cols: Vec<CopyCol> = self.tabs[cur].sql.as_ref().map(|s| s.sets[sel].cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
-            let table = if tab_coll.is_empty() { "result".to_string() } else { tab_coll };
+            let table = self.insert_table(super::super::export::Src::Query);
             let ctx = ui.ctx().clone();
             self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[], self.sql_bs());
         }

@@ -424,7 +424,7 @@ fn the_writer_writes_while_the_pooled_session_stays_read_only() {
 // Review fixes: the export guard and the tighter write checks.
 
 fn export_plan() -> crate::db::sql::export::AllPlan {
-    crate::db::sql::export::AllPlan { plan: crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false }, single: false }
+    crate::db::sql::export::AllPlan { plan: crate::db::sql::export::Plan { target: crate::db::sql::export::Target::Text(crate::db::copy::Fmt::Csv), header: true, table: "t".into(), bs: false }, single: false }
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn an_export_without_startup_options_still_cannot_write() {
         let res = l.w.rt.block_on(async {
             let o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&l.uri).unwrap().database("quarry_test");
             let mut c = crate::db::sql::exec::Conn::Pg(crate::db::sql::pg::PgConn::free(sqlx::PgConnection::connect_with(&o).await.unwrap()));
-            let plan = crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
+            let plan = crate::db::sql::export::Plan { target: crate::db::sql::export::Target::Text(crate::db::copy::Fmt::Csv), header: true, table: "t".into(), bs: false };
             let mut out = Vec::new();
             let r = crate::db::sql::export::stream_locked(&mut c, &l.db, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
             let _ = c.close().await;

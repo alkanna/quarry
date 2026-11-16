@@ -149,7 +149,7 @@ impl App {
         self.worker.blocking(move || db::Msg::LibFile { job: id, out: work() });
     }
 
-    fn tab_by_uid(&self, uid: u64) -> Option<usize> {
+    pub(in crate::app) fn tab_by_uid(&self, uid: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.uid == uid)
     }
 
@@ -234,7 +234,9 @@ impl App {
                     self.file_changed(i, link, &rel, Loaded { text: body.clone(), parsed: None, meta });
                 }
                 match (view, self.tab_by_uid(uid)) {
-                    (Some(v), Some(i)) if self.tabs[i].view == v => self.tabs[i].script = Some(Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None }),
+                    (Some(v), Some(i)) if self.tabs[i].view == v => {
+                        super::open::bind(&mut self.tabs[i], Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
+                    }
                     _ => {}
                 }
                 self.library.push_recent(r);
@@ -879,7 +881,7 @@ impl App {
         self.library.recent.truncate(crate::library::RECENT_MAX);
         for (uid, b) in tabs {
             if let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid && t.script.is_none() && t.view == b.view) {
-                t.script = Some(b);
+                super::open::bind(t, b);
             }
         }
         self.save_library();

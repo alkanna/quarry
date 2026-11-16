@@ -19,6 +19,7 @@ mod column_menu;
 mod compare;
 pub(crate) mod config;
 mod conn_form;
+mod conn_icon;
 mod conns_panel;
 mod crumbs;
 mod conn_pg_advanced;

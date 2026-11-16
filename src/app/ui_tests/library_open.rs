@@ -605,3 +605,16 @@ fn a_script_opens_on_another_connection_from_its_menu() {
     // The script keeps its own connection.
     assert_eq!(a.library.scripts.iter().find(|s| s.id == 11).map(|s| s.conn), Some(3));
 }
+
+#[test]
+fn opening_a_script_already_in_a_tab_switches_to_that_tab() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    let id = add(ui.h.state_mut(), "sql", 3, "Top customers", "SELECT 1", "shop", "");
+    open(&mut ui, id, How::Here);
+    let (at, n) = (ui.app().cur, ui.app().tabs.len());
+    ui.h.state_mut().set_cur(0);
+    open(&mut ui, id, How::Here);
+    assert_eq!((ui.app().cur, ui.app().tabs.len()), (at, n), "a second copy of the script opened");
+    open(&mut ui, id, How::NewTab);
+    assert_eq!(ui.app().tabs.len(), n + 1, "New tab did not open a second copy");
+}
