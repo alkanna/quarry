@@ -49,7 +49,7 @@ impl<T> UndoStore<T> {
         self.entries.iter().any(|e| e.0 == id)
     }
 
-    #[cfg(test)]
+    /// The bytes kept, for the memory readout.
     pub fn total(&self) -> u64 {
         self.total
     }

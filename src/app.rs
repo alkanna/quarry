@@ -238,6 +238,8 @@ pub struct App {
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,
+    /// Bytes of each undo entry by its time, measured the first time the memory tooltip needs them.
+    undo_bytes: std::cell::RefCell<HashMap<std::time::Instant, usize>>,
     explain_req: u64,
     modal: Option<Modal>,
     status: String,
@@ -419,6 +421,7 @@ impl App {
             test_info: None,
             idx_info: None,
             undo: Vec::new(),
+            undo_bytes: Default::default(),
             explain_req: 0,
             modal: None,
             status: "Ready. All connections start read-only.".into(),

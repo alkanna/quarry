@@ -27,7 +27,7 @@ pub mod copy;
 pub mod xlsx;
 mod tools;
 mod worker;
-pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentShell, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
+pub use agent::{doc_bytes, snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentShell, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
 pub use analysis::*;
 pub use code::*;
 pub use dates::*;
@@ -110,11 +110,11 @@ impl Row {
         &self.raw
     }
 
-    /// About the bytes this row holds, for the memory readout. A decoded copy counts as 11 more, the ratio above.
+    /// About the bytes this row holds, for the memory readout. A decoded copy counts as `DECODED` more.
     /// The struct itself counts too, since a short SQL row is about as small as it.
     pub fn mem(&self) -> usize {
         let n = self.raw.as_bytes().len();
-        std::mem::size_of::<Row>() + if self.doc.get().is_some() { n * 12 } else { n }
+        std::mem::size_of::<Row>() + if self.doc.get().is_some() { n * (1 + DECODED) } else { n }
     }
 }
 
@@ -196,6 +196,9 @@ pub enum UndoKind {
     /// `ids` is who the change ran on by oid (PostgreSQL), so an undo never acts on an object dropped and made again under the same name.
     Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo, ids: sql::write::PgIds },
 }
+
+/// A decoded document takes about this many times its encoded size, the ratio that makes rows stay raw.
+pub const DECODED: usize = 11;
 
 pub struct UndoAction {
     /// The Agent activity entry of a change an agent made. Such an action never joins the user's undo list: when its

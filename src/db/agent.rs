@@ -141,9 +141,38 @@ impl std::io::Write for Count {
     }
 }
 
-pub(in crate::db) fn doc_bytes(d: &Document) -> u64 {
+pub fn doc_bytes(d: &Document) -> u64 {
     let mut n = Count::default();
     d.to_writer(&mut n).map_or(0, |()| n.0)
+}
+
+impl UndoAction {
+    /// About the memory this entry takes: its documents are decoded, but a CSV import's rows are plain text.
+    pub fn held(&self) -> usize {
+        let import = matches!(self.kind, UndoKind::Sql { undo: sql::write::SqlUndo::Import(_), .. });
+        self.bytes() as usize * if import { 1 } else { DECODED }
+    }
+
+    /// The encoded bytes of what this entry keeps to put things back, for the agent undo cap.
+    pub fn bytes(&self) -> u64 {
+        use sql::write::SqlUndo as S;
+        let id = |id: &Bson| doc_bytes(&doc! { "_id": id.clone() });
+        let cells = |c: &[Option<String>]| c.iter().flatten().map(|s| s.len() as u64).sum::<u64>();
+        match &self.kind {
+            UndoKind::Insert { id: i } => id(i),
+            UndoKind::InsertMany { ids } => ids.iter().map(id).sum(),
+            UndoKind::Update { old, new } => doc_bytes(old) + doc_bytes(new),
+            UndoKind::Delete { old } => doc_bytes(old),
+            UndoKind::DeleteMany { old } => old.iter().map(doc_bytes).sum(),
+            UndoKind::Sql { undo, .. } => match undo {
+                S::Update(r) => r.iter().map(|e| doc_bytes(&e.pk) + e.changes.iter().map(|(n, o, v)| n.len() as u64 + doc_bytes(&doc! { "o": o.clone(), "v": v.clone() })).sum::<u64>()).sum(),
+                S::Delete(r) | S::Insert(r) | S::Inserted(r) => r.iter().map(doc_bytes).sum(),
+                S::Import(u) => u.inserted.iter().map(|r| cells(r)).sum::<u64>() + u.updated.iter().map(|(a, b)| cells(a) + cells(b)).sum::<u64>(),
+                // Structure, trigger, view and create undos keep a few statements.
+                _ => 0,
+            },
+        }
+    }
 }
 
 impl AgentUndo {
@@ -151,11 +180,7 @@ impl AgentUndo {
         match self {
             AgentUndo::Updated { docs, .. } => docs.iter().map(|(a, b)| doc_bytes(a) + doc_bytes(b)).sum(),
             AgentUndo::Deleted { docs, .. } | AgentUndo::Inserted { docs, .. } => docs.iter().map(doc_bytes).sum(),
-            AgentUndo::Sql(a) => match &a.kind {
-                UndoKind::Sql { undo: sql::write::SqlUndo::Update(r), .. } => r.iter().map(|e| doc_bytes(&e.pk) + e.changes.iter().map(|(n, o, v)| n.len() as u64 + doc_bytes(&doc! { "o": o.clone(), "v": v.clone() })).sum::<u64>()).sum(),
-                UndoKind::Sql { undo: sql::write::SqlUndo::Delete(r) | sql::write::SqlUndo::Insert(r) | sql::write::SqlUndo::Inserted(r), .. } => r.iter().map(doc_bytes).sum(),
-                _ => 0,
-            },
+            AgentUndo::Sql(a) => a.bytes(),
         }
     }
 

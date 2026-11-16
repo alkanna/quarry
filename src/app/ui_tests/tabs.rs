@@ -56,6 +56,23 @@ fn the_memory_tooltip_moves_a_closed_tabs_rows_to_the_reopen_line() {
     assert_eq!(part(a, "Closed tabs kept to reopen"), closed + bytes);
 }
 
+#[test]
+fn pipeline_samples_have_their_own_line_until_the_tab_closes() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let part = |a: &App, what: &str| a.mem_parts().iter().find(|p| p.0 == what).map_or(0, |p| p.1);
+    let a = ui.h.state_mut();
+    let (samples, closed) = (part(a, "Pipeline samples"), part(a, "Closed tabs kept to reopen"));
+    let mut t = Tab::new(a.tabs[0].sel.clone());
+    t.agg_input.sample = (0..10).map(|i| mongodb::bson::doc! { "_id": i }).collect();
+    a.tabs.push(t);
+    let grew = part(a, "Pipeline samples") - samples;
+    assert!(grew > 0, "an open tab's samples are not on their line");
+    let last = a.tabs.len() - 1;
+    a.close_tab(last);
+    assert_eq!(part(a, "Pipeline samples"), samples);
+    assert!(part(a, "Closed tabs kept to reopen") >= closed + grew, "a closed tab's samples left the reopen line");
+}
+
 /// The point `frac` of the way across the tab named `coll`, at its middle height.
 fn across_tab(ui: &UiApp, coll: &str, frac: f32) -> egui::Pos2 {
     let r = ui.h.get_by_label(&format!("Tab {coll}")).rect();
