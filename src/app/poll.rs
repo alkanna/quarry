@@ -125,7 +125,11 @@ impl App {
                     _ => {}
                 },
                 Msg::Explained { req, res } if req == self.explain_req => match res {
-                    Ok(raw) => self.modal = Some(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false }),
+                    Ok(raw) => {
+                        if self.modal_free("The explain plan") {
+                            self.modal = Some(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false });
+                        }
+                    }
                     Err(e) => self.err(e),
                 },
                 Msg::Explained { .. } => {}
@@ -157,11 +161,17 @@ impl App {
                 }
                 Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(ctx, conn, op, coll, path, res),
                 Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
-                Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
+                Msg::Notice { title, body } => {
+                    if self.modal_free(&title) {
+                        self.modal = Some(Modal::Text { title, body, code: false });
+                    }
+                }
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
                     Ok(rows) => {
                         self.ok(format!("{} distinct values of {path}", rows.len()));
-                        self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
+                        if self.modal_free("The distinct values") {
+                            self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
+                        }
                     }
                     Err(e) => self.err(e),
                 },
@@ -688,10 +698,23 @@ impl App {
         }
     }
 
+    /// Whether an answer that wants a dialog may open it. An open dialog holds typed input or a pending choice, so the
+    /// answer is dropped with a note instead of replacing it.
+    fn modal_free(&mut self, what: &str) -> bool {
+        if self.modal.is_some() {
+            self.warn(format!("{what} arrived while a dialog was open and was not shown. Run it again after closing the dialog."));
+            return false;
+        }
+        true
+    }
+
     fn on_written(&mut self, at: (String, String), res: db::Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)>) {
         match res {
             Ok(s) => {
-                self.reset_doc_state();
+                // A write that ran for another tab must not close an editor being typed in this one.
+                if self.t().is_some_and(|t| t.sel.space() == at.0 && t.sel.coll == at.1) {
+                    self.reset_doc_state();
+                }
                 self.ok(s);
             }
             Err(e) => {

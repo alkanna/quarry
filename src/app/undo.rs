@@ -56,15 +56,9 @@ impl App {
             return;
         };
         let a = self.undo.remove(i);
-        let t = Target { client, db: a.db, coll: a.coll, timeout: self.timeout() };
-        match a.kind {
-            UndoKind::Insert { id } => self.worker.delete_by_id(t, id),
-            UndoKind::InsertMany { ids } => self.worker.delete_ids(t, ids),
-            UndoKind::Delete { old } => self.worker.insert(a.conn, t, old, None),
-            UndoKind::DeleteMany { old } => self.worker.import(a.conn, t, old, None),
-            UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
-            UndoKind::Sql { .. } => {}
-        }
+        let t = Target { client, db: a.db.clone(), coll: a.coll.clone(), timeout: self.timeout() };
+        // The worker hands the action back if the undo fails, so it is not lost.
+        self.worker.undo_doc(t, a);
     }
 }
 

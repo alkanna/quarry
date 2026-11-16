@@ -503,14 +503,25 @@ impl Worker {
         self.spawn(async move {
             let at = t.at();
             let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
-            let (res, undo) = match t.c().insert_one(d).await {
-                Ok(r) => (
-                    Ok(format!("Inserted document {}", short(&r.inserted_id))),
-                    Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
-                ),
-                Err(err) => (Err(e(err)), None),
-            };
+            let (res, undo) = insert_doc(conn, t, d).await;
             Msg::Written { at, res, undo, reload: true, retry }
+        });
+    }
+
+    /// Runs a user undo. A failed one hands the action back in the answer so it stays in the list, like the SQL undo does.
+    pub fn undo_doc(&self, t: Target, a: UndoAction) {
+        self.write(t.at(), async move {
+            let (conn, kind) = (a.conn, &a.kind);
+            let (res, redo) = match kind {
+                UndoKind::Insert { id } => delete_one_id(&t, id.clone()).await,
+                UndoKind::InsertMany { ids } => delete_many_ids(&t, ids.clone()).await,
+                UndoKind::Delete { old } => insert_doc(conn, t, old.clone()).await,
+                UndoKind::DeleteMany { old } => import_docs(conn, t, old.clone(), None).await,
+                UndoKind::Update { old, new } => replace_doc(conn, t, new.clone(), old.clone(), false).await,
+                UndoKind::Sql { .. } => (Err("Not a MongoDB change".into()), None),
+            };
+            let back = res.is_err().then_some(a);
+            (res, redo.or(back))
         });
     }
 
@@ -563,12 +574,7 @@ impl Worker {
     }
 
     pub fn delete_by_id(&self, t: Target, id: Bson) {
-        self.write(t.at(), async move {
-            match t.c().delete_one(doc! { "_id": id }).await {
-                Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
-                Err(err) => (Err(e(err)), None),
-            }
-        });
+        self.write(t.at(), async move { delete_one_id(&t, id).await });
     }
 
     /// Preview values for the referenced ids shown in the table (relatedDocuments, renderer line 107207).
@@ -922,63 +928,11 @@ impl Worker {
     /// Writes imported documents: insert all (ordered, in batches), or upsert each by `key` with
     /// $set like the original's import (bulkWrite of updateOne upserts).
     pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
-        const BATCH: usize = 1000;
-        self.write(t.at(), async move {
-            let c = t.c();
-            let mut docs = docs;
-            match upsert_by {
-                None => {
-                    // Like the original's generateNewDocumentId: documents without _id get one of the
-                    // kind the collection already uses. ObjectIds are made here rather than by the
-                    // driver so a failed batch still knows the ids of what it did insert.
-                    if docs.iter().any(|d| !d.contains_key("_id")) {
-                        let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
-                        assign_ids(&mut docs, last);
-                    }
-                    let mut ids = Vec::with_capacity(docs.len());
-                    for chunk in docs.chunks(BATCH) {
-                        match c.insert_many(chunk.to_vec()).await {
-                            Ok(r) => ids.extend(r.inserted_ids.into_values()),
-                            Err(err) => {
-                                let done = inserted_before(&err, chunk.len());
-                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
-                                let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
-                                let undo = (!ids.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
-                                return (Err(msg), undo);
-                            }
-                        }
-                    }
-                    let n = ids.len();
-                    (Ok(format!("Imported {n} documents")), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
-                }
-                Some(key) => {
-                    let (mut matched, mut upserted) = (0u64, 0u64);
-                    for d in docs {
-                        // A CSV header like address.zip is a top-level key; a dotted path into nested fields is the fallback.
-                        let Some(v) = d.get(&key).or_else(|| crate::db::get_path(&d, &key)).cloned() else {
-                            return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
-                        };
-                        match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {
-                            Ok(r) => {
-                                matched += r.matched_count;
-                                upserted += r.upserted_id.is_some() as u64;
-                            }
-                            Err(err) => return (Err(format!("Stopped ({matched} updated, {upserted} added): {}", e(err))), None),
-                        }
-                    }
-                    (Ok(format!("Import done: {matched} updated, {upserted} added")), None)
-                }
-            }
-        });
+        self.write(t.at(), import_docs(conn, t, docs, upsert_by));
     }
 
     pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
-        self.write(t.at(), async move {
-            match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
-                Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
-                Err(err) => (Err(e(err)), None),
-            }
-        });
+        self.write(t.at(), async move { delete_many_ids(&t, ids).await });
     }
 
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
@@ -1092,6 +1046,80 @@ pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &N
     let mut dbs = client.list_database_names().await.map_err(e)?;
     dbs.sort();
     Ok((client, dbs, tunnel))
+}
+
+/// The body of `Worker::import`, shared with the undo of a delete.
+async fn import_docs(conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) -> (Res<String>, Option<UndoAction>) {
+    const BATCH: usize = 1000;
+    let c = t.c();
+    let mut docs = docs;
+    match upsert_by {
+        None => {
+            // Like the original's generateNewDocumentId: documents without _id get one of the
+            // kind the collection already uses. ObjectIds are made here rather than by the
+            // driver so a failed batch still knows the ids of what it did insert.
+            if docs.iter().any(|d| !d.contains_key("_id")) {
+                let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
+                assign_ids(&mut docs, last);
+            }
+            let mut ids = Vec::with_capacity(docs.len());
+            for chunk in docs.chunks(BATCH) {
+                match c.insert_many(chunk.to_vec()).await {
+                    Ok(r) => ids.extend(r.inserted_ids.into_values()),
+                    Err(err) => {
+                        let done = inserted_before(&err, chunk.len());
+                        ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
+                        let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
+                        let undo = (!ids.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
+                        return (Err(msg), undo);
+                    }
+                }
+            }
+            let n = ids.len();
+            (Ok(format!("Imported {n} documents")), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
+        }
+        Some(key) => {
+            let (mut matched, mut upserted) = (0u64, 0u64);
+            for d in docs {
+                // A CSV header like address.zip is a top-level key; a dotted path into nested fields is the fallback.
+                let Some(v) = d.get(&key).or_else(|| crate::db::get_path(&d, &key)).cloned() else {
+                    return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
+                };
+                match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {
+                    Ok(r) => {
+                        matched += r.matched_count;
+                        upserted += r.upserted_id.is_some() as u64;
+                    }
+                    Err(err) => return (Err(format!("Stopped ({matched} updated, {upserted} added): {}", e(err))), None),
+                }
+            }
+            (Ok(format!("Import done: {matched} updated, {upserted} added")), None)
+        }
+    }
+}
+
+async fn insert_doc(conn: u64, t: Target, d: Document) -> (Res<String>, Option<UndoAction>) {
+    match t.c().insert_one(d).await {
+        Ok(r) => (
+            Ok(format!("Inserted document {}", short(&r.inserted_id))),
+            Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
+        ),
+        Err(err) => (Err(e(err)), None),
+    }
+}
+
+async fn delete_one_id(t: &Target, id: Bson) -> (Res<String>, Option<UndoAction>) {
+    match t.c().delete_one(doc! { "_id": id }).await {
+        Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
+        Err(err) => (Err(e(err)), None),
+    }
+}
+
+async fn delete_many_ids(t: &Target, ids: Vec<Bson>) -> (Res<String>, Option<UndoAction>) {
+    match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
+        Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
+        Err(err) => (Err(e(err)), None),
+    }
 }
 
 pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Document, record_undo: bool) -> (Res<String>, Option<UndoAction>) {
