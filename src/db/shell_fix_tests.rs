@@ -38,7 +38,8 @@ fn run(db: &str, code: &str) -> Option<Run> {
     loop {
         // The first run in a fresh folder installs the packages.
         match rx.recv_timeout(Duration::from_secs(300)).expect("the shell never answered") {
-            Msg::ShellLog { text, .. } => logs.push(text),
+            // "info" lines are the app's notes about the package install, not the script's.
+            Msg::ShellLog { level, text, .. } if level != "info" => logs.push(text),
             Msg::ShellDone { res, .. } => return Some(Run { logs, res }),
             _ => {}
         }
