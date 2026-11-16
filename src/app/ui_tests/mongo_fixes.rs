@@ -101,16 +101,20 @@ fn type_over(ui: &mut UiApp, text: &str) {
     ui.settle();
 }
 
-/// Takes back the most recent action through the toolbar and Recent changes, then closes that dialog. A toast may show a Close
-/// button of its own, so the one nearest the dialog's title is clicked.
+/// Takes back the most recent action through the toolbar and Recent changes, leaving that dialog open: the answer may raise a
+/// toast with a Close button of its own, which a close clicked meanwhile could hit instead of the dialog's.
 fn undo_latest(ui: &mut UiApp) {
     let n = ui.app().undo.len();
     ui.click(&format!("Undo ({n})"));
     ui.click("Undo change 1");
-    let y = ui.h.get_by_label("Recent changes").rect().center().y;
-    let near = ui.h.get_all_by_label("Close").min_by(|a, b| (a.rect().center().y - y).abs().total_cmp(&(b.rect().center().y - y).abs())).unwrap();
-    near.click();
+}
+
+/// Closes Recent changes once no toast is left to share its Close label.
+fn close_recent_changes(ui: &mut UiApp) {
+    ui.h.state_mut().toasts.clear();
     ui.settle();
+    ui.click("Close");
+    ui.wait("Recent changes to close", |a| a.modal.is_none());
 }
 
 /// Opens the Documents bar's menu and the typed confirmation of `item`, then types `coll` into it.
@@ -237,6 +241,7 @@ fn a_failed_undo_stays_in_the_list() {
     undo_latest(&mut ui);
     ui.wait("the failed undo to come back", |a| a.undo.len() == 1 && a.last_problem().contains("E11000"));
     assert_eq!(f.all(0), seed());
+    close_recent_changes(&mut ui);
     // Once the blocker is gone, the same entry still undoes the delete.
     f.rt.block_on(async { f.coll(0).delete_one(doc! { "_id": 2 }).await.unwrap() });
     undo_latest(&mut ui);
