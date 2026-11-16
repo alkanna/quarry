@@ -38,17 +38,17 @@ fn job(input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> ShellJob {
 }
 
 /// Runs the runner with this input line and these relays, returning the queries it reported and its result.
-fn run(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> (Vec<ShellQuery>, Res<String>) {
+/// Calls run_shell itself rather than Worker::shell, whose ShellDone carries the parsed value: these tests read the runner's text.
+fn run(w: &Worker, _rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> (Vec<ShellQuery>, Res<String>) {
     let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
-    w.shell(5, job(input, sql), cancel_rx);
-    let mut queries = Vec::new();
-    loop {
-        match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
-            Msg::ShellQuery { q, .. } => queries.push(q),
-            Msg::ShellDone { res, .. } => return (queries, res),
-            _ => {}
+    let queries = std::sync::Mutex::new(Vec::new());
+    let send = |m: Msg| {
+        if let Msg::ShellQuery { q, .. } = m {
+            queries.lock().unwrap().push(q);
         }
-    }
+    };
+    let res = w.rt.block_on(crate::db::run_shell(5, &job(input, sql), &send, cancel_rx));
+    (queries.into_inner().unwrap(), res.map(|(out, _)| out))
 }
 
 /// A script on the one PostgreSQL connection "pg", and the value it returned.

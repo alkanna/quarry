@@ -323,14 +323,7 @@ impl App {
                     sh.cancel = None;
                     sh.started = None;
                     (sh.ms, sh.query_ms) = (Some(ms), query_ms);
-                    let parsed = res.and_then(|ejson| {
-                        let v: serde_json::Value = serde_json::from_str(&ejson).map_err(|e| e.to_string())?;
-                        match Bson::try_from(v).map_err(|e| e.to_string())? {
-                            Bson::Document(mut d) => Ok(d.remove("v").unwrap_or(Bson::Null)),
-                            _ => Err("Unexpected result from the shell".to_string()),
-                        }
-                    });
-                    match parsed {
+                    match res {
                         Ok(v) => {
                             sh.set_value(v);
                             if sql {

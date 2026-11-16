@@ -1244,18 +1244,24 @@ mod tests {
         (queries, res)
     }
 
-    fn shell_run_timed(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
+    /// Calls run_shell itself rather than Worker::shell, whose ShellDone carries the parsed value: these tests read the runner's text.
+    fn shell_run_timed(w: &Worker, _rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
         let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql };
         let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
-        w.shell(5, job, cancel_rx);
-        let mut queries = Vec::new();
-        loop {
-            match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
-                Msg::ShellQuery { q, .. } => queries.push(q),
-                Msg::ShellDone { res, ms, query_ms, .. } => return (queries, res, (ms, query_ms)),
-                _ => {}
+        let queries = std::sync::Mutex::new(Vec::new());
+        let send = |m: Msg| {
+            if let Msg::ShellQuery { q, .. } = m {
+                queries.lock().unwrap().push(q);
             }
-        }
+        };
+        let start = std::time::Instant::now();
+        let res = w.rt.block_on(crate::db::run_shell(5, &job, &send, cancel_rx));
+        let ms = start.elapsed().as_millis();
+        let (res, query_ms) = match res {
+            Ok((out, q)) => (Ok(out), q),
+            Err(e) => (Err(e), None),
+        };
+        (queries.into_inner().unwrap(), res, (ms, query_ms))
     }
 
     fn relay(db: &Db, read_only: bool) -> crate::db::SqlRelay {
