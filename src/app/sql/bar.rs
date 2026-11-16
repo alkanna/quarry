@@ -403,6 +403,14 @@ fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
     pick
 }
 
+/// The AND or OR between conditions. One connector joins them all, so a click switches every one. Returns whether it changed.
+fn joiner(ui: &mut egui::Ui, any: &mut bool) -> bool {
+    let w = if *any { "OR" } else { "AND" };
+    let hit = quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch every condition between AND and OR").clicked();
+    *any ^= hit;
+    hit
+}
+
 /// A round tick that keeps the condition being written. A "+" there read as adding another one.
 fn keep_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     round_button(ui, enabled, "Keep this condition", paint_check)
@@ -1208,11 +1216,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         let mut remove: Option<usize> = None;
                         for (i, r) in b.rules.iter().enumerate() {
                             if i > 0 {
-                                let w = if b.any { "OR" } else { "AND" };
-                                if quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch between AND and OR").clicked() {
-                                    b.any = !b.any;
-                                    run = true;
-                                }
+                                run |= joiner(ui, &mut b.any);
                             }
                             let (click, rm) = rule_token(ui, r);
                             if click {
@@ -1237,8 +1241,9 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                             let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
                             // The draft is always there to be filled in, but only shows once a condition was asked for or a token opened.
                             if b.show_draft {
+                                // Switchable here too, or OR could only be picked once a second condition was kept.
                                 if !b.rules.is_empty() {
-                                    ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
+                                    run |= joiner(ui, &mut b.any);
                                 }
                                 let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
                                 run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
