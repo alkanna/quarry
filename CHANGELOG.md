@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.1](https://github.com/alkanna/quarry/compare/v0.52.0...v0.52.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* Tab opens the SQL record with the filter panel open, and an open JSON tree no longer makes the grid jump ([#266](https://github.com/alkanna/quarry/issues/266)) ([f2ca99d](https://github.com/alkanna/quarry/commit/f2ca99d99eb2c753a595e9d25f4732a92b4ba71f))
+
 ## [0.52.0](https://github.com/alkanna/quarry/compare/v0.51.0...v0.52.0) (2026-11-16)
 
 
