@@ -143,7 +143,11 @@ impl App {
 
     /// Keeps the 10 most recently closed tabs for "Reopen closed tab" (maxClosedTabsCount,
     /// renderer line 197320).
-    pub(super) fn remember_closed(&mut self, t: Tab) {
+    pub(super) fn remember_closed(&mut self, mut t: Tab) {
+        // A closed tab's script would keep writing and holding SQL locks, and its answer would never land.
+        if let Some(c) = t.shell.cancel.take() {
+            let _ = c.send(());
+        }
         self.closed.insert(0, t);
         self.closed.truncate(10);
     }

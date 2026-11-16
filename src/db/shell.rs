@@ -102,14 +102,16 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     };
     std::fs::create_dir_all(dir).map_err(e)?;
     let package = runner_package(packages);
-    let mut deps_changed = false;
     for (name, body) in [("runner.mjs", RUNNER), ("package.json", package.as_str()), ("tsconfig.json", TSCONFIG)] {
         let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(body) {
             std::fs::write(&path, body).map_err(e)?;
-            deps_changed |= name == "package.json";
         }
     }
+    // The package.json of the last install that finished. Comparing with package.json itself would skip the retry after
+    // an install that failed offline or was stopped, and keep running the old versions.
+    let installed = dir.join("installed.json");
+    let deps_changed = std::fs::read_to_string(&installed).ok().as_deref() != Some(package.as_str());
     let modules = dir.join("node_modules");
     let missing = !modules.join("mongodb").exists()
         || SHELL_BUILTINS.iter().chain(&EDITOR_PACKAGES).any(|(n, _)| !modules.join(n).exists())
@@ -124,6 +126,7 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
+        std::fs::write(&installed, &package).map_err(e)?;
         note("Packages ready.");
     }
     Ok(())

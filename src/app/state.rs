@@ -370,6 +370,8 @@ pub(super) struct Tab {
     /// Arc::make_mut then makes a new pointer, so the Shell can tell a change by identity.
     pub(super) field_info: Arc<crate::ui::complete::Fields>,
     pub(super) count: u64,
+    /// The count ran out of time, so `count` is a lower bound.
+    pub(super) count_approx: bool,
     pub(super) ms: u128,
     pub(super) req: u64,
     /// Index list requests have their own id, so they never cancel a documents load.
@@ -843,6 +845,7 @@ impl Tab {
             paths: Vec::new(),
             field_info: Default::default(),
             count: 0,
+            count_approx: false,
             ms: 0,
             req: 0,
             idx_req: 0,
@@ -886,6 +889,8 @@ impl Tab {
 }
 
 pub(super) enum Danger {
+    /// An action on one tab's collection, run on that tab even if another became current while its dialog was open.
+    At(Sel, Box<Danger>),
     DeleteMatching(db::Scope),
     DropCollection,
     DropIndex(String),
@@ -1658,6 +1663,8 @@ impl App {
         c.client = None;
         c.sql = None;
         c.tunnel = None;
+        // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
+        c.writable = false;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let mut net = net_of(&c.meta);

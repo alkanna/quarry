@@ -320,7 +320,8 @@ pub enum Msg {
     /// `copied` names the collection a duplicate wrote, to end its spinner.
     /// `dropped` names what a drop removed: the collection, or empty for the whole database.
     DbChanged { conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: Res<String> },
-    Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
+    /// `approx`: the count timed out, so the total is only a lower bound that says whether another page follows.
+    Docs { req: u64, res: Res<(Vec<Row>, u64, u128)>, approx: bool },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },

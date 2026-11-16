@@ -525,7 +525,7 @@ impl App {
             app.req += 1;
             app.tabs[0].req = app.req;
             let n = rows.len() as u64;
-            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)) });
+            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)), approx: false });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in either theme regardless of the system, and with

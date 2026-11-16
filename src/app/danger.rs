@@ -3,7 +3,18 @@
 use super::*;
 
 impl App {
+    /// Ties a tab-scoped action to the current tab, so a tab switch before Confirm cannot redirect it.
+    pub(super) fn here(&self, d: Danger) -> Danger {
+        match self.t() {
+            Some(t) => Danger::At(t.sel.clone(), Box::new(d)),
+            None => d,
+        }
+    }
+
     pub(super) fn danger(&mut self, action: Danger) {
+        if let Danger::At(sel, d) = action {
+            return self.on_tab(&sel, |a| a.danger(*d));
+        }
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
             if !self.ephemeral {
@@ -111,7 +122,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::At(..) | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

@@ -282,10 +282,19 @@ impl Worker {
                         n = n.collation(co);
                     }
                     n.await
-                }
-                .map_err(e)?;
-                let count = q.limit.map_or(count.saturating_sub(q.skip), |l| count.saturating_sub(q.skip).min(l));
-                let take = count.saturating_sub(page * size).min(size).max(1);
+                };
+                // An unindexed filter on a huge collection can count past the time limit while the page itself is
+                // instant. The page is read then with one extra row, which tells whether another page follows.
+                let known = match count {
+                    Ok(n) => Some(q.limit.map_or(n.saturating_sub(q.skip), |l| n.saturating_sub(q.skip).min(l))),
+                    Err(err) if timed_out(&err) => None,
+                    Err(err) => return Err(e(err)),
+                };
+                let offset = page * size;
+                let take = match known {
+                    Some(count) => count.saturating_sub(offset).min(size).max(1),
+                    None => q.limit.map_or(size + 1, |l| l.saturating_sub(offset).min(size + 1)).max(1),
+                };
                 // Read as BSON bytes: the page is kept that way, see `Row`.
                 let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
                 let mut f = raw.find(q.filter).skip(q.skip.saturating_add(page * size)).limit(take as i64).max_time(t.timeout);
@@ -301,15 +310,19 @@ impl Worker {
                 if let Some(p) = q.projection {
                     f = f.projection(p);
                 }
-                let docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
+                let mut docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
+                let more = known.is_none() && docs.len() as u64 > size;
+                docs.truncate(size as usize);
+                let count = known.unwrap_or(offset + docs.len() as u64 + more as u64);
                 // One row at a time, so checking never holds more than one decoded document.
                 for r in &docs {
                     r.decode()?;
                 }
-                Ok((docs, count, start.elapsed().as_millis()))
+                Ok((docs, count, start.elapsed().as_millis(), more))
             }
             .await;
-            Msg::Docs { req, res }
+            let approx = res.as_ref().is_ok_and(|r| r.3);
+            Msg::Docs { req, res: res.map(|(d, n, ms, _)| (d, n, ms)), approx }
         });
     }
 
@@ -415,7 +428,7 @@ impl Worker {
                     // the sample does not. It is left out then; any other failure is a real error.
                     let n = match counted {
                         Ok(d) => Some(d.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?),
-                        Err(err) if matches!(&*err.kind, mongodb::error::ErrorKind::Command(c) if c.code == 50) => None,
+                        Err(err) if timed_out(&err) => None,
                         Err(err) => return Err(e(err)),
                     };
                     (n, docs)
@@ -1048,13 +1061,18 @@ impl Worker {
     }
 }
 
+/// MaxTimeMSExpired: the server stopped a command at its time limit.
+fn timed_out(err: &mongodb::error::Error) -> bool {
+    matches!(&*err.kind, mongodb::error::ErrorKind::Command(c) if c.code == 50)
+}
+
 pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None, false).await?),
         None => None,
     };
-    let mut o = ClientOptions::parse(uri).await.map_err(e)?;
+    let mut o = ClientOptions::parse(super::mongo_uri::for_driver(uri)).await.map_err(e)?;
     o.connect_timeout = Some(timeout);
     o.server_selection_timeout = Some(timeout);
     o.app_name.get_or_insert_with(|| "quarry".into());

@@ -191,9 +191,24 @@ impl MongoUri {
                 self.set_opt(k, None);
             }
         } else if !self.opt("tlsInsecure").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+            // A leftover tlsInsecure=false would still make the pair the driver refuses.
+            self.set_opt("tlsInsecure", None);
             self.set_opt("tlsAllowInvalidCertificates", Some("true"));
         }
     }
+}
+
+/// The address as the Rust driver accepts it. Its rustls build has no tlsAllowInvalidHostnames and refuses the whole
+/// string for it, while Compass and the Shell's Node driver take it. rustls cannot skip only the name check, so the
+/// option becomes Allow invalid certificates, which the form already shows it as.
+pub fn for_driver(uri: &str) -> String {
+    let Some(mut m) = MongoUri::parse(uri).filter(|m| m.has_opt("tlsAllowInvalidHostnames")) else { return uri.to_string() };
+    let on = m.opt("tlsAllowInvalidHostnames").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    m.set_opt("tlsAllowInvalidHostnames", None);
+    if on {
+        m.set_allow_invalid(true);
+    }
+    m.to_string()
 }
 
 impl std::fmt::Display for MongoUri {
@@ -380,5 +395,14 @@ mod tests {
         m.set_opt("tlsCAFile", Some("/my certs/ca.pem"));
         assert_eq!(m.to_string(), "mongodb://h/?tls=true&w=1&tlsCAFile=/my%20certs/ca.pem");
         assert_eq!(m.opt("tlsCAFile").as_deref(), Some("/my certs/ca.pem"));
+    }
+
+    #[test]
+    fn the_driver_never_sees_allow_invalid_hostnames() {
+        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=true&w=1"), "mongodb://h/?tls=true&w=1&tlsAllowInvalidCertificates=true");
+        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=false"), "mongodb://h/?tls=true");
+        assert_eq!(for_driver("mongodb://h/?tlsInsecure=true&tlsAllowInvalidHostnames=true"), "mongodb://h/?tlsInsecure=true");
+        assert_eq!(for_driver("mongodb://h/?tlsInsecure=false&tlsAllowInvalidHostnames=true"), "mongodb://h/?tlsAllowInvalidCertificates=true");
+        assert_eq!(for_driver("mongodb://h/?tls=true"), "mongodb://h/?tls=true");
     }
 }

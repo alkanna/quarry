@@ -36,6 +36,10 @@ impl App {
 
     /// Keeps an edit as unsaved instead of writing it, so several edits go out in one save.
     pub(super) fn stage(&mut self, d: &Document, new: db::Res<Document>) {
+        // Refused before the editors close, so the typed edit is still there once Project is cleared.
+        if self.projected() {
+            return;
+        }
         let new = match new {
             Ok(n) => n,
             Err(e) => return self.err(e),
@@ -54,6 +58,16 @@ impl App {
         } else {
             self.ok(format!("{n} unsaved change(s). Press Save on the document when ready."));
         }
+    }
+
+    /// Rows read with a projection hold only some fields: saving one fails its unchanged check, a copy holds only those
+    /// fields, and rows the projection left without _id would share one draft.
+    pub(super) fn projected(&mut self) -> bool {
+        let p = self.t().is_some_and(|t| t.sql.is_none() && t.query.projection.as_ref().is_some_and(|p| !p.is_empty()));
+        if p {
+            self.warn("These rows hold only the projected fields. Clear Project and run the query again to change documents.");
+        }
+        p
     }
 
     pub(super) fn save_draft(&mut self, key: &str) {

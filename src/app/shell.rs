@@ -460,6 +460,10 @@ impl App {
                 sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
             }
         } else {
+            // Without a live client there is no SSH tunnel either, and the stored address would then reach whatever answers locally.
+            if self.conn(sel.conn).is_none_or(|c| c.client.is_none()) {
+                return self.warn_offline();
+            }
             let uri = match stored_uri(sel.conn) {
                 Ok(u) => u,
                 Err(e) => return self.err(uri_err(e)),

@@ -873,7 +873,7 @@ impl Worker {
                 }
                 Err(err) => Err(err),
             };
-            let _ = tx.send(Msg::Docs { req, res });
+            let _ = tx.send(Msg::Docs { req, res, approx: false });
             ctx.request_repaint();
         });
     }

@@ -112,7 +112,7 @@ impl App {
                     }
                     Err(e) => self.err(e),
                 },
-                Msg::Docs { req, res } => self.on_docs(req, res),
+                Msg::Docs { req, res, approx } => self.on_docs(req, res, approx),
                 Msg::Indexes { req, res } => match (res, self.tabs.iter().position(|t| t.idx_req == req)) {
                     (Ok(v), Some(i)) => {
                         let t = &mut self.tabs[i];
@@ -285,7 +285,13 @@ impl App {
                 }
                 Msg::ShellLog { req, level, text } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        // Every line is laid out each frame, and a logging loop can print millions, so only the latest are kept.
+                        let text = if text.len() > 20_000 { text.chars().take(20_000).collect() } else { text };
                         t.shell.logs.push((level, text));
+                        if t.shell.logs.len() > 1500 {
+                            let over = t.shell.logs.len() - 1000;
+                            t.shell.logs.drain(..over);
+                        }
                     }
                 }
                 Msg::ShellQuery { req, q } => {
@@ -588,7 +594,7 @@ impl App {
         }
     }
 
-    fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>) {
+    fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>, approx: bool) {
         let Some(i) = self.tabs.iter().position(|t| t.req == req) else { return };
         let t = &mut self.tabs[i];
         t.rows_replaced();
@@ -630,7 +636,7 @@ impl App {
                 t.expanded.retain(|e| e.0);
                 t.expanded.extend(open.into_iter().map(|i| (false, i)));
                 t.docs = docs;
-                t.count = count;
+                (t.count, t.count_approx) = (count, approx);
                 t.ms = ms;
                 if matches!(t.selected, Some((false, i)) if i >= t.docs.len()) {
                     t.selected = None;
