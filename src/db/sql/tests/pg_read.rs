@@ -385,7 +385,7 @@ fn every_filter_rule_runs_on_postgres() {
                     Op::Contains | Op::NotContains | Op::StartsWith | Op::NotStartsWith | Op::EndsWith | Op::NotEndsWith => vec!["a%b_c'd\\".into()],
                     _ => rules::default_values(op).into_iter().map(|_| "a%b_c'd".to_string()).collect(),
                 };
-                let r = Rule { col: col.into(), kind, op, values };
+                let r = Rule { join: false, col: col.into(), kind, op, values };
                 let sql = rules::to_sql(std::slice::from_ref(&r), false, crate::db::sql::Dialect::Postgres, false);
                 let q = format!("SELECT count(*)::text FROM t4_rules.t WHERE {sql}");
                 let ran = l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(q.as_str())).fetch_all(&pool).await });

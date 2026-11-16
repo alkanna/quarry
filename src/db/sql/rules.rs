@@ -88,12 +88,15 @@ pub struct Rule {
     pub kind: Kind,
     pub op: Op,
     pub values: Vec<String>,
+    /// Joined to the rule before it by the other connector than the list's, which groups them in parentheses:
+    /// `a AND (b OR c)` is a list joined by AND whose `c` joins `b`. One level deep, which covers what a bar of rules shows.
+    pub join: bool,
 }
 
 impl Rule {
     pub fn new(col: &str, kind: Kind) -> Rule {
         let op = ops_for(kind)[0];
-        Rule { col: col.into(), kind, op, values: default_values(op) }
+        Rule { join: false, col: col.into(), kind, op, values: default_values(op) }
     }
 
     /// Whether the rule has all the values its operator needs.
@@ -391,7 +394,7 @@ pub fn filter_help(d: Dialect) -> String {
         (Op::JsonContains, Kind::Json, &["{\"a\": 1}"]),
     ];
     for (op, kind, vals) in samples {
-        let r = Rule { col: "name".into(), kind, op, values: vals.iter().map(|v| v.to_string()).collect() };
+        let r = Rule { join: false, col: "name".into(), kind, op, values: vals.iter().map(|v| v.to_string()).collect() };
         s += &row(label(op, kind), &rule_sql(&r, d, false));
     }
     if d == Dialect::Postgres {
@@ -406,9 +409,47 @@ pub fn filter_help(d: Dialect) -> String {
     s
 }
 
-/// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`).
+/// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`), and a rule that `join`s the
+/// one before it grouped with it in parentheses under the other connector.
 pub fn to_sql(rules: &[Rule], any: bool, d: Dialect, bs: bool) -> String {
-    rules.iter().filter(|r| r.complete()).map(|r| rule_sql(r, d, bs)).collect::<Vec<_>>().join(if any { " OR " } else { " AND " })
+    let (outer, inner) = if any { (" OR ", " AND ") } else { (" AND ", " OR ") };
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for r in rules.iter().filter(|r| r.complete()) {
+        let s = rule_sql(r, d, bs);
+        match groups.last_mut() {
+            Some(g) if r.join => g.push(s),
+            _ => groups.push(vec![s]),
+        }
+    }
+    // One group is a plain list in the other connector, with nothing to group it against.
+    if let [g] = groups.as_slice() {
+        return g.join(inner);
+    }
+    groups.iter().map(|g| if g.len() > 1 { format!("({})", g.join(inner)) } else { g[0].clone() }).collect::<Vec<_>>().join(outer)
+}
+
+/// Rules all joined by the other connector are a plain list in it: the list's connector flips and the joins clear, so the
+/// bar shows what `parse` would read back. The first rule never joins.
+pub fn normalize(rules: &mut [Rule], any: &mut bool) {
+    if rules.len() > 1 && rules[1..].iter().all(|r| r.join) {
+        *any = !*any;
+        rules.iter_mut().for_each(|r| r.join = false);
+    }
+    if let Some(r) = rules.first_mut() {
+        r.join = false;
+    }
+}
+
+/// Removes rule `i`. A rule that started a group hands the start to the next one, which would otherwise join the group before.
+pub fn remove(rules: &mut Vec<Rule>, any: &mut bool, i: usize) {
+    if i >= rules.len() {
+        return;
+    }
+    let r = rules.remove(i);
+    if !r.join && let Some(next) = rules.get_mut(i) {
+        next.join = false;
+    }
+    normalize(rules, any);
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -614,7 +655,7 @@ fn kind_of(cols: &[(String, Kind)], name: &str) -> Option<Kind> {
 }
 
 fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
-    let mk = |col: &str, op: Op, values: Vec<String>| Some(Rule { col: col.into(), kind: kind_of(cols, col)?, op, values });
+    let mk = |col: &str, op: Op, values: Vec<String>| Some(Rule { join: false, col: col.into(), kind: kind_of(cols, col)?, op, values });
     // PostgreSQL reads uuid, inet and other text-like columns as `col::text`; the column is the same rule. Writing the rule
     // out again (in `parse`) tells whether the cast belonged there.
     let mut cut = Vec::with_capacity(t.len());
@@ -675,7 +716,7 @@ fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
             _ => return None,
         };
         // A pattern that is not what the structured form would write stays a plain LIKE.
-        let probe = Rule { col: c.clone(), kind, op, values: vec![v.clone()] };
+        let probe = Rule { join: false, col: c.clone(), kind, op, values: vec![v.clone()] };
         if rule_sql(&probe, d, true).ends_with(&lit(s, true)) { Some(probe) } else { None }
     };
     match rest {
@@ -736,8 +777,8 @@ fn pg_rule_of(t: &[T], mk: &impl Fn(&str, Op, Vec<String>) -> Option<Rule>) -> O
     }
 }
 
-/// Reads text back into rules when it is a flat AND or OR list of what `to_sql` writes. Returns
-/// the rules and whether they are joined with OR. Anything else (subqueries, mixed AND/OR, other
+/// Reads text back into rules when it is an AND or OR list of what `to_sql` writes, with groups in parentheses one level
+/// deep. Returns the rules and whether they are joined with OR. Anything else (subqueries, mixed AND/OR, other
 /// functions) gives None, which keeps the bar in SQL mode. The result is checked by writing it
 /// out again, so a successful parse never changes the query.
 pub fn parse(text: &str, cols: &[(String, Kind)], d: Dialect, bs: bool) -> Option<(Vec<Rule>, bool)> {
@@ -750,7 +791,24 @@ pub fn parse(text: &str, cols: &[(String, Kind)], d: Dialect, bs: bool) -> Optio
         return Some((Vec::new(), false));
     }
     let (parts, any) = split(&toks)?;
-    let rules: Vec<Rule> = parts.iter().map(|p| rule_of(p, cols, d)).collect::<Option<_>>()?;
+    let mut rules = Vec::new();
+    for p in &parts {
+        // A rule may be wrapped in parentheses itself (NOT IN ... OR NULL), so that is tried before a group.
+        if let Some(r) = rule_of(p, cols, d) {
+            rules.push(r);
+            continue;
+        }
+        if parts.len() < 2 || p.first() != Some(&T::P('(')) || close_of(p, 0) != Some(p.len() - 1) {
+            return None;
+        }
+        let (inner, inner_any) = split(&p[1..p.len() - 1])?;
+        if inner.len() < 2 || inner_any == any {
+            return None;
+        }
+        for (k, q) in inner.iter().enumerate() {
+            rules.push(Rule { join: k > 0, ..rule_of(q, cols, d)? });
+        }
+    }
     let any = any && rules.len() > 1;
     if !rules.iter().all(|r| ops_for(r.kind).contains(&r.op) && r.complete()) {
         return None;
@@ -841,7 +899,7 @@ mod tests {
                 if matches!(op, Op::AfterCol) && col != "created_at" {
                     continue;
                 }
-                let r = Rule { col: col.clone(), kind, op, values: v };
+                let r = Rule { join: false, col: col.clone(), kind, op, values: v };
                 assert!(r.complete(), "{op:?}");
                 let sql = to_sql(std::slice::from_ref(&r), false, Dialect::MySql, true);
                 let (back, any) = parse(&sql, &cols(), Dialect::MySql, true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
@@ -884,7 +942,7 @@ mod tests {
                 if kind == Kind::Json && matches!(op, Op::Eq | Op::Ne) {
                     v = vec!["{\"a\": 1}".into()];
                 }
-                let r = Rule { col: col.clone(), kind, op, values: v };
+                let r = Rule { join: false, col: col.clone(), kind, op, values: v };
                 assert!(r.complete(), "{op:?}");
                 let sql = to_sql(std::slice::from_ref(&r), false, d, false);
                 let (back, _) = parse(&sql, &cols, d, false).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
@@ -895,7 +953,7 @@ mod tests {
 
     #[test]
     fn postgres_rules_use_postgres_operators() {
-        let sql = |col: &str, kind: Kind, op: Op, values: &[&str]| rule_sql(&Rule { col: col.into(), kind, op, values: values.iter().map(|s| s.to_string()).collect() }, Dialect::Postgres, false);
+        let sql = |col: &str, kind: Kind, op: Op, values: &[&str]| rule_sql(&Rule { join: false, col: col.into(), kind, op, values: values.iter().map(|s| s.to_string()).collect() }, Dialect::Postgres, false);
         assert_eq!(sql("name", Kind::Text, Op::Regexp, &["^a"]), "\"name\"::text ~ '^a'");
         assert_eq!(sql("created_at", Kind::DateTime, Op::Today, &[]), "\"created_at\"::date = CURRENT_DATE");
         assert_eq!(sql("created_at", Kind::DateTime, Op::Last, &["3", "weeks"]), "\"created_at\" >= NOW() - INTERVAL '3 WEEK'");
@@ -908,7 +966,7 @@ mod tests {
 
     #[test]
     fn postgres_text_rules_match_without_regard_to_case() {
-        let rule = |op: Op, v: &str| Rule { col: "name".into(), kind: Kind::Text, op, values: vec![v.into()] };
+        let rule = |op: Op, v: &str| Rule { join: false, col: "name".into(), kind: Kind::Text, op, values: vec![v.into()] };
         let d = Dialect::Postgres;
         assert_eq!(rule_sql(&rule(Op::Contains, "ann"), d, false), "\"name\" ILIKE '%ann%'");
         assert_eq!(rule_sql(&rule(Op::NotContains, "ann"), d, false), "\"name\" NOT ILIKE '%ann%'");
@@ -930,7 +988,7 @@ mod tests {
 
     #[test]
     fn like_names_its_escape_without_backslash_escapes() {
-        let r = Rule { col: "name".into(), kind: Kind::Text, op: Op::Contains, values: vec!["50%".into()] };
+        let r = Rule { join: false, col: "name".into(), kind: Kind::Text, op: Op::Contains, values: vec!["50%".into()] };
         assert_eq!(rule_sql(&r, Dialect::MySql, false), "`name` LIKE '%50\\%%' ESCAPE '\\'");
         assert_eq!(rule_sql(&r, Dialect::MySql, true), "`name` LIKE '%50\\\\%%'");
         let plain = Rule { values: vec!["ann".into()], ..r };
@@ -940,8 +998,8 @@ mod tests {
     #[test]
     fn postgres_rules_round_trip_through_double_quoted_names() {
         let d = Dialect::Postgres;
-        let a = Rule { col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
-        let b = Rule { col: "to\"tal".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
+        let a = Rule { join: false, col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
+        let b = Rule { join: false, col: "to\"tal".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
         let sql = to_sql(&[a.clone(), b.clone()], false, d, false);
         assert_eq!(sql, "\"status\" IN ('paid', 'shipped') AND \"to\"\"tal\" > 50");
         assert_eq!(parse(&sql, &[("status".into(), Kind::Enum), ("to\"tal".into(), Kind::Decimal)], d, false), Some((vec![a, b], false)));
@@ -951,9 +1009,57 @@ mod tests {
     }
 
     #[test]
+    fn groups_join_by_the_other_word_in_parentheses_on_every_engine() {
+        let r = |col: &str, kind: Kind, op: Op, v: &str, join: bool| Rule { join, col: col.into(), kind, op, values: vec![v.into()] };
+        let a = r("total", Kind::Decimal, Op::Gt, "50", false);
+        let b = r("status", Kind::Enum, Op::Eq, "paid", false);
+        let c = r("name", Kind::Text, Op::Eq, "ann", true);
+        let list = vec![a.clone(), b.clone(), c.clone()];
+        for d in [Dialect::MySql, Dialect::MariaDb, Dialect::Postgres] {
+            for any in [false, true] {
+                let sql = to_sql(&list, any, d, true);
+                let (outer, inner) = if any { ("OR", "AND") } else { ("AND", "OR") };
+                assert!(sql.contains(&format!(" {outer} (")) && sql.contains(&format!(" {inner} ")) && sql.ends_with(')'), "{d:?}: {sql}");
+                assert_eq!(parse(&sql, &cols(), d, true), Some((list.clone(), any)), "{d:?}: {sql}");
+            }
+            // A group first reads back too.
+            let first = vec![b.clone(), c.clone(), Rule { join: false, ..a.clone() }];
+            let sql = to_sql(&first, false, d, true);
+            assert_eq!(parse(&sql, &cols(), d, true), Some((first, false)), "{d:?}: {sql}");
+        }
+        // One group alone is a plain list in its own word.
+        assert_eq!(to_sql(&[b.clone(), c.clone()], false, Dialect::MySql, true), "`status` = 'paid' OR `name` = 'ann'");
+        // The same word inside and out, a group alone in parentheses, or two levels stay SQL.
+        for text in ["total > 50 AND (status = 'paid' AND name = 'ann')", "(status = 'paid' OR name = 'ann')", "total > 50 AND (status = 'paid' OR (name = 'ann' AND id = 1))"] {
+            assert!(parse(text, &cols(), Dialect::MySql, true).is_none(), "{text}");
+        }
+        // A rule wrapped in parentheses of its own is still one rule, not a group.
+        let nin = Rule { join: false, col: "name".into(), kind: Kind::Text, op: Op::NotInOrNull, values: vec!["ann".into()] };
+        let sql = to_sql(&[a.clone(), nin.clone()], false, Dialect::MySql, true);
+        assert_eq!(parse(&sql, &cols(), Dialect::MySql, true), Some((vec![a.clone(), nin], false)), "{sql}");
+    }
+
+    #[test]
+    fn switching_and_removing_keeps_groups_whole() {
+        let r = |col: &str, join: bool| Rule { join, col: col.into(), kind: Kind::Int, op: Op::Eq, values: vec!["1".into()] };
+        // Every rule joined by the other word is a plain list in it.
+        let (mut list, mut any) = (vec![r("a", false), r("b", true), r("c", true)], false);
+        normalize(&mut list, &mut any);
+        assert!(any && list.iter().all(|x| !x.join));
+        // a AND (b OR c): removing b leaves c to start its own group, not to join a.
+        let (mut list, mut any) = (vec![r("a", false), r("b", false), r("c", true)], false);
+        remove(&mut list, &mut any, 1);
+        assert_eq!((list.iter().map(|x| (x.col.as_str(), x.join)).collect::<Vec<_>>(), any), (vec![("a", false), ("c", false)], false));
+        // Removing a leaves (b OR c) alone, which is the list b OR c.
+        let (mut list, mut any) = (vec![r("a", false), r("b", false), r("c", true)], false);
+        remove(&mut list, &mut any, 0);
+        assert_eq!((list.iter().map(|x| (x.col.as_str(), x.join)).collect::<Vec<_>>(), any), (vec![("b", false), ("c", false)], true));
+    }
+
+    #[test]
     fn lists_join_with_and_or_or_and_reject_mixes() {
-        let a = Rule { col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
-        let b = Rule { col: "total".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
+        let a = Rule { join: false, col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
+        let b = Rule { join: false, col: "total".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
         let and = to_sql(&[a.clone(), b.clone()], false, Dialect::MySql, true);
         assert_eq!(and, "`status` IN ('paid', 'shipped') AND `total` > 50");
         assert_eq!(parse(&and, &cols(), Dialect::MySql, true), Some((vec![a.clone(), b.clone()], false)));
@@ -969,11 +1075,11 @@ mod tests {
 
     #[test]
     fn values_are_escaped_and_numbers_stay_bare_only_in_number_columns() {
-        let t = Rule { col: "name".into(), kind: Kind::Text, op: Op::Eq, values: vec!["5".into()] };
+        let t = Rule { join: false, col: "name".into(), kind: Kind::Text, op: Op::Eq, values: vec!["5".into()] };
         assert_eq!(rule_sql(&t, Dialect::MySql, true), "`name` = '5'");
-        let n = Rule { col: "total".into(), kind: Kind::Decimal, op: Op::Eq, values: vec!["5 OR 1=1".into()] };
+        let n = Rule { join: false, col: "total".into(), kind: Kind::Decimal, op: Op::Eq, values: vec!["5 OR 1=1".into()] };
         assert_eq!(rule_sql(&n, Dialect::MySql, true), "`total` = '5 OR 1=1'");
-        let q = Rule { col: "na`me".into(), kind: Kind::Text, op: Op::Eq, values: vec!["a'\\".into()] };
+        let q = Rule { join: false, col: "na`me".into(), kind: Kind::Text, op: Op::Eq, values: vec!["a'\\".into()] };
         assert_eq!(rule_sql(&q, Dialect::MySql, true), "`na``me` = 'a''\\\\'");
         // Without backslash escapes the backslash is a plain character, and text with one stays SQL.
         assert_eq!(rule_sql(&q, Dialect::MySql, false), "`na``me` = 'a''\\'");
