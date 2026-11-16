@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.0](https://github.com/alkanna/quarry/compare/v0.51.0...v0.52.0) (2026-11-16)
+
+
+### Features
+
+* custom rail icons, a Manage tile, Excel export and safer script tabs ([#264](https://github.com/alkanna/quarry/issues/264)) ([f50828f](https://github.com/alkanna/quarry/commit/f50828f46565e530e2a154dddf732673d8ce6e99))
+
 ## [0.51.0](https://github.com/alkanna/quarry/compare/v0.50.0...v0.51.0) (2026-11-16)
 
 
