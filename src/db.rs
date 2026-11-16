@@ -23,6 +23,8 @@ pub(crate) mod pct;
 mod shell;
 #[cfg(test)]
 mod conn_tests;
+#[cfg(test)]
+mod shell_fix_tests;
 pub mod sql;
 pub mod collopts;
 pub mod copy;

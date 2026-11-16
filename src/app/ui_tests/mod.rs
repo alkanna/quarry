@@ -37,6 +37,7 @@ mod conn_proxy;
 mod pg_roles;
 mod pg_server;
 mod rail;
+mod shell_fixes;
 mod sidebar;
 mod sidebar_resize;
 mod sql_bulk;
