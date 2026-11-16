@@ -20,6 +20,7 @@ mod fold;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
+mod conn_fixes;
 mod conns_panel;
 mod crumbs;
 mod library_linked;
