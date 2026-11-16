@@ -28,6 +28,25 @@ fn tab_opens_the_record_where_values_edit_and_esc_closes_it() {
 }
 
 #[test]
+fn tab_opens_the_record_while_the_filter_panel_is_open() {
+    let Some(mut ui) = super::filter_panel::opened() else { return };
+    ui.mouse_hold("note row 2", 0);
+    assert_eq!(ui.app().t().and_then(|t| t.selected), Some((false, 1)), "the click did not select row 2");
+    assert!(ui.h.ctx.memory(|m| m.focused().is_none()), "a widget kept the focus after the row click");
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| t.record), "Tab did not open the record with the filter panel open");
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| !t.record), "a second Tab did not close the record");
+    // A selected panel row has the keys, so Tab leaves the record alone.
+    super::filter_panel::select(&mut ui, 0);
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| !t.record), "Tab opened the record while a panel row was selected");
+}
+
+#[test]
 fn tab_in_a_text_field_leaves_the_record_closed() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.mouse_hold("note row 2", 0);

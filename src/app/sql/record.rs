@@ -25,6 +25,28 @@ fn tree_id(col: &str) -> egui::Id {
     egui::Id::unique(("sql-record-json", col))
 }
 
+/// The open JSON tree of column `c`, under its line and lined up with the values. Its height is kept under `room` for
+/// `tree_room`.
+fn json_under(ui: &mut egui::Ui, name_w: f32, c: &str, s: &str, room: egui::Id) {
+    let h = ui
+        .horizontal(|ui| {
+            ui.add_space(name_w);
+            ui.vertical(|ui| json_tree::show_text(ui, tree_id(c), s));
+        })
+        .response
+        .rect
+        .height();
+    ui.data_mut(|d| d.insert_temp(room, h));
+}
+
+/// The room of the open tree last drawn under a line, for the frames that skip it. Without it the record shrinks as the
+/// line scrolls away or opens its editor, and the grid jumps back up.
+fn tree_room(ui: &mut egui::Ui, room: egui::Id) {
+    if let Some(h) = ui.data(|d| d.get_temp::<f32>(room)) {
+        ui.allocate_exact_size(egui::vec2(0.0, h), Sense::hover());
+    }
+}
+
 impl App {
     /// Row `i` of `docs` as a record. `agg` rows are a query's answer, which is only read: a double click opens the value.
     #[allow(clippy::too_many_arguments)]
@@ -44,20 +66,25 @@ impl App {
         let key = docs.id(i);
         for (c, col) in names.iter().zip(&cols) {
             let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
+            let open_id = rid.with(("json", c));
+            let room = open_id.with("h");
             // Lines scrolled out of view keep their space but skip the work, like the grid's rows.
             if !ui.is_rect_visible(line) {
+                tree_room(ui, room);
                 continue;
             }
             let kind = col.as_ref().map_or(Kind::Text, |c| c.kind);
             let val = egui::Rect::from_min_max(egui::pos2(line.left() + name_w, line.top()), egui::pos2(line.right() - type_w, line.bottom()));
             if !agg && self.sql_cell.as_ref().is_some_and(|e| e.is_at(key.clone(), c)) {
                 self.sql_cell_editor(ui, val);
+                tree_room(ui, room);
                 continue;
             }
             let v = match &drafted {
                 Some(d) => d.get(c).map(Val::B),
                 None => docs.value(i, c),
             };
+            let text = v.and_then(Val::as_str);
             // Editing is the grid's: a column it refuses, or a query's answer, opens the value to read instead.
             let blocked = agg || self.sql_edit_block().or_else(|| self.sql_col_block(c)).is_some();
             let r = ui.interact(val, rid.with(("v", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -80,9 +107,7 @@ impl App {
                 p.rect_filled(val, 0, tint(WARNING(), 34));
                 p.rect_filled(egui::Rect::from_min_size(val.min, egui::vec2(2.0, val.height())), 0, WARNING());
             }
-            let text = v.and_then(Val::as_str);
             let json = text.is_some_and(|s| kind == Kind::Json || json_tree::looks_like(s));
-            let open_id = rid.with(("json", c));
             let mut open = json && ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
             let fk = v.filter(|v| !v.is_null()).and_then(|_| fks.iter().position(|f| col.as_ref().is_some_and(|k| f.cols.contains(&k.src))));
             let text_x = val.left() + if json { 20.0 } else { 6.0 };
@@ -134,6 +159,7 @@ impl App {
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {
                         json_tree::forget(ui.ctx(), tree_id(c));
+                        ui.data_mut(|d| d.remove::<f32>(room));
                     }
                 }
             }
@@ -144,10 +170,10 @@ impl App {
                 out.view = Some((c.to_string(), b));
             }
             if let (true, Some(s)) = (open, text) {
-                ui.horizontal(|ui| {
-                    ui.add_space(name_w);
-                    ui.vertical(|ui| json_tree::show_text(ui, tree_id(c), s));
-                });
+                json_under(ui, name_w, c, s, room);
+            } else if json {
+                // A JSON value whose tree is not drawn keeps no room for one. Closing the fold clears it too.
+                ui.data_mut(|d| d.remove::<f32>(room));
             }
         }
     }
@@ -159,8 +185,8 @@ impl App {
         if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
             t.record = false;
         }
-        // The filter panel moves through its own rows and fields with the keys.
-        let panel = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open);
+        // A filter panel with a selected row has the keys, as its arrows and Enter do. Without one, Tab is the grid's.
+        let panel = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open && s.bar.panel.sel.is_some());
         if self.window_open() || self.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || panel {
             return;
         }

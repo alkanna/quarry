@@ -9,7 +9,7 @@ fn bar(ui: &UiApp) -> &crate::app::sql::bar::Bar {
     ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| &s.bar).expect("a SQL tab")
 }
 
-fn bar_mut(ui: &mut UiApp) -> &mut crate::app::sql::bar::Bar {
+pub(super) fn bar_mut(ui: &mut UiApp) -> &mut crate::app::sql::bar::Bar {
     let app = ui.h.state_mut();
     let cur = app.cur;
     &mut app.tabs[cur].sql.as_mut().expect("a SQL tab").bar
@@ -20,7 +20,7 @@ fn filter_txt(ui: &UiApp) -> String {
 }
 
 /// The demo's orders tab, its WHERE read into the panel, which is open.
-fn opened() -> Option<UiApp> {
+pub(super) fn opened() -> Option<UiApp> {
     let mut ui = demo_ui(App::load_sql_demo)?;
     ui.settle();
     ui.click("Filters");
@@ -30,7 +30,7 @@ fn opened() -> Option<UiApp> {
 }
 
 /// Selects the row or group `i` in drawing order, as a click on its background does.
-fn select(ui: &mut UiApp, i: usize) {
+pub(super) fn select(ui: &mut UiApp, i: usize) {
     let b = bar_mut(ui);
     b.panel.sel = Some(b.tree.rows_in_order()[i]);
     ui.settle();
