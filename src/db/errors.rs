@@ -620,6 +620,29 @@ fn sentence(s: &str) -> String {
     }
 }
 
+/// The parts of a MySQL or MariaDB syntax error: the text from the failing token on (cut at 80 characters, empty at the
+/// end of the statement) and its 1-based line. None for any other sentence, such as one in another language.
+pub fn mysql_near(msg: &str) -> Option<(&str, usize)> {
+    let j = msg.rfind("' at line ")?;
+    let line = msg[j + 10..].trim().parse().ok()?;
+    let i = msg[..j].find(" near '")? + 7;
+    Some((&msg[i..j], line))
+}
+
+/// A syntax or unknown-name sentence from the Query editor's live check, cut to fit its footer: MySQL's advice to read the
+/// manual goes and the quoted text it points at stays. A name the server does not know gets the reason it may still be fine.
+pub fn lint_wording(msg: &str, warn: bool) -> String {
+    let base = match mysql_near(msg) {
+        Some(("", _)) => "Syntax error at the end of the statement".to_string(),
+        Some((near, _)) => {
+            let shown: String = near.chars().take(40).collect();
+            format!("Syntax error near '{shown}{}'", if shown.len() < near.len() { "\u{2026}" } else { "" })
+        }
+        None => msg.to_string(),
+    };
+    if warn { format!("{base}, unless an earlier statement creates it") } else { base }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

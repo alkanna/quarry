@@ -490,6 +490,8 @@ pub(super) struct SqlTab {
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
+    /// What the server said of the statements of the Query editor, checked as the person types.
+    pub(super) lint: super::sql::query::LintState,
     /// Results as text instead of a grid, and that text for the set it was built from.
     pub(super) text_mode: bool,
     pub(super) text_cache: Option<(usize, String)>,

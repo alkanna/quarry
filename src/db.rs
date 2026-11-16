@@ -230,6 +230,9 @@ pub enum Msg {
     SqlExplained { req: u64, sets: Vec<sql::ResultSet> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
+    /// What the live check of request `req` found in the statement under the Query editor's caret; see `sql::lint`.
+    /// Err when the check could not run, so the statement is not taken as clean.
+    SqlLint { req: u64, lint: Result<Option<sql::Lint>, ()> },
     /// The count, columns and key the bulk UPDATE or DELETE dialog of request `req` waits for; see `sql::bulk`.
     SqlBulkPrep { req: u64, res: Res<sql::bulk::BulkPrep> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.

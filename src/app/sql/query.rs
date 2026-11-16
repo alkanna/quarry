@@ -17,6 +17,53 @@ const FOOTER_H: f32 = 24.0;
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
 
+/// How long typing rests before the statement under the caret is sent to the server to be checked, in seconds.
+const LINT_PAUSE: f64 = 0.6;
+
+/// How long a check that could not run (no connection, a lock) waits before the statement is asked again.
+const LINT_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The live check of the Query editor. Answers are kept by statement text for the current target, so moving the caret
+/// back to a checked statement asks nothing and every statement keeps its mark.
+#[derive(Default)]
+pub(in crate::app) struct LintState {
+    /// The connection, database and schema the answers in `seen` were read in; a change clears them.
+    target: String,
+    /// The statement in flight and its request, 0 when none.
+    asked: String,
+    req: u64,
+    /// The statement under the caret and when it last changed, until typing has rested for `LINT_PAUSE`.
+    wait: Option<(String, f64)>,
+    seen: HashMap<String, Seen>,
+}
+
+/// One answer of the live check, Err when the check could not run: it marks nothing and is asked again after `LINT_RETRY`.
+struct Seen {
+    lint: Result<Option<db::sql::Lint>, ()>,
+    at: std::time::Instant,
+}
+
+impl LintState {
+    /// What the check found in `stmt`, if it marked anything.
+    pub(in crate::app) fn mark(&self, stmt: &str) -> Option<&db::sql::Lint> {
+        self.seen.get(stmt).and_then(|s| s.lint.as_ref().ok()?.as_ref())
+    }
+
+    /// Whether `stmt` needs asking: never asked, or a check that could not run long enough ago.
+    fn stale(&self, stmt: &str) -> bool {
+        self.seen.get(stmt).is_none_or(|s| s.lint.is_err() && s.at.elapsed() >= LINT_RETRY)
+    }
+
+    /// Forgets the unknown-name warnings, once a run or a reread schema may have made what they named.
+    pub(in crate::app) fn drop_warnings(&mut self) {
+        self.seen.retain(|_, s| !matches!(&s.lint, Ok(Some(l)) if l.warn));
+    }
+
+    fn put(&mut self, stmt: String, lint: Result<Option<db::sql::Lint>, ()>) {
+        self.seen.insert(stmt, Seen { lint, at: std::time::Instant::now() });
+    }
+}
+
 /// 1-based line and column of a caret given as a char index.
 pub(in crate::app) fn line_col(text: &str, caret: usize) -> (usize, usize) {
     text.chars().take(caret).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) })
@@ -69,6 +116,27 @@ fn statement_in(all: &[Range<usize>], text: &str, caret: usize, d: db::sql::Dial
     let r = lex::statement_at(text, byte_at(text, caret), d)?;
     let i = all.iter().position(|a| *a == r)?;
     Some((r, i + 1, all.len()))
+}
+
+/// Wavy lines under what the live check marked, red for a syntax error and amber for a name the server does not know,
+/// with the server's sentence when the pointer rests on one.
+fn paint_lints(ui: &egui::Ui, out: &egui::text_edit::TextEditOutput, query: &str, stmts: &[Range<usize>], lints: &LintState) {
+    if lints.seen.is_empty() {
+        return;
+    }
+    let (g, gp, hover) = (&out.galley, out.galley_pos, out.response.hover_pos());
+    for r in stmts {
+        let Some(l) = lints.mark(&query[r.clone()]) else { continue };
+        let at = |b: usize| CCursor::new(query[..r.start + b].chars().count());
+        let (a, z) = (g.pos_from_cursor(at(l.span.start)), g.pos_from_cursor(at(l.span.end)));
+        let (x0, y) = (gp.x + a.left(), gp.y + a.bottom() - 2.0);
+        let x1 = (gp.x + z.left()).max(x0 + 6.0);
+        crate::ui::widgets::wavy_line(ui.painter(), x0..=x1, y, if l.warn { WARNING() } else { ALERT() });
+        let rect = egui::Rect::from_min_max(egui::pos2(x0, gp.y + a.top()), egui::pos2(x1, gp.y + a.bottom()));
+        if hover.is_some_and(|p| rect.contains(p)) {
+            let _ = egui::Response::clone(&out.response).on_hover_text_at_pointer(l.msg.as_str());
+        }
+    }
 }
 
 /// One marker per statement in the gutter, at its first line: a gray play mark, or the accent with a play mark for the statement
@@ -595,6 +663,15 @@ impl App {
                 self.worker.sql_count(req, i, db.clone(), ns.clone(), stmt);
             }
         }
+        self.lint_schema_changed(conn);
+    }
+
+    /// A run, or a schema read again after a change elsewhere, may have made what an unknown name pointed at, so the
+    /// warnings of every tab of the connection are asked again; syntax stays as it is.
+    pub(in crate::app) fn lint_schema_changed(&mut self, conn: u64) {
+        for s in self.tabs.iter_mut().filter(|t| t.sel.conn == conn).filter_map(|t| t.sql.as_mut()) {
+            s.lint.drop_warnings();
+        }
     }
 
     /// The row count of a paged result arrived.
@@ -837,6 +914,72 @@ impl App {
         self.pick_acts(pick_acts);
     }
 
+    /// Sends the statement under the caret (`stmt`, a byte range of the script) to be checked once typing has rested, one
+    /// request at a time per tab. Only on a live connection: the demo and a closed connection have no server to ask.
+    fn sql_lint_tick(&mut self, ctx: &egui::Context, stmt: Option<Range<usize>>) {
+        let (ti, now) = (self.cur, ctx.input(|i| i.time));
+        let Some(t) = self.tabs.get(ti) else { return };
+        let conn = t.sel.conn;
+        let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
+        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX {
+            return;
+        }
+        let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
+        let Some(s) = self.tabs[ti].sql.as_mut() else { return };
+        let l = &mut s.lint;
+        // An answer still in flight for the old target is dropped with its request.
+        if l.target != target {
+            (l.target, l.seen, l.wait, l.req) = (target, HashMap::new(), None, 0);
+        }
+        let text = &s.query[r];
+        if l.req != 0 || !l.stale(text) {
+            return;
+        }
+        let since = match &l.wait {
+            Some((w, at)) if w == text => *at,
+            _ => {
+                l.wait = Some((text.to_string(), now));
+                now
+            }
+        };
+        if now - since < LINT_PAUSE {
+            return ctx.request_repaint_after(std::time::Duration::from_secs_f64(LINT_PAUSE - (now - since)));
+        }
+        (l.wait, l.asked) = (None, text.to_string());
+        self.req += 1;
+        l.req = self.req;
+        let stmt = l.asked.clone();
+        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
+        let (db, schema) = run_target(&self.tabs[ti], db);
+        self.worker.sql_lint(self.req, db, schema, stmt);
+    }
+
+    /// The check of request `req` came back. Answers for statements no longer in the script are dropped with it, so the
+    /// map stays as small as the script.
+    pub(in crate::app) fn sql_linted(&mut self, req: u64, lint: Result<Option<db::sql::Lint>, ()>) {
+        let Some(s) = self.tabs.iter_mut().filter_map(|t| t.sql.as_mut()).find(|s| s.lint.req == req) else { return };
+        s.lint.req = 0;
+        let stmt = std::mem::take(&mut s.lint.asked);
+        s.lint.put(stmt, lint);
+        s.lint.seen.retain(|k, _| s.query.contains(k.as_str()));
+    }
+
+    /// QUARRY_TEST_SQL=lint and QUARRY_TEST_PG=lint: a statement with a syntax error under the caret and one naming an
+    /// unknown table, marked as the live check marks them.
+    pub(in crate::app) fn demo_lint(&mut self, pg: bool) {
+        let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
+        let (bad, unknown) = ("SELCT ( FRO orders", "SELECT * FROM shipment WHERE order_id = 4405");
+        let lint = |span: Range<usize>, msg: &str, warn: bool| Ok(Some(db::sql::Lint { span, msg: db::lint_wording(msg, warn), warn }));
+        let (err, warn) = if pg {
+            (lint(0..5, "syntax error at or near \"SELCT\"", false), lint(14..22, "relation \"shipment\" does not exist", true))
+        } else {
+            (lint(0..5, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'SELCT ( FRO orders' at line 1", false), lint(14..22, "Table 'shop.shipment' doesn't exist", true))
+        };
+        (s.query, s.caret) = (format!("{bad};\n{unknown};"), 5);
+        s.lint.put(bad.into(), err);
+        s.lint.put(unknown.into(), warn);
+    }
+
     pub(in crate::app) fn sql_editor_id(cur: usize) -> egui::Id {
         egui::Id::unique(("sql-editor", cur))
     }
@@ -909,6 +1052,7 @@ impl App {
         let engine_db = self.conn(conn).map(|c| format!("{}  \u{b7}  {db}", super::super::sidebar::conn_product(c))).unwrap_or_default();
         let saved_in = self.tabs.get(self.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
         let mut gutter_run = None;
+        let mut lint_stmt = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
@@ -958,6 +1102,8 @@ impl App {
                     let band_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), gp.y + a.top()), egui::pos2(rect.right(), gp.y + z.bottom()));
                     ui.painter().set(band, egui::Shape::rect_filled(band_rect, 0.0, tint(PRIMARY(), 22)));
                 }
+                paint_lints(ui, &out, &s.query, &info.stmts, &s.lint);
+                lint_stmt = info.stmt.as_ref().map(|(r, _, _)| r.clone());
                 paint_gutter(ui, &out, Some(info.line_col.0));
                 gutter_run = gutter_markers(ui, &out, &s.query, &info.stmts, info.stmt.as_ref().map(|p| p.1), s.run_req != 0);
                 caret = Some(info);
@@ -970,6 +1116,9 @@ impl App {
                 let faint = |t: String| RichText::new(t).font(FontId::monospace(TXT_CAPTION)).color(FAINT());
                 ui.add_space(10.0);
                 ui.label(faint(format!("{place}Ln {}, Col {}  \u{b7}  {engine_db}", info.line_col.0, info.line_col.1)));
+                if let Some(l) = info.stmt.as_ref().and_then(|(r, _, _)| s.lint.mark(&s.query[r.clone()])) {
+                    ui.add(egui::Label::new(RichText::new(l.msg.as_str()).font(FontId::monospace(TXT_CAPTION)).color(if l.warn { WARNING() } else { ALERT() })).truncate());
+                }
                 if let Some(t) = &saved_in {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(10.0);
@@ -983,6 +1132,7 @@ impl App {
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
         self.sql_serve(conn, &db, &schema, wants);
+        self.sql_lint_tick(ui.ctx(), lint_stmt);
         let bar = splitter(ui);
         if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.inner, lo, hi) {
             self.save_prefs();
