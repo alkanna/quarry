@@ -144,10 +144,7 @@ impl App {
     /// Keeps the 10 most recently closed tabs for "Reopen closed tab" (maxClosedTabsCount,
     /// renderer line 197320).
     pub(super) fn remember_closed(&mut self, mut t: Tab) {
-        // A closed tab's script would keep writing and holding SQL locks, and its answer would never land.
-        if let Some(c) = t.shell.cancel.take() {
-            let _ = c.send(());
-        }
+        t.stop_work();
         self.closed.insert(0, t);
         self.closed.truncate(10);
     }
@@ -167,9 +164,7 @@ impl App {
         if i >= self.tabs.len() {
             return;
         }
-        let mut t = self.tabs.remove(i);
-        // A closed tab is kept for reopening; its stream must not keep reading meanwhile.
-        t.watch.stop();
+        let t = self.tabs.remove(i);
         self.remember_closed(t);
         let was_cur = self.cur == i;
         if self.cur > i || self.cur >= self.tabs.len() {
@@ -192,8 +187,11 @@ impl App {
         let was_cur = marks.get(self.cur).copied().unwrap_or(false);
         self.cur = cur_after(&marks, self.cur);
         let mut i = 0;
-        self.tabs.retain(|_| {
+        self.tabs.retain_mut(|t| {
             i += 1;
+            if marks[i - 1] {
+                t.stop_work();
+            }
             !marks[i - 1]
         });
         if was_cur {

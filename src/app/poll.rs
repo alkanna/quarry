@@ -285,13 +285,7 @@ impl App {
                 }
                 Msg::ShellLog { req, level, text } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
-                        // Every line is laid out each frame, and a logging loop can print millions, so only the latest are kept.
-                        let text = if text.len() > 2000 { text.chars().take(2000).collect() } else { text };
-                        t.shell.logs.push((level, text));
-                        if t.shell.logs.len() > 1500 {
-                            let over = t.shell.logs.len() - 1000;
-                            t.shell.logs.drain(..over);
-                        }
+                        t.shell.push_log(level, text);
                     }
                 }
                 Msg::ShellQuery { req, q } => {

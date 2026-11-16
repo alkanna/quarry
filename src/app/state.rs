@@ -2,7 +2,29 @@
 
 use super::*;
 
+impl Tab {
+    /// A tab that leaves, closed or removed, must not keep a stream reading or a script writing and holding SQL locks;
+    /// its answers would never land.
+    pub(super) fn stop_work(&mut self) {
+        self.watch.stop();
+        if let Some(c) = self.shell.cancel.take() {
+            let _ = c.send(());
+        }
+    }
+}
+
 impl ShellTab {
+    /// Every line is laid out each frame and a logging loop can print millions, so only the latest are kept, each cut short.
+    pub(super) fn push_log(&mut self, level: String, text: String) {
+        let text = if text.len() > 2000 { text.chars().take(2000).collect() } else { text };
+        self.logs.push((level, text));
+        // Trimmed in batches so a loop does not shift a thousand lines per print.
+        if self.logs.len() > 1500 {
+            let over = self.logs.len() - 1000;
+            self.logs.drain(..over);
+        }
+    }
+
     pub(super) fn set_value(&mut self, v: Bson) {
         self.count = match &v {
             Bson::Array(a) => Some(a.len()),
@@ -898,6 +920,7 @@ pub(super) enum Danger {
     /// An action on one tab's collection, run on that tab even if another became current while its dialog was open.
     At(Sel, Box<Danger>),
     DeleteMatching(db::Scope),
+    /// Never run: the placeholder left in a confirm dialog once its action is taken out.
     DropCollection,
     DropIndex(String),
     RemoveConnection(u64),

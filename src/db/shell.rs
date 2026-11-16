@@ -130,9 +130,9 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
-        std::fs::write(&installed, &package).map_err(e)?;
         note("Packages ready.");
-    } else if marker.is_none() {
+    }
+    if marker.as_deref() != Some(package.as_str()) {
         std::fs::write(&installed, &package).map_err(e)?;
     }
     Ok(())

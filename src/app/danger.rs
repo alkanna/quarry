@@ -109,11 +109,6 @@ impl App {
             Danger::DeleteMatching(s) => self.worker.delete_many(target, s),
             Danger::DropIndex(name) => self.worker.drop_index(target, name),
             Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
-            Danger::DropCollection => {
-                // The sidebar's drop also reloads the collection list, which keeps a refused drop visible.
-                let Sel { conn, db, coll, .. } = self.t().unwrap().sel.clone();
-                self.danger(Danger::DropCollAt { conn, db, coll });
-            }
             Danger::RenameMany { scope, from, to } => self.worker.rename_many(target, scope, from, to),
             Danger::UpdateMany { scope, stages } => self.worker.update_many(target, scope, stages),
             Danger::Upsert { key } => {
@@ -122,7 +117,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::At(..) | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::At(..) | Danger::DropCollection | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }
