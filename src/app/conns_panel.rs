@@ -47,6 +47,8 @@ pub(super) struct ConnsUi {
     pub(super) demo_tile_menu: Option<u64>,
     /// The rail tile drawn as a drop target with a tile carried over it, for QUARRY_TEST_RAIL=drag.
     pub(super) demo_rail_drop: Option<u64>,
+    /// The sidebar panel and hidden state the Manage tile opened the Connections panel from, which closing it goes back to.
+    pub(super) manage_back: Option<(super::config::SideMode, bool)>,
 }
 
 /// One row of the panel or of the picker.

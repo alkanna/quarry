@@ -330,7 +330,7 @@ impl App {
             Cmd::Reload if !self.tabs.is_empty() => self.reload(),
             Cmd::Explain if self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some()) => self.sql_run(false, true),
             Cmd::Explain => self.explain(),
-            Cmd::CloseTab => self.close_tab(self.cur),
+            Cmd::CloseTab => self.ask_close_tab(self.cur),
             Cmd::View(v) => self.set_view(v),
             Cmd::NewQuery => {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {

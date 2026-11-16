@@ -352,7 +352,13 @@ impl App {
                 if !one_ok {
                     f.single = false;
                 }
-                rows.row("One file", if one_ok { "A section for each statement, instead of name-1, name-2…" } else { "CSV, TSV and Values only: the others have no place for a second header" }, |ui| {
+                let hint = match f.fmt {
+                    _ if one_ok => "A section for each statement, instead of name-1, name-2…",
+                    // ponytail: one workbook per statement; a sheet per statement in one workbook if asked for.
+                    Format::Xlsx => "Excel writes a workbook for each statement",
+                    _ => "CSV, TSV and Values only: the others have no place for a second header",
+                };
+                rows.row("One file", hint, |ui| {
                     ui.add_enabled_ui(one_ok, |ui| toggle(ui, &mut f.single));
                 });
             }
@@ -394,8 +400,13 @@ impl App {
     }
 
     fn export_name(&self, src: Src) -> String {
-        // A tab bound to a saved script exports under the script's name, which says more than the table's.
-        if let Some(name) = self.t().and_then(|t| t.script.as_ref()).map(|b| match &b.r {
+        // A tab bound to a saved script exports that script's view under the script's name, which says more than the table's.
+        let view = match src {
+            Src::Query => View::Sql,
+            Src::Shell => View::Shell,
+            Src::Content => View::Documents,
+        };
+        if let Some(name) = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == view).map(|b| match &b.r {
             crate::library::ScriptRef::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             r => self.script_name(r),
         }) && let Some(name) = file_safe(&name)
@@ -435,11 +446,12 @@ impl App {
         put("Database", &t.sel.db);
         put("Schema", &t.sel.schema);
         put(if t.sql.is_some() { "Table" } else { "Collection" }, &t.sel.coll);
+        // What the rows ran with, never the bar's text, which may hold edits that did not run.
         if src == Src::Content {
-            put("Filter", &t.filter_txt);
-            put("Sort", &t.sort_txt);
+            put("Filter", &t.ran_txt[0]);
+            put("Sort", &t.ran_txt[1]);
             if t.sql.is_none() {
-                put("Projection", &t.proj_txt);
+                put("Projection", &t.ran_txt[2]);
             }
         }
         out
@@ -486,14 +498,14 @@ impl App {
             let (cols, _, _) = self.export_sheet(f.src, &rows);
             // A Query result's statement goes on the About sheet; a Content grid's filter is there already.
             let stmt = self.t().and_then(|t| t.sql.as_ref()).filter(|_| f.src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.stmt.clone());
+            let mut bytes = Vec::new();
             let book = db::xlsx::Book::new(&opts.sheet, self.xlsx_cols(f.src, &cols), opts.about).and_then(|mut b| {
                 b.rows(&rows)?;
-                b.finish(stmt.as_deref())
+                b.finish(stmt.as_deref(), &mut bytes)
             });
-            let bytes = match book {
-                Ok(b) => b,
-                Err(e) => return self.err(e),
-            };
+            if let Err(e) = book {
+                return self.err(e);
+            }
             return self.write_export(&path, &bytes, rows.len());
         }
         let text = match f.fmt {

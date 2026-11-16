@@ -55,18 +55,42 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     cmd.args(["-fsSL", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", "20", "--max-filesize", &MAX_BYTES.to_string(), "-A", "quarry"]).arg(url);
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW);
-    let out = cmd.output().map_err(|e| format!("Could not run curl: {e}"))?;
+    let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| format!("Could not run curl: {e}"))?;
+    // curl's --max-filesize cannot stop a body sent without a length, so the read itself stops past the limit.
+    let body = child.stdout.take().map(|o| capped(o)).transpose();
+    let body = match body {
+        Ok(Some(b)) => b,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
+    let out = child.wait_with_output().map_err(|e| format!("Could not run curl: {e}"))?;
     if !out.status.success() {
         return Err(format!("Could not download the image. {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    Ok(out.stdout)
+    Ok(body)
+}
+
+/// Reads at most `MAX_BYTES`, failing past it, so a stream that never ends cannot fill memory.
+fn capped(r: impl std::io::Read) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(r, MAX_BYTES + 1), &mut buf).map_err(|e| e.to_string())?;
+    if buf.len() as u64 > MAX_BYTES {
+        return Err("The image is larger than 10 MB.".into());
+    }
+    Ok(buf)
 }
 
 fn read_file(p: &std::path::Path) -> Result<Vec<u8>, String> {
-    if std::fs::metadata(p).map_err(|e| e.to_string())?.len() > MAX_BYTES {
-        return Err("The image is larger than 10 MB.".into());
+    let file = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    // A pipe or a device reports no length and never ends; only a regular file is read.
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("That is not an image file.".into());
     }
-    std::fs::read(p).map_err(|e| e.to_string())
+    capped(file)
 }
 
 /// Runs `load` and the resize off the UI thread, since a large photo takes a while to decode.

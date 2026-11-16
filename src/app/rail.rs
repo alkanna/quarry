@@ -26,9 +26,9 @@ impl App {
             self.conn_shortcuts(ui);
             self.connect_tile(ui);
             self.manage_tile(ui);
-            let mut act = None;
-            bg.context_menu(|ui| self.rail_menu(ui, &mut act));
-            if let Some(a) = act {
+            let mut acts = Vec::new();
+            bg.context_menu(|ui| self.rail_menu(ui, &mut acts));
+            for a in acts {
                 self.rail_act(a);
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -158,7 +158,10 @@ impl App {
         r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Manage connections"));
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Manage connections").clicked() {
             if on {
-                self.prefs.set_side_mode(SideMode::Explorer);
+                // Back to the panel and sidebar state Manage was opened from.
+                let (mode, hidden) = self.conns_ui.manage_back.take().unwrap_or((SideMode::Explorer, false));
+                self.prefs.set_side_mode(mode);
+                self.prefs.sidebar_hidden = hidden;
                 self.save_prefs();
             } else {
                 self.rail_act(RailAct::Manage);
@@ -172,21 +175,15 @@ impl App {
     }
 
     /// The menu of the rail's empty space.
-    fn rail_menu(&self, ui: &mut egui::Ui, act: &mut Option<RailAct>) {
-        menu_look(ui);
-        if ui.button("New connection\u{2026}").clicked() {
-            *act = Some(RailAct::New);
+    fn rail_menu(&self, ui: &mut egui::Ui, acts: &mut Vec<RailAct>) {
+        menu_list(ui);
+        menu_act(ui, acts, RailAct::New, |ui| ui.button("New connection\u{2026}"));
+        if !self.mongo_active() {
+            menu_act(ui, acts, RailAct::Cloud, |ui| ui.button("Add from Cloud SQL\u{2026}"));
         }
-        if !self.mongo_active() && ui.button("Add from Cloud SQL\u{2026}").clicked() {
-            *act = Some(RailAct::Cloud);
-        }
-        if ui.button("New group\u{2026}").clicked() {
-            *act = Some(RailAct::NewGroup);
-        }
+        menu_act(ui, acts, RailAct::NewGroup, |ui| ui.button("New group\u{2026}"));
         ui.separator();
-        if ui.button("Manage connections").clicked() {
-            *act = Some(RailAct::Manage);
-        }
+        menu_act(ui, acts, RailAct::Manage, |ui| ui.button("Manage connections"));
     }
 
     fn rail_act(&mut self, a: RailAct) {
@@ -194,6 +191,9 @@ impl App {
             RailAct::New => self.new_conn_modal(),
             RailAct::Cloud => self.open_cloud_browser(false),
             RailAct::Manage | RailAct::NewGroup => {
+                if !self.manages() {
+                    self.conns_ui.manage_back = Some((self.prefs.side_mode(), self.prefs.sidebar_hidden));
+                }
                 self.prefs.set_side_mode(SideMode::Connections);
                 self.prefs.sidebar_hidden = false;
                 self.save_prefs();

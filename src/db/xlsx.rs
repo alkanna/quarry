@@ -42,6 +42,7 @@ struct Formats {
     /// An id or a year: no thousands separator.
     plain_int: Format,
     general: Format,
+    boolean: Format,
     /// DECIMAL by its number of decimals, 0 to 10.
     dec: Vec<Format>,
     date: Format,
@@ -58,6 +59,7 @@ impl Formats {
             int: Format::new().set_num_format("#,##0"),
             plain_int: Format::new().set_num_format("0"),
             general: Format::new(),
+            boolean: Format::new().set_align(FormatAlign::Center),
             dec: (0..=10).map(|n| Format::new().set_num_format(if n == 0 { "#,##0".to_string() } else { format!("#,##0.{}", "0".repeat(n)) })).collect(),
             date: Format::new().set_num_format("yyyy-mm-dd").set_align(FormatAlign::Left),
             datetime: Format::new().set_num_format("yyyy-mm-dd hh:mm:ss").set_align(FormatAlign::Left),
@@ -169,129 +171,33 @@ impl Book {
         Ok(Book { wb, cols, plain, widths, row: 1, f, about })
     }
 
-    fn sheet(&mut self) -> Result<&mut Worksheet, String> {
-        self.wb.worksheet_from_index(0).map_err(err)
-    }
-
     pub fn rows(&mut self, rows: &[Document]) -> Result<(), String> {
         if self.row as usize + rows.len() > MAX_ROWS as usize {
             return Err("The result has more rows than an Excel sheet holds (1,048,576). Export it as CSV instead.".into());
         }
+        // Split borrows: the sheet is written while the formats and columns are read, so nothing is cloned per cell.
+        let Book { wb, cols, plain, widths, row, f, .. } = self;
+        let ws = wb.worksheet_from_index(0).map_err(err)?;
         for d in rows {
-            for i in 0..self.cols.len() {
+            for (i, c) in cols.iter().enumerate() {
                 // A SQL column can hold a dot in its name, so the exact key wins over a path.
-                let name = &self.cols[i].name;
-                let v = d.get(name).or_else(|| super::get_path(d, name)).cloned();
-                let w = self.cell(i, v.as_ref())?;
-                self.widths[i] = self.widths[i].max(w);
+                let v = d.get(&c.name).or_else(|| super::get_path(d, &c.name));
+                let w = cell(ws, f, *row, i as u16, c.kind, plain[i], v)?;
+                widths[i] = widths[i].max(w);
             }
-            self.row += 1;
+            *row += 1;
         }
         Ok(())
     }
 
-    fn text(&mut self, c: usize, s: &str, mono: bool) -> Result<usize, String> {
-        let r = self.row;
-        let s: String = s.chars().take(MAX_CELL).collect();
-        let n = s.chars().count();
-        let f = if mono { self.f.mono.clone() } else { self.f.text.clone() };
-        self.sheet()?.write_string_with_format(r, c as u16, s, &f).map_err(err)?;
-        Ok(n)
-    }
-
-    fn number(&mut self, c: usize, v: f64, f: Format, w: usize) -> Result<usize, String> {
-        let r = self.row;
-        self.sheet()?.write_number_with_format(r, c as u16, v, &f).map_err(err)?;
-        Ok(w)
-    }
-
-    fn int(&mut self, c: usize, n: i64) -> Result<usize, String> {
-        if n.abs() > EXACT {
-            return self.text(c, &n.to_string(), false);
-        }
-        let plain = self.plain[c];
-        let len = n.to_string().len();
-        let f = if plain { self.f.plain_int.clone() } else { self.f.int.clone() };
-        self.number(c, n as f64, f, if plain { len } else { len + len / 3 })
-    }
-
-    /// DECIMAL text: a number with as many decimals as the value has, or text when Excel would lose digits of it.
-    fn decimal(&mut self, c: usize, s: &str) -> Result<usize, String> {
-        let s = s.trim();
-        match s.parse::<f64>() {
-            Ok(v) if v.is_finite() && significant(s) <= 15 => {
-                let scale = s.split_once('.').map_or(0, |(_, d)| d.len()).min(10);
-                let f = self.f.dec[scale].clone();
-                self.number(c, v, f, s.len() + s.len() / 3)
-            }
-            _ => self.text(c, s, false),
-        }
-    }
-
-    fn date(&mut self, c: usize, s: &str) -> Result<usize, String> {
-        match parse_date(s) {
-            Some((dt, time)) => {
-                let r = self.row;
-                let f = if time { self.f.datetime.clone() } else { self.f.date.clone() };
-                self.sheet()?.write_datetime_with_format(r, c as u16, &dt, &f).map_err(err)?;
-                Ok(if time { 19 } else { 10 })
-            }
-            None => self.text(c, s, false),
-        }
-    }
-
-    fn time(&mut self, c: usize, s: &str) -> Result<usize, String> {
-        match hms(s.trim()).and_then(|(h, m, sec)| ExcelDateTime::from_hms(h, m, sec).ok()) {
-            Some(t) => {
-                let (r, f) = (self.row, self.f.time.clone());
-                self.sheet()?.write_datetime_with_format(r, c as u16, &t, &f).map_err(err)?;
-                Ok(8)
-            }
-            // A MySQL TIME can be a duration past 24 hours or negative, which is not a time of day.
-            None => self.text(c, s, false),
-        }
-    }
-
-    /// Writes one cell and returns how many characters wide it reads.
-    fn cell(&mut self, c: usize, v: Option<&Bson>) -> Result<usize, String> {
-        let kind = self.cols[c].kind;
-        match v {
-            None | Some(Bson::Null | Bson::Undefined) => Ok(0),
-            Some(Bson::Boolean(b)) => {
-                let r = self.row;
-                let f = self.f.general.clone().set_align(FormatAlign::Center);
-                self.sheet()?.write_boolean_with_format(r, c as u16, *b, &f).map_err(err)?;
-                Ok(5)
-            }
-            Some(Bson::Int32(n)) => self.int(c, i64::from(*n)),
-            Some(Bson::Int64(n)) => self.int(c, *n),
-            Some(Bson::Double(v)) if v.is_finite() => {
-                let f = self.f.general.clone();
-                self.number(c, *v, f, v.to_string().len().min(15))
-            }
-            Some(Bson::Decimal128(d)) => self.decimal(c, &d.to_string()),
-            Some(Bson::DateTime(t)) => self.date(c, &t.try_to_rfc3339_string().unwrap_or_default()),
-            Some(Bson::ObjectId(o)) => self.text(c, &o.to_hex(), true),
-            Some(Bson::Binary(b)) => self.text(c, &format!("0x{}", super::sql::value::hex_digits(&b.bytes, true)), true),
-            Some(Bson::String(s)) => match kind {
-                Some(Kind::Decimal) => self.decimal(c, s),
-                Some(Kind::Date | Kind::DateTime) => self.date(c, s),
-                Some(Kind::Time) => self.time(c, s),
-                Some(Kind::Json | Kind::Uuid | Kind::Array | Kind::Inet | Kind::Range | Kind::Interval | Kind::Bit | Kind::Geometry) => self.text(c, s, true),
-                _ => self.text(c, s, false),
-            },
-            Some(other) => self.text(c, &super::compact(other), true),
-        }
-    }
-
-    /// The finished file. `stmt` is the statement the rows came from, for the About sheet.
-    pub fn finish(mut self, stmt: Option<&str>) -> Result<Vec<u8>, String> {
+    /// Writes the finished file to `out`. The workbook is saved to a temporary file and copied over, so even a large
+    /// one never sits whole in memory. `stmt` is the statement the rows came from, for the About sheet.
+    pub fn finish(mut self, stmt: Option<&str>, out: &mut dyn std::io::Write) -> Result<(), String> {
         let n = self.cols.len();
         let rows = self.row - 1;
-        let widths = std::mem::take(&mut self.widths);
         let headers: Vec<TableColumn> = self.cols.iter().map(|c| TableColumn::new().set_header(&c.name)).collect();
         {
-            let ws = self.sheet()?;
+            let ws = self.wb.worksheet_from_index(0).map_err(err)?;
             if n > 0 {
                 // A table needs a data row, so an empty result gets an empty one.
                 let last = rows.max(1);
@@ -305,7 +211,7 @@ impl Book {
                 }
                 let band = ConditionalFormatFormula::new().set_rule("=MOD(ROW(),2)=1").set_format(Format::new().set_background_color(Color::RGB(BAND)));
                 ws.add_conditional_format(1, 0, last, last_col, &band).map_err(err)?;
-                for (i, w) in widths.iter().enumerate() {
+                for (i, w) in self.widths.iter().enumerate() {
                     ws.set_column_width(i as u16, (*w).clamp(6, MAX_W) as f64 + 2.0).map_err(err)?;
                 }
             }
@@ -315,7 +221,14 @@ impl Book {
         if let Some(lines) = self.about.take() {
             self.about_sheet(lines, rows, stmt)?;
         }
-        self.wb.save_to_buffer().map_err(err)
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let tmp = std::env::temp_dir().join(format!("quarry-{}-{nanos}.xlsx", std::process::id()));
+        let copied = self.wb.save(&tmp).map_err(err).and_then(|_| {
+            let mut file = std::fs::File::open(&tmp).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, out).map(drop).map_err(|e| format!("Could not write the workbook: {e}"))
+        });
+        let _ = std::fs::remove_file(&tmp);
+        copied
     }
 
     fn about_sheet(&mut self, lines: Vec<(String, String)>, rows: u32, stmt: Option<&str>) -> Result<(), String> {
@@ -347,6 +260,76 @@ impl Book {
             ws.write_string_with_format(r, 1, s.trim().chars().take(MAX_CELL).collect::<String>(), &Format::new().set_font_name(MONO).set_text_wrap().set_align(FormatAlign::Top)).map_err(err)?;
         }
         Ok(())
+    }
+}
+
+/// Writes one cell of `row` and returns how many characters wide it reads. `plain` leaves out the thousands separator.
+fn cell(ws: &mut Worksheet, f: &Formats, row: u32, c: u16, kind: Option<Kind>, plain: bool, v: Option<&Bson>) -> Result<usize, String> {
+    let text = |ws: &mut Worksheet, s: &str, mono: bool| -> Result<usize, String> {
+        let s: String = s.chars().take(MAX_CELL).collect();
+        let n = s.chars().count();
+        ws.write_string_with_format(row, c, s, if mono { &f.mono } else { &f.text }).map_err(err)?;
+        Ok(n)
+    };
+    let number = |ws: &mut Worksheet, v: f64, fmt: &Format, w: usize| -> Result<usize, String> {
+        ws.write_number_with_format(row, c, v, fmt).map_err(err)?;
+        Ok(w)
+    };
+    let int = |ws: &mut Worksheet, n: i64| -> Result<usize, String> {
+        if n.unsigned_abs() > EXACT as u64 {
+            return text(ws, &n.to_string(), false);
+        }
+        let len = n.to_string().len();
+        if plain { number(ws, n as f64, &f.plain_int, len) } else { number(ws, n as f64, &f.int, len + len / 3) }
+    };
+    // DECIMAL text: a number with as many decimals as the value has, or text when Excel would lose digits of it.
+    let decimal = |ws: &mut Worksheet, s: &str| -> Result<usize, String> {
+        let s = s.trim();
+        match s.parse::<f64>() {
+            Ok(v) if v.is_finite() && significant(s) <= 15 => {
+                let scale = s.split_once('.').map_or(0, |(_, d)| d.len()).min(10);
+                number(ws, v, &f.dec[scale], s.len() + s.len() / 3)
+            }
+            _ => text(ws, s, false),
+        }
+    };
+    let date = |ws: &mut Worksheet, s: &str| -> Result<usize, String> {
+        match parse_date(s) {
+            Some((dt, time)) => {
+                ws.write_datetime_with_format(row, c, &dt, if time { &f.datetime } else { &f.date }).map_err(err)?;
+                Ok(if time { 19 } else { 10 })
+            }
+            None => text(ws, s, false),
+        }
+    };
+    match v {
+        None | Some(Bson::Null | Bson::Undefined) => Ok(0),
+        Some(Bson::Boolean(b)) => {
+            ws.write_boolean_with_format(row, c, *b, &f.boolean).map_err(err)?;
+            Ok(5)
+        }
+        Some(Bson::Int32(n)) => int(ws, i64::from(*n)),
+        Some(Bson::Int64(n)) => int(ws, *n),
+        Some(Bson::Double(v)) if v.is_finite() => number(ws, *v, &f.general, v.to_string().len().min(15)),
+        Some(Bson::Decimal128(d)) => decimal(ws, &d.to_string()),
+        Some(Bson::DateTime(t)) => date(ws, &t.try_to_rfc3339_string().unwrap_or_default()),
+        Some(Bson::ObjectId(o)) => text(ws, &o.to_hex(), true),
+        Some(Bson::Binary(b)) => text(ws, &format!("0x{}", super::sql::value::hex_digits(&b.bytes, true)), true),
+        Some(Bson::String(s)) => match kind {
+            Some(Kind::Decimal) => decimal(ws, s),
+            Some(Kind::Date | Kind::DateTime) => date(ws, s),
+            Some(Kind::Time) => match hms(s.trim()).and_then(|(h, m, sec)| ExcelDateTime::from_hms(h, m, sec).ok()) {
+                Some(t) => {
+                    ws.write_datetime_with_format(row, c, &t, &f.time).map_err(err)?;
+                    Ok(8)
+                }
+                // A MySQL TIME can be a duration past 24 hours or negative, which is not a time of day.
+                None => text(ws, s, false),
+            },
+            Some(Kind::Json | Kind::Uuid | Kind::Array | Kind::Inet | Kind::Range | Kind::Interval | Kind::Bit | Kind::Geometry) => text(ws, s, true),
+            _ => text(ws, s, false),
+        },
+        Some(other) => text(ws, &super::compact(other), true),
     }
 }
 
@@ -390,7 +373,9 @@ mod tests {
         let cols = cols.into_iter().map(|(n, k)| XCol { name: n.into(), kind: k }).collect();
         let mut b = Book::new("orders", cols, Some(vec![("Table".into(), "orders".into())])).unwrap();
         b.rows(&[doc! { "id": 10421_i64, "total": "1284.50", "at": "2026-11-14 09:32:00", "paid": true, "note": Bson::Null, "big": "12345678901234567.5" }, doc! { "id": 10422_i64, "total": "89.90", "at": "0000-00-00 00:00:00", "paid": false, "note": "door" }]).unwrap();
-        let p = parts(&b.finish(Some("SELECT * FROM orders")).unwrap());
+        let mut bytes = Vec::new();
+        b.finish(Some("SELECT * FROM orders"), &mut bytes).unwrap();
+        let p = parts(&bytes);
         let sheet = &p["xl/worksheets/sheet1.xml"];
         // Numbers and dates are numeric cells, booleans are b cells, text is inline text.
         assert!(sheet.contains("<v>10421</v>") && sheet.contains("<v>1284.5</v>"), "{sheet}");

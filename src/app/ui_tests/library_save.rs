@@ -337,8 +337,7 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
     let a = ui.h.state_mut();
     let c = a.cur;
-    // Unbound, since opening a script already in a tab only switches to that tab.
-    (a.tabs[c].filter_txt, a.tabs[c].sort_txt, a.tabs[c].script) = (String::new(), String::new(), None);
+    (a.tabs[c].filter_txt, a.tabs[c].sort_txt) = (String::new(), String::new());
     a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
     ui.settle();
     let t = ui.app().t().unwrap();
@@ -360,4 +359,23 @@ fn saving_a_query_from_a_table_tab_turns_it_into_a_query_tab() {
     let t = ui.app().t().unwrap();
     assert!(t.script.is_some() && t.sel.coll.is_empty(), "the bound tab kept its table");
     assert!(ui.h.query_all_by_label("Structure").next().is_none(), "the table's views still show");
+}
+
+#[test]
+fn closing_a_tab_with_unsaved_script_changes_asks_first() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    ui.click("Save");
+    let n = ui.app().tabs.len();
+    set_query(&mut ui, "SELECT 2");
+    ui.settle();
+    ui.key(CMD, egui::Key::W);
+    assert!(matches!(ui.app().modal, Some(Modal::CloseEdited(_))), "an edited script closed without asking");
+    ui.click("Cancel");
+    assert_eq!(ui.app().tabs.len(), n);
+    ui.key(CMD, egui::Key::W);
+    ui.click("Save and close");
+    assert_eq!(ui.app().tabs.len(), n - 1);
+    assert_eq!(ui.app().library.scripts[0].body, "SELECT 2", "Save and close did not save");
 }

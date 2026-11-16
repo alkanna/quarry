@@ -149,7 +149,7 @@ impl App {
         self.worker.blocking(move || db::Msg::LibFile { job: id, out: work() });
     }
 
-    fn tab_by_uid(&self, uid: u64) -> Option<usize> {
+    pub(in crate::app) fn tab_by_uid(&self, uid: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.uid == uid)
     }
 

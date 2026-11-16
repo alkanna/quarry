@@ -166,10 +166,10 @@ impl Out {
         }
     }
 
-    fn end(self, stmt: &str) -> Res<Vec<u8>> {
+    fn end(self, stmt: &str, out: &mut (dyn Write + Send)) -> Res<()> {
         match self {
-            Out::Text(mut w) => Ok(w.end().into_bytes()),
-            Out::Xlsx(b) => b.finish(Some(stmt)),
+            Out::Text(mut w) => out.write_all(w.end().as_bytes()).map_err(write_err),
+            Out::Xlsx(b) => b.finish(Some(stmt), out),
         }
     }
 }
@@ -236,7 +236,7 @@ async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan:
         out.write_all(w.rows(&batch, &fix)?.as_bytes()).map_err(io)?;
         rows += batch.len() as u64;
         count.store(wrap.base + rows, Ordering::Relaxed);
-        out.write_all(&w.end(stmt)?).map_err(io)?;
+        w.end(stmt, out)?;
     }
     Ok(Some((rows, peak)))
 }
@@ -409,6 +409,10 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
             return Err(x);
         }
     };
+    // A script with one result keeps the name picked for it, without the number that tells several apart.
+    if let [(_, fin)] = parts.as_mut_slice() {
+        *fin = path.to_path_buf();
+    }
     for (i, (tmp, fin)) in parts.iter().enumerate() {
         if let Err(x) = std::fs::rename(tmp, fin) {
             parts[i..].iter().for_each(|p| drop(std::fs::remove_file(&p.0)));

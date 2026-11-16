@@ -993,6 +993,8 @@ pub(super) enum Modal {
     Attach(Box<super::shell_attach::AttachForm>),
     /// Edit a connection group.
     GroupEdit(Box<super::group_dialog::GroupForm>),
+    /// Close the tab with this uid, whose script changes are not saved.
+    CloseEdited(u64),
     /// Pick a custom rail icon for a connection.
     ConnIcon(Box<super::conn_icon::IconForm>),
     /// Save the current script to the library.

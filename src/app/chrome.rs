@@ -94,7 +94,7 @@ impl App {
             self.reopen_tab();
         }
         if k(cmd, Key::W) {
-            self.close_tab(self.cur);
+            self.ask_close_tab(self.cur);
         }
         if k(cmd, Key::K) {
             self.open_palette();
@@ -714,7 +714,7 @@ impl App {
             self.set_cur(self.cur);
             self.reset_doc_state();
         } else if let Some(i) = close {
-            self.close_tab(i);
+            self.ask_close_tab(i);
         } else if let Some(i) = pick {
             self.go_tab(i);
         }
