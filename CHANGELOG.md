@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.53.0](https://github.com/alkanna/quarry/compare/v0.52.1...v0.53.0) (2026-11-16)
+
+
+### Features
+
+* Linux can use the header as title bar, switched in Settings &gt; Appearance ([#263](https://github.com/alkanna/quarry/issues/263)) ([18aa1c7](https://github.com/alkanna/quarry/commit/18aa1c79483995ecc6304632e34312793477e254))
+* the memory tooltip breaks the total down by what holds it, with the system's own figures on every platform ([#270](https://github.com/alkanna/quarry/issues/270)) ([4550594](https://github.com/alkanna/quarry/commit/4550594211e6c8c81121827fec1605d91f083f2f))
+
+
+### Bug Fixes
+
+* a rail group with one open connection shows that tile instead of a closed folder ([#268](https://github.com/alkanna/quarry/issues/268)) ([50e4e6b](https://github.com/alkanna/quarry/commit/50e4e6bab5a45e2aae4e86e4581e641e33f00079))
+
 ## [0.52.1](https://github.com/alkanna/quarry/compare/v0.52.0...v0.52.1) (2026-11-16)
 
 
