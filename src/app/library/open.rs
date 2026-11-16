@@ -272,6 +272,12 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
+        // A script already open in a tab is switched to: a second copy comes only from New tab or a duplicated tab.
+        if how == How::Here
+            && let Some(i) = self.tabs.iter().position(|t| t.script.as_ref().is_some_and(|b| &b.r == r))
+        {
+            return self.set_cur(i);
+        }
         match self.script_target(r) {
             Target::On(c) => self.open_script_on(r, how, c),
             Target::Ask(conns) => {

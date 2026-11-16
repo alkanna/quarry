@@ -337,7 +337,8 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
     let a = ui.h.state_mut();
     let c = a.cur;
-    (a.tabs[c].filter_txt, a.tabs[c].sort_txt) = (String::new(), String::new());
+    // Unbound, since opening a script already in a tab only switches to that tab.
+    (a.tabs[c].filter_txt, a.tabs[c].sort_txt, a.tabs[c].script) = (String::new(), String::new(), None);
     a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
     ui.settle();
     let t = ui.app().t().unwrap();
