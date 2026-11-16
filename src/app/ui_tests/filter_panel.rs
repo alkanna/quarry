@@ -163,3 +163,37 @@ fn the_filter_demo_views_draw() {
         }
     }
 }
+
+/// A row wider than the panel pushes the SQL pane and Apply off the window, so every demo view checks they are on it.
+#[test]
+fn the_panel_fits_the_window_on_every_demo_view() {
+    for which in ["filters", "filters-cells", "filters-ops"] {
+        for pg in [false, true] {
+            let Some(mut ui) = demo_ui(|_| {}) else { return };
+            if pg {
+                ui.h.state_mut().pg_demo(which);
+            } else {
+                ui.h.state_mut().sql_demo(which);
+            }
+            ui.settle();
+            let screen = ui.h.ctx.content_rect();
+            for label in ["Apply", "Edit as SQL"] {
+                let r = ui.h.get_by_label(label).rect();
+                assert!(screen.contains_rect(r), "{which} ({}): {label} at {r:?} is outside the window {screen:?}", if pg { "PostgreSQL" } else { "MySQL" });
+            }
+        }
+    }
+}
+
+#[test]
+fn a_row_dragged_onto_a_group_header_moves_into_the_group() {
+    let Some(mut ui) = opened() else { return };
+    ui.click("+ Group");
+    ui.settle();
+    let status = bar(&ui).tree.rows_in_order()[0];
+    ui.drag("Condition status", "Group", 0.5, 2);
+    let b = bar(&ui);
+    let group = b.tree.root.kids.iter().find_map(|n| matches!(n.item, Item::Group(_)).then_some(n.id)).expect("the group");
+    assert_eq!(b.tree.parent_of(status), Some(group), "the row did not land in the group");
+    assert_eq!(filter_txt(&ui), "`total` > 50 AND (`status` = 'paid')", "the new row of the group is not complete, so only the moved one writes SQL");
+}

@@ -89,6 +89,8 @@ pub(in crate::app) struct Panel {
     pub(in crate::app) hover: Option<u32>,
     pub(in crate::app) hover_count: Count,
     pub(in crate::app) hover_cache: HashMap<String, Counted>,
+    /// The table the counts are for, since a tab can move to another one.
+    pub(in crate::app) table: String,
 }
 
 impl Panel {
@@ -140,6 +142,15 @@ impl Panel {
     pub(in crate::app) fn toggle(&mut self, ctx: &egui::Context) {
         self.open = !self.open;
         fold::start(ctx, fold_id(), self.open);
+        // The rows may have changed while it was closed, so counts are asked again.
+        if self.open {
+            self.forget_counts();
+        }
+    }
+
+    pub(in crate::app) fn forget_counts(&mut self) {
+        (self.count, self.hover_count) = (Count::default(), Count::default());
+        self.hover_cache.clear();
     }
 
     /// Opens the panel, if it is not, on node `at`.
@@ -206,6 +217,8 @@ enum Act {
     Toggle(u32),
     /// A row, or a group holding one, added at the end of a group (0 the root).
     Add(u32, bool),
+    /// A row added right after this one.
+    After(u32),
     Duplicate(u32),
     Negate(u32),
     Wrap(u32),
@@ -319,7 +332,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
     for a in acts {
         match a {
             Act::Remove(id) => {
-                // The selection moves on to the next row, so ⌘⌫ can be pressed again.
+                // The selection moves on to the next row, so Cmd+Backspace can be pressed again.
                 let order = tree.rows_in_order();
                 let next = order.iter().position(|x| *x == id).and_then(|i| order.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| order.get(j)))).copied();
                 tree.remove(id);
@@ -331,6 +344,12 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                 tree.toggle(id);
             }
             Act::Add(parent, group) => add(tree, p, parent, group, cols, d),
+            Act::After(id) => {
+                if let Some(c) = cols.first() {
+                    let new = tree.insert_after(id, Item::Cond(Cond { rule: Rule::new(&c.name, c.kind, d), on: true }));
+                    (p.sel, p.pick) = (new, new);
+                }
+            }
             Act::Duplicate(id) => p.sel = tree.duplicate(id).or(p.sel),
             Act::Negate(id) => {
                 tree.negate(id, d);
@@ -476,8 +495,8 @@ fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
     };
     let group = matches!(tree.find(sel).map(|n| &n.item), Some(Item::Group(_)));
     if enter {
-        // A row is followed by a new one in its group; a group gets one at its end.
-        acts.push(Act::Add(if group { sel } else { tree.parent_of(sel).unwrap_or(0) }, false));
+        // A row is followed by a new one; a group gets one at its end.
+        acts.push(if group { Act::Add(sel, false) } else { Act::After(sel) });
     }
     if space && !group {
         acts.push(Act::Toggle(sel));
@@ -505,6 +524,8 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
     out.targets.push(Target { rect, ..at });
     // Registered before the cells, so they take the clicks and drags they are under; the rest of the row is the handle.
     let bg = ui.interact(rect, row_salt(id).with("row"), Sense::click_and_drag());
+    let name = format!("Condition {}", c.rule.col);
+    bg.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, &name));
     let ghost = format!("{} {}", c.rule.col, crate::db::sql::rules::label(c.rule.op, c.rule.kind));
     drag_source_with(ui, &bg, FilterDrag(id), |p, r| {
         p.text(r.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, &ghost, FontId::monospace(TXT_SMALL), TEXT());
@@ -530,6 +551,9 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
         p.pick = None;
     }
     let ops = p.ops == Some(id);
+    if ops {
+        p.ops = None;
+    }
     // The menu at the right end is drawn in a child that takes no room, and the cells stop before it.
     let end = egui::Rect::from_min_max(egui::pos2(rect.right() - 6.0 - BUTTON_H, rect.top()), egui::pos2(rect.right() - 6.0, rect.bottom()));
     let mut menu = ui.new_child(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -591,6 +615,7 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, at: Target, p: &mut Panel, cx
         out.targets.push(Target { rect: head, kind: Place::Head(id), ..at });
         // The header's empty part drags the group and selects it, under its controls like a row's background.
         let bg = ui.interact(head, row_salt(id).with("head"), Sense::click_and_drag());
+        bg.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, "Group"));
         drag_source_with(ui, &bg, FilterDrag(id), |p, r| {
             p.text(r.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "group", FontId::monospace(TXT_SMALL), TEXT());
         });

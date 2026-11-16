@@ -326,7 +326,9 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
     let entered = |ui: &egui::Ui, r: &egui::Response| r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     // Booleans pick true, false or null instead of typing.
     if r.kind == Kind::Bool && matches!(r.op, Op::Eq | Op::IsNull) {
-        let mut v = if r.op == Op::IsNull { 2 } else if r.values.first().is_some_and(|v| v.trim().eq_ignore_ascii_case("false")) { 1 } else { 0 };
+        // Nothing is picked until a value is written; f and 0 are false as the drill of a group writes them.
+        let cur = r.values.first().map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+        let mut v = if r.op == Op::IsNull { 2 } else if matches!(cur.as_str(), "false" | "f" | "0") { 1 } else if cur.is_empty() { 3 } else { 0 };
         let before = v;
         segmented(ui, &mut v, &[(0, "true"), (1, "false"), (2, "null")]);
         if v != before {
@@ -421,14 +423,23 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
             let a = ui.add(mono_edit(&mut r.values[0], 44.0, "7").id(salt.with("v0")));
             changed |= a.changed();
             enter |= entered(ui, &a);
-            let mut unit = rules::UNITS.iter().position(|u| *u == r.values[1]).unwrap_or(1);
-            let before = unit;
-            let opts: Vec<(usize, &str)> = rules::UNITS.iter().enumerate().map(|(i, u)| (i, *u)).collect();
-            segmented(ui, &mut unit, &opts);
-            if unit != before || !rules::UNITS.contains(&r.values[1].as_str()) {
-                r.values[1] = rules::UNITS[unit].to_string();
+            if !rules::UNITS.contains(&r.values[1].as_str()) {
+                r.values[1] = "days".into();
                 changed = true;
             }
+            // A menu, not a segmented control: the row has the date shortcuts to fit too.
+            let cur = r.values[1].clone();
+            let u = pill_combo(ui, &cur, "", combo_w(ui, &cur, "", 70.0), TEXT());
+            egui::Popup::menu(&u).width(120.0).show(|ui| {
+                menu_look(ui);
+                for unit in rules::UNITS {
+                    if menu_row(ui, unit, TEXT(), unit == cur, "").clicked() {
+                        r.values[1] = unit.to_string();
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
         }
         Input::Column => {
             let dates: Vec<Col> = cols.iter().filter(|c| rules::group_of(c.kind) == rules::Group::Date && c.name != r.col).cloned().collect();
@@ -453,15 +464,33 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
             changed = true;
         }
     }
-    // Dates: the common ranges as pills beside the operator's own cells.
+    // Dates: the common ranges as pills where the operator has no cells of its own, and as a menu beside cells that take
+    // the room, so the row stays inside the panel.
     if date && matches!(r.op, Op::Today | Op::Yesterday | Op::Last | Op::ThisMonth | Op::LastMonth | Op::Between | Op::ThisWeek) {
-        for (name, op, values) in DATE_PILLS {
-            let on = r.op == op && (op != Op::Last || r.values.first().is_some_and(|v| v == "7") && r.values.get(1).is_some_and(|u| u == "days"));
-            if text_pill(ui, name, on).clicked() && !on {
-                set_op(r, op, d);
-                r.values = values.iter().map(|v| v.to_string()).collect();
-                changed = true;
+        let on = |op: Op| r.op == op && (op != Op::Last || r.values.first().is_some_and(|v| v == "7") && r.values.get(1).is_some_and(|u| u == "days"));
+        let mut pick = None;
+        if rules::input(r.op) == Input::None {
+            for (name, op, values) in DATE_PILLS {
+                if text_pill(ui, name, on(op)).clicked() && !on(op) {
+                    pick = Some((op, values));
+                }
             }
+        } else {
+            let m = pill_combo(ui, "presets", "", 84.0, MUTED());
+            egui::Popup::menu(&m).width(150.0).show(|ui| {
+                menu_look(ui);
+                for (name, op, values) in DATE_PILLS {
+                    if menu_row(ui, name, TEXT(), on(op), "").clicked() {
+                        pick = Some((op, values));
+                        ui.close();
+                    }
+                }
+            });
+        }
+        if let Some((op, values)) = pick {
+            set_op(r, op, d);
+            r.values = values.iter().map(|v| v.to_string()).collect();
+            changed = true;
         }
     }
     (changed, enter)

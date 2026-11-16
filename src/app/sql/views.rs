@@ -95,6 +95,10 @@ impl App {
         let text = t.filter_txt.clone();
         let Some(s) = t.sql.as_mut().filter(|s| s.bar.panel.open && !s.bar.c.sql) else { return };
         let p = &mut s.bar.panel;
+        if p.table != table {
+            p.forget_counts();
+            p.table = table.to_string();
+        }
         match p.count.tick(&text, now) {
             Tick::Ask => {
                 self.req += 1;

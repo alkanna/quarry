@@ -171,7 +171,8 @@ fn expr(t: &[T], cols: &[(String, Kind)], d: Dialect, depth: usize) -> Option<It
     if depth > DEPTH {
         return None;
     }
-    if let Some(rule) = rule_of(t, cols, d) {
+    // A rule the column does not offer is a group the writer wrote, such as NOT IN and IS NULL in an any group on an enum.
+    if let Some(rule) = rule_of(t, cols, d).filter(|r| ops_for(r.kind, d).contains(&r.op)) {
         return Some(Item::Cond(Cond { rule, on: true }));
     }
     if let [n, T::P('('), ..] = t
@@ -316,6 +317,7 @@ fn number(b: &mut Block, next: &mut u32) {
 
 impl Tree {
     /// A tree of `root` with fresh ids.
+    #[cfg(test)]
     pub fn new(root: Block) -> Tree {
         let mut t = Tree { root, next: 0 };
         t.renumber();
@@ -626,6 +628,8 @@ mod tests {
                 tree(Match::All, vec![group(Match::Any, vec![a(d), b(d)])]),
                 tree(Match::All, vec![a(d), group(Match::All, vec![b(d)])]),
                 tree(Match::All, vec![a(d), group(Match::None, vec![b(d)])]),
+                // Spelled like the NOT IN ... OR NULL rule, which an enum column does not offer.
+                tree(Match::All, vec![a(d), group(Match::Any, vec![cond("status", Kind::Enum, Op::NotIn, &["a"], d), cond("status", Kind::Enum, Op::IsNull, &[], d)])]),
             ];
             for t in shapes {
                 let sql = to_sql(&t, d, false);
