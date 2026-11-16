@@ -286,7 +286,7 @@ impl App {
                 Msg::ShellLog { req, level, text } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
                         // Every line is laid out each frame, and a logging loop can print millions, so only the latest are kept.
-                        let text = if text.len() > 20_000 { text.chars().take(20_000).collect() } else { text };
+                        let text = if text.len() > 2000 { text.chars().take(2000).collect() } else { text };
                         t.shell.logs.push((level, text));
                         if t.shell.logs.len() > 1500 {
                             let over = t.shell.logs.len() - 1000;
@@ -599,6 +599,7 @@ impl App {
         let t = &mut self.tabs[i];
         t.rows_replaced();
         t.loading = false;
+        t.count_approx = approx;
         match res {
             Ok((docs, count, ms)) => {
                 // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
@@ -636,7 +637,7 @@ impl App {
                 t.expanded.retain(|e| e.0);
                 t.expanded.extend(open.into_iter().map(|i| (false, i)));
                 t.docs = docs;
-                (t.count, t.count_approx) = (count, approx);
+                t.count = count;
                 t.ms = ms;
                 if matches!(t.selected, Some((false, i)) if i >= t.docs.len()) {
                     t.selected = None;

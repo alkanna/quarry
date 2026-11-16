@@ -270,55 +270,59 @@ impl Worker {
                 let start = Instant::now();
                 let c = t.c();
                 let (hint, co) = (q.driver_hint(), q.driver_collation()?);
+                let offset = page * size;
                 // An empty filter on a huge collection is the common case; the estimate is instant.
-                let count = if q.filter.is_empty() {
-                    c.estimated_document_count().max_time(t.timeout).await
-                } else {
-                    let mut n = c.count_documents(q.filter.clone()).max_time(t.timeout);
+                let counting = async {
+                    if q.filter.is_empty() {
+                        c.estimated_document_count().max_time(t.timeout).await
+                    } else {
+                        let mut n = c.count_documents(q.filter.clone()).max_time(t.timeout);
+                        if let Some(h) = hint.clone() {
+                            n = n.hint(h);
+                        }
+                        if let Some(co) = co.clone() {
+                            n = n.collation(co);
+                        }
+                        n.await
+                    }
+                };
+                // Read as BSON bytes: the page is kept that way, see `Row`. One row past the page says whether another
+                // follows when the count runs out of time.
+                let reading = async {
+                    let take = q.limit.map_or(size + 1, |l| l.saturating_sub(offset).min(size + 1)).max(1);
+                    let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
+                    let mut f = raw.find(q.filter.clone()).skip(q.skip.saturating_add(offset)).limit(take as i64).max_time(t.timeout);
                     if let Some(h) = hint.clone() {
-                        n = n.hint(h);
+                        f = f.hint(h);
                     }
                     if let Some(co) = co.clone() {
-                        n = n.collation(co);
+                        f = f.collation(co);
                     }
-                    n.await
+                    if let Some(s) = q.sort.clone() {
+                        f = f.sort(s);
+                    }
+                    if let Some(p) = q.projection.clone() {
+                        f = f.projection(p);
+                    }
+                    f.await.map_err(e)?.map_ok(Row::from_raw).try_collect::<Vec<Row>>().await.map_err(e)
                 };
-                // An unindexed filter on a huge collection can count past the time limit while the page itself is
-                // instant. The page is read then with one extra row, which tells whether another page follows.
-                let known = match count {
-                    Ok(n) => Some(q.limit.map_or(n.saturating_sub(q.skip), |l| n.saturating_sub(q.skip).min(l))),
-                    Err(err) if timed_out(&err) => None,
+                // Side by side, so an unindexed filter on a huge collection, whose count can pass the time limit while
+                // the page itself is instant, does not hold the page back.
+                let (count, docs) = tokio::join!(counting, reading);
+                let mut docs = docs?;
+                let more = docs.len() as u64 > size;
+                docs.truncate(size as usize);
+                let (count, approx) = match count {
+                    Ok(n) => (q.limit.map_or(n.saturating_sub(q.skip), |l| n.saturating_sub(q.skip).min(l)), false),
+                    // A lower bound: what was read, plus one when another page follows.
+                    Err(err) if timed_out(&err) => (offset + docs.len() as u64 + more as u64, true),
                     Err(err) => return Err(e(err)),
                 };
-                let offset = page * size;
-                let take = match known {
-                    Some(count) => count.saturating_sub(offset).min(size).max(1),
-                    None => q.limit.map_or(size + 1, |l| l.saturating_sub(offset).min(size + 1)).max(1),
-                };
-                // Read as BSON bytes: the page is kept that way, see `Row`.
-                let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
-                let mut f = raw.find(q.filter).skip(q.skip.saturating_add(page * size)).limit(take as i64).max_time(t.timeout);
-                if let Some(h) = hint {
-                    f = f.hint(h);
-                }
-                if let Some(co) = co {
-                    f = f.collation(co);
-                }
-                if let Some(s) = q.sort {
-                    f = f.sort(s);
-                }
-                if let Some(p) = q.projection {
-                    f = f.projection(p);
-                }
-                let mut docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
-                let more = known.is_none() && docs.len() as u64 > size;
-                docs.truncate(size as usize);
-                let count = known.unwrap_or(offset + docs.len() as u64 + more as u64);
                 // One row at a time, so checking never holds more than one decoded document.
                 for r in &docs {
                     r.decode()?;
                 }
-                Ok((docs, count, start.elapsed().as_millis(), more))
+                Ok((docs, count, start.elapsed().as_millis(), approx))
             }
             .await;
             let approx = res.as_ref().is_ok_and(|r| r.3);
@@ -1072,7 +1076,7 @@ pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &N
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None, false).await?),
         None => None,
     };
-    let mut o = ClientOptions::parse(super::mongo_uri::for_driver(uri)).await.map_err(e)?;
+    let mut o = ClientOptions::parse(super::mongo_uri::for_driver(uri)?).await.map_err(e)?;
     o.connect_timeout = Some(timeout);
     o.server_selection_timeout = Some(timeout);
     o.app_name.get_or_insert_with(|| "quarry".into());

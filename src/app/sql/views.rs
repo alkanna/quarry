@@ -201,6 +201,7 @@ impl App {
             total: t.count,
             unit: if grouped.is_some() { "groups" } else { "rows" },
             approx: t.sql.as_ref().is_some_and(|s| s.estimated),
+            at_least: false,
             ms: t.ms,
             loading: t.loading,
             stats: &[],

@@ -451,7 +451,7 @@ impl App {
         let t = self.t().unwrap();
         // The collection's data size and index count, which the header used to carry.
         let stats = t.stats.map(|(_, size, nidx)| [human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]);
-        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: t.count_approx, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
+        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: false, at_least: t.count_approx, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
         let out = self.results_bar(ui, &info, |app, ui| {
             dots_menu(ui, |ui| {
                 if ui.button("Export").on_hover_text("Export these documents").clicked() {
@@ -469,7 +469,7 @@ impl App {
                     ui.close();
                 }
                 let t = app.t().unwrap();
-                let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
+                let (coll, scope, reach, sel) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count(), t.sel.clone());
                 if ui.button("Update matching…").clicked() {
                     app.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
                     ui.close();
@@ -489,7 +489,8 @@ impl App {
                         title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
                         expect: coll,
                         typed: String::new(),
-                        action: app.pinned(Danger::DropCollection),
+                        // Named here rather than pinned: the drop closes this tab, so the tab to come back to is gone.
+                        action: Danger::DropCollAt { conn: sel.conn, db: sel.db, coll: sel.coll },
                     });
                     ui.close();
                 }

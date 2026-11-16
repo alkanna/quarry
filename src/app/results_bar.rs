@@ -12,6 +12,8 @@ pub(super) struct BarInfo<'a> {
     pub unit: &'static str,
     /// Whether the total is an estimate.
     pub approx: bool,
+    /// Whether the total is only a lower bound, because counting ran out of time.
+    pub at_least: bool,
     pub ms: u128,
     pub loading: bool,
     /// Plain facts after the time, such as a collection's size.
@@ -67,7 +69,11 @@ impl App {
         ui.horizontal(|ui| {
             // The count is also the page-size control, so the bar has one control fewer.
             let mut size = self.page_size();
-            let text = semibold(mono(range_text(info.page, info.size, info.total, info.unit, info.approx), BRIGHT()));
+            let mut range = range_text(info.page, info.size, info.total, info.unit, info.approx);
+            if info.at_least {
+                range = range.replacen(" of ", " of at least ", 1);
+            }
+            let text = semibold(mono(range, BRIGHT()));
             let (r, _) = ui
                 .scope(|ui| {
                     quiet_look(ui);

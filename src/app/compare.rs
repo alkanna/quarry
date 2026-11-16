@@ -155,7 +155,7 @@ impl App {
                 n(c.replace, r.changed.len()),
                 n(c.delete, r.only_dst.len())
             );
-            self.modal = Some(Modal::Typed { title, expect: tcoll, typed: String::new(), action: Danger::Sync { conn: tc } });
+            self.modal = Some(Modal::Typed { title, expect: tcoll, typed: String::new(), action: self.pinned(Danger::Sync { conn: tc }) });
         }
     }
 }

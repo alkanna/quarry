@@ -816,7 +816,13 @@ impl Tab {
     /// How many documents an action on every match of the filter reaches, as a phrase. The results
     /// count stops at the limit and skip, which such actions ignore.
     pub(super) fn bulk_count(&self) -> String {
-        if self.query.limit.is_some() || self.query.skip > 0 { "every match, ignoring the limit and skip".into() } else { format!("about {}", self.count) }
+        if self.query.limit.is_some() || self.query.skip > 0 {
+            "every match, ignoring the limit and skip".into()
+        } else if self.count_approx {
+            format!("at least {}, the count ran out of time", self.count)
+        } else {
+            format!("about {}", self.count)
+        }
     }
 
     /// Marks the tab as one of a SQL connection.

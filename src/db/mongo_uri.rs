@@ -199,16 +199,16 @@ impl MongoUri {
 }
 
 /// The address as the Rust driver accepts it. Its rustls build has no tlsAllowInvalidHostnames and refuses the whole
-/// string for it, while Compass and the Shell's Node driver take it. rustls cannot skip only the name check, so the
-/// option becomes Allow invalid certificates, which the form already shows it as.
-pub fn for_driver(uri: &str) -> String {
-    let Some(mut m) = MongoUri::parse(uri).filter(|m| m.has_opt("tlsAllowInvalidHostnames")) else { return uri.to_string() };
-    let on = m.opt("tlsAllowInvalidHostnames").is_some_and(|v| v.eq_ignore_ascii_case("true"));
-    m.set_opt("tlsAllowInvalidHostnames", None);
-    if on {
-        m.set_allow_invalid(true);
+/// string with a raw parse error, while Compass and the Shell's Node driver take it. Off, it changes nothing and is
+/// dropped. On, it is refused in plain words: rustls cannot skip only the name check, and turning off every
+/// certificate check instead must be the user's choice.
+pub fn for_driver(uri: &str) -> Result<String, String> {
+    let Some(mut m) = MongoUri::parse(uri).filter(|m| m.has_opt("tlsAllowInvalidHostnames")) else { return Ok(uri.to_string()) };
+    if m.opt("tlsAllowInvalidHostnames").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+        return Err("Quarry cannot skip only the host name check (tlsAllowInvalidHostnames). Edit the connection and turn on Allow invalid certificates, which skips every certificate check, or remove the option.".into());
     }
-    m.to_string()
+    m.set_opt("tlsAllowInvalidHostnames", None);
+    Ok(m.to_string())
 }
 
 impl std::fmt::Display for MongoUri {
@@ -399,10 +399,11 @@ mod tests {
 
     #[test]
     fn the_driver_never_sees_allow_invalid_hostnames() {
-        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=true&w=1"), "mongodb://h/?tls=true&w=1&tlsAllowInvalidCertificates=true");
-        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=false"), "mongodb://h/?tls=true");
-        assert_eq!(for_driver("mongodb://h/?tlsInsecure=true&tlsAllowInvalidHostnames=true"), "mongodb://h/?tlsInsecure=true");
-        assert_eq!(for_driver("mongodb://h/?tlsInsecure=false&tlsAllowInvalidHostnames=true"), "mongodb://h/?tlsAllowInvalidCertificates=true");
-        assert_eq!(for_driver("mongodb://h/?tls=true"), "mongodb://h/?tls=true");
+        assert!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=true&w=1").unwrap_err().contains("Allow invalid certificates"));
+        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=false&w=1").unwrap(), "mongodb://h/?tls=true&w=1");
+        assert_eq!(for_driver("mongodb://h/?tls=true").unwrap(), "mongodb://h/?tls=true");
+        let mut m = MongoUri::parse("mongodb://h/?tlsInsecure=false").unwrap();
+        m.set_allow_invalid(true);
+        assert_eq!(m.to_string(), "mongodb://h/?tlsAllowInvalidCertificates=true");
     }
 }
