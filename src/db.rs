@@ -294,6 +294,10 @@ pub enum Msg {
     SqlKeys { req: u64, res: Res<(sql::KeyTable, Vec<(String, String)>)> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
     SqlValues { conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
+    /// How many rows the filter panel's WHERE matches, or where the server says it fails.
+    SqlFilterCount { req: u64, res: Result<sql::facts::FilterCount, sql::facts::FilterErr> },
+    /// What the filter panel's value cells can suggest for a column.
+    SqlFacts { conn: u64, database: String, schema: String, table: String, column: String, res: Res<sql::facts::ColFacts> },
     /// Result of the connection form's Test button.
     Tested { req: u64, res: Res<String>, info: Option<sql::TestInfo> },
     /// Collection names (sorted) and which of them are views.

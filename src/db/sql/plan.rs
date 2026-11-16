@@ -162,6 +162,27 @@ pub fn raw_text(text: &str) -> String {
     serde_json::from_str::<Value>(text).ok().and_then(|v| serde_json::to_string_pretty(&v).ok()).unwrap_or_else(|| text.to_string())
 }
 
+/// The planner's estimate of the rows a one-table read returns, from EXPLAIN's JSON: PostgreSQL's top node, MySQL's rows
+/// produced (or examined, cut by the filtered share) and MariaDB's rows cut by its filtered share. A WHERE the optimizer
+/// proved false has a message instead of numbers and matches nothing.
+pub fn est_rows(d: Dialect, text: &str) -> Option<u64> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let n = if d == Dialect::Postgres {
+        num(v.get(0)?.get("Plan")?, "Plan Rows")?
+    } else {
+        let qb = v.get("query_block")?;
+        // MariaDB 11 puts even one table in a nested_loop.
+        let t = qb.get("table").or_else(|| qb.get("nested_loop")?.get(0)?.get("table")).unwrap_or(qb);
+        let share = num(t, "filtered").unwrap_or(100.0) / 100.0;
+        match num(t, "rows_produced_per_join").or_else(|| Some(num(t, "rows_examined_per_scan").or_else(|| num(t, "rows"))? * share)) {
+            Some(n) => n,
+            None if t.get("message").is_some() || qb.get("message").is_some() => 0.0,
+            None => return None,
+        }
+    };
+    Some(n.max(0.0).round() as u64)
+}
+
 fn num(v: &Value, key: &str) -> Option<f64> {
     match v.get(key)? {
         Value::Number(n) => n.as_f64(),
@@ -503,6 +524,18 @@ mod tests {
     const MYSQL: &str = r#"{"query_block":{"select_id":1,"cost_info":{"query_cost":"1250.40"},"ordering_operation":{"using_filesort":true,"nested_loop":[
         {"table":{"table_name":"o","access_type":"ALL","possible_keys":["idx_cust"],"rows_examined_per_scan":9000,"rows_produced_per_join":900,"filtered":"10.00","cost_info":{"read_cost":"900.00","eval_cost":"90.00","prefix_cost":"990.00","data_read_per_join":"1M"},"attached_condition":"(`o`.`total` > 100)"}},
         {"table":{"table_name":"c","access_type":"eq_ref","possible_keys":["PRIMARY"],"key":"PRIMARY","used_key_parts":["id"],"key_length":"4","ref":["shop.o.customer_id"],"rows_examined_per_scan":1,"rows_produced_per_join":900,"filtered":"100.00","using_index":true,"cost_info":{"prefix_cost":"1250.40"}}}]}}}"#;
+
+    #[test]
+    fn row_estimates_per_engine() {
+        assert_eq!(est_rows(Dialect::Postgres, PG), Some(50000));
+        assert_eq!(est_rows(Dialect::MySql, r#"{"query_block":{"select_id":1,"table":{"table_name":"t","access_type":"ALL","rows_examined_per_scan":9000,"rows_produced_per_join":900,"filtered":"10.00"}}}"#), Some(900));
+        assert_eq!(est_rows(Dialect::MySql, r#"{"query_block":{"select_id":1,"table":{"table_name":"t","rows_examined_per_scan":9000,"filtered":"50.00"}}}"#), Some(4500));
+        assert_eq!(est_rows(Dialect::MariaDb, r#"{"query_block":{"select_id":1,"table":{"table_name":"t","access_type":"ALL","rows":20000,"filtered":25,"attached_condition":"t.a > 1"}}}"#), Some(5000));
+        assert_eq!(est_rows(Dialect::MariaDb, r#"{"query_block":{"select_id":1,"cost":0.003,"nested_loop":[{"table":{"table_name":"t","rows":40,"filtered":50}}]}}"#), Some(20));
+        assert_eq!(est_rows(Dialect::MySql, r#"{"query_block":{"select_id":1,"message":"Impossible WHERE"}}"#), Some(0));
+        assert_eq!(est_rows(Dialect::MariaDb, r#"{"query_block":{"select_id":1,"table":{"message":"Impossible WHERE noticed after reading const tables"}}}"#), Some(0));
+        assert_eq!(est_rows(Dialect::MySql, "not json"), None);
+    }
 
     #[test]
     fn mysql_json_plan() {

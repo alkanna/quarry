@@ -172,6 +172,7 @@ impl App {
         t.filter_txt = "status = 'paid' AND total > 50".into();
         pg_bar_demo(which, &mut t);
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.demo_facts(CONN, ns_key(DB, SCHEMA));
         self.cur = 0;
         self.status = "Offline demo: no database is connected.".into();
         self.pg_structure_demo(which);
@@ -384,14 +385,24 @@ impl App {
 
 /// The query bar's state for rules, sqlmode, grouped and ac, written in PostgreSQL quoting.
 fn pg_bar_demo(which: &str, t: &mut Tab) {
+    let pg = db::sql::Dialect::Postgres;
     match which {
         "rules" => {
-            t.filter_txt = r#""status" IN ('paid', 'shipped') AND "total" > 50"#.into();
+            t.filter_txt = r#""status" IN ('paid', 'shipped') AND "total" > 50 AND ("note" ILIKE '%gift%' OR "gift" = 'true') AND "created_at" >= NOW() - INTERVAL '7 DAY' AND "tags"::text[] && ARRAY['express']"#.into();
             t.sort_txt = r#""created_at" DESC, "total" ASC"#.into();
             if let Some(s) = t.sql.as_mut() {
                 s.bar.c.limit = "100".into();
             }
         }
+        "filters" => {
+            let text = r#""status" IN ('paid', 'shipped') AND "total" > 50 AND ("note" ILIKE '%gift%' OR "gift" = 'true') AND NOT ("tags"::text[] && ARRAY['b2b'] OR "customer_id" = 12) AND "created_at"::date = CURRENT_DATE"#;
+            App::filter_demo(t, pg, text, &[8], 48_213, None);
+        }
+        "filters-cells" => {
+            let text = r#""gift" = 'true' AND "public_id"::text = 'zz' AND "tags"::text[] && ARRAY['express', 'gift'] AND jsonb_path_query_first("meta"::jsonb, '$.channel') #>> '{}' = 'web' AND "status" = 'paid'"#;
+            App::filter_demo(t, pg, text, &[], 2_204, None);
+        }
+        "filters-ops" => App::filter_demo(t, pg, r#""note" ILIKE '%gift%' AND "total" > 50"#, &[], 87, Some(0)),
         "sqlmode" => {
             t.filter_txt = "status IN ('paid','shipped') AND total > 50".into();
             t.sort_txt = "created_at DESC, total ASC".into();

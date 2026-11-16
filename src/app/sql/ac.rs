@@ -56,6 +56,25 @@ impl App {
         }
     }
 
+    /// Asks once for what the filter panel's value cells can suggest for a column. Demo mode has no server.
+    pub(in crate::app) fn sql_serve_facts(&mut self, conn: u64, db: &str, schema: &str, table: &str, column: String, kind: db::sql::value::Kind) {
+        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
+        if schema.is_empty() && self.is_pg(conn) {
+            return;
+        }
+        let key = ns_key(db, schema);
+        if self.sql_facts_asked.insert((conn, key, table.to_string(), column.clone())) {
+            let space = if schema.is_empty() { db.to_string() } else { schema.to_string() };
+            self.worker.sql_col_facts(conn, sql.at(db), space, table.to_string(), column, kind);
+        }
+    }
+
+    /// Keeps a column's facts. A failed read keeps empty ones, so the cells stop waiting and nothing asks again.
+    pub(in crate::app) fn sql_facts_done(&mut self, conn: u64, database: String, schema: String, table: String, column: String, res: db::Res<db::sql::facts::ColFacts>) {
+        let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
+        self.sql_facts.entry((conn, key, table)).or_default().insert(column, res.unwrap_or_default());
+    }
+
     /// Reads a schema's tables and columns for completion and shell types, once until a Refresh. `key` is the cache key
     /// (`ns_key`), `space` the schema name the server reads, and `sql` a session on the right database.
     pub(in crate::app) fn ask_sql_schema(&mut self, conn: u64, sql: db::sql::Db, key: String, space: String) {
@@ -74,6 +93,8 @@ impl App {
         self.sql_schema_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
         self.sql_values.retain(|k, _| !(k.0 == conn && mine(&k.1)));
         self.sql_values_asked.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.sql_facts.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.sql_facts_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
     }
 
     /// The sidebar's Refresh: the schema is read again and looked up values are forgotten.
@@ -81,6 +102,8 @@ impl App {
         let key = ns_key(db, schema);
         self.sql_values.remove(&(conn, key.clone()));
         self.sql_values_asked.retain(|k, _| !(k.0 == conn && k.1 == key));
+        self.sql_facts.retain(|k, _| !(k.0 == conn && k.1 == key));
+        self.sql_facts_asked.retain(|k| !(k.0 == conn && k.1 == key));
         if self.sql_schema_asked.contains(&(conn, key)) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
             self.worker.sql_schema(conn, sql.at(db), if schema.is_empty() { db.to_string() } else { schema.to_string() });
         }

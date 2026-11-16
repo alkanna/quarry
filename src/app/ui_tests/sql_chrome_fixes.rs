@@ -32,14 +32,20 @@ fn insert_document_with_no_table_open_says_so_and_opens_nothing() {
 }
 
 #[test]
-fn cmd_f_switches_the_sql_bar_to_sql_mode_and_focuses_its_where_field() {
+fn cmd_f_opens_the_filter_panel_in_rules_mode_and_focuses_the_where_field_in_sql_mode() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
     let cur = app.cur;
     app.tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = false;
     ui.settle();
     ui.key(egui::Modifiers::COMMAND, egui::Key::F);
-    ui.wait("the SQL mode", |a| a.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.c.sql));
+    ui.wait("the filter panel", |a| a.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open && !s.bar.c.sql));
+    let app = ui.h.state_mut();
+    let s = app.tabs[cur].sql.as_mut().expect("a SQL tab");
+    s.bar.panel.open = false;
+    s.bar.c.sql = true;
+    ui.settle();
+    ui.key(egui::Modifiers::COMMAND, egui::Key::F);
     ui.settle();
     let id = crate::app::query::query_id("SQL-WHERE");
     assert!(ui.h.ctx.memory(|m| m.has_focus(id)), "Cmd+F left the SQL WHERE field without focus");

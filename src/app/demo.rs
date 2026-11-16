@@ -463,6 +463,39 @@ impl App {
         }
     }
 
+    /// Opens the filter panel of `t` on `text`, read with the tab's columns, with the rows numbered in `off` (drawing order,
+    /// groups counted) turned off, `n` rows matching, and the operator menu of row `ops` open. The demo has no server, so
+    /// the count is made up here like the rows.
+    pub(super) fn filter_demo(t: &mut Tab, d: db::sql::Dialect, text: &str, off: &[usize], n: u64, ops: Option<usize>) {
+        use db::sql::filter;
+        let Some(s) = t.sql.as_mut() else { return };
+        let pairs: Vec<(String, db::sql::value::Kind)> = s.cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
+        let Some(mut tree) = filter::parse(text, &pairs, d, true) else { panic!("the demo filter does not read as a tree: {text}") };
+        let order = tree.rows_in_order();
+        for &i in off {
+            tree.toggle(order[i]);
+        }
+        t.filter_txt = filter::to_sql(&tree, d, true);
+        s.bar.pending = filter::to_json(&tree);
+        s.bar.panel.open = true;
+        s.bar.panel.ops = ops.map(|i| order[i]);
+        s.bar.panel.count.asked = Some(t.filter_txt.clone());
+        s.bar.panel.count.res = Some((t.filter_txt.clone(), Ok(db::sql::facts::FilterCount { n, estimated: false })));
+    }
+
+    /// Made-up facts of the orders columns, as a server would answer the value cells.
+    pub(super) fn demo_facts(&mut self, conn: u64, ns: String) {
+        use db::sql::facts::ColFacts;
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let facts = HashMap::from([
+            ("total".to_string(), ColFacts { range: Some(("1.00".into(), "1204.10".into(), Some("94.31".into()))), ..Default::default() }),
+            ("status".to_string(), ColFacts { labels: v(&["pending", "paid", "shipped", "refunded", "cancelled"]), ..Default::default() }),
+            ("meta".to_string(), ColFacts { keys: v(&["channel", "coupon", "items", "source"]), ..Default::default() }),
+            ("tags".to_string(), ColFacts { items: v(&["b2b", "express", "gift", "promo"]), ..Default::default() }),
+        ]);
+        self.sql_facts.insert((conn, ns, "orders".into()), facts);
+    }
+
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
     pub(super) fn load_sql_demo(&mut self) {
         let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
@@ -524,11 +557,24 @@ impl App {
         // QUARRY_TEST_SQL=rules, sqlmode or grouped pick the query bar's state; anything else is the plain Content view.
         match which {
             "rules" => {
-                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
+                // Enough conditions, one of them a group, that the line cuts them with a +N.
+                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50 AND (`currency` = 'EUR' OR `currency` = 'GBP') AND `created_at` >= NOW() - INTERVAL 7 DAY AND `note` IS NOT NULL".into();
                 t.sort_txt = "`created_at` DESC, `total` ASC".into();
                 if let Some(s) = t.sql.as_mut() {
                     s.bar.c.limit = "100".into();
                 }
+            }
+            "filters" => {
+                // An any group, a none group and an off row (the 8th in drawing order: groups count).
+                let text = "`status` IN ('paid', 'shipped') AND `total` > 50 AND (`currency` = 'EUR' OR `currency` = 'GBP') AND NOT (`note` LIKE '%test%' OR `customer_id` = 12) AND DATE(`created_at`) = CURDATE()";
+                Self::filter_demo(&mut t, db::sql::Dialect::MySql, text, &[8], 1204, None);
+            }
+            "filters-cells" => {
+                let text = "`status` = 'paid' AND `total` BETWEEN 20 AND 500 AND `created_at` >= NOW() - INTERVAL 7 DAY AND CAST(`note` AS BINARY) LIKE '%Gift%' AND `currency` IN ('EUR', 'USD', 'GBP', 'CHF')";
+                Self::filter_demo(&mut t, db::sql::Dialect::MySql, text, &[], 312, None);
+            }
+            "filters-ops" => {
+                Self::filter_demo(&mut t, db::sql::Dialect::MySql, "`note` LIKE '%gift%' AND `total` > 50", &[], 87, Some(0));
             }
             "sqlmode" => {
                 t.filter_txt = "status IN ('paid','shipped') AND total > 50".into();
@@ -574,6 +620,7 @@ impl App {
             _ => {}
         }
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.demo_facts(3, ns_key("shop", ""));
         self.cur = 0;
         self.status = "Offline demo: no database is connected.".into();
         self.sql_structure_demo(which);

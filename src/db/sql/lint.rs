@@ -119,7 +119,7 @@ fn span_at(stmt: &str, at: usize, d: Dialect) -> Range<usize> {
 /// Where a MySQL syntax error points. The server gives no offset, only the text from the failing token on and its line
 /// (`db::mysql_near`). An uncut text is the tail of the statement, so it is matched there and never at an earlier copy of
 /// the same words. A sentence in another language marks the start.
-fn near_at(stmt: &str, msg: &str) -> usize {
+pub(super) fn near_at(stmt: &str, msg: &str) -> usize {
     let found = || {
         let (near, line) = crate::db::mysql_near(msg)?;
         if stmt.ends_with(near) {

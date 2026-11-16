@@ -40,7 +40,7 @@ impl App {
                 agg: t.agg_txt.clone(),
                 shell: t.shell.code.clone(),
                 attached: t.shell.attached.clone(),
-                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
+                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&crate::app::sql::bar::Clauses { tree: s.bar.tree_json.clone(), ..s.bar.c.clone() }).ok()).unwrap_or_default(),
                 query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
                 run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
                 run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
@@ -133,9 +133,16 @@ impl App {
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
             self.set_view(View::Documents);
-            // The SQL bar's text field exists only in SQL mode, so Rules mode switches over to it. Its text is already written out.
-            let sql_tab = self.tm().and_then(|t| t.sql.as_mut()).map(|s| s.bar.c.sql = true).is_some();
-            ctx.memory_mut(|m| m.request_focus(query_id(if sql_tab { "SQL-WHERE" } else { "QUERY" })));
+            let d = self.sql_dialect();
+            // Rules mode opens the filter panel; SQL mode focuses its WHERE field, and Mongo its query.
+            match self.tm().and_then(|t| t.sql.as_mut()) {
+                Some(s) if !s.bar.c.sql => {
+                    let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+                    s.bar.open_filters(ctx, &cols, d);
+                }
+                Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
+                None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),
+            }
         }
         if k(cmd, Key::Comma) {
             self.modal = Some(Modal::Settings);

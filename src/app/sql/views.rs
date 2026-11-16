@@ -78,6 +78,68 @@ impl App {
         self.reload();
     }
 
+    /// Asks for the filter panel's counts while it is open on a live connection: the whole WHERE once it has rested,
+    /// and the hovered row alone. Each slot has one request in flight; an answer to an older one is dropped.
+    fn sql_filter_tick(&mut self, ctx: &egui::Context, conn: u64, db: &str, schema: &str, table: &str) {
+        use crate::app::sql::filter_panel::Tick;
+        if !self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.bar.panel.open && !s.bar.c.sql) {
+            return;
+        }
+        // The demo has no session, and a PostgreSQL tab without its schema has nothing to count in.
+        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
+        if schema.is_empty() && self.is_pg(conn) {
+            return;
+        }
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
+        let now = ctx.input(|i| i.time);
+        let space = if schema.is_empty() { db.to_string() } else { schema.to_string() };
+        let t = &mut self.tabs[self.cur];
+        let text = t.filter_txt.clone();
+        let Some(s) = t.sql.as_mut().filter(|s| s.bar.panel.open && !s.bar.c.sql) else { return };
+        let p = &mut s.bar.panel;
+        // The same text on another table, schema, database or connection is another count.
+        let (c, d0, s0, t0) = &p.place;
+        if (*c, d0.as_str(), s0.as_str(), t0.as_str()) != (conn, db, schema, table) {
+            p.forget_counts();
+            p.place = (conn, db.to_string(), schema.to_string(), table.to_string());
+        }
+        match p.count.tick(&text, now) {
+            Tick::Ask => {
+                self.req += 1;
+                p.count.ask(self.req, &text);
+                self.worker.sql_filter_count(self.req, sql.at(db), space.clone(), table.to_string(), text);
+            }
+            Tick::Wait(left) => ctx.request_repaint_after(std::time::Duration::from_secs_f32(left)),
+            Tick::Idle => {}
+        }
+        let hovered = p.hover.and_then(|id| s.bar.tree.find(id)).and_then(|n| match &n.item {
+            db::sql::filter::Item::Cond(c) if c.on && c.rule.complete() => Some(db::sql::rules::rule_sql(&c.rule, d, bs)),
+            _ => None,
+        });
+        if let Some(one) = hovered.filter(|h| !p.hover_cache.contains_key(h)) {
+            match p.hover_count.tick(&one, now) {
+                Tick::Ask => {
+                    self.req += 1;
+                    p.hover_count.ask(self.req, &one);
+                    self.worker.sql_filter_count(self.req, sql.at(db), space, table.to_string(), one);
+                }
+                Tick::Wait(left) => ctx.request_repaint_after(std::time::Duration::from_secs_f32(left)),
+                Tick::Idle => {}
+            }
+        }
+    }
+
+    /// An answer for a filter panel's count, given to the tab that asked.
+    pub(in crate::app) fn sql_filter_counted(&mut self, req: u64, res: crate::app::sql::filter_panel::Counted) {
+        for t in &mut self.tabs {
+            if let Some(s) = t.sql.as_mut()
+                && s.bar.panel.counted(req, &res)
+            {
+                return;
+            }
+        }
+    }
+
     /// Content: the query line, the results line and the table.
     pub(in crate::app) fn sql_content(&mut self, ui: &mut egui::Ui) {
         // Loaded with another page size, set from another tab: its page numbers no longer line up.
@@ -93,10 +155,14 @@ impl App {
         let none = Fields::new();
         let hist = self.prefs.history.get(&self.tabs[self.cur].coll_key()).cloned().unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Where);
-        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false };
+        let covered = self.window_open();
+        let table = self.tabs[self.cur].sel.coll.clone();
+        let facts = self.sql_facts.get(&(conn, ns_key(&db, &schema), table.clone()));
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts };
         let t = &mut self.tabs[self.cur];
         let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        let want_facts = t.sql.as_mut().and_then(|s| s.bar.want_facts.take());
         // Picking from the history fills the box, as in the Documents view; Run or Enter applies it.
         for a in std::mem::take(&mut side.qacts) {
             match a {
@@ -110,9 +176,16 @@ impl App {
             self.modal = Some(Modal::Text { title: "Query help".into(), body: crate::db::sql::rules::filter_help(dialect), code: false });
         }
         self.sql_serve(conn, &db, &schema, wants);
+        if let Some((column, kind)) = want_facts {
+            self.sql_serve_facts(conn, &db, &schema, &table, column, kind);
+        }
+        self.sql_filter_tick(ui.ctx(), conn, &db, &schema, &table);
         self.pick_acts(pick_acts);
         if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.explain)) {
             return self.explain();
+        }
+        if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.save_filter)) {
+            self.save_script_as();
         }
         if run {
             self.tm().unwrap().page = 0;
