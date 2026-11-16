@@ -1077,8 +1077,9 @@ pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &N
         None => None,
     };
     let mut o = ClientOptions::parse(super::mongo_uri::for_driver(uri)?).await.map_err(e)?;
-    o.connect_timeout = Some(timeout);
-    o.server_selection_timeout = Some(timeout);
+    // A timeout written in the URI is the user's choice; the setting only fills in what the URI left out.
+    o.connect_timeout.get_or_insert(timeout);
+    o.server_selection_timeout.get_or_insert(timeout);
     o.app_name.get_or_insert_with(|| "quarry".into());
     o.command_event_handler = Some(mongodb::event::EventHandler::callback(move |ev| log_event(conn, ev)));
     if let Some(t) = &tunnel {

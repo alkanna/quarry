@@ -75,10 +75,33 @@ pub fn restore_args(uri: &str, archive: &str, from_db: &str, coll: Option<&str>,
     a
 }
 
+/// URI options whose value is a secret or can hold one (authMechanismProperties carries AWS session tokens).
+const SECRET_OPTS: [&str; 3] = ["proxyPassword", "tlsCertificateKeyFilePassword", "authMechanismProperties"];
+
+/// The raw values of the secret options in a URI, for hiding them from text.
+pub fn secret_opt_values(uri: &str) -> Vec<String> {
+    let Some((_, q)) = uri.split_once('?') else { return Vec::new() };
+    q.split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| !v.is_empty() && SECRET_OPTS.iter().any(|s| s.eq_ignore_ascii_case(k))).map(|(_, v)| v.to_string()).collect()
+}
+
 pub fn mask_uri(uri: &str) -> String {
+    // Options come after the last "?" that follows the authority, so a password holding "?" stays in the userinfo.
+    let (head, query) = match uri.rfind('@').map_or(uri.find('?'), |at| uri[at..].find('?').map(|i| at + i)) {
+        Some(i) => (&uri[..i], Some(&uri[i + 1..])),
+        None => (uri, None),
+    };
     // Hide the password between "user:" and "@".
-    if let (Some(s), Some(at)) = (uri.find("://"), uri.rfind('@')) && let Some(colon) = uri[s + 3..at].find(':') {
-        return format!("{}****{}", &uri[..s + 3 + colon + 1], &uri[at..]);
+    let mut out = head.to_string();
+    if let (Some(s), Some(at)) = (head.find("://"), head.rfind('@')) && let Some(colon) = head[s + 3..at].find(':') {
+        out = format!("{}****{}", &head[..s + 3 + colon + 1], &head[at..]);
     }
-    uri.to_string()
+    if let Some(q) = query {
+        let parts: Vec<String> = q.split('&').map(|p| match p.split_once('=') {
+            Some((k, v)) if !v.is_empty() && SECRET_OPTS.iter().any(|s| s.eq_ignore_ascii_case(k)) => format!("{k}=****"),
+            _ => p.to_string(),
+        }).collect();
+        out.push('?');
+        out.push_str(&parts.join("&"));
+    }
+    out
 }

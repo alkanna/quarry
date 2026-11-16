@@ -999,6 +999,10 @@ impl Redact {
                 }
             }
         }
+        for s in super::tools::secret_opt_values(uri) {
+            v.push(decode(&s));
+            v.push(s);
+        }
         v.extend(extra.iter().filter(|s| s.chars().count() >= REDACT_MIN).cloned());
         v.retain(|s| !s.is_empty());
         // Longest first, so the URI goes whole before the password inside it.

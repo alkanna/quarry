@@ -217,7 +217,10 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
         }
         Ok(Ok(h)) => h,
     };
-    authenticate(&mut h, conf, secrets).await?;
+    match tokio::time::timeout(timeout.max(std::time::Duration::from_secs(10)), authenticate(&mut h, conf, secrets)).await {
+        Err(_) => return Err(format!("The SSH server {}:{port} did not finish signing in in time.", conf.host)),
+        Ok(r) => r?,
+    }
     let fingerprint = seen.lock().unwrap().clone().unwrap_or_default();
     let session = Arc::new(h);
     // Without `to` the local end is a SOCKS5 gateway and each client names its own destination.

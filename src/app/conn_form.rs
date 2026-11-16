@@ -75,7 +75,7 @@ fn mongo_toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) {
 /// Parses the MongoDB address once, runs `body` on it and writes it back only when `body` set the flag it is given. None
 /// when the text is not a mongodb:// address.
 fn with_mongo<T>(f: &mut ConnForm, body: impl FnOnce(&mut db::mongo_uri::MongoUri, &mut bool) -> T) -> Option<T> {
-    let mut m = db::mongo_uri::MongoUri::parse(&f.uri)?;
+    let mut m = db::mongo_uri::MongoUri::parse(f.uri.trim())?;
     let mut dirty = false;
     let r = body(&mut m, &mut dirty);
     if dirty {
@@ -628,7 +628,7 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::C
     let cloud_on = f.cloud_on().is_some();
     let mut change = false;
     let mut paste = Paste::default();
-    if !cloud_on {
+    if !cloud_on && f.engine.is_sql() {
         let w = ui.available_width() - FORM_LABEL_W - FORM_GAP - 2.0 * ui.spacing().item_spacing.x;
         paste = paste_field(ui, f, w);
         ui.add_space(6.0);
@@ -966,7 +966,7 @@ impl App {
         dialog_foot(ui, |ui| {
             let address_ok = if let Some(c) = f.cloud_on() {
                 crate::cloudsql::valid_instance(&c.instance) && !f.addr.user.trim().is_empty()
-            } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
+            } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.trim().starts_with("mongodb://") || f.uri.trim().starts_with("mongodb+srv://") };
             let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_active() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
             test |= ui.add_enabled(valid, egui::Button::new("Test")).clicked();
@@ -1028,7 +1028,12 @@ impl App {
                         engine: f.engine,
                         name: f.name.trim().into(),
                         tag: clean_tag(&f.tag).into(),
-                        ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
+                        // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed.
+                        ssh: f.ssh_on.then(|| {
+                            let old = self.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
+                            let same = old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
+                            crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
+                        }),
                         proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
                         cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
                         advanced: f.advanced().unwrap_or_default(),

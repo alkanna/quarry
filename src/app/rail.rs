@@ -608,6 +608,15 @@ impl App {
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
         c.forget_lists();
         let name = c.meta.name.clone();
+        // A watch holds its own client and a Shell run its own tunnel, either of which would keep the session alive.
+        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == id) {
+            let own_shell = t.shell.relays.is_empty() || t.shell.relays.iter().all(|(c, _)| *c == id);
+            if own_shell {
+                t.stop_work();
+            } else {
+                t.watch.stop();
+            }
+        }
         self.pg_tables_asked.forget(id, None, None);
         Some(name)
     }

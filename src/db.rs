@@ -1094,6 +1094,9 @@ mod tests {
         let t = to_table(&[doc! { "a": "x,\"y\"" }, doc! { "b": false }], ',');
         assert_eq!(t, "a,b\n\"x,\"\"y\"\"\",\n,false");
         assert_eq!(mask_uri("mongodb://u:secret@h:27017/db"), "mongodb://u:****@h:27017/db");
+        assert_eq!(mask_uri("mongodb://u:p@h/db?tls=true&proxyPassword=hunter2&tlsCertificateKeyFilePassword=k3y&authMechanismProperties=AWS_SESSION_TOKEN:tok"), "mongodb://u:****@h/db?tls=true&proxyPassword=****&tlsCertificateKeyFilePassword=****&authMechanismProperties=****");
+        assert_eq!(mask_uri("mongodb://h/?proxyPassword=hunter2"), "mongodb://h/?proxyPassword=****");
+        assert_eq!(agent::Redact::new("mongodb://h/?proxyPassword=hunter2", &[]).apply("proxy hunter2 failed"), "proxy [hidden] failed");
         assert_eq!(to_edit_line(&Bson::Document(doc! { "n": 5i64, "s": "x" })), r#"{"n":{"$numberLong":"5"},"s":"x"}"#);
     }
 
