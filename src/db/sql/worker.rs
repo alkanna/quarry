@@ -1244,7 +1244,6 @@ mod tests {
         (queries, res)
     }
 
-    /// shell_run with the total and query times of the run.
     fn shell_run_timed(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
         let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql };
         let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();

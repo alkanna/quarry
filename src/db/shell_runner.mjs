@@ -440,8 +440,7 @@ const input = await inputLine;
 const mongoEntries = input.mongo || [];
 const sqlEntries = input.sql || [];
 const clients = [];
-// When the first connection is checked out, so already open and signed in: the query time starts there.
-// CMAP events are always emitted, unlike command monitoring, which slows reading results.
+// Query time starts at the first checkout, once connected and signed in; CMAP events need no command monitoring, which slows reads.
 let firstOut;
 try {
   // Names pick the connection a query goes to, so a repeated one would send queries to the wrong place.
@@ -552,7 +551,7 @@ try {
   if (result === null) throw new Error("No results");
   if (result === undefined) throw new Error('No results. Did you forget to "return" something in the function?');
   if (result && typeof result.toArray === "function" && typeof result.limit === "function") {
-    // A find cursor with a limit of its own keeps it; any other stops at 100. findOptions is the driver's find cursor state.
+    // limit() would replace the script's own limit. findOptions is driver state, not public API.
     if (!result.findOptions?.limit) result.limit(100);
     result = await result.toArray();
   }

@@ -50,7 +50,6 @@ pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f}){chain}\n}}", collection_ref(coll))
 }
 
-/// A parsed query's projection and cursor options as calls after find() in query_script.
 pub(super) fn cursor_chain(q: &db::Query) -> String {
     let proj = q.projection.as_ref().map(|p| format!(".project({})", db::shell_text(&Bson::Document(p.clone()))));
     proj.unwrap_or_default() + &db::mongosh_chain(q)
