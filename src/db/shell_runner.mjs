@@ -552,7 +552,9 @@ try {
   if (result === null) throw new Error("No results");
   if (result === undefined) throw new Error('No results. Did you forget to "return" something in the function?');
   if (result && typeof result.toArray === "function" && typeof result.limit === "function") {
-    result = await result.limit(100).toArray();
+    // A find cursor with a limit of its own keeps it; any other stops at 100. findOptions is the driver's find cursor state.
+    if (!result.findOptions?.limit) result.limit(100);
+    result = await result.toArray();
   }
   const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);
   await write({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });

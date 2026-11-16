@@ -52,8 +52,11 @@ impl Worker {
                 ctx.request_repaint();
             };
             let start = Instant::now();
-            let res = run_shell(req, &job, &send, cancel).await;
-            send(Msg::ShellDone { req, res, ms: start.elapsed().as_millis() });
+            let (res, query_ms) = match run_shell(req, &job, &send, cancel).await {
+                Ok((out, q)) => (Ok(out), q),
+                Err(e) => (Err(e), None),
+            };
+            send(Msg::ShellDone { req, res, ms: start.elapsed().as_millis(), query_ms });
         });
     }
 

@@ -50,34 +50,10 @@ pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f}){chain}\n}}", collection_ref(coll))
 }
 
-/// A parsed query's sort, projection, skip, limit, hint and collation as cursor calls for query_script.
-/// Written from the parsed values so shortcuts are expanded and the text is valid JavaScript.
+/// A parsed query's projection and cursor options as calls after find() in query_script.
 pub(super) fn cursor_chain(q: &db::Query) -> String {
-    let sh = |d: &Document| db::shell_text(&Bson::Document(d.clone()));
-    let mut out = String::new();
-    if let Some(d) = &q.sort {
-        out += &format!(".sort({})", sh(d));
-    }
-    if let Some(d) = &q.projection {
-        out += &format!(".project({})", sh(d));
-    }
-    if q.skip > 0 {
-        out += &format!(".skip({})", q.skip);
-    }
-    if let Some(n) = q.limit {
-        out += &format!(".limit({n})");
-    }
-    if let Some(h) = &q.hint {
-        out += &format!(".hint({})", db::shell_text(h));
-    }
-    if let Some(d) = &q.collation {
-        out += &format!(".collation({})", sh(d));
-    }
-    // The runner caps a returned cursor at 100 documents, which would override a larger limit.
-    if q.limit.is_some() {
-        out += ".toArray()";
-    }
-    out
+    let proj = q.projection.as_ref().map(|p| format!(".project({})", db::shell_text(&Bson::Document(p.clone()))));
+    proj.unwrap_or_default() + &db::mongosh_chain(q)
 }
 
 /// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
@@ -957,8 +933,7 @@ mod tests {
         let mut t = Tab::new(Sel { coll: "o".into(), ..Default::default() });
         (t.filter_txt, t.sort_txt, t.limit_txt, t.skip_txt, t.hint_txt) = ("{}".into(), "{ a: -1 }".into(), "500".into(), "20".into(), "a_1".into());
         let chain = |t: &Tab| cursor_chain(&super::super::run::find_query(t).unwrap());
-        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1").toArray()"#);
-        // A limit read as none must not turn the cursor into an array, which would skip the runner's cap.
+        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1")"#);
         t.limit_txt = "00".into();
         assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).hint("a_1")"#);
         t.proj_txt = "{ at: { $gt: #today } }".into();

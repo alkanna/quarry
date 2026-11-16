@@ -305,19 +305,14 @@ impl App {
                 }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
-                Msg::ShellQueryMs { req, ms } => {
-                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
-                        t.shell.query_ms = Some(ms);
-                    }
-                }
-                Msg::ShellDone { req, res, ms } => {
+                Msg::ShellDone { req, res, ms, query_ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
                     t.rows_replaced();
                     let sql = t.sql.is_some();
                     let sh = &mut t.shell;
                     sh.cancel = None;
                     sh.started = None;
-                    sh.ms = Some(ms);
+                    (sh.ms, sh.query_ms) = (Some(ms), query_ms);
                     let parsed = res.and_then(|ejson| {
                         let v: serde_json::Value = serde_json::from_str(&ejson).map_err(|e| e.to_string())?;
                         match Bson::try_from(v).map_err(|e| e.to_string())? {

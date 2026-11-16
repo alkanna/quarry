@@ -35,6 +35,28 @@ impl Lang {
 
 /// A runnable snippet for the query. Values travel as Extended JSON in a raw string literal and are
 /// read back by each driver's own parser, so every BSON type survives without a per-language converter.
+/// A find's sort, skip, limit, hint and collation as mongosh cursor calls.
+pub fn mongosh_chain(q: &Query) -> String {
+    let sh = |d: &Document| shell_text(&Bson::Document(d.clone()));
+    let mut s = String::new();
+    if let Some(o) = &q.sort {
+        s += &format!(".sort({})", sh(o));
+    }
+    if q.skip > 0 {
+        s += &format!(".skip({})", q.skip);
+    }
+    if let Some(n) = q.limit {
+        s += &format!(".limit({n})");
+    }
+    if let Some(h) = &q.hint {
+        s += &format!(".hint({})", shell_text(h));
+    }
+    if let Some(co) = &q.collation {
+        s += &format!(".collation({})", sh(co));
+    }
+    s
+}
+
 pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
     let q = |s: &str| serde_json::Value::String(s.into()).to_string();
     let uri = "mongodb://localhost:27017";
@@ -71,22 +93,7 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     s += &format!(", {}", sh(p));
                 }
                 s.push(')');
-                if let Some(o) = &f.sort {
-                    s += &format!(".sort({})", sh(o));
-                }
-                if skip > 0 {
-                    s += &format!(".skip({skip})");
-                }
-                if let Some(n) = limit {
-                    s += &format!(".limit({n})");
-                }
-                if let Some(h) = hint {
-                    s += &format!(".hint({})", shell_text(h));
-                }
-                if let Some(co) = collation {
-                    s += &format!(".collation({})", sh(co));
-                }
-                s
+                s + &mongosh_chain(f)
             }
             CodeOf::Aggregate(p) => format!("{c}.aggregate({})", shell_text(&Bson::Array(p.iter().cloned().map(Bson::Document).collect()))),
         },

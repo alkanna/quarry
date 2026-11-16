@@ -129,13 +129,14 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     Ok(())
 }
 
-pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+/// The script's result as Extended JSON, with its query time when it used MongoDB.
+pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(String, Option<u64>)> {
     run_shell_gated(req, job, None, send, cancel).await
 }
 
 /// `run_shell` for an agent's script: `gate` checks each SQL statement and cleans each row and error before the script
 /// gets them.
-pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn sql::RelayGate>, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn sql::RelayGate>, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(String, Option<u64>)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     if let Some(n) = repeated_name(job.sql.iter().map(|(n, _)| n.as_str())) {
@@ -172,7 +173,7 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
         err
     });
     let read = async {
-        let mut result: Option<Res<String>> = None;
+        let mut result: Option<Res<(String, Option<u64>)>> = None;
         let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
         // Names whose relay was dropped after a cut result. A later query errors like it does on MySQL, where the relay
         // stays but is dead, instead of quietly opening a new session that has lost the script's transaction.
@@ -186,10 +187,7 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("log") => send(Msg::ShellLog { req, level: s("level"), text: s("text") }),
                 Some("result") => {
-                    if let Some(ms) = v.get("queryMs").and_then(|x| x.as_u64()) {
-                        send(Msg::ShellQueryMs { req, ms });
-                    }
-                    result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok(s("ejson")) } else { Err(s("error")) });
+                    result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok((s("ejson"), v.get("queryMs").and_then(|x| x.as_u64()))) } else { Err(s("error")) });
                     // Closing the pipe lets the runner exit.
                     stdin = None;
                 }
