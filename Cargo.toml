@@ -30,7 +30,7 @@ rfd = "0.18"
 trash = "5"
 dirs = "7"
 # Excel export. constant_memory streams a sheet of any size through a temp file.
-rust_xlsxwriter = { version = "0.93", default-features = false, features = ["constant_memory"] }
+rust_xlsxwriter = { version = "0.102", default-features = false, features = ["constant_memory"] }
 # Custom rail icons are imported from any of these and stored as PNG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 sha2 = "0.11"
@@ -72,7 +72,7 @@ raw-window-handle = "0.6"
 
 [dev-dependencies]
 # Already in the build through rust_xlsxwriter; the xlsx tests read the file back.
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Drives the real App without a window in the tests under src/app/ui_tests.
 egui_kittest = { version = "0.37", features = ["eframe"] }
 
