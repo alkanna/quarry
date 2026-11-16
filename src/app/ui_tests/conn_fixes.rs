@@ -151,18 +151,14 @@ fn aws_and_kerberos_sign_in_are_named_as_not_built_in_on_the_failed_card() {
 }
 
 #[test]
-fn reconnect_from_the_rail_locks_writes_again() {
+fn a_reconnect_locks_writes_again() {
     let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };
-    // The READ-ONLY badge needs a tab, and this test is about the rail.
     ui.h.state_mut().conns[0].writable = true;
-    let tile = "Switch to test";
-    ui.show(tile);
-    let at = ui.h.get_by_label(tile).rect().center();
-    ui.press_at(at, egui::PointerButton::Secondary, 1);
-    ui.settle();
-    ui.click("Reconnect");
-    ui.wait("the reconnect to end", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
+    // The rail tile's Reconnect calls connect, which does nothing in the keychain-less test app, so the step under it runs directly.
+    ui.h.state_mut().connect_uri(CONN, std::env::var("QUARRY_TEST_MONGO").unwrap());
     assert!(!ui.app().conn(CONN).unwrap().writable, "a reconnect kept writes unlocked");
+    ui.wait("the reconnect to end", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
+    assert!(!ui.app().conn(CONN).unwrap().writable);
 }
 
 #[test]
