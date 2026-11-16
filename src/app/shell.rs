@@ -572,9 +572,15 @@ impl App {
             // With the library picker open, Cmd+Enter runs the script picked there, not this one.
             run |= running.is_none() && !covered && !egui::Popup::is_any_open(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
             stop = quiet_enabled(ui, running.is_some(), "Stop").on_hover_text("End the script and interrupt its running statement").clicked();
+            // A slot as wide as the longest readout, kept while idle, so neither the ticking digits nor a run starting or ending moves what follows.
+            // ponytail: past 9999 s the readout is clipped, widen the sample if multi-hour scripts matter.
+            let slot_w = ui.spacing().interact_size.y + ui.spacing().item_spacing.x + crate::ui::theme::text_w(ui, "Running 9999.9 s", FontId::proportional(TXT_BODY));
+            let (slot, _) = ui.allocate_exact_size(egui::vec2(slot_w, ui.spacing().interact_size.y), Sense::hover());
             if let Some(at) = running {
-                spin(ui);
-                ui.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED()));
+                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                row.set_clip_rect(slot.intersect(ui.clip_rect()));
+                spin(&mut row);
+                row.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED()));
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
