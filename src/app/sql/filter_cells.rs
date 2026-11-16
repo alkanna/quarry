@@ -235,8 +235,9 @@ pub(super) struct Hints<'a> {
 
 impl Hints<'_> {
     fn facts(&mut self, col: &str, kind: Kind) -> Option<&ColFacts> {
+        // A table with no answer yet has no entry either, so a missing entry asks too; the app asks once per column.
         let f = self.facts.and_then(|f| f.get(col));
-        if f.is_none() && self.facts.is_some() && self.want_facts.is_none() {
+        if f.is_none() && self.want_facts.is_none() {
             self.want_facts = Some((col.to_string(), kind));
         }
         f
@@ -430,16 +431,17 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
             // A menu, not a segmented control: the row has the date shortcuts to fit too.
             let cur = r.values[1].clone();
             let u = pill_combo(ui, &cur, "", combo_w(ui, &cur, "", 70.0), TEXT());
-            egui::Popup::menu(&u).width(120.0).show(|ui| {
-                menu_look(ui);
+            let mut picks = Vec::new();
+            egui::Popup::menu(&u).show(|ui| {
+                menu_list(ui);
                 for unit in rules::UNITS {
-                    if menu_row(ui, unit, TEXT(), unit == cur, "").clicked() {
-                        r.values[1] = unit.to_string();
-                        changed = true;
-                        ui.close();
-                    }
+                    menu_act(ui, &mut picks, unit, |ui| ui.selectable_label(unit == cur, unit));
                 }
             });
+            if let Some(unit) = picks.pop() {
+                r.values[1] = unit.to_string();
+                changed = true;
+            }
         }
         Input::Column => {
             let dates: Vec<Col> = cols.iter().filter(|c| rules::group_of(c.kind) == rules::Group::Date && c.name != r.col).cloned().collect();
@@ -477,15 +479,14 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
             }
         } else {
             let m = pill_combo(ui, "presets", "", 84.0, MUTED());
-            egui::Popup::menu(&m).width(150.0).show(|ui| {
-                menu_look(ui);
+            let mut picks = Vec::new();
+            egui::Popup::menu(&m).show(|ui| {
+                menu_list(ui);
                 for (name, op, values) in DATE_PILLS {
-                    if menu_row(ui, name, TEXT(), on(op), "").clicked() {
-                        pick = Some((op, values));
-                        ui.close();
-                    }
+                    menu_act(ui, &mut picks, (op, values), |ui| ui.selectable_label(on(op), name));
                 }
             });
+            pick = picks.pop();
         }
         if let Some((op, values)) = pick {
             set_op(r, op, d);

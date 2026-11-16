@@ -154,7 +154,8 @@ pub(super) async fn col_facts(db: &Db, schema: &str, table: &str, column: &str, 
     let ranged = matches!(group, super::rules::Group::Number | super::rules::Group::Date);
     if ranged && let Some(g) = gate(db, schema, table, column).await? {
         // MIN and MAX read the ends of an index that leads with the column; AVG reads every row.
-        let avg = g.small && group == super::rules::Group::Number;
+        // Times have no average on PostgreSQL.
+        let avg = g.small && group == super::rules::Group::Number && kind != Kind::Time;
         if g.small || g.leads {
             let mut s = format!("SELECT {}, {}", as_text(&format!("MIN({c})")), as_text(&format!("MAX({c})")));
             if avg {

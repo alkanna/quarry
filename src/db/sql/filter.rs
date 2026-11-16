@@ -64,7 +64,7 @@ impl PartialEq for Tree {
 }
 
 /// Whether a node writes any SQL: an on, complete row, or a group holding one.
-fn live(n: &Node) -> bool {
+pub fn live(n: &Node) -> bool {
     match &n.item {
         Item::Cond(c) => c.on && c.rule.complete(),
         Item::Group(b) => b.kids.iter().any(live),
@@ -267,7 +267,12 @@ pub fn reconcile(json: &str, text: &str, cols: &[(String, Kind)], d: Dialect, bs
 /// The opposite operator, where the column offers one.
 fn opposite(op: rules::Op) -> Option<rules::Op> {
     use rules::Op::*;
-    let pairs = [(Eq, Ne), (Gt, Le), (Lt, Ge), (In, NotInOrNull), (IsNull, NotNull), (Contains, NotContains), (StartsWith, NotStartsWith), (EndsWith, NotEndsWith), (Like, NotLike), (Regexp, NotRegexp), (Empty, NotEmpty), (JsonPathEq, JsonPathNe)];
+    // NOT IN ... OR NULL is the opposite of IN, but IN's is plain NOT IN: like the other pairs it leaves NULL out, and a
+    // column without NOT IN wraps the row in a none group instead.
+    if op == NotInOrNull {
+        return Some(In);
+    }
+    let pairs = [(Eq, Ne), (Gt, Le), (Lt, Ge), (In, NotIn), (IsNull, NotNull), (Contains, NotContains), (StartsWith, NotStartsWith), (EndsWith, NotEndsWith), (Like, NotLike), (Regexp, NotRegexp), (Empty, NotEmpty), (JsonPathEq, JsonPathNe)];
     pairs.iter().find_map(|&(a, b)| if a == op { Some(b) } else if b == op { Some(a) } else { None })
 }
 
@@ -732,6 +737,12 @@ mod tests {
         t.negate(ids[1], MY).unwrap();
         t.negate(ids[2], MY).unwrap();
         assert_eq!(to_sql(&t, MY, true), "`total` <= 50 AND NOT (DATE(`created_at`) = CURDATE()) AND NOT (`status` = 'paid')");
+        // IN turns into NOT IN where the column offers it, and into a none group where it does not.
+        let mut t = tree(Match::All, vec![cond("status", Kind::Enum, Op::In, &["a"], MY), cond("id", Kind::Int, Op::In, &["1"], MY)]);
+        let ids = t.rows_in_order();
+        t.negate(ids[0], MY).unwrap();
+        t.negate(ids[1], MY).unwrap();
+        assert_eq!(to_sql(&t, MY, true), "`status` NOT IN ('a') AND NOT (`id` IN (1))");
     }
 
     #[test]

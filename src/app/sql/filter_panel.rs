@@ -89,7 +89,7 @@ pub(in crate::app) struct Panel {
     pub(in crate::app) hover: Option<u32>,
     pub(in crate::app) hover_count: Count,
     pub(in crate::app) hover_cache: HashMap<String, Counted>,
-    /// The table the counts are for, since a tab can move to another one.
+    /// Where the counts are from (connection, database, schema and table), since a tab can move.
     pub(in crate::app) table: String,
 }
 
@@ -114,15 +114,7 @@ impl Panel {
 
 /// A count with its thousands separated.
 fn grouped(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+    crate::app::group(&n.to_string())
 }
 
 /// The line under the SQL: how many rows match, an estimate, or why the server refused it.
@@ -269,14 +261,16 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
     };
     p.hover = None;
     // Sampled before anything draws: a field that gives up its focus on Enter this frame still had it.
-    let typing = ui.ctx().egui_wants_keyboard_input();
+    // A focused button or box would also take Space and Enter as a click.
+    let typing = ui.ctx().egui_wants_keyboard_input() || ui.memory(|m| m.focused().is_some());
     let drag = egui::DragAndDrop::payload::<FilterDrag>(ui.ctx()).filter(|_| !drag_cancelled(ui.ctx())).map(|d| d.0);
     let cx = Cx { cols, d, bs, bad };
     let t = fold::openness(ui.ctx(), fold_id(), p.open);
     let mut acts = Vec::new();
     let mut apply = false;
+    let mut area = egui::Rect::NOTHING;
     fold::body(ui, fold_id(), t, 220.0, p.open, |ui| {
-        egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        area = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if ui.available_width() >= WIDE {
                 ui.horizontal_top(|ui| {
@@ -311,8 +305,14 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                     ui.label(RichText::new("Esc closes, keeps the edits").size(TXT_CAPTION).color(FAINT()));
                 });
             });
-        });
+        })
+        .response
+        .rect;
     });
+    // A press anywhere else, in the grid say, gives the keys back to the page.
+    if ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|o| !area.contains(o))) {
+        p.sel = None;
+    }
     if let Some(id) = drag {
         drop_at(ui, &out.targets, tree, id, &mut acts);
     }
@@ -464,6 +464,12 @@ fn drop_at(ui: &egui::Ui, targets: &[Target], tree: &Tree, id: u32, acts: &mut V
 /// The keys of the panel while no field has the focus: Up and Down select, Enter adds a row below, Space turns a row on
 /// or off, Cmd+G groups, Cmd+Shift+G takes out of the group, Cmd+Backspace removes.
 fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
+    let order = tree.rows_in_order();
+    let at = p.sel.and_then(|s| order.iter().position(|x| *x == s));
+    // Without a selection in the panel the keys are the page's, the grid's arrows say.
+    if at.is_none() {
+        return;
+    }
     let none = egui::Modifiers::NONE;
     let (down, up, enter, space, unwrap, wrap, del) = ui.input_mut(|i| {
         (
@@ -477,8 +483,6 @@ fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
             i.consume_key(egui::Modifiers::COMMAND, Key::Backspace),
         )
     });
-    let order = tree.rows_in_order();
-    let at = p.sel.and_then(|s| order.iter().position(|x| *x == s));
     if down || up {
         p.sel = match (at, down) {
             (Some(i), true) => order.get(i + 1).or(order.get(i)).copied(),

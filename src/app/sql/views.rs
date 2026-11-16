@@ -78,7 +78,6 @@ impl App {
         self.reload();
     }
 
-    /// Content: the query line, the results line and the table.
     /// Asks for the filter panel's counts while it is open on a live connection: the whole WHERE once it has rested,
     /// and the hovered row alone. Each slot has one request in flight; an answer to an older one is dropped.
     fn sql_filter_tick(&mut self, ctx: &egui::Context, conn: u64, db: &str, schema: &str, table: &str) {
@@ -95,9 +94,11 @@ impl App {
         let text = t.filter_txt.clone();
         let Some(s) = t.sql.as_mut().filter(|s| s.bar.panel.open && !s.bar.c.sql) else { return };
         let p = &mut s.bar.panel;
-        if p.table != table {
+        // The same text on another table, schema, database or connection is another count.
+        let place = format!("{conn}\u{1f}{db}\u{1f}{schema}\u{1f}{table}");
+        if p.table != place {
             p.forget_counts();
-            p.table = table.to_string();
+            p.table = place;
         }
         match p.count.tick(&text, now) {
             Tick::Ask => {
@@ -136,6 +137,7 @@ impl App {
         }
     }
 
+    /// Content: the query line, the results line and the table.
     pub(in crate::app) fn sql_content(&mut self, ui: &mut egui::Ui) {
         // Loaded with another page size, set from another tab: its page numbers no longer line up.
         let size = self.page_size();

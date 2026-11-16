@@ -3,7 +3,7 @@
 
 use crate::app::*;
 use crate::db::sql::{
-    filter::{Item, Match, Node, Tree},
+    filter::{live, Item, Match, Node, Tree},
     rules::{self, Input, Rule},
 };
 
@@ -16,7 +16,7 @@ pub(super) fn live_rows(t: &Tree) -> usize {
 pub(super) fn filters_button(ui: &mut egui::Ui, t: &Tree, open: bool) -> egui::Response {
     let n = live_rows(t);
     let g = ui.painter().layout_no_wrap("Filters".into(), FontId::proportional(TXT_SMALL), TEXT());
-    let count = (n > 0).then(|| ui.painter().layout_job(LayoutJob::single_section(n.to_string(), mono_fmt(10.0, PRIMARY(), W_SEMIBOLD))));
+    let count = (n > 0).then(|| ui.painter().layout_job(LayoutJob::single_section(n.to_string(), mono_fmt(TXT_MICRO, PRIMARY(), W_SEMIBOLD))));
     let badge_w = count.as_ref().map_or(0.0, |c| c.size().x + 10.0 + 6.0);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(10.0 + 16.0 + 6.0 + g.size().x + badge_w + 10.0, BUTTON_H), Sense::click());
     let state = state_of(&r);
@@ -30,7 +30,8 @@ pub(super) fn filters_button(ui: &mut egui::Ui, t: &Tree, open: bool) -> egui::R
     ui.painter().galley(egui::pos2(x, rect.center().y - g.size().y / 2.0 + dy), g, TEXT());
     x += gw + 6.0;
     if let Some(c) = count {
-        let b = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - 8.0), egui::vec2(c.size().x + 10.0, 16.0));
+        // As tall as its digits and a little air, centered on the button.
+        let b = egui::Rect::from_center_size(egui::pos2(x + (c.size().x + 10.0) / 2.0, rect.center().y), egui::vec2(c.size().x + 10.0, c.size().y + 4.0));
         paint_badge(ui.painter(), b, c, PRIMARY(), 31);
     }
     focus_ring(ui, &r, rect, R_SM as f32);
@@ -78,13 +79,6 @@ fn part(job: &mut LayoutJob, n: &Node) {
             }
             job.append(")", 0.0, f(MUTED()));
         }
-    }
-}
-
-fn live(n: &Node) -> bool {
-    match &n.item {
-        Item::Cond(c) => c.on && c.rule.complete(),
-        Item::Group(g) => g.kids.iter().any(live),
     }
 }
 
