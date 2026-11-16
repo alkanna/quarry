@@ -40,7 +40,7 @@ impl App {
                 agg: t.agg_txt.clone(),
                 shell: t.shell.code.clone(),
                 attached: t.shell.attached.clone(),
-                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
+                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&crate::app::sql::bar::Clauses { tree: s.bar.tree_json.clone(), ..s.bar.c.clone() }).ok()).unwrap_or_default(),
                 query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
                 run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
                 run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),

@@ -93,7 +93,8 @@ impl App {
         let none = Fields::new();
         let hist = self.prefs.history.get(&self.tabs[self.cur].coll_key()).cloned().unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Where);
-        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false };
+        let covered = self.window_open();
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered };
         let t = &mut self.tabs[self.cur];
         let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
@@ -113,6 +114,9 @@ impl App {
         self.pick_acts(pick_acts);
         if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.explain)) {
             return self.explain();
+        }
+        if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.save_filter)) {
+            self.save_script_as();
         }
         if run {
             self.tm().unwrap().page = 0;

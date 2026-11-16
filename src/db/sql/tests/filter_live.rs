@@ -49,7 +49,7 @@ fn every_rule(cols: &[(&str, Kind)], d: Dialect) -> Vec<Rule> {
                 if case && !rules::has_case(kind, op) {
                     continue;
                 }
-                out.push(Rule { join: false, col: col.into(), kind, op, values: values(op, kind), case: if rules::has_case(kind, op) { case } else { rules::default_case(op, d) } });
+                out.push(Rule { col: col.into(), kind, op, values: values(op, kind), case: if rules::has_case(kind, op) { case } else { rules::default_case(op, d) } });
             }
         }
     }
@@ -72,7 +72,7 @@ fn live_every_filter_op_runs_on_mysql_and_mariadb() {
         }
         // Case: 'Ann' and 'ann' are one row each, and the default collation finds both unless case is matched.
         let n = |op: Op, v: &str, case: bool| {
-            let r = Rule { join: false, col: "name".into(), kind: Kind::Text, op, values: vec![v.into()], case };
+            let r = Rule { col: "name".into(), kind: Kind::Text, op, values: vec![v.into()], case };
             l.one(&format!("SELECT COUNT(*) FROM `{s}`.t WHERE {}", rules::rule_sql(&r, d, bs)))
         };
         for (op, v) in [(Op::Eq, "Ann"), (Op::Contains, "An"), (Op::StartsWith, "A"), (Op::Regexp, "^A")] {
@@ -129,7 +129,7 @@ fn live_every_filter_op_runs_on_postgres() {
             let sql = rules::rule_sql(&r, d, false);
             assert!(run(&sql).is_ok(), "{var}: {:?} on {} ({:?}): {sql}: {:?}", r.op, r.col, r.kind, run(&sql).err());
         }
-        let rule = |col: &str, kind: Kind, op: Op, v: &[&str], case: bool| rules::rule_sql(&Rule { join: false, col: col.into(), kind, op, values: v.iter().map(|s| s.to_string()).collect(), case }, d, false);
+        let rule = |col: &str, kind: Kind, op: Op, v: &[&str], case: bool| rules::rule_sql(&Rule { col: col.into(), kind, op, values: v.iter().map(|s| s.to_string()).collect(), case }, d, false);
         for (op, v) in [(Op::Eq, "Ann"), (Op::Contains, "An"), (Op::StartsWith, "A"), (Op::Regexp, "^A")] {
             assert_eq!((n(&rule("name", Kind::Text, op, &[v], false)), n(&rule("name", Kind::Text, op, &[v], true))), ("2".into(), "1".into()), "{var}: {op:?}");
         }

@@ -315,6 +315,13 @@ fn number(b: &mut Block, next: &mut u32) {
 }
 
 impl Tree {
+    /// A tree of `root` with fresh ids.
+    pub fn new(root: Block) -> Tree {
+        let mut t = Tree { root, next: 0 };
+        t.renumber();
+        t
+    }
+
     /// Gives every node a fresh id, after a parse or a load.
     fn renumber(&mut self) {
         number(&mut self.root, &mut self.next);
@@ -469,6 +476,8 @@ impl Tree {
         if parent == id || (parent != 0 && self.path(parent)?.starts_with(&self.path(id)?)) {
             return None;
         }
+        // A target that is not a group is refused before anything moves.
+        self.group_mut(parent)?;
         let from = self.path(id)?;
         let mut index = index;
         if self.parent_of(id)? == parent && from[from.len() - 1] < index {
@@ -545,7 +554,7 @@ mod tests {
     }
 
     fn cond(col: &str, kind: Kind, op: Op, v: &[&str], d: Dialect) -> Item {
-        Item::Cond(Cond { rule: Rule { join: false, col: col.into(), kind, op, values: v.iter().map(|s| s.to_string()).collect(), case: rules::default_case(op, d) }, on: true })
+        Item::Cond(Cond { rule: Rule { col: col.into(), kind, op, values: v.iter().map(|s| s.to_string()).collect(), case: rules::default_case(op, d) }, on: true })
     }
 
     fn group(mode: Match, kids: Vec<Item>) -> Item {
@@ -670,6 +679,8 @@ mod tests {
         // A group moves into neither itself nor a group inside it.
         let inner = t.wrap(rb, Match::None).unwrap();
         assert!(t.move_to(g, g, 0).is_none() && t.move_to(g, inner, 0).is_none());
+        // Into a row: refused, and the row being moved stays.
+        assert!(t.move_to(ra, rc, 0).is_none() && t.find(ra).is_some());
         // Across groups, and down in the same group counting the list before the move.
         t.move_to(ra, g, 1).unwrap();
         assert_eq!(t.parent_of(ra), Some(g));

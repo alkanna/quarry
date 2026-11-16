@@ -614,6 +614,9 @@ impl App {
                 t.shell.attached = st.attached.into_iter().filter(|a| app.conn(a.conn).is_some()).collect();
                 if let (Some(s), Ok(c)) = (t.sql.as_mut(), serde_json::from_str(&st.clauses)) {
                     s.bar.c = c;
+                    // The saved tree is used once the columns arrive; until then it is saved again as it came.
+                    s.bar.pending = std::mem::take(&mut s.bar.c.tree);
+                    s.bar.tree_json = s.bar.pending.clone();
                 }
                 if let Some(s) = t.sql.as_mut() {
                     (s.query, s.run_db, s.run_schema) = (st.query, st.run_db, st.run_schema);
