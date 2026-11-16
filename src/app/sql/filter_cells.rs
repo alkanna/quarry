@@ -68,6 +68,12 @@ struct ColBox {
     age: u8,
 }
 
+/// Whether the column picker of `id` (as passed to `col_pick`) is open, its field and list on screen.
+#[cfg(test)]
+pub(in crate::app) fn col_pick_open(ctx: &egui::Context, id: egui::Id) -> bool {
+    ctx.data(|d| d.get_temp::<ColBox>(id.with("col-box")).is_some())
+}
+
 /// A searchable column picker: a click turns the pill into a text field in place and typing filters
 /// the list. `id` keeps its open state with its row when rows move. Returns the picked name.
 pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col], min: f32, start_text: Option<String>) -> Option<String> {
@@ -132,7 +138,11 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
             }
         });
     });
-    let in_list = list.as_ref().is_some_and(|l| ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(|p| l.response.rect.contains(p)) || Some(l.response.rect) == st.list);
+    // The list as drawn now or last frame: a press there is a pick, not leaving the field.
+    let on_list = |p: egui::Pos2| list.as_ref().is_some_and(|l| l.response.rect.contains(p)) || st.list.is_some_and(|r| r.contains(p));
+    let in_list = ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(on_list);
+    // A press anywhere else leaves it, even where nothing takes the focus from the field (a panel's background).
+    let pressed_out = settled && ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|o| !rect.contains(o) && !on_list(o)));
     if let Some(l) = &list {
         st.list = Some(l.response.rect);
     }
@@ -141,7 +151,7 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
         pick = pick.or_else(|| hits.get(st.sel).map(|&i| cols[i].name.clone()));
     }
     // Leaving the field any other way, such as a click on the page, restores the previous value.
-    let gone = esc || keyed || pick.is_some() || (settled && !te.has_focus() && !ui.ctx().input(|i| i.pointer.any_down() && i.pointer.interact_pos().is_some_and(|p| st.list.is_some_and(|l| l.contains(p)))) && !in_list);
+    let gone = esc || keyed || pick.is_some() || pressed_out || (settled && !te.has_focus() && !in_list);
     if gone {
         ui.memory_mut(|m| m.surrender_focus(edit_id));
         ui.data_mut(|d| d.remove::<ColBox>(key));

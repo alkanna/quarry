@@ -69,6 +69,23 @@ fn a_new_condition_writes_the_where_and_marks_the_line_edited() {
 }
 
 #[test]
+fn a_press_outside_the_column_picker_closes_it() {
+    let Some(mut ui) = opened() else { return };
+    ui.click("+ Condition");
+    ui.settle();
+    let row = bar(&ui).tree.rows_in_order()[2];
+    let picker = crate::app::sql::filter_panel::row_salt(row).with("col");
+    let open = |ui: &UiApp| crate::app::sql::filter_cells::col_pick_open(&ui.h.ctx, picker);
+    assert!(open(&ui), "the new row did not open its column picker");
+    // The panel's caption takes no focus, so only the press itself can close the list.
+    let at = ui.h.get_by_label("of these conditions").rect().center();
+    ui.press_at(at, egui::PointerButton::Primary, 1);
+    ui.settle();
+    assert!(!open(&ui), "the column list stayed open after a press outside it");
+    assert!(bar(&ui).panel.open, "the press outside the picker closed the panel");
+}
+
+#[test]
 fn group_of_conditions_in_the_plus_menu_adds_an_any_group() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     ui.settle();
