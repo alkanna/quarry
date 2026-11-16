@@ -665,11 +665,14 @@ fn sql_pane(ui: &mut egui::Ui, tree: &Tree, p: &Panel, text: &str, d: Dialect, b
                 r.on_hover_text(&e.msg);
             }
         }
-        // Asked before, so a count is on its way; the demo never asks and shows none.
+        // Asked before, so a count is on its way.
         None if p.count.asked.is_some() => {
             ui.label(RichText::new("Counting\u{2026}").size(TXT_SMALL).color(FAINT()));
         }
-        None => {}
+        // The line keeps its room before the first answer (and in the demo, which never asks), so nothing moves when it comes.
+        None => {
+            ui.label(RichText::new(" ").size(TXT_SMALL));
+        }
     }
     out.as_sql |= quiet(ui, RichText::new("Edit as SQL").size(TXT_SMALL).color(PRIMARY())).on_hover_text("Switch the line to SQL with this WHERE").clicked();
 }
