@@ -168,6 +168,10 @@ pub(crate) fn leaf_text(b: &Bson) -> String {
         Bson::Int64(n) => n.to_string(),
         Bson::Document(d) => format!("{{{} fields}}", d.len()),
         Bson::Array(a) => format!("[{} items]", a.len()),
+        Bson::Binary(b) => match std::str::from_utf8(&b.bytes) {
+            Ok(t) => format!("Binary({} B) {}", b.bytes.len(), t.split_whitespace().collect::<Vec<_>>().join(" ")),
+            Err(_) => format!("Binary({} B)", b.bytes.len()),
+        },
         other => db::compact(other),
     }
 }
