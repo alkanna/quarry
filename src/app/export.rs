@@ -349,6 +349,14 @@ impl App {
     }
 
     fn export_name(&self, src: Src) -> String {
+        // A tab bound to a saved script exports under the script's name, which says more than the table's.
+        if let Some(name) = self.t().and_then(|t| t.script.as_ref()).map(|b| match &b.r {
+            crate::library::ScriptRef::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            r => self.script_name(r),
+        }) && let Some(name) = file_safe(&name)
+        {
+            return name;
+        }
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         match (src, coll.is_empty()) {
             (Src::Query, true) => "query-result".into(),
@@ -497,6 +505,14 @@ fn lex_check_msg(stmt: &str, d: db::sql::Dialect) -> Result<(), String> {
     db::sql::lex::read_only_check(stmt, d).map_err(|why| format!("Only statements that read can be copied in full: {why}"))
 }
 
+/// `name` as a file name on every platform: separators and the characters Windows refuses become dashes. None when
+/// nothing is left.
+fn file_safe(name: &str) -> Option<String> {
+    let s: String = name.chars().map(|c| if c.is_control() || r#"/\:*?"<>|"#.contains(c) { '-' } else { c }).collect();
+    let s = s.trim().trim_matches('.').trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +555,13 @@ mod tests {
         for d in [Dialect::MySql, Dialect::Postgres] {
             assert!(db::sql::lex::read_only_check(&q.select_sql(d, "s", "t", &pk, None), d).is_ok());
         }
+    }
+
+    #[test]
+    fn script_names_become_file_names() {
+        assert_eq!(file_safe("Erreurs TAXI/VLOC/Train").as_deref(), Some("Erreurs TAXI-VLOC-Train"));
+        assert_eq!(file_safe(" a:b*? ").as_deref(), Some("a-b--"));
+        assert_eq!(file_safe(" .. "), None);
     }
 
     #[test]
