@@ -414,6 +414,7 @@ impl App {
             "text" => Modal::Text { title: "Query help".into(), body: "{ status: 'paid' }            exact value\n{ total: { $gt: 100 } }       comparison\n{ tags: { $in: ['a', 'b'] } } any of".into(), code: true },
             "update" => Modal::UpdateMany { set_txt: "{ status: 'archived' }".into(), unset_txt: "note".into(), preview: None },
             "undo" => Modal::Undo,
+            "icon" => Modal::ConnIcon(Box::new(super::conn_icon::IconForm::new(1))),
             _ => return,
         });
     }

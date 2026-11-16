@@ -184,7 +184,19 @@ impl App {
             dialog_head_with(ui, &Head::new("Data protection").sub("What AI agents may read, and what they see masked").glyph(glyphs::shield), |ui| {
                 let opts: Vec<(Option<u64>, &str)> = scopes.iter().map(|(id, n)| (*id, n.as_str())).collect();
                 let mut s = w.scope;
-                segmented(ui, &mut s, &opts);
+                // A row of names would push the title off the header once a few connections are shared, so more
+                // than three choices become a dropdown.
+                if opts.len() <= 3 {
+                    segmented(ui, &mut s, &opts);
+                } else {
+                    let cur = opts.iter().find(|o| o.0 == s).map_or("All connections", |o| o.1);
+                    egui::ComboBox::from_id_salt("rules-scope").width(220.0).selected_text(cur).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for (id, name) in &opts {
+                            ui.selectable_value(&mut s, *id, *name);
+                        }
+                    });
+                }
                 if s != w.scope {
                     (w.scope, w.sel) = (s, None);
                 }

@@ -12,6 +12,7 @@ impl App {
                 for what in SECRETS {
                     let _ = set_secret(id, what, "");
                 }
+                let _ = std::fs::remove_file(super::conn_icon::path(id));
             }
             self.conns.retain(|c| c.meta.id != id);
             self.remove_tabs(|t| t.sel.conn == id);

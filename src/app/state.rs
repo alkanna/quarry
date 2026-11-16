@@ -68,6 +68,9 @@ pub(super) struct ConnMeta {
     /// Session settings, init command and timeouts of a SQL connection. None of it is secret.
     #[serde(default, skip_serializing_if = "db::sql::Advanced::is_default")]
     pub(super) advanced: db::sql::Advanced,
+    /// A custom rail icon is saved in icons/<id>.png.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) icon: bool,
 }
 
 #[derive(PartialEq)]
@@ -990,6 +993,8 @@ pub(super) enum Modal {
     Attach(Box<super::shell_attach::AttachForm>),
     /// Edit a connection group.
     GroupEdit(Box<super::group_dialog::GroupForm>),
+    /// Pick a custom rail icon for a connection.
+    ConnIcon(Box<super::conn_icon::IconForm>),
     /// Save the current script to the library.
     SaveScript(Box<super::library::save_dialog::SaveForm>),
     /// Which connection a library script opens on, when none is the obvious one.
