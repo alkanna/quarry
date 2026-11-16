@@ -1418,6 +1418,49 @@ mod tests {
         assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
     }
 
+    fn undo_of(t: &Target, kind: UndoKind) -> UndoAction {
+        UndoAction { agent: None, at: Instant::now(), conn: 1, db: t.db.clone(), coll: t.coll.clone(), kind }
+    }
+
+    #[test]
+    fn live_mongo_fixes_a_failed_undo_hands_its_action_back() {
+        let Some((w, rx, t)) = live("mongo_fixes_undo_back") else { return };
+        seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }]);
+        // Undoing a delete whose document is back fails on its _id.
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::Delete { old: doc! { "_id": 1, "a": 1 } }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert!(res.is_err());
+        let Some(UndoAction { kind: UndoKind::Delete { old }, .. }) = undo else { panic!("the failed delete undo was not handed back") };
+        assert_eq!(old, doc! { "_id": 1, "a": 1 });
+        // Undoing an edit of a document changed meanwhile is refused and handed back too.
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::Update { old: doc! { "_id": 1, "a": 0 }, new: doc! { "_id": 1, "a": 5 } }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert_eq!(res, Err(CONFLICT.to_string()));
+        let Some(UndoAction { kind: UndoKind::Update { old, new }, .. }) = undo else { panic!("the failed update undo was not handed back") };
+        assert_eq!((old, new), (doc! { "_id": 1, "a": 0 }, doc! { "_id": 1, "a": 5 }));
+        assert_eq!(all(&w, &t), [doc! { "_id": 1, "a": 1 }]);
+    }
+
+    #[test]
+    fn live_mongo_fixes_a_partial_undo_keeps_only_what_was_not_restored() {
+        let Some((w, rx, t)) = live("mongo_fixes_undo_part") else { return };
+        let docs = vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "a": 2 }, doc! { "_id": 3, "a": 3 }];
+        // The second document is back already, so the ordered restore stops after the first.
+        seed(&w, &t, vec![docs[1].clone()]);
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::DeleteMany { old: docs.clone() }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert!(res.is_err());
+        let Some(a) = undo else { panic!("the partial undo was not handed back") };
+        assert!(matches!(&a.kind, UndoKind::DeleteMany { old } if *old == docs[1..]), "the restored document is still in the undo");
+        assert_eq!(all(&w, &t), docs[..2]);
+        // Once the blocker is gone, the rest comes back without inserting the first one twice.
+        w.rt.block_on(async { t.c().delete_one(doc! { "_id": 2 }).await.unwrap() });
+        w.undo_doc(t.clone(), a);
+        let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
+        res.unwrap();
+        assert_eq!(all(&w, &t), docs);
+    }
+
     #[test]
     fn live_index_list_keeps_every_option() {
         let Some((w, rx, t)) = live("index_options") else { return };
