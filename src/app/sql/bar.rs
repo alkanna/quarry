@@ -54,6 +54,8 @@ pub(in crate::app) struct Bar {
     rules: Vec<Rule>,
     any: bool,
     draft: Option<Rule>,
+    /// Where the draft came from when a token was opened, so keeping it puts it back in its place and its group.
+    edit_at: Option<usize>,
     /// The WHERE text the rules were last written as; a different `filter_txt` came from elsewhere.
     src: String,
     fold_open: bool,
@@ -403,17 +405,34 @@ fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
     pick
 }
 
-/// A round "+" button, painted because the glyph sits off center.
-fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
-    plus_named(ui, enabled, "Add rule")
+/// The AND or OR before a condition. A click switches this one only: conditions joined by the other word than the rest
+/// are grouped in parentheses, so `a AND (b OR c)` is two clicks away. Returns whether it was clicked.
+fn joiner(ui: &mut egui::Ui, or: bool) -> bool {
+    let w = if or { "OR" } else { "AND" };
+    quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch between AND and OR. Conditions joined by the other word are grouped in parentheses.").clicked()
 }
 
+/// A parenthesis around a group of conditions.
+fn paren(ui: &mut egui::Ui, p: &str) {
+    ui.label(RichText::new(p).font(FontId::monospace(TXT_SMALL)).color(MUTED()));
+}
+
+/// A round tick that keeps the condition being written. A "+" there read as adding another one.
+fn keep_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    round_button(ui, enabled, "Keep this condition", paint_check)
+}
+
+/// A round "+" button, painted because the glyph sits off center.
 fn plus_named(ui: &mut egui::Ui, enabled: bool, name: &str) -> egui::Response {
+    round_button(ui, enabled, name, |p, c, color| paint_plus(p, c, 4.0, color))
+}
+
+fn round_button(ui: &mut egui::Ui, enabled: bool, name: &str, glyph: impl FnOnce(&egui::Painter, egui::Pos2, Color32)) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H + 4.0, BUTTON_H), Sense::click());
     let state = if enabled { state_of(&r) } else { 0 };
     ui.painter().rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let color = if !enabled { FAINT() } else if state > 0 { BRIGHT() } else { MUTED() };
-    paint_plus(ui.painter(), rect.center(), 4.0, color);
+    glyph(ui.painter(), rect.center(), color);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default })
@@ -906,6 +925,7 @@ fn read_rules(b: &mut Bar, text: &str, pairs: &[(String, Kind)], cols: &[Col], d
             Some((r, any)) => {
                 // Every rule is a token; the draft is an empty one, shown when a condition is asked for.
                 b.draft = None;
+                b.edit_at = None;
                 b.show_draft = false;
                 b.rules = r;
                 b.any = any;
@@ -926,14 +946,21 @@ fn write_rules(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dial
     if pairs.is_empty() || b.src != *text {
         return;
     }
-    let mut all = b.rules.clone();
-    all.extend(b.draft.clone());
-    let out = rules::to_sql(&all, b.any, d, bs);
+    let out = rules::to_sql(&with_draft(b), b.any, d, bs);
     // `src` already equals the text when nothing changed, so it is only copied on a change.
     if out != *text {
         *text = out;
         b.src = text.clone();
     }
+}
+
+/// The rules with the draft in its place: where its token was when one was opened, else at the end.
+fn with_draft(b: &Bar) -> Vec<Rule> {
+    let mut all = b.rules.clone();
+    if let Some(d) = &b.draft {
+        all.insert(b.edit_at.unwrap_or(all.len()).min(all.len()), d.clone());
+    }
+    all
 }
 
 /// What the bar shows beside Run: the table's filter history and its saved filters, and what was picked in them.
@@ -1115,9 +1142,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     // Reading the text as rules spells it their way, which is what this frame writes back. It is the same query, so it must not
     // count as an edit of the one that ran.
     if read_rules(b, &t.filter_txt, &pairs, &cols, d, bs, false) && !pairs.is_empty() && !b.c.sql {
-        let mut all = b.rules.clone();
-        all.extend(b.draft.clone());
-        let out = rules::to_sql(&all, b.any, d, bs);
+        let out = rules::to_sql(&with_draft(b), b.any, d, bs);
         if out != t.filter_txt {
             b.respelled = Some((t.filter_txt.clone(), out.clone()));
         }
@@ -1192,23 +1217,56 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                     ui.spacing_mut().item_spacing = LINE_GAP;
                     if b.c.sql {
-                        let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
+                        // Leaves room for the field's side margins, the gap and the "+" that ends the row, or the "+" wraps under the text.
+                        let w = (ui.max_rect().right() - ui.cursor().left() - (BUTTON_H + 4.0 + LINE_GAP.x + 8.0)).max(160.0);
                         if b.preset.ac {
                             open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
                         }
                         run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                     } else {
-                        let mut edit: Option<usize> = None;
-                        let mut remove: Option<usize> = None;
-                        for (i, r) in b.rules.iter().enumerate() {
-                            if i > 0 {
-                                let w = if b.any { "OR" } else { "AND" };
-                                if quiet(ui, RichText::new(w).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD())).on_hover_text("Click to switch between AND and OR").clicked() {
-                                    b.any = !b.any;
-                                    run = true;
+                        let (mut edit, mut remove, mut flip) = (None, None, None);
+                        let (mut keep, mut drop_draft, mut flip_draft) = (false, false, false);
+                        // The draft sits where its token was when one was opened, else at the end, and shows once asked for.
+                        let at = b.edit_at.unwrap_or(b.rules.len()).min(b.rules.len());
+                        let shown = b.show_draft && b.draft.is_some();
+                        let mut joins: Vec<bool> = b.rules.iter().map(|r| r.join).collect();
+                        if let Some(dr) = b.draft.as_ref().filter(|_| shown) {
+                            joins.insert(at, dr.join);
+                        }
+                        // Parentheses only mean something beside another group.
+                        let parens = joins.iter().skip(1).any(|j| !j);
+                        let opens = |k: usize| parens && (k == 0 || !joins[k]) && joins.get(k + 1) == Some(&true);
+                        let closes = |k: usize| parens && k > 0 && joins[k] && joins.get(k + 1) != Some(&true);
+                        let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
+                        for k in 0..joins.len() {
+                            if shown && k == at {
+                                let Some(dr) = b.draft.as_mut() else { continue };
+                                flip_draft = k > 0 && joiner(ui, b.any ^ dr.join);
+                                if opens(k) {
+                                    paren(ui, "(");
                                 }
+                                let (changed, enter) = rule_editor(ui, dr, &cols, ui.scope_id().with("draft"));
+                                run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
+                                keep = (keep_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() || enter) && dr.complete();
+                                drop_draft = close_x(ui).on_hover_text("Remove this condition").clicked();
+                                run |= drop_draft && dr.complete();
+                                if closes(k) {
+                                    paren(ui, ")");
+                                }
+                                continue;
+                            }
+                            let i = if shown && k > at { k - 1 } else { k };
+                            let r = &b.rules[i];
+                            if k > 0 && joiner(ui, b.any ^ r.join) {
+                                flip = Some(i);
+                            }
+                            if opens(k) {
+                                paren(ui, "(");
                             }
                             let (click, rm) = rule_token(ui, r);
+                            if closes(k) {
+                                paren(ui, ")");
+                            }
                             if click {
                                 edit = Some(i);
                             }
@@ -1216,42 +1274,39 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                                 remove = Some(i);
                             }
                         }
-                        if let Some(i) = remove {
-                            b.rules.remove(i);
+                        if flip_draft && let Some(dr) = b.draft.as_mut() {
+                            dr.join ^= true;
                             run = true;
-                        } else if let Some(i) = edit {
-                            // The rule being edited goes back to a token when it is complete, else it is dropped.
-                            let picked = b.rules.remove(i);
-                            if let Some(old) = b.draft.replace(picked).filter(|r| r.complete()) {
-                                b.rules.insert(i.min(b.rules.len()), old);
+                        } else if keep && let Some(dr) = b.draft.take() {
+                            b.rules.insert(at, dr);
+                            rules::normalize(&mut b.rules, &mut b.any);
+                            (b.draft, b.edit_at, b.show_draft) = (fresh, None, false);
+                        } else if drop_draft {
+                            // An opened token that is removed takes its place in its group with it.
+                            if b.edit_at.is_some() && let Some(dr) = b.draft.take() {
+                                b.rules.insert(at, dr);
+                                rules::remove(&mut b.rules, &mut b.any, at);
                             }
+                            (b.draft, b.edit_at, b.show_draft) = (fresh, None, false);
+                        } else if let Some(i) = flip {
+                            b.rules[i].join ^= true;
+                            rules::normalize(&mut b.rules, &mut b.any);
+                            run = true;
+                        } else if let Some(i) = remove {
+                            rules::remove(&mut b.rules, &mut b.any, i);
+                            if let Some(e) = b.edit_at.as_mut().filter(|e| **e > i) {
+                                *e -= 1;
+                            }
+                            run = true;
+                        } else if let Some(mut i) = edit {
+                            // A complete draft is kept first, in its place; one not finished is dropped.
+                            if let Some(old) = b.draft.take().filter(|r| shown && r.complete()) {
+                                b.rules.insert(at, old);
+                                i += usize::from(at <= i);
+                            }
+                            b.draft = Some(b.rules.remove(i));
+                            b.edit_at = Some(i);
                             b.show_draft = true;
-                        }
-                        if let Some(mut dr) = b.draft.take() {
-                            let fresh = cols.first().map(|c| Rule::new(&c.name, c.kind));
-                            // The draft is always there to be filled in, but only shows once a condition was asked for or a token opened.
-                            if b.show_draft {
-                                if !b.rules.is_empty() {
-                                    ui.label(RichText::new(if b.any { "OR" } else { "AND" }).font(FontId::monospace(TXT_CAPTION)).color(C_KEYWORD()));
-                                }
-                                let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
-                                run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
-                                let add = plus_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
-                                let close = close_x(ui).on_hover_text("Remove this condition").clicked();
-                                if add || (enter && dr.complete()) {
-                                    b.rules.push(dr);
-                                    b.draft = fresh;
-                                    b.show_draft = false;
-                                } else if close {
-                                    run |= dr.complete();
-                                    b.draft = fresh;
-                                    b.show_draft = false;
-                                } else {
-                                    b.draft = Some(dr);
-                                }
-                            } else {
-                                b.draft = Some(dr);
-                            }
                         }
                         write_rules(b, &mut t.filter_txt, &pairs, d, bs);
                     }
@@ -1610,7 +1665,7 @@ pub(in crate::app) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
                 // The row reader makes no other value; a guessed condition would show the wrong rows, so the drill stops.
                 let Some(text) = bson_text(v) else { return };
                 match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
-                    Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
+                    Some(c) => rules::rule_sql(&Rule { join: false, col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
                     None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
                 }
             }
