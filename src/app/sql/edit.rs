@@ -289,7 +289,7 @@ impl App {
     pub(in crate::app) fn sql_col_block(&self, col: &str) -> Option<&'static str> {
         let s = self.t()?.sql.as_ref()?;
         if s.pk.iter().any(|p| p == col) {
-            return Some("Primary key columns can't be edited inline, because changing the key would break undo for this row. Use a query instead.");
+            return Some("Key columns can't be edited inline, because changing the key would break undo for this row. Use a query instead.");
         }
         let c = self.sql_col(col)?;
         if c.generated {
@@ -591,6 +591,10 @@ impl App {
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
         let Some(orig) = rows.owned(i) else { return };
+        // A row without a key would share one draft with every other keyless row, and that draft could never be saved.
+        if rows.id(i).is_none() {
+            return self.warn("This row has no key value, so it cannot be edited here.");
+        }
         let cur = self.shown_row(rows, i, false).unwrap_or(orig);
         let mut new = cur.clone();
         new.insert(col, v);
@@ -637,7 +641,7 @@ impl App {
         let skipped = keyless.len();
         self.drafts.extend(keyless);
         if skipped > 0 {
-            self.err(format!("{skipped} row{} without a primary key {} not saved.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
+            self.err(format!("{skipped} row{} without a key value {} not saved.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
         }
         let drafts = keyed;
         if drafts.is_empty() {
@@ -902,19 +906,19 @@ impl App {
         }
         let n = rows.len();
         let writes = matches!(act, DocsAct::Duplicate | DocsAct::SetValue | DocsAct::Delete);
-        if writes {
-            if let Some(why) = self.sql_edit_block() {
-                return self.warn(why);
-            }
-            if !self.sel_writable() {
-                let ctx = ctx.clone();
-                return self.ask_unlock_then(move |a| a.sql_docs_act(&ctx, act, rows));
-            }
+        if writes && let Some(why) = self.sql_edit_block() {
+            return self.warn(why);
         }
-        // A row whose unique key is NULL has no `_id`, and `key IN (NULL)` would match nothing.
+        // A row whose unique key is NULL has no `_id`, and `key IN (NULL)` would match nothing. Checked before the unlock,
+        // so writes are not unlocked for an action that cannot run. A table with no key at all says so further down.
+        let keyed = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| !s.pk.is_empty());
         let keyless = rows.iter().filter(|r| r.get_document("_id").is_err()).count();
-        if keyless > 0 && matches!(act, DocsAct::Filter | DocsAct::EditQuery | DocsAct::SetValue | DocsAct::Delete) {
+        if keyed && keyless > 0 && matches!(act, DocsAct::Filter | DocsAct::EditQuery | DocsAct::SetValue | DocsAct::Delete) {
             return self.warn(if keyless == 1 { "One of these rows has no key value, so it cannot be addressed.".to_string() } else { format!("{keyless} of these rows have no key value, so they cannot be addressed.") });
+        }
+        if writes && !self.sel_writable() {
+            let ctx = ctx.clone();
+            return self.ask_unlock_then(move |a| a.sql_docs_act(&ctx, act, rows));
         }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new(), ..Default::default() }, Arc::new(Vec::new()), Vec::new()));
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
@@ -957,10 +961,10 @@ impl App {
                 if let [one] = rows.as_slice() {
                     return self.sql_new_row(Some(one.clone()));
                 }
-                let pk_shown = cols.iter().find(|c| pk.len() == 1 && c.src == pk[0]).map(|c| (c.name.clone(), matches!(c.kind, Kind::Int | Kind::UInt)));
-                let auto = pk_shown.as_ref().is_some_and(|p| p.1);
-                let pk_name = pk_shown.map(|p| p.0).unwrap_or_default();
-                let copies: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id" && !(auto && **k == pk_name)).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
+                // A copy of a key value always collides with the row it came from, so the key is left to the server's
+                // default, its identity or auto-increment, or NULL.
+                let key_names: Vec<&str> = cols.iter().filter(|c| pk.contains(&c.src)).map(|c| c.name.as_str()).collect();
+                let copies: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id" && !key_names.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
                 self.sql_insert_rows(copies);
             }
             DocsAct::SetValue => {
@@ -1152,6 +1156,9 @@ impl App {
                 CellAct::SetNull => {
                     if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
                         return self.warn(why);
+                    }
+                    if self.t().is_some_and(|t| Rows::Raw(&t.docs).id(i).is_none()) {
+                        return self.warn("This row has no key value, so it cannot be edited here.");
                     }
                     if !self.sel_writable() {
                         return self.ask_unlock_then(move |a| a.sql_set_cell(i, &col, Bson::Null));

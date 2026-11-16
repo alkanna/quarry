@@ -712,10 +712,6 @@ async fn table_checks(db: &Db, schema: &str, table: &str) -> Vec<CheckConstraint
     rows.unwrap_or_default().iter().map(|r| CheckConstraint { name: s(r, "name"), expr: s(r, "expr"), not_enforced: r.int("not_enforced").is_some_and(|n| n != 0), ..Default::default() }).collect()
 }
 
-/// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
-/// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
-pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
-
 /// On PostgreSQL the read runs under the table's schema as search_path, the one a structure change writes its statements
 /// under, so a type or function outside it comes back qualified and means the same when it is written back.
 async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<SqlRow>> {

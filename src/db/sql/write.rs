@@ -132,7 +132,7 @@ fn src_of(cols: &[Col], name: &str) -> String {
 /// the one shown, and an empty key would address every row.
 fn check_key(pk: &[String], key: &Document) -> Res<()> {
     if pk.is_empty() || key.len() != pk.len() || !pk.iter().all(|p| key.contains_key(p)) {
-        return Err("Not written: a row has no complete primary key.".into());
+        return Err("Not written: a row has no complete primary key or unique key value.".into());
     }
     Ok(())
 }
@@ -604,20 +604,10 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     key_changed_error(table, recorded, &now)
 }
 
-/// The table's primary key columns in key order, empty when it has none.
+/// The columns that address one row of the table, as the grid reads them: the primary key, else a unique index.
 pub(super) async fn primary_key(db: &Db, schema: &str, table: &str) -> Res<Vec<String>> {
-    if db.dialect == Dialect::Postgres {
-        // The index query names the primary key by `is_primary`, not by an index called PRIMARY.
-        let rows = db.meta(schema, Dialect::Postgres.indexes(), [schema, table]).await?;
-        return Ok(rows.iter().filter(|r| r.int("is_primary") == Some(1)).filter_map(|r| super::worker::text(r, "col")).collect());
-    }
-    let pool = db.my_pool()?;
-    let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
-    let t = Instant::now();
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, &sql, t, &rows);
-    let rows = rows.map_err(se)?;
-    Ok(rows.iter().filter_map(|r| super::worker::text_at(r, 0)).collect())
+    let rows = db.meta(schema, db.dialect.indexes(), [schema, table]).await?;
+    Ok(super::worker::row_key(db.dialect, &rows))
 }
 
 fn key_changed_error(table: &str, recorded: &[String], now: &[String]) -> Res<()> {
@@ -625,7 +615,7 @@ fn key_changed_error(table: &str, recorded: &[String], now: &[String]) -> Res<()
         return Ok(());
     }
     let now = if now.is_empty() { "none".to_string() } else { now.join(", ") };
-    Err(format!("Undo refused: the primary key of {table} is now ({now}), not ({}) as when the change ran, so its rows cannot be told apart. Nothing was changed.", recorded.join(", ")))
+    Err(format!("Undo refused: the key of {table} is now ({now}), not ({}) as when the change ran, so its rows cannot be told apart. Nothing was changed.", recorded.join(", ")))
 }
 
 fn plural(n: usize, word: &str) -> String {

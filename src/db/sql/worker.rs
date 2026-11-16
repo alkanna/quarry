@@ -459,35 +459,29 @@ pub(super) async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashM
         cols.iter().filter(|r| text(r, "full_type").is_some_and(|t| t.eq_ignore_ascii_case("longtext"))).filter_map(|r| text(r, "name")).filter(|n| json.contains(&(table.to_string(), n.clone()))).map(|n| (n, Kind::Json)).collect()
     };
     // A Postgres key is named by the table, so the index query says which one is the primary key.
-    let mut pk: Vec<String> = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
-    if pk.is_empty() {
-        // An expression, a prefix or a predicate makes the part no plain column, so its index cannot address a row.
-        let parts: Vec<KeyPart> = idx
-            .iter()
-            .filter_map(|r| {
-                let plain = text(r, "pred").is_none() && text(r, "sub_part").is_none();
-                Some((text(r, "name")?, text(r, "col").filter(|c| plain && !c.is_empty()), r.int("non_unique") == Some(0), text(r, "nullable").is_some_and(|n| !n.is_empty())))
-            })
-            .collect();
-        pk = unique_key(&parts);
-    }
+    let pk = row_key(d, &idx);
     Ok((meta, kinds, pk))
 }
 
-/// One part of an index: its name, the column (None when it is not a plain column), unique, and whether the column takes NULL.
-type KeyPart = (String, Option<String>, bool, bool);
-
-/// The key of a table without a primary key: a unique index on plain columns, with NOT NULL ones first because UNIQUE
-/// lets several rows hold NULL, and those rows cannot be told apart. Then the fewest columns, then the name.
-fn unique_key(parts: &[KeyPart]) -> Vec<String> {
-    let mut by_name: std::collections::BTreeMap<&str, (Vec<Option<&str>>, bool, bool)> = Default::default();
-    for (name, col, unique, nullable) in parts {
-        let e = by_name.entry(name).or_insert((Vec::new(), true, false));
-        e.0.push(col.as_deref());
-        e.1 &= unique;
-        e.2 |= nullable;
+/// The columns that address one row: the primary key, else the best unique index on plain columns (`unique_key`).
+pub(super) fn row_key(d: Dialect, idx: &[SqlRow]) -> Vec<String> {
+    let all = super::structure::indexes(idx);
+    // A Postgres key is named by the table, so the index query says which one is the primary key.
+    if let Some(p) = all.iter().find(|i| if d == Dialect::Postgres { i.primary } else { i.name == "PRIMARY" }) {
+        return p.cols.iter().map(|c| c.name.clone()).collect();
     }
-    by_name.into_values().filter(|(cols, unique, _)| *unique && cols.iter().all(Option::is_some)).min_by_key(|(cols, _, nullable)| (*nullable, cols.len())).map(|(cols, ..)| cols.into_iter().flatten().map(String::from).collect()).unwrap_or_default()
+    let nullable: HashSet<String> = idx.iter().filter(|r| text(r, "nullable").is_some_and(|n| !n.is_empty())).filter_map(|r| text(r, "col")).collect();
+    // A failed CREATE UNIQUE INDEX CONCURRENTLY leaves an invalid index that may sit over duplicates.
+    let invalid: HashSet<String> = idx.iter().filter(|r| r.int("valid") == Some(0)).filter_map(|r| text(r, "name")).collect();
+    unique_key(all.iter().filter(|i| !invalid.contains(&i.name)), &nullable)
+}
+
+/// The key of a table without a primary key: a unique index on plain columns, NOT NULL ones first because UNIQUE lets
+/// several rows hold NULL, and those rows cannot be told apart. Then the fewest columns, then the name. A Postgres index
+/// that is `complex` may compare with another collation or operator class than `=` on the column, so it is skipped.
+fn unique_key<'a>(all: impl Iterator<Item = &'a super::structure::Index>, nullable: &HashSet<String>) -> Vec<String> {
+    let plain = |i: &&super::structure::Index| i.unique && !i.complex && i.predicate.is_empty() && i.cols.iter().all(|c| !c.name.is_empty() && c.expr.is_none() && c.prefix.is_none());
+    all.filter(plain).min_by_key(|i| (i.cols.iter().any(|c| nullable.contains(&c.name)), i.cols.len())).map(|i| i.cols.iter().map(|c| c.name.clone()).collect()).unwrap_or_default()
 }
 
 /// Whether any clause of the page query is text the user typed. The index hint is quoted by `PageQuery`, and the limit
@@ -1642,16 +1636,18 @@ mod tests {
 
     #[test]
     fn unique_key_prefers_not_null_plain_columns() {
-        let part = |n: &str, c: Option<&str>, unique: bool, nullable: bool| (n.to_string(), c.map(String::from), unique, nullable);
+        use super::super::structure::{Index, IndexCol};
+        let ix = |name: &str, cols: &[&str]| Index { name: name.into(), unique: true, cols: cols.iter().map(|c| IndexCol { name: c.to_string(), ..Default::default() }).collect(), ..Default::default() };
+        let pick = |all: &[Index], nullable: &[&str]| unique_key(all.iter(), &nullable.iter().map(|c| c.to_string()).collect());
         // NOT NULL wins over fewer columns, since rows with a NULL key cannot be addressed.
-        let parts = [part("a_u", Some("x"), true, true), part("b_u", Some("y"), true, false), part("b_u", Some("z"), true, false)];
-        assert_eq!(unique_key(&parts), ["y", "z"]);
-        // A plain index, or a unique one with an expression, prefix or predicate part, is never a key.
-        let parts = [part("k", Some("x"), false, false), part("e", Some("y"), true, false), part("e", None, true, false)];
-        assert!(unique_key(&parts).is_empty());
+        assert_eq!(pick(&[ix("a_u", &["x"]), ix("b_u", &["y", "z"])], &["x"]), ["y", "z"]);
+        // A plain index, or a unique one with an expression, a prefix, a predicate or another comparison, is never a key.
+        let expr = Index { cols: vec![IndexCol { expr: Some("lower(x)".into()), ..Default::default() }], ..ix("e", &[]) };
+        let prefix = Index { cols: vec![IndexCol { name: "x".into(), prefix: Some(3), ..Default::default() }], ..ix("f", &[]) };
+        let skipped = [Index { unique: false, ..ix("k", &["x"]) }, expr, prefix, Index { predicate: "b > 0".into(), ..ix("p", &["x"]) }, Index { complex: true, ..ix("c", &["x"]) }];
+        assert!(pick(&skipped, &[]).is_empty());
         // Nullable is still a key when nothing better exists, and ties go to the fewest columns, then the name.
-        let parts = [part("c", Some("p"), true, true), part("c", Some("q"), true, true), part("b", Some("r"), true, true), part("a", Some("s"), true, true)];
-        assert_eq!(unique_key(&parts), ["s"]);
+        assert_eq!(pick(&[ix("a", &["s"]), ix("b", &["r"]), ix("c", &["p", "q"])], &["p", "q", "r", "s"]), ["s"]);
     }
 
     #[test]

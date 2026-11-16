@@ -189,9 +189,12 @@ fn a_unique_key_stands_in_for_a_missing_primary_key() {
         let of = |role: &str| rows.iter().find(|r| r.get_str("role") == Ok(role)).unwrap().clone();
         assert!(!of("guest").contains_key("_id"), "{var}: a NULL key value addressed a row");
         let ed = RowEdit { pk: pk_doc(&of("admin")), changes: vec![("n".into(), Bson::Int64(1), Bson::Int64(5))] };
-        let (res, _) = t.save("t", &cols, &["user_id"], vec![ed], false);
+        let (res, undo) = t.save("t", &cols, &["user_id"], vec![ed], false);
         res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(t.one("SELECT n::text FROM t WHERE role = 'admin'"), "5", "{var}");
+        // Undo checks the key is still the one the change used, so it must find the unique key too.
+        t.undo(undo.expect("no undo"), &["user_id"]).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.one("SELECT n::text FROM t WHERE role = 'admin'"), "1", "{var}");
         assert_eq!(t.one("SELECT n::text FROM t WHERE role = 'guest'"), "2", "{var}");
         // A partial or an expression index does not name one row by plain column values.
         assert!(t.page("p").1.is_empty(), "{var}");
