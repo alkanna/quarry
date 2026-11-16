@@ -241,7 +241,7 @@ impl App {
         let opens: Vec<f32> = items
             .iter()
             .map(|it| match it {
-                RailItem::Folder { gid, .. } => fold::openness(&ctx, fold_id(*gid), self.rail_open.contains(gid)),
+                RailItem::Folder { gid, members } => fold::openness(&ctx, fold_id(*gid), self.rail_folder_open(*gid, members)),
                 RailItem::Conn(_) => 0.0,
             })
             .collect();
@@ -284,7 +284,8 @@ impl App {
                     RailItem::Folder { gid, members } => {
                         let Some(g) = self.groups.group(*gid) else { return ui.response() };
                         let color = group_color(&g.color);
-                        let open_now = self.rail_open.contains(gid);
+                        let open_now = self.rail_folder_open(*gid, members);
+                        let can_toggle = members.len() > 1;
                         // The tile sits at the first open member in rail order, which is not always the group's first.
                         let anchor = folder_anchor(&self.rail_order, members);
                         let worst = folder_status(g.members.iter().filter_map(|m| self.conn(*m)).map(|c| &c.status));
@@ -310,13 +311,15 @@ impl App {
                             }
                             return r;
                         }
-                        if r.clicked() {
+                        if r.clicked() && can_toggle {
                             toggle = Some(*gid);
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             let gid = *gid;
-                            menu_act(ui, &mut folder_acts, (gid, FolderAct::Toggle), |ui| ui.button(if open_now { "Close" } else { "Open" }));
+                            if can_toggle {
+                                menu_act(ui, &mut folder_acts, (gid, FolderAct::Toggle), |ui| ui.button(if open_now { "Close" } else { "Open" }));
+                            }
                             match conns_panel::connect_all_items(ui, g, &self.conns) {
                                 Some(true) => folder_acts.push((gid, FolderAct::ConnectAll)),
                                 Some(false) => folder_acts.push((gid, FolderAct::DisconnectAll)),
@@ -461,6 +464,11 @@ impl App {
                 }
             });
         }
+    }
+
+    /// Whether a folder is drawn open. One holding a single open connection shows that tile rather than a folder around it.
+    fn rail_folder_open(&self, gid: u64, members: &[u64]) -> bool {
+        members.len() == 1 || self.rail_open.contains(&gid)
     }
 
     /// Opens or closes a folder in the rail, with its animation.
