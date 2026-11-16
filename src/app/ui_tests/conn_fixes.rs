@@ -35,8 +35,13 @@ fn connect_and_wait(ui: &mut UiApp, id: u64, uri: &str) {
 fn failure(ui: &UiApp, id: u64) -> String {
     match &ui.app().conn(id).unwrap().status {
         Status::Failed(e) => e.clone(),
-        s => panic!("expected a failed connection, found {s:?}"),
+        _ => panic!("expected a failed connection"),
     }
+}
+
+fn assert_ready(ui: &UiApp, id: u64) {
+    let c = ui.app().conn(id).unwrap();
+    assert!(c.status == Status::Ready, "not ready: {}", if let Status::Failed(e) = &c.status { e.as_str() } else { "still connecting" });
 }
 
 fn tls_uri() -> Option<String> {
@@ -66,7 +71,7 @@ fn a_uri_that_turns_the_host_name_check_off_with_false_connects() {
     let id = save_form(&mut ui);
     let uri = ui.app().conn(id).unwrap().masked_uri.clone();
     connect_and_wait(&mut ui, id, &uri);
-    assert_eq!(ui.app().conn(id).unwrap().status, Status::Ready, "{:?}", ui.app().conn(id).unwrap().status);
+    assert_ready(&ui, id);
 }
 
 #[test]
@@ -78,7 +83,7 @@ fn allow_invalid_certificates_on_an_address_with_tls_insecure_false_gives_one_th
     assert!(uri.contains("tlsAllowInvalidCertificates=true") && !uri.contains("tlsInsecure"), "{uri}");
     let id = save_form(&mut ui);
     connect_and_wait(&mut ui, id, &uri);
-    assert_eq!(ui.app().conn(id).unwrap().status, Status::Ready, "{:?}", ui.app().conn(id).unwrap().status);
+    assert_ready(&ui, id);
 }
 
 #[test]
@@ -221,7 +226,7 @@ fn ssh_connect(ui: &mut UiApp, id: u64, pass: &str, far: &str) {
     let net = db::Net { ssh: c.meta.ssh.clone().map(|s| (s, crate::ssh::SshSecrets { password: Some(pass.into()), passphrase: None })), ..Default::default() };
     app.worker.connect(id, attempt, far.to_string(), timeout, net);
     ui.wait("the SSH connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
-    assert_eq!(ui.app().conn(id).unwrap().status, Status::Ready, "{:?}", ui.app().conn(id).unwrap().status);
+    assert_ready(&ui, id);
 }
 
 fn known(ui: &UiApp, id: u64) -> Option<String> {
