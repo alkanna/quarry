@@ -1,5 +1,6 @@
 //! Live and cross-module tests of the SQL code. Each file skips itself when its server variable is unset.
 
+mod filter_live;
 mod mariadb_json;
 mod my_session_settings;
 mod pg_advanced;

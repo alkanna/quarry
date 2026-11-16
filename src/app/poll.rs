@@ -83,6 +83,8 @@ impl App {
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlKeys { req, res } => self.sql_keys_done(req, res),
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
+                // The filter panel reads these from the next commits on.
+                Msg::SqlFilterCount { .. } | Msg::SqlFacts { .. } => {}
                 Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
                 Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),

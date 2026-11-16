@@ -46,6 +46,7 @@ pub(crate) mod testing;
 mod tests;
 pub mod rules;
 pub mod filter;
+pub mod facts;
 pub mod schema;
 pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
