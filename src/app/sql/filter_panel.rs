@@ -560,7 +560,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
         menu_act(ui, &mut picks, Act::Wrap(id), |ui| ui.button("Convert to group"));
         menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
         menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
-        popover_divider(ui);
+        ui.separator();
         menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete"));
         acts.extend(picks);
     })
@@ -631,7 +631,7 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, at: Target, p: &mut Panel, cx
                     menu_act(ui, &mut picks, Act::Ungroup(id), |ui| ui.button("Ungroup"));
                     menu_act(ui, &mut picks, Act::MoveBy(id, -1), |ui| ui.button("Move up"));
                     menu_act(ui, &mut picks, Act::MoveBy(id, 1), |ui| ui.button("Move down"));
-                    popover_divider(ui);
+                    ui.separator();
                     menu_act(ui, &mut picks, Act::Remove(id), |ui| danger_item(ui, "Delete group"));
                     acts.extend(picks);
                 })
