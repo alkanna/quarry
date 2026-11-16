@@ -857,8 +857,8 @@ impl App {
         if let Some(f) = editor {
             self.js_editor(ui.ctx(), f, &colls);
         }
-        if stop && let Some(c) = self.tabs[self.cur].shell.cancel.take() {
-            let _ = c.send(());
+        if stop {
+            self.tabs[self.cur].shell.stop();
         }
         if let Some(i) = detach {
             self.tabs[self.cur].shell.attached.remove(i);

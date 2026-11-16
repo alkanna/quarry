@@ -523,14 +523,19 @@ impl Worker {
                 UndoKind::Update { old, new } => replace_doc(conn, t, new.clone(), old.clone(), false).await,
                 UndoKind::Sql { .. } => (Err("Not a MongoDB change".into()), None),
             };
-            let back = res.is_err().then_some(a);
-            (res, redo.or(back))
+            let back = match (res.is_err(), redo) {
+                (false, redo) => redo,
+                // Restoring many documents can stop partway; what was put back must not be inserted again on a retry,
+                // and what was not must stay undoable.
+                (true, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) if matches!(a.kind, UndoKind::DeleteMany { .. }) => {
+                    let UndoKind::DeleteMany { old } = a.kind else { unreachable!() };
+                    let rest = old.into_iter().filter(|d| !d.get("_id").is_some_and(|i| ids.contains(i))).collect();
+                    Some(UndoAction { kind: UndoKind::DeleteMany { old: rest }, ..a })
+                }
+                (true, _) => Some(a),
+            };
+            (res, back)
         });
-    }
-
-    /// Replaces `old` with `new`, but only if the server still holds exactly `old`.
-    pub fn replace(&self, conn: u64, t: Target, old: Document, new: Document, record_undo: bool) {
-        self.write(t.at(), replace_doc(conn, t, old, new, record_undo));
     }
 
     /// Writes one document's staged edits; the answer names the draft so it can be kept on failure.
@@ -574,10 +579,6 @@ impl Worker {
             }
             (Ok(msg), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
         });
-    }
-
-    pub fn delete_by_id(&self, t: Target, id: Bson) {
-        self.write(t.at(), async move { delete_one_id(&t, id).await });
     }
 
     /// Preview values for the referenced ids shown in the table (relatedDocuments, renderer line 107207).
@@ -932,10 +933,6 @@ impl Worker {
     /// $set like the original's import (bulkWrite of updateOne upserts).
     pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
         self.write(t.at(), import_docs(conn, t, docs, upsert_by));
-    }
-
-    pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
-        self.write(t.at(), async move { delete_many_ids(&t, ids).await });
     }
 
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
@@ -1430,9 +1427,9 @@ mod tests {
         w.import(1, t.clone(), docs, None);
         let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
         assert!(res.unwrap_err().starts_with("Stopped after 2 documents"));
-        let Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. }) = undo else { panic!("expected an undo") };
-        assert_eq!(ids, [Bson::Int32(1), Bson::Int32(2)]);
-        w.delete_ids(t.clone(), ids);
+        let Some(a) = undo else { panic!("expected an undo") };
+        assert!(matches!(&a.kind, UndoKind::InsertMany { ids } if *ids == [Bson::Int32(1), Bson::Int32(2)]));
+        w.undo_doc(t.clone(), a);
         next(&rx);
         assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
     }

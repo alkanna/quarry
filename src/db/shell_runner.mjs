@@ -15,9 +15,15 @@ import { createRequire } from "module";
 // Packages added in Quarry are installed next to this file; scripts load them with require() or import().
 const require = createRequire(import.meta.url);
 
-// JSON.stringify writes a lone surrogate as an escape serde_json refuses, which would lose the whole line.
+// JSON.stringify writes a lone surrogate as an escape serde_json refuses, which would lose the whole line. Paired
+// surrogates are written as they are, so an escaped one in the output is always lone; only then is the line redone.
 const wellFormed = (_, v) => (typeof v === "string" ? v.toWellFormed() : v);
-const write = (o) => new Promise((r) => process.stdout.write(JSON.stringify(o, wellFormed) + "\n", r));
+const lone = /\\ud[89a-f][0-9a-f]{2}/i;
+const line = (o) => {
+  const s = JSON.stringify(o);
+  return lone.test(s) ? JSON.stringify(o, wellFormed) : s;
+};
+const write = (o) => new Promise((r) => process.stdout.write(line(o) + "\n", r));
 const out = (o) => void write(o);
 
 // The app stops reading a line at LINE_MAX (src/db/shell.rs), so a bigger result is refused here, with its size and a way out.
@@ -64,8 +70,13 @@ const serialize = (v) => {
 };
 const fmt = (m) => {
   if (typeof m === "string") return m;
-  // An Error's message and stack are not enumerable, so stringify would print {}.
-  if (m instanceof Error) return m.stack || String(m);
+  // An Error's message and stack are not enumerable, so stringify would print {}. Driver errors keep their details,
+  // such as code and errInfo, in enumerable fields.
+  if (m instanceof Error) {
+    const s = m.stack || String(m);
+    const own = Object.fromEntries(Object.entries(m));
+    return Object.keys(own).length ? `${s}\n${fmt(own)}` : s;
+  }
   try {
     const w = walk(m, asLog);
     return (mongodb ? mongodb.BSON.EJSON.stringify(w, { relaxed: true }, 2) : JSON.stringify(w, null, 2)) ?? String(m);
@@ -148,6 +159,8 @@ function wire(v, pg) {
   }
   if (v instanceof Uint8Array) return { $hex: Buffer.from(v).toString("hex") };
   if (typeof v === "object") return JSON.stringify(walk(v, asLog));
+  // Written out it would become a replacement character, storing other text than the script holds.
+  if (typeof v === "string" && !v.isWellFormed()) throw new Error("A query value holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji");
   return v;
 }
 

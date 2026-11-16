@@ -779,6 +779,7 @@ fn ssh_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
                         ui.label(RichText::new(fp).monospace().size(TXT_SMALL).color(MUTED()));
                         if ui.button("Forget").on_hover_text("Trust the next key the server shows, e.g. after a reinstall").clicked() {
                             f.ssh.known_host = None;
+                            f.forget_key = true;
                         }
                     }
                     None => {
@@ -1028,10 +1029,10 @@ impl App {
                         engine: f.engine,
                         name: f.name.trim().into(),
                         tag: clean_tag(&f.tag).into(),
-                        // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed.
+                        // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
                         ssh: f.ssh_on.then(|| {
                             let old = self.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
-                            let same = old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
+                            let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
                             crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
                         }),
                         proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),

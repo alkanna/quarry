@@ -75,18 +75,31 @@ pub fn restore_args(uri: &str, archive: &str, from_db: &str, coll: Option<&str>,
     a
 }
 
-/// URI options whose value is a secret or can hold one (authMechanismProperties carries AWS session tokens).
-const SECRET_OPTS: [&str; 3] = ["proxyPassword", "tlsCertificateKeyFilePassword", "authMechanismProperties"];
+/// Whether a URI option's value is a secret. authMechanismProperties is one only when it carries an AWS session token;
+/// otherwise it holds plain names such as SERVICE_NAME.
+fn secret_opt(k: &str, v: &str) -> bool {
+    !v.is_empty() && (["proxyPassword", "tlsCertificateKeyFilePassword"].iter().any(|s| s.eq_ignore_ascii_case(k)) || (k.eq_ignore_ascii_case("authMechanismProperties") && v.to_ascii_uppercase().contains("AWS_SESSION_TOKEN")))
+}
+
+/// Where the options start. Hosts never hold "/", so the first "?" after the first "/" past the userinfo is it: a
+/// password may hold "?" and an option value may hold "@". Without a path, the last "@" bounds the userinfo.
+fn query_at(uri: &str) -> Option<usize> {
+    let s = uri.find("://").map_or(0, |i| i + 3);
+    let from = uri.rfind('@').filter(|&at| at > s && !uri[s..at].contains('/')).unwrap_or(s);
+    match uri[from..].find('/') {
+        Some(p) => uri[from + p..].find('?').map(|i| from + p + i),
+        None => uri[from..].find('?').map(|i| from + i),
+    }
+}
 
 /// The raw values of the secret options in a URI, for hiding them from text.
 pub fn secret_opt_values(uri: &str) -> Vec<String> {
-    let Some((_, q)) = uri.split_once('?') else { return Vec::new() };
-    q.split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| !v.is_empty() && SECRET_OPTS.iter().any(|s| s.eq_ignore_ascii_case(k))).map(|(_, v)| v.to_string()).collect()
+    let Some(i) = query_at(uri) else { return Vec::new() };
+    uri[i + 1..].split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| secret_opt(k, v)).map(|(_, v)| v.to_string()).collect()
 }
 
 pub fn mask_uri(uri: &str) -> String {
-    // Options come after the last "?" that follows the authority, so a password holding "?" stays in the userinfo.
-    let (head, query) = match uri.rfind('@').map_or(uri.find('?'), |at| uri[at..].find('?').map(|i| at + i)) {
+    let (head, query) = match query_at(uri) {
         Some(i) => (&uri[..i], Some(&uri[i + 1..])),
         None => (uri, None),
     };
@@ -97,7 +110,7 @@ pub fn mask_uri(uri: &str) -> String {
     }
     if let Some(q) = query {
         let parts: Vec<String> = q.split('&').map(|p| match p.split_once('=') {
-            Some((k, v)) if !v.is_empty() && SECRET_OPTS.iter().any(|s| s.eq_ignore_ascii_case(k)) => format!("{k}=****"),
+            Some((k, v)) if secret_opt(k, v) => format!("{k}=****"),
             _ => p.to_string(),
         }).collect();
         out.push('?');

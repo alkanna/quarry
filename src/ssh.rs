@@ -217,7 +217,8 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
         }
         Ok(Ok(h)) => h,
     };
-    match tokio::time::timeout(timeout.max(std::time::Duration::from_secs(10)), authenticate(&mut h, conf, secrets)).await {
+    // Generous, since an agent may wait for a Touch ID or a hardware key touch; it only has to end a stalled server.
+    match tokio::time::timeout(timeout.max(std::time::Duration::from_secs(60)), authenticate(&mut h, conf, secrets)).await {
         Err(_) => return Err(format!("The SSH server {}:{port} did not finish signing in in time.", conf.host)),
         Ok(r) => r?,
     }

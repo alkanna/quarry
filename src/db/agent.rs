@@ -999,7 +999,7 @@ impl Redact {
                 }
             }
         }
-        for s in super::tools::secret_opt_values(uri) {
+        for s in super::tools::secret_opt_values(uri).into_iter().filter(|s| s.chars().count() >= REDACT_MIN) {
             v.push(decode(&s));
             v.push(s);
         }

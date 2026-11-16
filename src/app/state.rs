@@ -7,13 +7,17 @@ impl Tab {
     /// its answers would never land.
     pub(super) fn stop_work(&mut self) {
         self.watch.stop();
-        if let Some(c) = self.shell.cancel.take() {
-            let _ = c.send(());
-        }
+        self.shell.stop();
     }
 }
 
 impl ShellTab {
+    pub(super) fn stop(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            let _ = c.send(());
+        }
+    }
+
     /// Every line is laid out each frame and a logging loop can print millions, so only the latest are kept, each cut short.
     pub(super) fn push_log(&mut self, level: String, text: String) {
         let text = if text.len() > 2000 { text.chars().take(2000).collect() } else { text };
@@ -1197,6 +1201,8 @@ pub(super) enum ZoneKind {
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    /// Forget was clicked on the SSH host key, so Save must not bring back the stored one.
+    pub(super) forget_key: bool,
     /// A new connection joins this group when it is saved, from "New connection in <group>" in the Connections panel.
     pub(super) group: Option<u64>,
     pub(super) engine: db::sql::Engine,
