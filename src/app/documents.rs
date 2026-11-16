@@ -460,7 +460,7 @@ impl App {
                 }
                 if ui.button("Open query in Shell").clicked() {
                     let t = &app.tabs[app.cur];
-                    app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
+                    app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt, &cursor_chain(t)));
                     ui.close();
                 }
                 let t = app.t().unwrap();

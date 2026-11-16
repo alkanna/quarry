@@ -38,15 +38,39 @@ pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
-pub(super) fn query_script(coll: &str, filter: &str) -> String {
+pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     let f = filter.trim().trim_end_matches(';');
     if db::is_shell(f) {
-        return format!("async function run() {{\n\treturn await {f}\n}}");
+        return format!("async function run() {{\n\treturn await {f}{chain}\n}}");
     }
     let f = if f.is_empty() { "{}" } else { f };
     let expanded = db::expand_shortcuts(f);
     let f = expanded.as_deref().unwrap_or(f);
-    format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
+    format!("async function run() {{\n\treturn await {}.find({f}){chain}\n}}", collection_ref(coll))
+}
+
+/// The tab's sort, projection, skip, limit, hint and collation as cursor calls for query_script.
+pub(super) fn cursor_chain(t: &Tab) -> String {
+    let mut out = String::new();
+    let mut add = |m: &str, v: &str| {
+        if !v.is_empty() {
+            out += &format!(".{m}({v})");
+        }
+    };
+    add("sort", t.sort_txt.trim());
+    add("project", t.proj_txt.trim());
+    add("skip", t.skip_txt.trim());
+    let limit = t.limit_txt.trim();
+    add("limit", if limit == "0" { "" } else { limit });
+    // An index name may be typed bare, as find_query accepts it.
+    let h = t.hint_txt.trim();
+    add("hint", &if h.is_empty() || h.starts_with(['{', '"', '\'']) { h.to_string() } else { format!("{h:?}") });
+    add("collation", t.collation_txt.trim());
+    // The runner caps a returned cursor at 100 documents, which would override a larger limit.
+    if !limit.is_empty() && limit != "0" {
+        out += ".toArray()";
+    }
+    out
 }
 
 /// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
@@ -914,10 +938,15 @@ mod tests {
 
     #[test]
     fn shell_scripts() {
-        assert_eq!(query_script("orders", "{ a: 1 }"), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
-        assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
-        assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
-        assert!(query_script("orders", "{ name: ~\"a.b\" }").contains(r#"$regex: "a\\.b", $options: "i""#));
+        assert_eq!(query_script("orders", "{ a: 1 }", ""), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
+        assert!(query_script("my.coll", "", "").contains("db.collection(\"my.coll\").find({})"));
+        assert!(query_script("x", "db.x.find({});", "").ends_with("return await db.x.find({})\n}"));
+        assert!(query_script("orders", "{ name: ~\"a.b\" }", "").contains(r#"$regex: "a\\.b", $options: "i""#));
+        let mut t = Tab::new(Sel { coll: "o".into(), ..Default::default() });
+        (t.sort_txt, t.limit_txt, t.skip_txt, t.hint_txt) = ("{ a: -1 }".into(), "500".into(), "20".into(), "a_1".into());
+        assert_eq!(cursor_chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1").toArray()"#);
+        t.limit_txt = "0".into();
+        assert_eq!(cursor_chain(&t), r#".sort({ a: -1 }).skip(20).hint("a_1")"#);
         assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
         assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);

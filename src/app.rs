@@ -931,7 +931,7 @@ mod tests {
         for word in ["default", "class", "new", "delete", "import", "await"] {
             assert_eq!(collection_ref(word), format!("db.collection(\"{word}\")"));
         }
-        assert_eq!(query_script("default", ""), "async function run() {\n\treturn await db.collection(\"default\").find({})\n}");
+        assert_eq!(query_script("default", "", ""), "async function run() {\n\treturn await db.collection(\"default\").find({})\n}");
     }
 
     #[test]
