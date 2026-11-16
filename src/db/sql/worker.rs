@@ -571,22 +571,57 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
 }
 
 /// Below this many rows a table is cheap enough to group in full while someone types.
-const VALUES_SMALL: u64 = 100_000;
+pub(super) const VALUES_SMALL: u64 = 100_000;
 
-/// A column's most frequent values, or None where looking would scan a big table: the estimate is
-/// large and no index leads with the column. Both checks read metadata only. The lookup runs on a
+/// What a lookup may afford on a table: `small` when it can be scanned in full, `leads` when an index leads with the
+/// column (always false for an empty column).
+pub(super) struct Gate {
+    pub small: bool,
+    pub leads: bool,
+}
+
+/// Reads metadata only, except on a PostgreSQL table never analyzed: its estimate is NULL, so a bounded count with a
+/// 300 ms limit stands in for it, and a table too big or too slow to count is not small.
+pub(super) async fn gate(db: &Db, schema: &str, table: &str, column: &str) -> Res<Option<Gate>> {
+    let d = db.dialect;
+    let row = if d == Dialect::Postgres {
+        db.meta(schema, d.value_gate(), [column, schema, table]).await?.into_iter().next()
+    } else {
+        sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(db.my_pool()?).await.map_err(se)?.map(SqlRow::My)
+    };
+    let Some(row) = row else { return Ok(None) };
+    let est = super::structure::num(&row, "est");
+    let leads = super::structure::num(&row, "leads").unwrap_or(0) > 0;
+    let small = match est {
+        Some(n) => n < VALUES_SMALL,
+        None if d == Dialect::Postgres && !leads => pg_small(db, schema, table).await?,
+        None => false,
+    };
+    Ok(Some(Gate { small, leads }))
+}
+
+/// A count of at most VALUES_SMALL + 1 rows on a connection of its own.
+async fn pg_small(db: &Db, schema: &str, table: &str) -> Res<bool> {
+    let mut c = db.detached().await?;
+    let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
+    // A SET LOCAL in the read-only transaction, never a session value, because a pooler would hand the session on.
+    let short = super::pg::set_timeout("300");
+    let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", db.dialect.qualified(schema, table), VALUES_SMALL + 1);
+    let n = super::pg::read::in_read_only(pc, db, &short, async |c| c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await).await;
+    let _ = c.close().await;
+    Ok(matches!(n, Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL)))
+}
+
+/// A column's most frequent values, or None where looking would scan a big table (see `gate`). The lookup runs on a
 /// connection of its own with a 300 ms limit, so a slow one never holds the pool.
 async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
     let d = db.dialect;
+    let Some(g) = gate(db, schema, table, column).await? else { return Ok(None) };
+    if !g.small && !g.leads {
+        return Ok(None);
+    }
     if d == Dialect::Postgres {
         return pg_field_values(db, schema, table, column, prefix).await;
-    }
-    let pool = db.my_pool()?;
-    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(se)? else { return Ok(None) };
-    let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
-    let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
-    if !small && !leads {
-        return Ok(None);
     }
     let mut c = super::run::side_conn(db, "Could not reach the server").await?.into_my()?;
     let res = async {
@@ -612,30 +647,15 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
     res
 }
 
-/// `field_values` on PostgreSQL. The planner's estimate is NULL until the table has been analyzed, so a bounded count
-/// stands in for it, and a table that is not small is looked up only when an index leads with the column.
+/// `field_values` on PostgreSQL, once `gate` allowed it.
 async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
     let d = db.dialect;
-    let Some(gate) = db.meta(schema, d.value_gate(), [column, schema, table]).await?.into_iter().next() else { return Ok(None) };
-    let est = super::structure::num(&gate, "est");
-    let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
-    if est.is_some_and(|n| n >= VALUES_SMALL) && !leads {
-        return Ok(None);
-    }
     let mut c = db.detached().await?;
     let res = async {
         let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
         // The lookup must stay short, so a slow one gives up instead of holding a connection. The limit is a SET LOCAL in
         // the read-only transaction of each read, never a session value, because a pooler would hand the session on.
         let short = super::pg::set_timeout("300");
-        if est.is_none() && !leads {
-            let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
-            match super::pg::read::in_read_only(pc, db, &short, async |c| c.fetch_all(sqlx::AssertSqlSafe(sql.as_str())).await).await {
-                Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL) => {}
-                // Too big to group, or too slow to tell.
-                _ => return Ok(None),
-            }
-        }
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let pattern = prefix.map(|p| format!("{}%", super::rules::like_bang(p)));
         let t = Instant::now();
