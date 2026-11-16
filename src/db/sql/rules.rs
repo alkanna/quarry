@@ -571,7 +571,7 @@ pub fn remove(rules: &mut Vec<Rule>, any: &mut bool, i: usize) {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum T {
+pub(super) enum T {
     Id(String),
     Word(String),
     Str(String),
@@ -584,7 +584,7 @@ enum T {
 
 /// Splits text into the few token kinds the rule SQL uses. Bare words that name a column become
 /// identifiers, so `status` and `` `status` `` read the same.
-fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec<T>> {
+pub(super) fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec<T>> {
     // Backticks hold names on MySQL, double quotes on PostgreSQL. The other mark is not a name there.
     let quote = if d == Dialect::Postgres { '"' } else { '`' };
     let ch: Vec<char> = text.chars().collect();
@@ -697,7 +697,7 @@ fn unslash(s: &str) -> String {
     out
 }
 
-fn close_of(t: &[T], open: usize) -> Option<usize> {
+pub(super) fn close_of(t: &[T], open: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, x) in t.iter().enumerate().skip(open) {
         match x {
@@ -743,7 +743,7 @@ fn split(t: &[T]) -> Option<(Vec<&[T]>, bool)> {
     Some((parts, joiner.unwrap_or(false)))
 }
 
-fn word(t: &T, w: &str) -> bool {
+pub(super) fn word(t: &T, w: &str) -> bool {
     matches!(t, T::Word(x) if x == w)
 }
 
@@ -779,7 +779,7 @@ fn kind_of(cols: &[(String, Kind)], name: &str) -> Option<Kind> {
     cols.iter().find(|(n, _)| n == name).map(|(_, k)| *k)
 }
 
-fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
+pub(super) fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
     // PostgreSQL reads uuid, inet and other text-like columns as `col::text` and arrays as `col::text[]`, and MySQL
     // matches case on `CAST(col AS BINARY)`; the column is the same rule. Writing the rule out again (in `parse`) tells
     // whether the cast belonged there.
