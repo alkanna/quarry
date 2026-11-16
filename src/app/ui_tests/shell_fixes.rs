@@ -207,6 +207,8 @@ fn shell_fix_disconnect_stops_the_scripts_of_tabs_that_attached_it() {
 #[test]
 fn shell_fix_lone_surrogates_in_logs_and_results_keep_the_run() {
     let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
+    // The replacement character the runner writes has no glyph in the app's fonts, which is expected here.
+    ui.h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
     let sh = run_done(&mut ui, r#"async function run() {
   console.log('a\uD800b');
   return { s: 'x\uDC00y', ['k\uD800']: 1 };
