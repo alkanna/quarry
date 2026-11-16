@@ -234,7 +234,10 @@ impl App {
                     self.file_changed(i, link, &rel, Loaded { text: body.clone(), parsed: None, meta });
                 }
                 match (view, self.tab_by_uid(uid)) {
-                    (Some(v), Some(i)) if self.tabs[i].view == v => self.tabs[i].script = Some(Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None }),
+                    (Some(v), Some(i)) if self.tabs[i].view == v => {
+                        super::open::query_only(&mut self.tabs[i], v);
+                        self.tabs[i].script = Some(Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
+                    }
                     _ => {}
                 }
                 self.library.push_recent(r);
