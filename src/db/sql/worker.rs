@@ -333,8 +333,9 @@ pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row>
     let mut d = Document::new();
     // The key is looked up by the server's column names, since a renamed column keeps its real name there.
     // A key with a missing column would address too many rows, so then there is no key at all.
+    // A unique key lets several rows hold NULL, so a NULL key value addresses no single row.
     let idx: Option<Vec<usize>> = pk.iter().map(|p| row.col_pos(p)).collect();
-    if let Some(idx) = idx.filter(|i| !i.is_empty()) {
+    if let Some(idx) = idx.filter(|i| !i.is_empty() && i.iter().all(|&i| vals[i] != Bson::Null)) {
         let mut k = Document::new();
         for (p, i) in pk.iter().zip(idx) {
             k.insert(p.clone(), vals[i].clone());
@@ -458,8 +459,35 @@ pub(super) async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashM
         cols.iter().filter(|r| text(r, "full_type").is_some_and(|t| t.eq_ignore_ascii_case("longtext"))).filter_map(|r| text(r, "name")).filter(|n| json.contains(&(table.to_string(), n.clone()))).map(|n| (n, Kind::Json)).collect()
     };
     // A Postgres key is named by the table, so the index query says which one is the primary key.
-    let pk = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
+    let mut pk: Vec<String> = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
+    if pk.is_empty() {
+        // An expression, a prefix or a predicate makes the part no plain column, so its index cannot address a row.
+        let parts: Vec<KeyPart> = idx
+            .iter()
+            .filter_map(|r| {
+                let plain = text(r, "pred").is_none() && text(r, "sub_part").is_none();
+                Some((text(r, "name")?, text(r, "col").filter(|c| plain && !c.is_empty()), r.int("non_unique") == Some(0), text(r, "nullable").is_some_and(|n| !n.is_empty())))
+            })
+            .collect();
+        pk = unique_key(&parts);
+    }
     Ok((meta, kinds, pk))
+}
+
+/// One part of an index: its name, the column (None when it is not a plain column), unique, and whether the column takes NULL.
+type KeyPart = (String, Option<String>, bool, bool);
+
+/// The key of a table without a primary key: a unique index on plain columns, with NOT NULL ones first because UNIQUE
+/// lets several rows hold NULL, and those rows cannot be told apart. Then the fewest columns, then the name.
+fn unique_key(parts: &[KeyPart]) -> Vec<String> {
+    let mut by_name: std::collections::BTreeMap<&str, (Vec<Option<&str>>, bool, bool)> = Default::default();
+    for (name, col, unique, nullable) in parts {
+        let e = by_name.entry(name).or_insert((Vec::new(), true, false));
+        e.0.push(col.as_deref());
+        e.1 &= unique;
+        e.2 |= nullable;
+    }
+    by_name.into_values().filter(|(cols, unique, _)| *unique && cols.iter().all(Option::is_some)).min_by_key(|(cols, _, nullable)| (*nullable, cols.len())).map(|(cols, ..)| cols.into_iter().flatten().map(String::from).collect()).unwrap_or_default()
 }
 
 /// Whether any clause of the page query is text the user typed. The index hint is quoted by `PageQuery`, and the limit
@@ -1610,6 +1638,31 @@ mod tests {
         }
         let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_stop").fetch_one(&*p).await.unwrap() });
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn unique_key_prefers_not_null_plain_columns() {
+        let part = |n: &str, c: Option<&str>, unique: bool, nullable: bool| (n.to_string(), c.map(String::from), unique, nullable);
+        // NOT NULL wins over fewer columns, since rows with a NULL key cannot be addressed.
+        let parts = [part("a_u", Some("x"), true, true), part("b_u", Some("y"), true, false), part("b_u", Some("z"), true, false)];
+        assert_eq!(unique_key(&parts), ["y", "z"]);
+        // A plain index, or a unique one with an expression, prefix or predicate part, is never a key.
+        let parts = [part("k", Some("x"), false, false), part("e", Some("y"), true, false), part("e", None, true, false)];
+        assert!(unique_key(&parts).is_empty());
+        // Nullable is still a key when nothing better exists, and ties go to the fewest columns, then the name.
+        let parts = [part("c", Some("p"), true, true), part("c", Some("q"), true, true), part("b", Some("r"), true, true), part("a", Some("s"), true, true)];
+        assert_eq!(unique_key(&parts), ["s"]);
+    }
+
+    #[test]
+    fn live_a_unique_key_stands_in_for_a_missing_primary_key() {
+        let Some((w, rx, db, p)) = live("t_uniq", "u VARCHAR(10), v INT, UNIQUE KEY uq_pre (u(3)), UNIQUE KEY uq_v (v)") else { return };
+        exec(&w, &p, "INSERT INTO quarry_test.t_uniq VALUES ('a', 1), ('b', NULL)");
+        let (_, pk, rows, _) = page_of(&w, &rx, &db, "t_uniq", "", "u", 10, 0);
+        // The prefix index is skipped: its key is only part of the value.
+        assert_eq!(pk, ["v"]);
+        assert!(rows[0].get_document("_id").is_ok_and(|k| k.contains_key("v")), "{:?}", rows[0]);
+        assert!(!rows[1].contains_key("_id"), "a NULL key value addressed a row: {:?}", rows[1]);
     }
 
     #[test]

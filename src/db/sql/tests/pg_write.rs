@@ -179,6 +179,26 @@ fn a_stale_old_value_refuses_the_whole_save() {
 }
 
 #[test]
+fn a_unique_key_stands_in_for_a_missing_primary_key() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5_uniq", "CREATE TABLE t (role text NOT NULL, user_id uuid DEFAULT gen_random_uuid(), n int, CONSTRAINT t_user_id_key UNIQUE (user_id)); \
+            INSERT INTO t (role, n) VALUES ('admin', 1); INSERT INTO t (role, user_id, n) VALUES ('guest', NULL, 2); \
+            CREATE TABLE p (a int NOT NULL, b int); CREATE UNIQUE INDEX p_part ON p (a) WHERE b > 0; CREATE UNIQUE INDEX p_expr ON p ((a + 1));");
+        let (cols, pk, rows) = t.page("t");
+        assert_eq!(pk, ["user_id"], "{var}");
+        let of = |role: &str| rows.iter().find(|r| r.get_str("role") == Ok(role)).unwrap().clone();
+        assert!(!of("guest").contains_key("_id"), "{var}: a NULL key value addressed a row");
+        let ed = RowEdit { pk: pk_doc(&of("admin")), changes: vec![("n".into(), Bson::Int64(1), Bson::Int64(5))] };
+        let (res, _) = t.save("t", &cols, &["user_id"], vec![ed], false);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.one("SELECT n::text FROM t WHERE role = 'admin'"), "5", "{var}");
+        assert_eq!(t.one("SELECT n::text FROM t WHERE role = 'guest'"), "2", "{var}");
+        // A partial or an expression index does not name one row by plain column values.
+        assert!(t.page("p").1.is_empty(), "{var}");
+    });
+}
+
+#[test]
 fn a_key_matching_two_rows_is_refused_and_rolled_back() {
     every_pg(|l, var| {
         let t = fixture(l, "t5_dup", "CREATE TABLE t (k int, v int, w text); INSERT INTO t VALUES (1, 10, 'a'), (1, 20, 'b'), (2, 30, 'c');");

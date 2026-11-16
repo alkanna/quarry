@@ -274,7 +274,7 @@ impl App {
         } else if self.sel_is_view() {
             Some("Views cannot be edited.")
         } else if s.pk.is_empty() {
-            Some("This table has no usable primary key, so its rows cannot be edited.")
+            Some("This table has no primary key or unique key, so its rows cannot be edited.")
         } else {
             None
         }
@@ -331,7 +331,7 @@ impl App {
         let rows = Rows::Raw(&t.docs);
         // A row without a key would match every keyless row in the grid and could never be written back.
         if rows.id(i).is_none() {
-            return self.warn("This row has no key, so it cannot be edited here.");
+            return self.warn("This row has no key value, so it cannot be edited here.");
         }
         let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
         let kind = self.sql_col(&col).map_or(Kind::Text, |c| c.kind);
@@ -911,6 +911,11 @@ impl App {
                 return self.ask_unlock_then(move |a| a.sql_docs_act(&ctx, act, rows));
             }
         }
+        // A row whose unique key is NULL has no `_id`, and `key IN (NULL)` would match nothing.
+        let keyless = rows.iter().filter(|r| r.get_document("_id").is_err()).count();
+        if keyless > 0 && matches!(act, DocsAct::Filter | DocsAct::EditQuery | DocsAct::SetValue | DocsAct::Delete) {
+            return self.warn(if keyless == 1 { "One of these rows has no key value, so it cannot be addressed.".to_string() } else { format!("{keyless} of these rows have no key value, so they cannot be addressed.") });
+        }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new(), ..Default::default() }, Arc::new(Vec::new()), Vec::new()));
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         // The key names are the server's, which differ from the shown name of a renamed column.
@@ -928,7 +933,7 @@ impl App {
             DocsAct::CopyAs(f) => self.copy_rows_as(ctx, f, &rows),
             DocsAct::Filter => {
                 if pk.is_empty() {
-                    return self.warn("This table has no usable primary key to filter by.");
+                    return self.warn("This table has no primary key or unique key to filter by.");
                 }
                 let text = key_list();
                 let t = self.tm().unwrap();
@@ -938,7 +943,7 @@ impl App {
             }
             DocsAct::EditQuery => {
                 if pk.is_empty() {
-                    return self.warn("This table has no usable primary key to address these rows.");
+                    return self.warn("This table has no primary key or unique key to address these rows.");
                 }
                 let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(sel.space(), &sel.coll), key_list());
                 let t = self.tm().unwrap();
