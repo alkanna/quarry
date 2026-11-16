@@ -191,9 +191,10 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
     assert!(!matches!(ui.app().modal, Some(Modal::Delete(..))), "Delete opened its dialog on projected rows");
     assert!(ui.said(refused), "no warning for Delete: {}", ui.app().last_problem());
 
-    // Duplicate opens no insert editor, which would hold only the projected fields.
+    // Duplicate opens no insert editor, which would hold only the projected fields. The document open under its row has a
+    // Duplicate of its own; the selection bar floats above it, so its button is the last one.
     ui.h.state_mut().toasts.clear();
-    ui.click("Duplicate");
+    ui.click_last("Duplicate");
     assert!(ui.app().insert.is_none(), "Duplicate opened the insert editor on a projected row");
     assert!(ui.said(refused), "no warning for Duplicate: {}", ui.app().last_problem());
     assert_eq!(f.all(0), seed());
