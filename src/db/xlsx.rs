@@ -48,7 +48,6 @@ struct Formats {
     date: Format,
     datetime: Format,
     time: Format,
-    text: Format,
     mono: Format,
 }
 
@@ -64,7 +63,6 @@ impl Formats {
             date: Format::new().set_num_format("yyyy-mm-dd").set_align(FormatAlign::Left),
             datetime: Format::new().set_num_format("yyyy-mm-dd hh:mm:ss").set_align(FormatAlign::Left),
             time: Format::new().set_num_format("hh:mm:ss").set_align(FormatAlign::Left),
-            text: Format::new(),
             mono: Format::new().set_font_name(MONO),
         }
     }
@@ -180,8 +178,8 @@ impl Book {
         let ws = wb.worksheet_from_index(0).map_err(err)?;
         for d in rows {
             for (i, c) in cols.iter().enumerate() {
-                // A SQL column can hold a dot in its name, so the exact key wins over a path.
-                let v = d.get(&c.name).or_else(|| super::get_path(d, &c.name));
+                // A SQL column can hold a dot in its name, so the exact key wins over a path, which only a dotted name has.
+                let v = d.get(&c.name).or_else(|| if c.name.contains('.') { super::get_path(d, &c.name) } else { None });
                 let w = cell(ws, f, *row, i as u16, c.kind, plain[i], v)?;
                 widths[i] = widths[i].max(w);
             }
@@ -231,7 +229,7 @@ impl Book {
         copied
     }
 
-    fn about_sheet(&mut self, lines: Vec<(String, String)>, rows: u32, stmt: Option<&str>) -> Result<(), String> {
+    fn about_sheet(&mut self, mut lines: Vec<(String, String)>, rows: u32, stmt: Option<&str>) -> Result<(), String> {
         let ws = self.wb.add_worksheet();
         ws.set_name("About").map_err(err)?;
         ws.set_screen_gridlines(false);
@@ -241,7 +239,6 @@ impl Book {
         ws.write_string_with_format(0, 0, "About this export", &Format::new().set_bold().set_font_size(14)).map_err(err)?;
         ws.write_string_with_format(1, 0, "Written by Quarry.", &key).map_err(err)?;
         let plain = Format::new().set_align(FormatAlign::Left);
-        let mut lines = lines;
         lines.push(("Rows".into(), group3(rows)));
         let mut r = 3;
         for (k, v) in &lines {
@@ -249,8 +246,7 @@ impl Book {
             ws.write_string_with_format(r, 1, v.chars().take(MAX_CELL).collect::<String>(), &plain).map_err(err)?;
             r += 1;
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        if let Ok(t) = ExcelDateTime::from_timestamp(now) {
+        if let Ok(t) = ExcelDateTime::from_timestamp(crate::library::now_secs() as i64) {
             ws.write_string_with_format(r, 0, "Exported", &key).map_err(err)?;
             ws.write_datetime_with_format(r, 1, &t, &Format::new().set_num_format("yyyy-mm-dd hh:mm \"UTC\"").set_align(FormatAlign::Left)).map_err(err)?;
             r += 1;
@@ -266,10 +262,10 @@ impl Book {
 /// Writes one cell of `row` and returns how many characters wide it reads. `plain` leaves out the thousands separator.
 fn cell(ws: &mut Worksheet, f: &Formats, row: u32, c: u16, kind: Option<Kind>, plain: bool, v: Option<&Bson>) -> Result<usize, String> {
     let text = |ws: &mut Worksheet, s: &str, mono: bool| -> Result<usize, String> {
-        let s: String = s.chars().take(MAX_CELL).collect();
-        let n = s.chars().count();
-        ws.write_string_with_format(row, c, s, if mono { &f.mono } else { &f.text }).map_err(err)?;
-        Ok(n)
+        // The byte length bounds the characters, so only a long string is counted and cut.
+        let s = if s.len() > MAX_CELL { s.char_indices().nth(MAX_CELL).map_or(s, |(i, _)| &s[..i]) } else { s };
+        ws.write_string_with_format(row, c, s, if mono { &f.mono } else { &f.general }).map_err(err)?;
+        Ok(if s.is_ascii() { s.len() } else { s.chars().count() })
     };
     let number = |ws: &mut Worksheet, v: f64, fmt: &Format, w: usize| -> Result<usize, String> {
         ws.write_number_with_format(row, c, v, fmt).map_err(err)?;
@@ -312,7 +308,14 @@ fn cell(ws: &mut Worksheet, f: &Formats, row: u32, c: u16, kind: Option<Kind>, p
         Some(Bson::Int64(n)) => int(ws, *n),
         Some(Bson::Double(v)) if v.is_finite() => number(ws, *v, &f.general, v.to_string().len().min(15)),
         Some(Bson::Decimal128(d)) => decimal(ws, &d.to_string()),
-        Some(Bson::DateTime(t)) => date(ws, &t.try_to_rfc3339_string().unwrap_or_default()),
+        // Straight from the timestamp, in UTC: no text to build and parse again per cell.
+        Some(Bson::DateTime(t)) => match ExcelDateTime::from_timestamp(t.timestamp_millis().div_euclid(1000)) {
+            Ok(dt) => {
+                ws.write_datetime_with_format(row, c, &dt, &f.datetime).map_err(err)?;
+                Ok(19)
+            }
+            Err(_) => text(ws, &t.try_to_rfc3339_string().unwrap_or_default(), false),
+        },
         Some(Bson::ObjectId(o)) => text(ws, &o.to_hex(), true),
         Some(Bson::Binary(b)) => text(ws, &format!("0x{}", super::sql::value::hex_digits(&b.bytes, true)), true),
         Some(Bson::String(s)) => match kind {

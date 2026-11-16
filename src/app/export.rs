@@ -142,7 +142,7 @@ impl App {
     fn shown_rows(&self, src: Src) -> Vec<Document> {
         let Some(t) = self.t() else { return Vec::new() };
         match src {
-            Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.rows.iter().map(db::Row::owned).collect()).unwrap_or_default(),
+            Src::Query => t.sql.as_ref().and_then(|s| s.cur_set()).map(|x| x.rows.iter().map(db::Row::owned).collect()).unwrap_or_default(),
             Src::Shell => t.shell.docs.iter().map(db::Row::owned).collect(),
             Src::Content => t.docs.iter().map(db::Row::owned).collect(),
         }
@@ -167,18 +167,19 @@ impl App {
         self.checks().iter().filter_map(|i| all.get(base + i).cloned()).collect()
     }
 
-    /// Columns, table name and key for writing `rows` of `src` as text.
+    /// Columns, table name and key for writing `rows` of `src` as text. The table is `insert_table`'s, so Copy as and
+    /// Export agree on it.
     fn export_sheet(&self, src: Src, rows: &[Document]) -> (Vec<CopyCol>, String, Vec<String>) {
         let Some(t) = self.t() else { return Default::default() };
-        let named = |c: &str| if c.is_empty() { "result".to_string() } else { c.to_string() };
+        let table = self.insert_table(src);
         match src {
             Src::Query => {
-                let set = t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))));
+                let set = t.sql.as_ref().and_then(|s| s.cur_set());
                 let cols = set.map(|s| s.cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
-                (cols, named(&t.sel.coll), Vec::new())
+                (cols, table, Vec::new())
             }
-            Src::Shell => (keys_of(rows).into_iter().map(|n| CopyCol { numeric: infer_numeric(rows, &n), src: n.clone(), name: n }).collect(), named(&t.sel.coll), Vec::new()),
-            Src::Content => (self.copy_cols(rows), t.sel.coll.clone(), t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
+            Src::Shell => (keys_of(rows).into_iter().map(|n| CopyCol { numeric: infer_numeric(rows, &n), src: n.clone(), name: n }).collect(), table, Vec::new()),
+            Src::Content => (self.copy_cols(rows), table, t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
         }
     }
 
@@ -193,7 +194,7 @@ impl App {
             Some(crate::library::ScriptRef::Saved(id)) => self.library.scripts.iter().find(|s| s.id == *id && s.kind == "sql").map(|s| s.coll.clone()),
             _ => None,
         };
-        let stmt = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.stmt.as_str()).unwrap_or_default();
+        let stmt = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.cur_set()).map(|x| x.stmt.as_str()).unwrap_or_default();
         [base, db::sql::source::first_table(stmt, self.sql_dialect()), Some(t.sel.coll.clone())].into_iter().flatten().find(|n| !n.trim().is_empty()).unwrap_or_else(|| "result".into())
     }
 
@@ -202,7 +203,7 @@ impl App {
         let src = self.grid_src();
         let Some(t) = self.t() else { return };
         let sql = t.sql.is_some();
-        let set = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))));
+        let set = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.cur_set());
         let shown = shown_count(t, src);
         let paged = set.is_some_and(|x| x.page.is_some());
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
@@ -409,9 +410,9 @@ impl App {
         if let Some(name) = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == view).map(|b| match &b.r {
             crate::library::ScriptRef::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             r => self.script_name(r),
-        }) && let Some(name) = file_safe(&name)
+        }) && !name.trim().is_empty()
         {
-            return name;
+            return crate::library::disk::file_name(&name, "");
         }
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         match (src, coll.is_empty()) {
@@ -462,7 +463,7 @@ impl App {
     fn xlsx_cols(&self, src: Src, cols: &[CopyCol]) -> Vec<db::xlsx::XCol> {
         let t = self.t();
         let sql_cols: &[db::sql::Col] = match (src, t.and_then(|t| t.sql.as_ref())) {
-            (Src::Query, Some(s)) => s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))).map_or(&[], |x| x.cols.as_slice()),
+            (Src::Query, Some(s)) => s.cur_set().map_or(&[], |x| x.cols.as_slice()),
             (Src::Content, Some(s)) => s.cols.as_slice(),
             _ => &[],
         };
@@ -470,34 +471,36 @@ impl App {
     }
 
     fn export_run(&mut self, f: &ExportForm, path: PathBuf) {
-        let table = if f.table.trim().is_empty() { self.export_sheet(f.src, &[]).1 } else { f.table.trim().to_string() };
+        let table = if f.table.trim().is_empty() { self.insert_table(f.src) } else { f.table.trim().to_string() };
         if matches!(f.fmt, Format::T(Fmt::SqlInsert | Fmt::SqlUpdate)) {
             self.keep_base_table(f.src, &table);
         }
         // The text format to stream, or for a workbook the CSV slot it leaves unused.
-        let (fmt, xlsx) = match f.fmt {
-            Format::T(fmt) => (Some(fmt), None),
-            Format::Xlsx => (Some(Fmt::Csv), Some(self.xlsx_opts(f))),
-            _ => (None, None),
+        use db::sql::export::Target;
+        let target = match f.fmt {
+            Format::T(fmt) => Some(Target::Text(fmt)),
+            Format::Xlsx => Some(Target::Xlsx(self.xlsx_opts(f))),
+            _ => None,
         };
         if f.scope == Scope::All {
-            let (Some(a), Some(fmt)) = (&f.all, fmt) else { return };
-            let plan = db::sql::export::Plan { fmt, header: f.header, table, bs: self.sql_bs(), xlsx };
+            let (Some(a), Some(target)) = (&f.all, target) else { return };
+            let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
             self.start_stream(a, plan, Sink::File(path), false);
             return;
         }
         if f.scope == Scope::Script {
-            let (Some(sc), Some(fmt)) = (&f.script, fmt) else { return };
+            let (Some(sc), Some(target)) = (&f.script, target) else { return };
             let Ok(stmts) = &sc.stmts else { return };
-            let single = f.single && xlsx.is_none();
-            let ap = db::sql::export::AllPlan { plan: Plan { fmt, header: f.header, table, bs: self.sql_bs(), xlsx }, single };
-            return self.start_script(sc, stmts.clone(), ap, path);
+            let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
+            // Only text formats with room for several results go in one file.
+            let single = f.single && plan.text().is_some_and(db::sql::export::can_single);
+            return self.start_script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
         }
         let rows = if f.scope == Scope::Selected { f.selected.clone() } else { self.shown_rows(f.src) };
-        if let Some(opts) = xlsx {
+        if let Some(Target::Xlsx(opts)) = target {
             let (cols, _, _) = self.export_sheet(f.src, &rows);
             // A Query result's statement goes on the About sheet; a Content grid's filter is there already.
-            let stmt = self.t().and_then(|t| t.sql.as_ref()).filter(|_| f.src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.stmt.clone());
+            let stmt = self.t().and_then(|t| t.sql.as_ref()).filter(|_| f.src == Src::Query).and_then(|s| s.cur_set()).map(|x| x.stmt.clone());
             let mut bytes = Vec::new();
             let book = db::xlsx::Book::new(&opts.sheet, self.xlsx_cols(f.src, &cols), opts.about).and_then(|mut b| {
                 b.rows(&rows)?;
@@ -569,7 +572,7 @@ impl App {
     pub(super) fn copy_all_pages(&mut self, fmt: Fmt, header: bool) {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
-        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let Some(set) = s.cur_set() else { return };
         if let Err(why) = lex_check_msg(&set.stmt, self.sql_dialect()) {
             return self.warn(why);
         }
@@ -577,7 +580,7 @@ impl App {
         let (db, schema) = super::sql::query::ran_target(t, db);
         let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
-        let plan = Plan { fmt, header, table, bs: self.sql_bs(), xlsx: None };
+        let plan = Plan { target: crate::db::sql::export::Target::Text(fmt), header, table, bs: self.sql_bs() };
         self.start_stream(&a, plan, Sink::Clipboard, true);
     }
 
@@ -625,7 +628,7 @@ struct Ask {
 /// The rows of `src` on screen: the selected Query result, the Shell's results or the Content page.
 fn shown_count(t: &Tab, src: Src) -> usize {
     match src {
-        Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map_or(0, |x| x.rows.len()),
+        Src::Query => t.sql.as_ref().and_then(|s| s.cur_set()).map_or(0, |x| x.rows.len()),
         Src::Shell => t.shell.docs.len(),
         Src::Content => t.docs.len(),
     }
@@ -644,14 +647,6 @@ fn pick_scope(a: Ask) -> Scope {
 
 fn lex_check_msg(stmt: &str, d: db::sql::Dialect) -> Result<(), String> {
     db::sql::lex::read_only_check(stmt, d).map_err(|why| format!("Only statements that read can be copied in full: {why}"))
-}
-
-/// `name` as a file name on every platform: separators and the characters Windows refuses become dashes. None when
-/// nothing is left.
-fn file_safe(name: &str) -> Option<String> {
-    let s: String = name.chars().map(|c| if c.is_control() || r#"/\:*?"<>|"#.contains(c) { '-' } else { c }).collect();
-    let s = s.trim().trim_matches('.').trim();
-    (!s.is_empty()).then(|| s.to_string())
 }
 
 #[cfg(test)]
@@ -696,13 +691,6 @@ mod tests {
         for d in [Dialect::MySql, Dialect::Postgres] {
             assert!(db::sql::lex::read_only_check(&q.select_sql(d, "s", "t", &pk, None), d).is_ok());
         }
-    }
-
-    #[test]
-    fn script_names_become_file_names() {
-        assert_eq!(file_safe("Erreurs TAXI/VLOC/Train").as_deref(), Some("Erreurs TAXI-VLOC-Train"));
-        assert_eq!(file_safe(" a:b*? ").as_deref(), Some("a-b--"));
-        assert_eq!(file_safe(" .. "), None);
     }
 
     #[test]

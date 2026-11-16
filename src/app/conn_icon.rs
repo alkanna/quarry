@@ -2,7 +2,7 @@
 //! scaled to one small PNG in the config folder, `icons/<id>.png`. `ConnMeta::icon` says whether one is set, so a
 //! connection without one never touches the disk and a demo connection, whose id may be a real one's, never reads it.
 
-use super::rail::{engine_mark, logo, mark_color};
+use super::rail::{engine_mark, tile_face};
 use super::*;
 use std::sync::mpsc;
 
@@ -26,9 +26,6 @@ pub(super) fn path(id: u64) -> std::path::PathBuf {
 
 /// Decodes any supported image, crops it to its centered square and scales it to `SIDE`, as PNG bytes.
 pub(super) fn square_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err("The image is larger than 10 MB.".into());
-    }
     let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
     if r.format().is_none() {
         return Err(format!("Not an image Quarry can read. Use {FORMATS}."));
@@ -57,10 +54,8 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW);
     let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| format!("Could not run curl: {e}"))?;
     // curl's --max-filesize cannot stop a body sent without a length, so the read itself stops past the limit.
-    let body = child.stdout.take().map(|o| capped(o)).transpose();
-    let body = match body {
-        Ok(Some(b)) => b,
-        Ok(None) => Vec::new(),
+    let body = match capped(child.stdout.take().expect("stdout is piped")) {
+        Ok(b) => b,
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
@@ -104,12 +99,6 @@ fn spawn(ctx: &egui::Context, load: impl FnOnce() -> Result<Vec<u8>, String> + S
     rx
 }
 
-fn texture_of(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
-    let size = [img.width() as usize, img.height() as usize];
-    Some(ctx.load_texture("conn-icon", egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR))
-}
-
 fn cache_id(id: u64) -> egui::Id {
     egui::Id::unique(("conn-icon", id))
 }
@@ -123,24 +112,26 @@ pub(super) fn texture(ctx: &egui::Context, meta: &ConnMeta) -> Option<egui::Text
     if let Some(t) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(key)) {
         return t;
     }
-    let t = std::fs::read(path(meta.id)).ok().and_then(|b| texture_of(ctx, &b));
+    let t = std::fs::read(path(meta.id)).ok().and_then(|b| super::rail::png_texture(ctx, "conn-icon", &b));
     ctx.data_mut(|d| d.insert_temp(key, t.clone()));
     t
 }
 
-/// The icon filling `tile`, rounded like the engine tiles. `tint` dims it under a spinner.
-pub(super) fn paint(p: &egui::Painter, tile: egui::Rect, tex: &egui::TextureHandle, tint: Color32) {
-    let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-    p.add(egui::epaint::RectShape::filled(tile, R_TILE, tint).with_texture(tex.id(), uv));
+/// What Save writes.
+enum Staged {
+    /// Nothing picked yet.
+    Keep,
+    /// Back to the engine logo.
+    Logo,
+    /// A new icon, with its preview.
+    Png(Vec<u8>, Option<egui::TextureHandle>),
 }
 
 /// The Connection icon dialog's working copy. Nothing is written until Save.
 pub(super) struct IconForm {
     conn: u64,
     url: String,
-    /// What Save writes: a new PNG, or an empty one to go back to the engine logo. None until something is picked.
-    staged: Option<Vec<u8>>,
-    preview: Option<egui::TextureHandle>,
+    staged: Staged,
     /// The file or download being read. It belongs to this dialog, so a late answer never lands on another connection.
     job: Option<Job>,
     error: String,
@@ -148,7 +139,7 @@ pub(super) struct IconForm {
 
 impl IconForm {
     pub(super) fn new(conn: u64) -> Self {
-        Self { conn, url: String::new(), staged: None, preview: None, job: None, error: String::new() }
+        Self { conn, url: String::new(), staged: Staged::Keep, job: None, error: String::new() }
     }
 }
 
@@ -159,8 +150,8 @@ impl App {
             f.job = None;
             match res {
                 Ok(png) => {
-                    f.preview = texture_of(&ctx, &png);
-                    f.staged = Some(png);
+                    let tex = super::rail::png_texture(&ctx, "conn-icon", &png);
+                    f.staged = Staged::Png(png, tex);
                     f.error.clear();
                 }
                 Err(e) => f.error = e,
@@ -181,19 +172,12 @@ impl App {
         dialog_body(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 64.0), Sense::hover());
-                let p = ui.painter();
                 let shown = match &f.staged {
-                    Some(png) if png.is_empty() => None,
-                    Some(_) => f.preview.clone(),
-                    None => current,
+                    Staged::Keep => current,
+                    Staged::Logo => None,
+                    Staged::Png(_, t) => t.clone(),
                 };
-                match shown {
-                    Some(t) => paint(p, rect, &t, Color32::WHITE),
-                    None => {
-                        gradient_rect(p, rect, R_TILE as f32, tint(mark_color(mark), 140));
-                        logo(p, rect.center(), 34.0, mark, Color32::WHITE);
-                    }
-                }
+                tile_face(ui.painter(), rect, shown.as_ref(), mark, 140, 34.0, Color32::WHITE);
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     ui.add_space(6.0);
@@ -235,17 +219,20 @@ impl App {
         }
         let mut save = false;
         dialog_foot(ui, |ui| {
-            if ui.add_enabled_ui(f.staged.is_some() && !busy, |ui| primary(ui, "Save", PRIMARY())).inner.clicked() {
+            if ui.add_enabled_ui(!matches!(f.staged, Staged::Keep) && !busy, |ui| primary(ui, "Save", PRIMARY())).inner.clicked() {
                 save = true;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
-            let custom = matches!(&f.staged, Some(png) if !png.is_empty()) || (has_icon && f.staged.is_none());
+            let custom = match f.staged {
+                Staged::Keep => has_icon,
+                Staged::Logo => false,
+                Staged::Png(..) => true,
+            };
             foot_left(ui, |ui| {
                 if ui.add_enabled(custom && !busy, egui::Button::new("Use engine logo")).clicked() {
-                    f.staged = Some(Vec::new());
-                    f.preview = None;
+                    f.staged = Staged::Logo;
                 }
             });
         });
@@ -256,20 +243,24 @@ impl App {
     }
 
     fn save_icon(&mut self, ctx: &egui::Context, f: &mut IconForm) {
-        let Some(png) = f.staged.take() else { return };
-        let (id, on) = (f.conn, !png.is_empty());
+        let id = f.conn;
+        let (png, tex) = match std::mem::replace(&mut f.staged, Staged::Keep) {
+            Staged::Keep => return,
+            Staged::Logo => (None, None),
+            Staged::Png(png, tex) => (Some(png), tex),
+        };
+        let on = png.is_some();
         // The demo keeps its icon in memory only, since its ids may be real connections' ids.
         if !self.ephemeral {
-            let res = if on {
-                write_atomic(&icons_dir(), &format!("{id}.png"), &png)
-            } else {
-                std::fs::remove_file(path(id)).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+            let res = match &png {
+                Some(png) => write_atomic(&icons_dir(), &format!("{id}.png"), png),
+                None => std::fs::remove_file(path(id)).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
             };
             if let Err(e) = res {
                 return self.err(format!("Could not save the icon: {e}"));
             }
         }
-        ctx.data_mut(|d| d.insert_temp(cache_id(id), f.preview.take().filter(|_| on)));
+        ctx.data_mut(|d| d.insert_temp(cache_id(id), tex));
         if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
             c.meta.icon = on;
         }

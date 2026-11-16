@@ -1777,7 +1777,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let stmt = "SELECT id, name FROM t_export_big ORDER BY id";
         let run = |fmt: Fmt, file: &str| {
-            let plan = Plan { fmt, header: true, table: "t_export_big".into(), bs: true, xlsx: None };
+            let plan = Plan { target: crate::db::sql::export::Target::Text(fmt), header: true, table: "t_export_big".into(), bs: true };
             let path = dir.join(file);
             let count = AtomicU64::new(0);
             let done = w.rt.block_on(export_to(&db, "quarry_test", stmt, &plan, Sink::File(path.clone()), &count, &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
@@ -1793,7 +1793,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(run(Fmt::Json, "big.json")).unwrap()).unwrap();
         assert_eq!((json.as_array().map(|a| a.len()), json[199_999]["id"].as_i64()), (Some(200_000), Some(200_000)));
         // A workbook streams the same way and is a whole zip with the last row as a number.
-        let plan = Plan { fmt: Fmt::Csv, header: true, table: String::new(), bs: true, xlsx: Some(crate::db::xlsx::Opts { sheet: "big".into(), about: None }) };
+        let plan = Plan { target: crate::db::sql::export::Target::Xlsx(crate::db::xlsx::Opts { sheet: "big".into(), about: None }), header: true, table: String::new(), bs: true };
         let path = dir.join("big.xlsx");
         let done = w.rt.block_on(export_to(&db, "quarry_test", stmt, &plan, Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
         assert!(done.peak_batch <= BATCH && done.rows == 200_000);
@@ -1802,7 +1802,7 @@ mod tests {
         std::io::Read::read_to_string(&mut z.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut sheet).unwrap();
         assert!(sheet.contains("<v>200000</v>") && sheet.contains("ref=\"A1:B200001\""), "{}", &sheet[..sheet.len().min(400)]);
         // A statement that writes is refused before it reaches the server, and leaves no file.
-        let plan = Plan { fmt: Fmt::Csv, header: true, table: String::new(), bs: true, xlsx: None };
+        let plan = Plan { target: crate::db::sql::export::Target::Text(Fmt::Csv), header: true, table: String::new(), bs: true };
         let refused = dir.join("never.csv");
         let err = w.rt.block_on(export_to(&db, "quarry_test", "DELETE FROM t_export_big", &plan, Sink::File(refused.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).err().unwrap();
         assert!(err.contains("read"), "{err}");
@@ -1810,7 +1810,7 @@ mod tests {
         let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_export_big").fetch_one(&p.pool).await.unwrap() });
         assert_eq!(n, 200_000);
         // An empty result still writes its header and footer.
-        let empty = w.rt.block_on(export_to(&db, "quarry_test", "SELECT id FROM t_export_big WHERE id < 0", &Plan { fmt: Fmt::Json, header: true, table: String::new(), bs: true, xlsx: None }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
+        let empty = w.rt.block_on(export_to(&db, "quarry_test", "SELECT id FROM t_export_big WHERE id < 0", &Plan { target: crate::db::sql::export::Target::Text(Fmt::Json), header: true, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
         assert_eq!((empty.rows, empty.text.as_deref()), (0, Some("[]\n")));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1832,7 +1832,7 @@ mod tests {
         let script = "USE quarry_test; SET @lim = 2; SELECT id, name FROM t_exp ORDER BY id; SELECT @lim AS lim, COUNT(*) AS n FROM t_exp";
         let stmts = check_script(script, Dialect::MySql).unwrap();
         let run = |stmts: &[String], fmt: Fmt, single: bool, file: &str, cancel: bool| {
-            let ap = AllPlan { plan: Plan { fmt, header: true, table: "t_exp".into(), bs: true, xlsx: None }, single };
+            let ap = AllPlan { plan: Plan { target: crate::db::sql::export::Target::Text(fmt), header: true, table: "t_exp".into(), bs: true }, single };
             let (count, step) = (AtomicU64::new(0), AtomicU64::new(0));
             let r = w.rt.block_on(export_all(&db, "", stmts, &ap, &dir.join(file), &count, &step, &AtomicBool::new(cancel), &AtomicU64::new(0)));
             (r, count.load(Ordering::Relaxed), step.load(Ordering::Relaxed))

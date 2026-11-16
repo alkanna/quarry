@@ -356,7 +356,7 @@ impl App {
     /// query again; everything else sets up this tab's view of the result.
     pub(in crate::app) fn query_head_act(&mut self, ui: &egui::Ui, c: &str, act: HeadAct) {
         let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
-        let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
+        let Some(set) = s.cur_set() else { return };
         let names = super::sql::query::result_keys(&set.cols);
         // The name the column has in the result, for the actions that read or sort by it.
         let key = c;

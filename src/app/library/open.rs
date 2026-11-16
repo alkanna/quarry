@@ -261,8 +261,7 @@ impl App {
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
         if let Some(t) = self.tm() {
-            query_only(t, view);
-            t.script = Some(Bound { r: r.clone(), view, base, disk: None, conflict: None });
+            bind(t, Bound { r: r.clone(), view, base, disk: None, conflict: None });
         }
         self.library.push_recent(r);
         self.save_library();
@@ -756,10 +755,12 @@ impl App {
     }
 }
 
-/// A SQL tab bound to a Query script becomes a plain query tab, as one opened from the library is. Its table's views would
-/// otherwise stay under the script's name, with nothing saying which table they show.
-pub(in crate::app) fn query_only(t: &mut Tab, view: View) {
-    if view == View::Sql && t.sql.is_some() {
+/// Ties tab `t` to script binding `b`, the one place a tab is bound. A SQL tab bound to a Query script becomes a plain
+/// query tab, as one opened from the library is: its table's views would otherwise stay under the script's name, with
+/// nothing saying which table they show.
+pub(in crate::app) fn bind(t: &mut Tab, b: Bound) {
+    if b.view == View::Sql && t.sql.is_some() {
         t.sel.coll.clear();
     }
+    t.script = Some(b);
 }

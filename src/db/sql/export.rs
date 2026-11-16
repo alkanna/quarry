@@ -23,13 +23,28 @@ pub const CLIP_MAX: usize = 64 << 20;
 
 #[derive(Clone)]
 pub struct Plan {
-    pub fmt: Fmt,
+    pub target: Target,
     pub header: bool,
     /// The table name SQL INSERT and UPDATE write.
     pub table: String,
     pub bs: bool,
-    /// An Excel workbook instead of the text of `fmt`.
-    pub xlsx: Option<crate::db::xlsx::Opts>,
+}
+
+/// What a result becomes: Copy as text, or an Excel workbook.
+#[derive(Clone)]
+pub enum Target {
+    Text(Fmt),
+    Xlsx(crate::db::xlsx::Opts),
+}
+
+impl Plan {
+    /// The text format, None for a workbook, which has no line endings or sections between results.
+    pub fn text(&self) -> Option<Fmt> {
+        match self.target {
+            Target::Text(f) => Some(f),
+            Target::Xlsx(_) => None,
+        }
+    }
 }
 
 /// Where the text goes.
@@ -117,7 +132,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     let r = r?;
     let (rows, peak) = r.unwrap_or_default();
     // Line formats end with a newline like any text file; a workbook is binary.
-    if plan.xlsx.is_none() {
+    if plan.text().is_some() {
         out.write_all(b"\n").map_err(write_err)?;
     }
     Ok((rows, peak))
@@ -146,13 +161,13 @@ enum Out {
 
 impl Out {
     fn open(dialect: super::Dialect, plan: &Plan, cols: &[super::Col], copy: Vec<CopyCol>) -> Res<(Out, String)> {
-        Ok(match &plan.xlsx {
-            Some(x) => {
+        Ok(match &plan.target {
+            Target::Xlsx(x) => {
                 let xc = cols.iter().map(|c| crate::db::xlsx::XCol { name: c.name.clone(), kind: Some(c.kind) }).collect();
                 (Out::Xlsx(Box::new(crate::db::xlsx::Book::new(&x.sheet, xc, x.about.clone())?)), String::new())
             }
-            None => {
-                let mut w = Writer::new(dialect, plan.fmt, plan.header, copy, &plan.table, &[], plan.bs);
+            Target::Text(fmt) => {
+                let mut w = Writer::new(dialect, *fmt, plan.header, copy, &plan.table, &[], plan.bs);
                 let begin = w.begin();
                 (Out::Text(w), begin)
             }
@@ -428,7 +443,7 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
     let mut conn = db.acquire_conn().await?;
     prepare(&mut conn, db, schema, true, id).await?;
     pin_reads(&mut conn).await?;
-    let fmt = ap.plan.fmt;
+    let fmt = ap.plan.text();
     let (mut total, mut results) = (0u64, 0usize);
     let mut shared = Lazy::new(part_of(path));
     let io = write_err;
@@ -438,8 +453,11 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
             return Err("Export cancelled".into());
         }
         let first = results == 0;
-        let head = if ap.single { single_head(fmt, i + 1, stmt, first) } else { String::new() };
-        let tag = (ap.single && fmt == Fmt::JsonLines).then(|| json_str(stmt));
+        let head = match (ap.single, fmt) {
+            (true, Some(f)) => single_head(f, i + 1, stmt, first),
+            _ => String::new(),
+        };
+        let tag = (ap.single && fmt == Some(Fmt::JsonLines)).then(|| json_str(stmt));
         let wrap = Wrap { head: &head, tag: tag.as_deref(), base: total, lenient: true };
         let n = results + 1;
         let mut own = Lazy::new(part_of(&numbered(path, n)));
@@ -456,8 +474,8 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
             *open = None;
             continue;
         };
-        if ap.plan.xlsx.is_none() {
-            out.write_all(result_tail(fmt, ap.single, rows).as_bytes()).map_err(io)?;
+        if let Some(f) = fmt {
+            out.write_all(result_tail(f, ap.single, rows).as_bytes()).map_err(io)?;
         }
         out.ensure().map_err(io)?;
         if !ap.single {
@@ -475,7 +493,7 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
         return Err("No statement in the editor returns rows.".into());
     }
     if ap.single {
-        shared.write_all(single_close(fmt).as_bytes()).map_err(io)?;
+        shared.write_all(fmt.map_or("", single_close).as_bytes()).map_err(io)?;
         shared.flush().map_err(io)?;
     }
     let _ = conn.close().await;

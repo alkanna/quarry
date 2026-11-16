@@ -60,18 +60,13 @@ impl App {
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
-        let state = state_of(&r);
         let demo_open = std::mem::take(&mut self.conns_ui.demo_picker);
         if demo_open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
-        let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
-        let p = ui.painter();
-        p.rect_filled(boxed, R_TILE, if open { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
         // The plus is painted: the glyph comes from a fallback font and sits off center.
-        paint_plus(p, boxed.center(), 6.0, if open || state > 0 { BRIGHT() } else { MUTED() });
-        focus_ring(ui, &r, boxed, R_TILE as f32);
+        pinned_face(ui, &r, rect, open, |p, c, ink| paint_plus(p, c, 6.0, ink));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connect"));
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Connect");
         let mut pick = None;
@@ -148,13 +143,8 @@ impl App {
     /// closes it again while it shows.
     fn manage_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
-        let state = state_of(&r);
         let on = self.manages();
-        let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
-        let p = ui.painter();
-        p.rect_filled(boxed, R_TILE, if on { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
-        glyphs::sliders(p, boxed.center(), if on || state > 0 { BRIGHT() } else { MUTED() });
-        focus_ring(ui, &r, boxed, R_TILE as f32);
+        pinned_face(ui, &r, rect, on, glyphs::sliders);
         r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Manage connections"));
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Manage connections").clicked() {
             if on {
@@ -190,21 +180,35 @@ impl App {
         match a {
             RailAct::New => self.new_conn_modal(),
             RailAct::Cloud => self.open_cloud_browser(false),
-            RailAct::Manage | RailAct::NewGroup => {
-                if !self.manages() {
-                    self.conns_ui.manage_back = Some((self.prefs.side_mode(), self.prefs.sidebar_hidden));
-                }
-                self.prefs.set_side_mode(SideMode::Connections);
-                self.prefs.sidebar_hidden = false;
-                self.save_prefs();
+            RailAct::Manage => self.open_manage(),
+            RailAct::NewGroup => {
+                self.open_manage();
                 // The panel's own New group field, at the end of its groups.
-                if matches!(a, RailAct::NewGroup) {
-                    self.conns_ui.adding = Some(String::new());
-                    self.conns_ui.focus_edit = true;
-                }
+                self.conns_ui.adding = Some(String::new());
+                self.conns_ui.focus_edit = true;
             }
         }
     }
+
+    /// Shows the Connections panel, remembering what the sidebar showed so closing it from the Manage tile goes back.
+    fn open_manage(&mut self) {
+        if !self.manages() {
+            self.conns_ui.manage_back = Some((self.prefs.side_mode(), self.prefs.sidebar_hidden));
+        }
+        self.prefs.set_side_mode(SideMode::Connections);
+        self.prefs.sidebar_hidden = false;
+        self.save_prefs();
+    }
+}
+
+/// A pinned tile under the connections: a quiet square, filled while `on`, with `glyph` bright on hover, press or on.
+fn pinned_face(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, on: bool, glyph: impl FnOnce(&egui::Painter, egui::Pos2, Color32)) {
+    let state = state_of(r);
+    let boxed = egui::Rect::from_center_size(rect.center(), egui::vec2(RAIL_TILE, RAIL_TILE));
+    let p = ui.painter();
+    p.rect_filled(boxed, R_TILE, if on { SEL() } else { [tint(TEXT(), 14), HOVER(), PRESSED()][state] });
+    glyph(p, boxed.center(), if on || state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, r, boxed, R_TILE as f32);
 }
 
 /// What the Connect popover and the rail's menu ask for.
@@ -872,6 +876,21 @@ fn tile_edge() -> Color32 {
     if is_light() { tint(Color32::BLACK, 20) } else { tint(Color32::WHITE, 26) }
 }
 
+/// A connection tile's face: its own icon when it has one, else the engine's color with its logo `logo_size` wide in
+/// `ink`. `alpha` is how strong the engine color is.
+pub(super) fn tile_face(p: &egui::Painter, rect: egui::Rect, icon: Option<&egui::TextureHandle>, mark: &str, alpha: u8, logo_size: f32, ink: Color32) {
+    match icon {
+        Some(tex) => {
+            let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+            p.add(egui::epaint::RectShape::filled(rect, R_TILE, ink).with_texture(tex.id(), uv));
+        }
+        None => {
+            gradient_rect(p, rect, R_TILE as f32, tint(mark_color(mark), alpha));
+            logo(p, rect.center(), logo_size, mark, ink);
+        }
+    }
+}
+
 /// The engine's logo, `size` points wide, centered on `c` in `color`.
 pub(super) fn logo(p: &egui::Painter, c: egui::Pos2, size: f32, mark: &str, color: Color32) {
     if let Some(tex) = engine_logo(p.ctx(), mark) {
@@ -932,12 +951,7 @@ fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
     painter.add(ui.visuals().popup_shadow.as_shape(rect, R_TILE));
     let mark = engine_mark(c.meta.engine, &c.server.product).0;
     painter.rect_filled(rect, R_TILE, RAISED());
-    if let Some(tex) = super::conn_icon::texture(ctx, &c.meta) {
-        super::conn_icon::paint(&painter, rect, &tex, Color32::WHITE);
-    } else {
-        gradient_rect(&painter, rect, R_TILE as f32, tint(mark_color(mark), tile_alpha(1)));
-        logo(&painter, rect.center(), 22.0, mark, Color32::WHITE);
-    }
+    tile_face(&painter, rect, super::conn_icon::texture(ctx, &c.meta).as_ref(), mark, tile_alpha(1), 22.0, Color32::WHITE);
     painter.rect_stroke(rect, R_TILE, Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Inside);
 }
 
@@ -1020,12 +1034,17 @@ pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::Textu
     };
     let id = egui::Id::unique(name);
     ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
-        let icon = eframe::icon_data::from_png_bytes(png).ok()?;
-        let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-        let tex = ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
+        let tex = png_texture(ctx, name, png)?;
         ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
         Some(tex)
     })
+}
+
+/// A PNG as a texture named `name`, None when it does not decode.
+pub(super) fn png_texture(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<egui::TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(png).ok()?;
+    let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }
 
 /// A connection's tile: an app icon in the engine's color with the logo in white, a dash in the tag color at its foot for a
@@ -1040,13 +1059,11 @@ fn conn_shortcut(ui: &mut egui::Ui, rect: egui::Rect, c: &Conn, active: bool, ta
     let p = ui.painter();
     // A connection that is not ready yet dims its logo under the spinner.
     let ink = if c.status == Status::Connecting { Color32::WHITE.gamma_multiply(0.45) } else { Color32::WHITE };
-    if let Some(tex) = super::conn_icon::texture(p.ctx(), &c.meta) {
-        super::conn_icon::paint(p, tile, &tex, ink);
-        // A picture has no engine color to brighten, so hover and press lay a light veil over it.
+    let icon = super::conn_icon::texture(p.ctx(), &c.meta);
+    tile_face(p, tile, icon.as_ref(), mark, tile_alpha(state), 22.0, ink);
+    // A picture has no engine color to brighten, so hover and press lay a light veil over it.
+    if icon.is_some() {
         p.rect_filled(tile, R_TILE, tint(Color32::WHITE, [0, 22, 36][state]));
-    } else {
-        gradient_rect(p, tile, R_TILE as f32, tint(mark_color(mark), tile_alpha(state)));
-        logo(p, tile.center(), 22.0, mark, ink);
     }
     p.rect_stroke(tile, R_TILE, Stroke::new(1.0, tile_edge()), egui::StrokeKind::Inside);
     if let Some(level) = tag_level(&c.meta.tag) {

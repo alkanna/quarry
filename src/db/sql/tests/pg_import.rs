@@ -422,7 +422,7 @@ fn live_export_streams_the_types_of_a_table_and_the_file_imports_back_the_same()
              (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL), (3, -0.5, false, '2026-01-31', 'infinity', NULL, 'null', 'null', '\\x', '{}', '{}', 'NaN', '-1 mons', '')",
         );
         let path = std::env::temp_dir().join(format!("pgcsv_export_{}_{}.csv", std::process::id(), var));
-        let plan = Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "src".into(), bs: false, xlsx: None };
+        let plan = Plan { target: crate::db::sql::export::Target::Text(crate::db::copy::Fmt::Csv), header: true, table: "src".into(), bs: false };
         let out = l.w.rt.block_on(export_to(&f.db, &f.schema, "SELECT * FROM src ORDER BY id", &plan, Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(out.rows, 3, "{var}");
         let text = std::fs::read_to_string(&path).unwrap();

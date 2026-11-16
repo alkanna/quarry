@@ -235,8 +235,7 @@ impl App {
                 }
                 match (view, self.tab_by_uid(uid)) {
                     (Some(v), Some(i)) if self.tabs[i].view == v => {
-                        super::open::query_only(&mut self.tabs[i], v);
-                        self.tabs[i].script = Some(Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
+                        super::open::bind(&mut self.tabs[i], Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
                     }
                     _ => {}
                 }
@@ -882,7 +881,7 @@ impl App {
         self.library.recent.truncate(crate::library::RECENT_MAX);
         for (uid, b) in tabs {
             if let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid && t.script.is_none() && t.view == b.view) {
-                t.script = Some(b);
+                super::open::bind(t, b);
             }
         }
         self.save_library();
