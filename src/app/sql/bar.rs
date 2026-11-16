@@ -403,17 +403,22 @@ fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, min: f32) -> Option<Op> {
     pick
 }
 
-/// A round "+" button, painted because the glyph sits off center.
-fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
-    plus_named(ui, enabled, "Add rule")
+/// A round tick that keeps the condition being written. A "+" there read as adding another one.
+fn keep_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    round_button(ui, enabled, "Keep this condition", paint_check)
 }
 
+/// A round "+" button, painted because the glyph sits off center.
 fn plus_named(ui: &mut egui::Ui, enabled: bool, name: &str) -> egui::Response {
+    round_button(ui, enabled, name, |p, c, color| paint_plus(p, c, 4.0, color))
+}
+
+fn round_button(ui: &mut egui::Ui, enabled: bool, name: &str, glyph: impl FnOnce(&egui::Painter, egui::Pos2, Color32)) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H + 4.0, BUTTON_H), Sense::click());
     let state = if enabled { state_of(&r) } else { 0 };
     ui.painter().rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let color = if !enabled { FAINT() } else if state > 0 { BRIGHT() } else { MUTED() };
-    paint_plus(ui.painter(), rect.center(), 4.0, color);
+    glyph(ui.painter(), rect.center(), color);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default })
@@ -1237,7 +1242,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                                 }
                                 let (changed, enter) = rule_editor(ui, &mut dr, &cols, ui.scope_id().with("draft"));
                                 run |= enter || (changed && !matches!(rules::input(dr.op), Input::One | Input::Two | Input::Path | Input::List | Input::Last));
-                                let add = plus_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
+                                let add = keep_button(ui, dr.complete()).on_hover_text("Keep this condition").clicked() && dr.complete();
                                 let close = close_x(ui).on_hover_text("Remove this condition").clicked();
                                 if add || (enter && dr.complete()) {
                                     b.rules.push(dr);
