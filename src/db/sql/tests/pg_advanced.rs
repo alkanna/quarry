@@ -441,7 +441,7 @@ fn floats_and_money_keep_their_spelling_whatever_the_form_asked_for() {
         assert_eq!(l.qone(&pool, "SELECT f::text FROM adv_flt.t WHERE id = 1"), "5.5", "{var}");
         // The export is not lossy.
         let path = std::env::temp_dir().join(format!("adv_flt_{}_{}.csv", std::process::id(), var));
-        let plan = crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: false, table: String::new(), bs: false };
+        let plan = crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: false, table: String::new(), bs: false, xlsx: None };
         use std::sync::atomic::{AtomicBool, AtomicU64};
         l.w.rt.block_on(crate::db::sql::export::export_to(&db, "adv_flt", "SELECT id, f FROM t WHERE id > 1 ORDER BY id", &plan, crate::db::sql::export::Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var}: {x}"));
         let text = std::fs::read_to_string(&path).unwrap();

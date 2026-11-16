@@ -24,6 +24,7 @@ mod shell;
 pub mod sql;
 pub mod collopts;
 pub mod copy;
+pub mod xlsx;
 mod tools;
 mod worker;
 pub use agent::{snapshot_now as agent_snapshot_now, AgentEvent, AgentJob, AgentRun, AgentShell, AgentTarget, AgentUndo, AgentsHandle, Finished, Redact, Snapshot};
