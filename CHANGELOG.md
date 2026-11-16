@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.51.0](https://github.com/alkanna/quarry/compare/v0.50.0...v0.51.0) (2026-11-16)
+
+
+### Features
+
+* SQL filter rules group conditions in parentheses, like a AND (b OR c) ([#261](https://github.com/alkanna/quarry/issues/261)) ([f42ea38](https://github.com/alkanna/quarry/commit/f42ea3830e0ddb5441645dd51b7fc4bf44daf5bd))
+* SQL filters are built in a panel of nested all, any and none groups with live row counts ([#262](https://github.com/alkanna/quarry/issues/262)) ([4e21cf1](https://github.com/alkanna/quarry/commit/4e21cf1ff1b72df4fa4d371359158e7e503780b5))
+* SQL tables without a primary key can be edited through a unique key ([#259](https://github.com/alkanna/quarry/issues/259)) ([fe2e3a9](https://github.com/alkanna/quarry/commit/fe2e3a9d20ec3c824ffa6cf495c7e7f82fdef934))
+
 ## [0.50.0](https://github.com/alkanna/quarry/compare/v0.49.0...v0.50.0) (2026-11-16)
 
 
