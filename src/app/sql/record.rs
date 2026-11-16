@@ -25,8 +25,9 @@ fn tree_id(col: &str) -> egui::Id {
     egui::Id::unique(("sql-record-json", col))
 }
 
-/// The open JSON tree of column `c`, under its line and lined up with the values. Its height is kept for `tree_room`.
-fn json_under(ui: &mut egui::Ui, name_w: f32, c: &str, s: &str, open_id: egui::Id) {
+/// The open JSON tree of column `c`, under its line and lined up with the values. Its height is kept under `room` for
+/// `tree_room`.
+fn json_under(ui: &mut egui::Ui, name_w: f32, c: &str, s: &str, room: egui::Id) {
     let h = ui
         .horizontal(|ui| {
             ui.add_space(name_w);
@@ -35,13 +36,13 @@ fn json_under(ui: &mut egui::Ui, name_w: f32, c: &str, s: &str, open_id: egui::I
         .response
         .rect
         .height();
-    ui.data_mut(|d| d.insert_temp(open_id.with("h"), h));
+    ui.data_mut(|d| d.insert_temp(room, h));
 }
 
 /// The room of the open tree last drawn under a line, for the frames that skip it. Without it the record shrinks as the
 /// line scrolls away or opens its editor, and the grid jumps back up.
-fn tree_room(ui: &mut egui::Ui, open_id: egui::Id) {
-    if let Some(h) = ui.data(|d| d.get_temp::<f32>(open_id.with("h"))) {
+fn tree_room(ui: &mut egui::Ui, room: egui::Id) {
+    if let Some(h) = ui.data(|d| d.get_temp::<f32>(room)) {
         ui.allocate_exact_size(egui::vec2(0.0, h), Sense::hover());
     }
 }
@@ -66,16 +67,17 @@ impl App {
         for (c, col) in names.iter().zip(&cols) {
             let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
             let open_id = rid.with(("json", c));
+            let room = open_id.with("h");
             // Lines scrolled out of view keep their space but skip the work, like the grid's rows.
             if !ui.is_rect_visible(line) {
-                tree_room(ui, open_id);
+                tree_room(ui, room);
                 continue;
             }
             let kind = col.as_ref().map_or(Kind::Text, |c| c.kind);
             let val = egui::Rect::from_min_max(egui::pos2(line.left() + name_w, line.top()), egui::pos2(line.right() - type_w, line.bottom()));
             if !agg && self.sql_cell.as_ref().is_some_and(|e| e.is_at(key.clone(), c)) {
                 self.sql_cell_editor(ui, val);
-                tree_room(ui, open_id);
+                tree_room(ui, room);
                 continue;
             }
             let v = match &drafted {
@@ -157,6 +159,7 @@ impl App {
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {
                         json_tree::forget(ui.ctx(), tree_id(c));
+                        ui.data_mut(|d| d.remove::<f32>(room));
                     }
                 }
             }
@@ -167,10 +170,10 @@ impl App {
                 out.view = Some((c.to_string(), b));
             }
             if let (true, Some(s)) = (open, text) {
-                json_under(ui, name_w, c, s, open_id);
-            } else {
-                // No tree drawn, so no room kept for one.
-                ui.data_mut(|d| d.remove::<f32>(open_id.with("h")));
+                json_under(ui, name_w, c, s, room);
+            } else if json {
+                // A JSON value whose tree is not drawn keeps no room for one. Closing the fold clears it too.
+                ui.data_mut(|d| d.remove::<f32>(room));
             }
         }
     }

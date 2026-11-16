@@ -29,10 +29,7 @@ fn tab_opens_the_record_where_values_edit_and_esc_closes_it() {
 
 #[test]
 fn tab_opens_the_record_while_the_filter_panel_is_open() {
-    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    ui.click("Filters");
-    ui.settle();
-    assert!(ui.app().t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open), "the filter panel did not open");
+    let Some(mut ui) = super::filter_panel::opened() else { return };
     ui.mouse_hold("note row 2", 0);
     assert_eq!(ui.app().t().and_then(|t| t.selected), Some((false, 1)), "the click did not select row 2");
     assert!(ui.h.ctx.memory(|m| m.focused().is_none()), "a widget kept the focus after the row click");
@@ -43,13 +40,7 @@ fn tab_opens_the_record_while_the_filter_panel_is_open() {
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| !t.record), "a second Tab did not close the record");
     // A selected panel row has the keys, so Tab leaves the record alone.
-    {
-        let app = ui.h.state_mut();
-        let cur = app.cur;
-        let b = &mut app.tabs[cur].sql.as_mut().expect("a SQL tab").bar;
-        b.panel.sel = b.tree.rows_in_order().first().copied();
-    }
-    ui.settle();
+    super::filter_panel::select(&mut ui, 0);
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| !t.record), "Tab opened the record while a panel row was selected");
