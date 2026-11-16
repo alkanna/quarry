@@ -4,11 +4,74 @@
 use super::filter_cells::{rule_editor, Hints};
 use crate::app::*;
 use crate::db::sql::{
+    facts::{FilterCount, FilterErr},
     filter::{self, Block, Cond, Item, Match, Tree},
     rules::Rule,
     Col, Dialect,
 };
 use crate::ui::fold;
+
+/// The pause after the last edit before a count is asked again, as long as the Query editor's live check waits.
+const PAUSE: f64 = 0.6;
+/// Counts of single rows kept while the panel is used, so hovering back and forth asks once per row.
+const HOVER_CACHE: usize = 64;
+
+pub(in crate::app) type Counted = Result<FilterCount, FilterErr>;
+
+/// What a count slot should do this frame.
+pub(in crate::app) enum Tick {
+    Ask,
+    /// Look again after this many seconds.
+    Wait(f32),
+    Idle,
+}
+
+/// One count the panel shows: the text last asked about under which request, and the answer with the text it is for.
+#[derive(Default)]
+pub(in crate::app) struct Count {
+    pub(in crate::app) req: u64,
+    pub(in crate::app) asked: Option<String>,
+    /// The text seen last and since when, for the pause before asking.
+    seen: String,
+    since: f64,
+    pub(in crate::app) res: Option<(String, Counted)>,
+}
+
+impl Count {
+    /// Whether to ask about `text` now: once it has rested PAUSE seconds and was not asked yet.
+    pub(in crate::app) fn tick(&mut self, text: &str, now: f64) -> Tick {
+        if text != self.seen {
+            self.seen = text.to_string();
+            self.since = now;
+        }
+        if self.asked.as_deref() == Some(text) {
+            return Tick::Idle;
+        }
+        let left = PAUSE - (now - self.since);
+        if left > 0.0 { Tick::Wait(left as f32) } else { Tick::Ask }
+    }
+
+    pub(in crate::app) fn ask(&mut self, req: u64, text: &str) {
+        self.req = req;
+        self.asked = Some(text.to_string());
+    }
+
+    /// Keeps the answer to request `req` when it is this slot's latest, and says whether it was.
+    pub(in crate::app) fn answer(&mut self, req: u64, res: &Counted) -> bool {
+        match &self.asked {
+            Some(text) if req == self.req => {
+                self.res = Some((text.clone(), res.clone()));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The answer for `text`, never one for an older text.
+    fn shown(&self, text: &str) -> Option<&Counted> {
+        self.res.as_ref().filter(|(t, _)| t == text).map(|(_, r)| r)
+    }
+}
 
 #[derive(Default)]
 pub(in crate::app) struct Panel {
@@ -17,6 +80,53 @@ pub(in crate::app) struct Panel {
     pub(in crate::app) sel: Option<u32>,
     /// A row just added, whose column picker opens on its first frame.
     pub(in crate::app) pick: Option<u32>,
+    /// How many rows the whole WHERE matches.
+    pub(in crate::app) count: Count,
+    /// The row under the pointer, whose own count shows at its end.
+    pub(in crate::app) hover: Option<u32>,
+    pub(in crate::app) hover_count: Count,
+    pub(in crate::app) hover_cache: HashMap<String, Counted>,
+}
+
+impl Panel {
+    /// Keeps the answer to request `req` in the slot that asked. False when neither did.
+    pub(in crate::app) fn counted(&mut self, req: u64, res: &Counted) -> bool {
+        if self.count.answer(req, res) {
+            return true;
+        }
+        match self.hover_count.asked.clone().filter(|_| self.hover_count.req == req) {
+            Some(text) => {
+                if self.hover_cache.len() >= HOVER_CACHE {
+                    self.hover_cache.clear();
+                }
+                self.hover_cache.insert(text, res.clone());
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// A count with its thousands separated.
+fn grouped(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The line under the SQL: how many rows match, an estimate, or why the server refused it.
+fn count_line(c: &Counted) -> (String, Color32) {
+    match c {
+        Ok(c) if c.estimated => (format!("\u{2248} {} rows match", grouped(c.n)), MUTED()),
+        Ok(c) => (format!("{} {} match", grouped(c.n), if c.n == 1 { "row" } else { "rows" }), TEXT()),
+        Err(e) => (crate::db::explain(&e.msg, &crate::db::ErrCtx { what: "count the rows".into(), ns: String::new(), host: String::new() }).title, ALERT()),
+    }
 }
 
 fn fold_id() -> egui::Id {
@@ -56,6 +166,14 @@ pub(super) struct Out {
     pub(super) as_sql: bool,
 }
 
+/// What every row of one frame reads: the columns, the server's dialect and escapes, and the row an error points into.
+struct Cx<'a> {
+    cols: &'a [Col],
+    d: Dialect,
+    bs: bool,
+    bad: Option<u32>,
+}
+
 enum Act {
     Remove(u32),
     Toggle(u32),
@@ -89,6 +207,14 @@ pub(super) fn add(tree: &mut Tree, p: &mut Panel, parent: u32, group: bool, cols
 /// `keys` is false while a dialog is over the page, which then owns Esc and Cmd+Enter.
 pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, bs: bool, keys: bool, hints: &mut Hints) -> Out {
     let mut out = Out::default();
+    let (text, spans) = filter::spans(tree, d, bs);
+    // The row a server error points into: the narrowest span that holds the position.
+    let bad = match p.count.shown(&text) {
+        Some(Err(FilterErr { at: Some(at), .. })) => spans.iter().filter(|(_, r)| r.contains(at) || r.end == *at).min_by_key(|(_, r)| r.len()).map(|(id, _)| *id),
+        _ => None,
+    };
+    p.hover = None;
+    let cx = Cx { cols, d, bs, bad };
     let t = fold::openness(ui.ctx(), fold_id(), p.open);
     let mut acts = Vec::new();
     let mut apply = false;
@@ -100,18 +226,18 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                     let left = ui.available_width() - PANE - 16.0;
                     ui.allocate_ui_with_layout(egui::vec2(left, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_width(left);
-                        conditions(ui, tree, p, cols, d, &mut acts, &mut out, hints);
+                        conditions(ui, tree, p, &cx, &mut acts, &mut out, hints);
                     });
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
                         ui.set_width(PANE);
-                        sql_pane(ui, tree, d, bs, &mut out);
+                        sql_pane(ui, tree, p, &text, d, bs, &mut out);
                     });
                 });
             } else {
-                conditions(ui, tree, p, cols, d, &mut acts, &mut out, hints);
+                conditions(ui, tree, p, &cx, &mut acts, &mut out, hints);
                 ui.add_space(10.0);
-                sql_pane(ui, tree, d, bs, &mut out);
+                sql_pane(ui, tree, p, &text, d, bs, &mut out);
             }
             ui.add_space(8.0);
             popover_divider(ui);
@@ -166,7 +292,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
 
 /// The root's word, its rows and groups, and the buttons that add to it.
 #[allow(clippy::too_many_arguments)]
-fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new("Match").size(TXT_SMALL).color(MUTED()));
@@ -179,7 +305,7 @@ fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d
     if tree.root.kids.is_empty() {
         ui.label(RichText::new("No conditions yet: every row shows.").size(TXT_SMALL).color(FAINT()));
     }
-    block(ui, &mut tree.root, p, cols, d, acts, out, hints);
+    block(ui, &mut tree.root, p, cx, acts, out, hints);
     add_buttons(ui, 0, acts);
 }
 
@@ -196,12 +322,12 @@ fn add_buttons(ui: &mut egui::Ui, parent: u32, acts: &mut Vec<Act>) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn block(ui: &mut egui::Ui, b: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn block(ui: &mut egui::Ui, b: &mut Block, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     for n in &mut b.kids {
         let id = n.id;
         ui.push_id(id, |ui| match &mut n.item {
-            Item::Cond(c) => row(ui, id, c, p, cols, d, acts, out, hints),
-            Item::Group(g) => card(ui, id, g, p, cols, d, acts, out, hints),
+            Item::Cond(c) => row(ui, id, c, p, cx, acts, out, hints),
+            Item::Group(g) => card(ui, id, g, p, cx, acts, out, hints),
         });
     }
 }
@@ -213,7 +339,7 @@ fn row_salt(id: u32) -> egui::Id {
 
 /// A condition: its on box, column, operator, values and a cross. A click on the row's background selects it.
 #[allow(clippy::too_many_arguments)]
-fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let h = BUTTON_H + 8.0;
     let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
     // Registered before the cells, so they take the clicks they are under.
@@ -221,6 +347,12 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d:
     let sel = p.sel == Some(id);
     if sel || bg.hovered() {
         ui.painter().rect_filled(rect, R_SM, if sel { tint(PRIMARY(), 22) } else { HOVER() });
+    }
+    if ui.rect_contains_pointer(rect) {
+        p.hover = Some(id);
+    }
+    if cx.bad == Some(id) {
+        ui.painter().rect_stroke(rect, R_SM, Stroke::new(1.0, ALERT()), egui::StrokeKind::Inside);
     }
     if bg.clicked() {
         p.sel = Some(id);
@@ -244,10 +376,17 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d:
         if ui.scope_builder(egui::UiBuilder::new().max_rect(end).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| close_x(ui).on_hover_text("Remove condition").clicked()).inner {
             acts.push(Act::Remove(id));
         }
+        // The hovered row's own count, faint before the cross.
+        if p.hover == Some(id) && c.on && c.rule.complete() && let Some(Ok(n)) = p.hover_cache.get(&crate::db::sql::rules::rule_sql(&c.rule, cx.d, cx.bs)) {
+            let label = format!("{}{}", if n.estimated { "\u{2248} " } else { "" }, grouped(n.n));
+            let g = ui.painter().layout_no_wrap(label, FontId::monospace(TXT_CAPTION), FAINT());
+            let dy = optical_dy(&g);
+            ui.painter().galley(egui::pos2(end.left() - 6.0 - g.size().x, rect.center().y - g.size().y / 2.0 + dy), g, FAINT());
+        }
         if !c.on {
             ui.multiply_opacity(0.5);
         }
-        let (changed, enter) = rule_editor(ui, &mut c.rule, cols, row_salt(id), d, pick, hints);
+        let (changed, enter) = rule_editor(ui, &mut c.rule, cx.cols, row_salt(id), cx.d, pick, hints);
         out.changed |= changed;
         out.run |= enter;
     });
@@ -255,7 +394,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d:
 
 /// A group as a tinted card: its own word, its rows and groups, and the buttons that add to it.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
+fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cx: &Cx, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let (fill, edge) = match g.mode {
         Match::Any => (tint(C_LINK(), 18), tint(C_LINK(), 70)),
         Match::None => (tint(ALERT(), 18), tint(ALERT(), 70)),
@@ -277,17 +416,17 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cols: &[Col], 
                 }
             });
         });
-        block(ui, g, p, cols, d, acts, out, hints);
+        block(ui, g, p, cx, acts, out, hints);
         add_buttons(ui, id, acts);
     });
     ui.add_space(2.0);
 }
 
 /// The SQL the tree writes, with off rows as comments, and the way to edit it as text.
-fn sql_pane(ui: &mut egui::Ui, tree: &Tree, d: Dialect, bs: bool, out: &mut Out) {
+fn sql_pane(ui: &mut egui::Ui, tree: &Tree, p: &Panel, text: &str, d: Dialect, bs: bool, out: &mut Out) {
     caption(ui, "SQL");
-    let text = filter::preview(tree, d, bs);
-    let mut job = sql_job(if text.is_empty() { "-- every row" } else { &text }, TXT_SMALL);
+    let shown = filter::preview(tree, d, bs);
+    let mut job = sql_job(if shown.is_empty() { "-- every row" } else { &shown }, TXT_SMALL);
     job.wrap.max_width = ui.available_width() - 20.0;
     let g = ui.fonts_mut(|f| f.layout_job(job));
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
@@ -295,5 +434,19 @@ fn sql_pane(ui: &mut egui::Ui, tree: &Tree, d: Dialect, bs: bool, out: &mut Out)
         ui.label(g);
     });
     ui.add_space(4.0);
+    match p.count.shown(text) {
+        Some(c) => {
+            let (line, color) = count_line(c);
+            let r = ui.label(RichText::new(line).size(TXT_SMALL).color(color));
+            if let Err(e) = c {
+                r.on_hover_text(&e.msg);
+            }
+        }
+        // Asked before, so a count is on its way; the demo never asks and shows none.
+        None if p.count.asked.is_some() => {
+            ui.label(RichText::new("Counting\u{2026}").size(TXT_SMALL).color(FAINT()));
+        }
+        None => {}
+    }
     out.as_sql |= quiet(ui, RichText::new("Edit as SQL").size(TXT_SMALL).color(PRIMARY())).on_hover_text("Switch the line to SQL with this WHERE").clicked();
 }

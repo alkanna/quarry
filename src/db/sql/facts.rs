@@ -100,6 +100,8 @@ pub(super) async fn filter_count(db: &Db, schema: &str, table: &str, filter: &st
     let f = filter.trim();
     let count = PageQuery { filter: f.to_string(), ..Default::default() }.count_sql(d, schema, table);
     super::worker::one_read(&count, d).map_err(plain)?;
+    // ponytail: the gate is read for every count, which on a PostgreSQL table never analyzed is a bounded count of its
+    // own; keep it per table while the panel is open if that shows.
     let small = gate(db, schema, table, "").await.map_err(plain)?.is_some_and(|g| g.small);
     // Both statements end with the WHERE text and its closing line.
     let pre = |sql: &str| sql.len() - f.len() - if f.is_empty() { 0 } else { 2 };
