@@ -1,7 +1,7 @@
 //! The filter panel under the query line (design B in docs/sql/rules-builder.figcraft): the conditions in nested all, any
 //! and none groups, the SQL they write, and Apply. It edits `Bar::tree`; the bar writes the WHERE text from it.
 
-use super::filter_cells::rule_editor;
+use super::filter_cells::{rule_editor, Hints};
 use crate::app::*;
 use crate::db::sql::{
     filter::{self, Block, Cond, Item, Match, Tree},
@@ -87,7 +87,7 @@ pub(super) fn add(tree: &mut Tree, p: &mut Panel, parent: u32, group: bool, cols
 /// Draws the panel while it is open or folding, and handles its keys. The tree is edited in place; structural edits are
 /// queued while it is drawn and made after.
 /// `keys` is false while a dialog is over the page, which then owns Esc and Cmd+Enter.
-pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, bs: bool, keys: bool) -> Out {
+pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, bs: bool, keys: bool, hints: &mut Hints) -> Out {
     let mut out = Out::default();
     let t = fold::openness(ui.ctx(), fold_id(), p.open);
     let mut acts = Vec::new();
@@ -100,7 +100,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                     let left = ui.available_width() - PANE - 16.0;
                     ui.allocate_ui_with_layout(egui::vec2(left, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_width(left);
-                        conditions(ui, tree, p, cols, d, &mut acts, &mut out);
+                        conditions(ui, tree, p, cols, d, &mut acts, &mut out, hints);
                     });
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
@@ -109,7 +109,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                     });
                 });
             } else {
-                conditions(ui, tree, p, cols, d, &mut acts, &mut out);
+                conditions(ui, tree, p, cols, d, &mut acts, &mut out, hints);
                 ui.add_space(10.0);
                 sql_pane(ui, tree, d, bs, &mut out);
             }
@@ -165,7 +165,8 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
 }
 
 /// The root's word, its rows and groups, and the buttons that add to it.
-fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out) {
+#[allow(clippy::too_many_arguments)]
+fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new("Match").size(TXT_SMALL).color(MUTED()));
@@ -178,7 +179,7 @@ fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d
     if tree.root.kids.is_empty() {
         ui.label(RichText::new("No conditions yet: every row shows.").size(TXT_SMALL).color(FAINT()));
     }
-    block(ui, &mut tree.root, p, cols, d, acts, out);
+    block(ui, &mut tree.root, p, cols, d, acts, out, hints);
     add_buttons(ui, 0, acts);
 }
 
@@ -194,12 +195,13 @@ fn add_buttons(ui: &mut egui::Ui, parent: u32, acts: &mut Vec<Act>) {
     });
 }
 
-fn block(ui: &mut egui::Ui, b: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out) {
+#[allow(clippy::too_many_arguments)]
+fn block(ui: &mut egui::Ui, b: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     for n in &mut b.kids {
         let id = n.id;
         ui.push_id(id, |ui| match &mut n.item {
-            Item::Cond(c) => row(ui, id, c, p, cols, d, acts, out),
-            Item::Group(g) => card(ui, id, g, p, cols, d, acts, out),
+            Item::Cond(c) => row(ui, id, c, p, cols, d, acts, out, hints),
+            Item::Group(g) => card(ui, id, g, p, cols, d, acts, out, hints),
         });
     }
 }
@@ -211,7 +213,7 @@ fn row_salt(id: u32) -> egui::Id {
 
 /// A condition: its on box, column, operator, values and a cross. A click on the row's background selects it.
 #[allow(clippy::too_many_arguments)]
-fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out) {
+fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let h = BUTTON_H + 8.0;
     let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
     // Registered before the cells, so they take the clicks they are under.
@@ -245,7 +247,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d:
         if !c.on {
             ui.multiply_opacity(0.5);
         }
-        let (changed, enter) = rule_editor(ui, &mut c.rule, cols, row_salt(id), d, pick);
+        let (changed, enter) = rule_editor(ui, &mut c.rule, cols, row_salt(id), d, pick, hints);
         out.changed |= changed;
         out.run |= enter;
     });
@@ -253,7 +255,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, p: &mut Panel, cols: &[Col], d:
 
 /// A group as a tinted card: its own word, its rows and groups, and the buttons that add to it.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out) {
+fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cols: &[Col], d: Dialect, acts: &mut Vec<Act>, out: &mut Out, hints: &mut Hints) {
     let (fill, edge) = match g.mode {
         Match::Any => (tint(C_LINK(), 18), tint(C_LINK(), 70)),
         Match::None => (tint(ALERT(), 18), tint(ALERT(), 70)),
@@ -275,7 +277,7 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, p: &mut Panel, cols: &[Col], 
                 }
             });
         });
-        block(ui, g, p, cols, d, acts, out);
+        block(ui, g, p, cols, d, acts, out, hints);
         add_buttons(ui, id, acts);
     });
     ui.add_space(2.0);

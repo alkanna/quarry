@@ -3,7 +3,7 @@
 //! source of truth; rules, popovers and chips read and write it.
 
 use crate::app::*;
-use super::filter_cells::{col_pick, combo_w, mono_edit, pill_combo, rule_editor, type_name};
+use super::filter_cells::{col_pick, combo_w, mono_edit, pill_combo, rule_editor, type_name, Hints};
 use super::filter_panel::Panel;
 use crate::db::sql::{
     filter::{self, Match},
@@ -68,6 +68,8 @@ pub(in crate::app) struct Bar {
     pub(in crate::app) panel: Panel,
     /// Set by the panel's Save as filter; `sql_content` opens the Save dialog.
     pub(in crate::app) save_filter: bool,
+    /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
+    pub(in crate::app) want_facts: Option<(String, Kind)>,
     /// The WHERE text the tree was last written as; a different `filter_txt` came from elsewhere.
     src: String,
     fold_open: bool,
@@ -500,7 +502,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
             if !aliases.iter().any(|a| a.name == r.col) {
                 r.col = aliases.first().map(|a| a.name.clone()).unwrap_or_default();
             }
-            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, None);
+            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, None, &mut Hints::default());
             if close_x(ui).on_hover_text("Remove condition").clicked() {
                 g.having = None;
             }
@@ -615,6 +617,8 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) help: bool,
     /// A dialog or window is over the page, so the panel leaves Esc and Cmd+Enter to it.
     pub(in crate::app) covered: bool,
+    /// What is known of the table's columns for the value cells, by column name.
+    pub(in crate::app) facts: Option<&'a HashMap<String, db::sql::facts::ColFacts>>,
 }
 
 /// A row of the "+" menu: a condition or a clause. `on` marks the ones already in the query.
@@ -889,7 +893,14 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     }
     if let Some(s) = t.sql.as_mut().filter(|s| !s.bar.c.sql) {
         let b = &mut s.bar;
-        let out = super::filter_panel::panel(ui, &mut b.tree, &mut b.panel, &cols, d, bs, !side.covered);
+        let mut hints = Hints { table: &table, facts: side.facts, values: Some(values), ..Default::default() };
+        let out = super::filter_panel::panel(ui, &mut b.tree, &mut b.panel, &cols, d, bs, !side.covered, &mut hints);
+        if let Some(f) = hints.want_facts.take() {
+            b.want_facts = Some(f);
+        }
+        if let Some(column) = hints.want_values.take() {
+            b.wants.values = Some(crate::ui::sql_complete::Need { table: table.clone(), column, prefix: None });
+        }
         // Written every frame, so a text read in another spelling is shown as the tree writes it.
         write_tree(b, &mut t.filter_txt, &pairs, d, bs);
         if out.changed {

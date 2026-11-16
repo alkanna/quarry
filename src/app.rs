@@ -214,6 +214,9 @@ pub struct App {
     /// Looked up column values per (connection, database), keyed `table.column`, and the lookups already sent.
     sql_values: HashMap<(u64, String), Fields>,
     sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
+    /// What the filter panel knows of a table's columns, by (connection, namespace, table), then column.
+    sql_facts: HashMap<(u64, String, String), HashMap<String, db::sql::facts::ColFacts>>,
+    sql_facts_asked: HashSet<(u64, String, String, String)>,
     users: Option<UsersWin>,
     sql_users: Option<sql::users::SqlUsersWin>,
     pg_roles: Option<sql::pg_roles::PgRolesWin>,
@@ -400,6 +403,8 @@ impl App {
             sql_schema_asked: HashSet::new(),
             sql_values: HashMap::new(),
             sql_values_asked: HashMap::new(),
+            sql_facts: HashMap::new(),
+            sql_facts_asked: HashSet::new(),
             users: None,
             sql_users: None,
             pg_roles: None,

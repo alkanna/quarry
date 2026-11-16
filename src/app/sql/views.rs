@@ -94,10 +94,13 @@ impl App {
         let hist = self.prefs.history.get(&self.tabs[self.cur].coll_key()).cloned().unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Where);
         let covered = self.window_open();
-        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered };
+        let table = self.tabs[self.cur].sel.coll.clone();
+        let facts = self.sql_facts.get(&(conn, ns_key(&db, &schema), table.clone()));
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts };
         let t = &mut self.tabs[self.cur];
         let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        let want_facts = t.sql.as_mut().and_then(|s| s.bar.want_facts.take());
         // Picking from the history fills the box, as in the Documents view; Run or Enter applies it.
         for a in std::mem::take(&mut side.qacts) {
             match a {
@@ -111,6 +114,9 @@ impl App {
             self.modal = Some(Modal::Text { title: "Query help".into(), body: crate::db::sql::rules::filter_help(dialect), code: false });
         }
         self.sql_serve(conn, &db, &schema, wants);
+        if let Some((column, kind)) = want_facts {
+            self.sql_serve_facts(conn, &db, &schema, &table, column, kind);
+        }
         self.pick_acts(pick_acts);
         if self.tabs[self.cur].sql.as_mut().is_some_and(|s| std::mem::take(&mut s.bar.explain)) {
             return self.explain();
