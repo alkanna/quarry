@@ -458,18 +458,19 @@ pub(super) async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashM
     } else {
         cols.iter().filter(|r| text(r, "full_type").is_some_and(|t| t.eq_ignore_ascii_case("longtext"))).filter_map(|r| text(r, "name")).filter(|n| json.contains(&(table.to_string(), n.clone()))).map(|n| (n, Kind::Json)).collect()
     };
-    // A Postgres key is named by the table, so the index query says which one is the primary key.
     let pk = row_key(d, &idx);
     Ok((meta, kinds, pk))
 }
 
 /// The columns that address one row: the primary key, else the best unique index on plain columns (`unique_key`).
 pub(super) fn row_key(d: Dialect, idx: &[SqlRow]) -> Vec<String> {
-    let all = super::structure::indexes(idx);
-    // A Postgres key is named by the table, so the index query says which one is the primary key.
-    if let Some(p) = all.iter().find(|i| if d == Dialect::Postgres { i.primary } else { i.name == "PRIMARY" }) {
-        return p.cols.iter().map(|c| c.name.clone()).collect();
+    // A Postgres key is named by the table, so the index query says which one is the primary key. Read straight from the
+    // rows: this runs on every page, and most tables have one, so the full index list is built only without it.
+    let pk: Vec<String> = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
+    if !pk.is_empty() {
+        return pk;
     }
+    let all = super::structure::indexes(idx);
     let nullable: HashSet<String> = idx.iter().filter(|r| text(r, "nullable").is_some_and(|n| !n.is_empty())).filter_map(|r| text(r, "col")).collect();
     // A failed CREATE UNIQUE INDEX CONCURRENTLY leaves an invalid index that may sit over duplicates.
     let invalid: HashSet<String> = idx.iter().filter(|r| r.int("valid") == Some(0)).filter_map(|r| text(r, "name")).collect();

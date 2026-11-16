@@ -280,6 +280,13 @@ impl App {
         }
     }
 
+    /// Why row `i` of the open table cannot be edited, if so. A unique key lets rows hold NULL, and such a row has no `_id`:
+    /// its draft would be shared with every other keyless row and could never be saved.
+    pub(in crate::app) fn sql_row_block(&self, i: usize) -> Option<&'static str> {
+        let t = self.t()?;
+        Rows::Raw(&t.docs).id(i).is_none().then_some("This row has no key value, so it cannot be edited here.")
+    }
+
     /// A column of the open SQL table, by its key in the row documents.
     pub(in crate::app) fn sql_col(&self, name: &str) -> Option<&Col> {
         self.t()?.sql.as_ref()?.cols.iter().find(|c| c.name == name)
@@ -329,9 +336,8 @@ impl App {
         }
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
-        // A row without a key would match every keyless row in the grid and could never be written back.
-        if rows.id(i).is_none() {
-            return self.warn("This row has no key value, so it cannot be edited here.");
+        if let Some(why) = self.sql_row_block(i) {
+            return self.warn(why);
         }
         let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
         let kind = self.sql_col(&col).map_or(Kind::Text, |c| c.kind);
@@ -591,9 +597,8 @@ impl App {
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
         let Some(orig) = rows.owned(i) else { return };
-        // A row without a key would share one draft with every other keyless row, and that draft could never be saved.
-        if rows.id(i).is_none() {
-            return self.warn("This row has no key value, so it cannot be edited here.");
+        if let Some(why) = self.sql_row_block(i) {
+            return self.warn(why);
         }
         let cur = self.shown_row(rows, i, false).unwrap_or(orig);
         let mut new = cur.clone();
@@ -637,7 +642,7 @@ impl App {
         let read_only = !self.conn_writable(first.conn);
         let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
         // A row without its key could address any row, so it is never sent; its edits stay staged.
-        let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| d.current.get_document("_id").is_ok_and(|k| !k.is_empty()));
+        let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| has_key(&d.current));
         let skipped = keyless.len();
         self.drafts.extend(keyless);
         if skipped > 0 {
@@ -912,9 +917,8 @@ impl App {
         // A row whose unique key is NULL has no `_id`, and `key IN (NULL)` would match nothing. Checked before the unlock,
         // so writes are not unlocked for an action that cannot run. A table with no key at all says so further down.
         let keyed = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| !s.pk.is_empty());
-        let keyless = rows.iter().filter(|r| r.get_document("_id").is_err()).count();
-        if keyed && keyless > 0 && matches!(act, DocsAct::Filter | DocsAct::EditQuery | DocsAct::SetValue | DocsAct::Delete) {
-            return self.warn(if keyless == 1 { "One of these rows has no key value, so it cannot be addressed.".to_string() } else { format!("{keyless} of these rows have no key value, so they cannot be addressed.") });
+        if keyed && matches!(act, DocsAct::Filter | DocsAct::EditQuery | DocsAct::SetValue | DocsAct::Delete) && !rows.iter().all(has_key) {
+            return self.warn("Some of these rows have no key value, so they cannot be addressed.");
         }
         if writes && !self.sel_writable() {
             let ctx = ctx.clone();
@@ -1157,8 +1161,8 @@ impl App {
                     if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
                         return self.warn(why);
                     }
-                    if self.t().is_some_and(|t| Rows::Raw(&t.docs).id(i).is_none()) {
-                        return self.warn("This row has no key value, so it cannot be edited here.");
+                    if let Some(why) = self.sql_row_block(i) {
+                        return self.warn(why);
                     }
                     if !self.sel_writable() {
                         return self.ask_unlock_then(move |a| a.sql_set_cell(i, &col, Bson::Null));
@@ -1196,6 +1200,11 @@ impl App {
 
 /// Height of the staged-edits bar, with its padding.
 const STAGED_H: f32 = 40.0;
+
+/// Whether a loaded or staged row carries its whole key in `_id`.
+fn has_key(d: &Document) -> bool {
+    d.get_document("_id").is_ok_and(|k| !k.is_empty())
+}
 
 #[cfg(test)]
 mod tests {

@@ -754,7 +754,7 @@ mod tests {
             l.w.sql_undo(l.db.clone(), undo, vec!["id".into()], false);
             let Msg::Written { res, undo, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("written") };
             let err = res.err().unwrap_or_else(|| panic!("{var}: the undo must be refused"));
-            assert!(err.contains("primary key of t is now (id, region), not (id)"), "{var}: {err}");
+            assert!(err.contains("key of t is now (id, region), not (id)"), "{var}: {err}");
             assert!(undo.is_some(), "{var}: the entry stays for when the key is put back");
             assert_eq!(l.one(&format!("SELECT GROUP_CONCAT(region ORDER BY region) FROM {db}.t WHERE id = 2")), "eu,us", "{var}: both id=2 rows remain");
             assert_eq!(l.count(&format!("{db}.t")), 4, "{var}");

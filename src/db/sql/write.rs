@@ -600,12 +600,12 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     if recorded.is_empty() {
         return Ok(());
     }
-    let now = primary_key(db, schema, table).await?;
+    let now = key_columns(db, schema, table).await?;
     key_changed_error(table, recorded, &now)
 }
 
 /// The columns that address one row of the table, as the grid reads them: the primary key, else a unique index.
-pub(super) async fn primary_key(db: &Db, schema: &str, table: &str) -> Res<Vec<String>> {
+pub(super) async fn key_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<String>> {
     let rows = db.meta(schema, db.dialect.indexes(), [schema, table]).await?;
     Ok(super::worker::row_key(db.dialect, &rows))
 }

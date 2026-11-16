@@ -189,7 +189,6 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         }
     }
     let mut old: Vec<Document> = Vec::new();
-    let mut keyless = false;
     let mut cols = p.cols.clone();
     if p.undo {
         let sql = capture_sql(d, schema, table, &p.filter, p.expected + 1);
@@ -208,11 +207,6 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         for r in &rows {
             old.push(to_row(&cols, r, &pk)?.owned());
         }
-        // A unique key lets rows hold NULL, and such a row could not be found again, so the change runs without undo.
-        if old.iter().any(|doc| pk_of(doc).len() != pk.len()) {
-            old.clear();
-            keyless = true;
-        }
     }
     // Bound with no values: a prepared statement is one statement to the server, whatever the lexer read.
     let t = Instant::now();
@@ -225,7 +219,8 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         let _ = tx.rollback().await;
         return Err(moved(&row_count(n), p.expected));
     }
-    let kept_undo = p.undo && !keyless;
+    // A unique key lets rows hold NULL, and such a row could not be found again, so the change runs without undo.
+    let kept_undo = p.undo && old.iter().all(|doc| pk_of(doc).len() == pk.len());
     let ids = if kept_undo { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
     let undo = kept_undo.then(|| match &p.op {
@@ -240,7 +235,7 @@ async fn run(db: &Db, schema: &str, table: &str, p: &BulkPlan, read_only: bool) 
         format!("{what}, not {} as counted: the {} engine of this table cannot roll back, so the change stays.{}", row_count(p.expected), p.engine, if kept_undo { " Undo puts back the rows read before it." } else { "" })
     } else if kept_undo {
         what
-    } else if keyless {
+    } else if p.undo {
         format!("{what}. No undo was kept: some of the rows have no key value.")
     } else if p.pk.is_empty() {
         format!("{what}. No undo was kept: the table has no primary key or unique key.")
