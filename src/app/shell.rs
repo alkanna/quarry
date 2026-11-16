@@ -766,7 +766,7 @@ impl App {
                     export = ui.button("Export…").clicked();
                     ui.scope(|ui| {
                         quiet_look(ui);
-                        ui.menu_button("Copy as ▾", |ui| {
+                        ui.menu_button("Copy as", |ui| {
                             menu_look(ui);
                             let docs: Vec<Document> = t.shell.docs.iter().map(db::Row::owned).collect();
                             let mut text = None;
