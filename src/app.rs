@@ -490,6 +490,9 @@ impl App {
         // Screenshot runs stay off the real menu bar.
         let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
         app.win_buttons = window_buttons::install(cc);
+        // shortcut: the window opens decorated and loses them on the first frame when opted in, so it may flash; build the viewport from ui.json to avoid that.
+        #[cfg(target_os = "linux")]
+        app.set_titlebar(&cc.egui_ctx);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
             (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);
@@ -839,6 +842,10 @@ impl eframe::App for App {
         set_window_over_page(&ctx, self.window_open());
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
+        #[cfg(target_os = "linux")]
+        if self.win_buttons {
+            window_buttons::resize_edges(&ctx);
+        }
         self.top_bar(ui);
         self.status_bar(ui);
         let corner = self.rail(ui);

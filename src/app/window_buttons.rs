@@ -1,5 +1,5 @@
 //! Minimize, Maximize and Close at the right of the header, on Windows where the header replaces the title bar
-//! (`crate::win_frame`). Minimize and Close are ordinary egui buttons. Maximize is one too, for the tests and the
+//! (`crate::win_frame`), and on Linux when Settings > Appearance > Title bar opts in to an undecorated window. Minimize and Close are ordinary egui buttons. Maximize is one too, for the tests and the
 //! keyboard, but on Windows the window procedure answers the pointer there, so its hover and press come from there.
 
 use super::*;
@@ -25,10 +25,48 @@ pub(super) fn install(cc: &eframe::CreationContext<'_>) -> bool {
     }
 }
 
-/// Other platforms keep their own title bar, or hide it under the header as macOS does.
-#[cfg(not(windows))]
+/// Linux starts with the window manager's title bar; `App::set_titlebar` swaps it once the preference is loaded.
+#[cfg(target_os = "linux")]
 pub(super) fn install(_cc: &eframe::CreationContext<'_>) -> bool {
     false
+}
+
+/// macOS keeps its own window buttons, which sit over the header.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(super) fn install(_cc: &eframe::CreationContext<'_>) -> bool {
+    false
+}
+
+/// An undecorated window has no frame to grab: a thin outline, and resizing from the outer few pixels.
+#[cfg(target_os = "linux")]
+pub(super) fn resize_edges(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    let (maxed, full) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
+    if full {
+        return;
+    }
+    let r = ctx.content_rect();
+    if !maxed {
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("window-outline"))).rect_stroke(r, 0.0, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
+    }
+    let Some(p) = ctx.pointer_hover_pos().filter(|_| !maxed) else { return };
+    const E: f32 = 5.0;
+    let (l, t, rt, b) = (p.x - r.left() < E, p.y - r.top() < E, r.right() - p.x < E, r.bottom() - p.y < E);
+    let (dir, cursor) = match (l, t, rt, b) {
+        (true, true, ..) => (D::NorthWest, C::ResizeNwSe),
+        (_, true, true, _) => (D::NorthEast, C::ResizeNeSw),
+        (true, _, _, true) => (D::SouthWest, C::ResizeNeSw),
+        (_, _, true, true) => (D::SouthEast, C::ResizeNwSe),
+        (true, ..) => (D::West, C::ResizeHorizontal),
+        (_, _, true, _) => (D::East, C::ResizeHorizontal),
+        (_, true, ..) => (D::North, C::ResizeVertical),
+        (.., true) => (D::South, C::ResizeVertical),
+        _ => return,
+    };
+    ctx.set_cursor_icon(cursor);
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
 }
 
 /// Paints the three buttons at the right of the header, whose height `full` spans, and publishes where Maximize is.
@@ -77,5 +115,14 @@ pub(super) fn window_buttons(ui: &mut egui::Ui, full: egui::Rect) {
                 _ => egui::ViewportCommand::Close,
             });
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl App {
+    /// Applies `prefs.own_titlebar`: no window decorations and the header's own buttons, or the window manager's.
+    pub(super) fn set_titlebar(&mut self, ctx: &egui::Context) {
+        self.win_buttons = self.prefs.own_titlebar;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!self.win_buttons));
     }
 }

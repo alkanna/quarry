@@ -66,7 +66,7 @@ impl App {
         let mut keep = true;
         let look = self.prefs.look();
         // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
-        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel, p.lock_scroll_axis, p.vim));
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.own_titlebar, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel, p.lock_scroll_axis, p.vim));
         let before = saved(&self.prefs);
         let r = banded(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
             let screen = ui.ctx().content_rect();
@@ -191,6 +191,17 @@ impl App {
                             self.prefs.accent = accent_name(i).into();
                         }
                     });
+                    #[cfg(target_os = "linux")]
+                    {
+                        ui.separator();
+                        setting_row(ui, "Title bar", "Window uses the title bar of your window manager, or Quarry's own with its header buttons. Tiling window managers such as i3 or Hyprland work best with the window manager's.", |ui| {
+                            let was = self.prefs.own_titlebar;
+                            segmented(ui, &mut self.prefs.own_titlebar, &[(false, "Window manager"), (true, "Quarry")]);
+                            if self.prefs.own_titlebar != was {
+                                self.set_titlebar(ui.ctx());
+                            }
+                        });
+                    }
                 });
                 settings_section(ui, "TEXT", |ui| {
                     setting_row(ui, "Interface size", "Makes text, buttons and rows bigger together. Also Cmd+= and Cmd+- anywhere.", |ui| {
