@@ -305,6 +305,11 @@ impl App {
                 }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
+                Msg::ShellQueryMs { req, ms } => {
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        t.shell.query_ms = Some(ms);
+                    }
+                }
                 Msg::ShellDone { req, res, ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
                     t.rows_replaced();

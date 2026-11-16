@@ -343,6 +343,8 @@ pub enum Msg {
     /// A query the Shell script sent to the SQL relay, with what came back.
     ShellQuery { req: u64, q: ShellQuery },
     /// Every column of a SQL database, for the shell editor types.
+    /// Time from the Shell script's first MongoDB connection being ready to its result, without the start and connect.
+    ShellQueryMs { req: u64, ms: u64 },
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
     ShellDone { req: u64, res: Res<String>, ms: u128 },
     /// One change event from the Watch view's change stream `req`.

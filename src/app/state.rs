@@ -685,6 +685,8 @@ pub(super) struct ShellTab {
     pub(super) help: bool,
     pub(super) started: Option<std::time::Instant>,
     pub(super) ms: Option<u128>,
+    /// The part of `ms` spent on queries, when the script used MongoDB.
+    pub(super) query_ms: Option<u64>,
     pub(super) count: Option<usize>,
     /// Every query a SQL script ran, in order.
     pub(super) queries: Vec<db::ShellQuery>,

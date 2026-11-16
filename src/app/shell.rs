@@ -765,7 +765,12 @@ impl App {
                     ui.label(RichText::new(text).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
                 }
                 if let Some(ms) = t.shell.ms {
-                    ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(if sql { MUTED() } else { SUCCESS() }));
+                    ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(if sql { MUTED() } else { SUCCESS() }))
+                        .on_hover_text("From Run to the result, with starting the script and connecting");
+                }
+                if let Some(q) = t.shell.query_ms {
+                    ui.label(RichText::new(format!("· query {q} ms")).font(FontId::monospace(TXT_SMALL)).color(MUTED()))
+                        .on_hover_text("From the first connection being ready to the result");
                 }
                 let pages = t.shell.docs.len().div_ceil(PAGE_SIZE as usize);
                 if has_table && pages > 1 {

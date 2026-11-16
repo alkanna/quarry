@@ -186,6 +186,9 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("log") => send(Msg::ShellLog { req, level: s("level"), text: s("text") }),
                 Some("result") => {
+                    if let Some(ms) = v.get("queryMs").and_then(|x| x.as_u64()) {
+                        send(Msg::ShellQueryMs { req, ms });
+                    }
                     result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok(s("ejson")) } else { Err(s("error")) });
                     // Closing the pipe lets the runner exit.
                     stdin = None;

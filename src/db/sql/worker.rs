@@ -1369,9 +1369,22 @@ mod tests {
         let mongo = serde_json::json!([{ "name": "docs", "uri": uri, "db": "quarry_attach_d", "proxy": null, "collections": ["users"], "readOnly": false }]);
         // One connection: no Mongo query lines.
         let input = serde_json::json!({ "code": "async function run() { return { n: (await db.collection('users').find({}).toArray()).length } }", "packages": [], "timeoutMs": 30000, "main": "docs", "mongo": mongo, "sql": [] });
-        let (queries, res) = shell_run(&w, &rx, input, vec![]);
-        assert_eq!(decode(&res.expect("script result")).get_i32("n").unwrap(), 1);
-        assert!(queries.is_empty(), "{}", query_names(&queries));
+        let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql: vec![] };
+        let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+        w.shell(5, job, cancel_rx);
+        let (mut queries, mut query_ms) = (0, None);
+        let res = loop {
+            match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
+                Msg::ShellQuery { .. } => queries += 1,
+                Msg::ShellQueryMs { ms, .. } => query_ms = Some(ms),
+                Msg::ShellDone { res, ms, .. } => break (res, ms),
+                _ => {}
+            }
+        };
+        assert_eq!(decode(&res.0.expect("script result")).get_i32("n").unwrap(), 1);
+        assert_eq!(queries, 0);
+        // The query time leaves out starting Bun and connecting, even without command monitoring.
+        assert!(query_ms.is_some_and(|q| (q as u128) < res.1), "{query_ms:?} of {} ms", res.1);
         // The two long filters put an emoji across the 2000 character cut in one of the two parities.
         let script = "async function run() {
   const u = db.collection('users');

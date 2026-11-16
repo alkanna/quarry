@@ -440,6 +440,9 @@ const input = await inputLine;
 const mongoEntries = input.mongo || [];
 const sqlEntries = input.sql || [];
 const clients = [];
+// When the first connection is checked out, so already open and signed in: the query time starts there.
+// CMAP events are always emitted, unlike command monitoring, which slows reading results.
+let firstOut;
 try {
   // Names pick the connection a query goes to, so a repeated one would send queries to the wrong place.
   const seen = new Set();
@@ -472,6 +475,7 @@ try {
     // The driver connects on the first database call, so plain scripts run without a server.
     const client = new mongodb.MongoClient(m.uri, options);
     clients.push(client);
+    client.once("connectionCheckedOut", () => (firstOut ??= performance.now()));
     if (monitor) watchCommands(client, m.name);
     return client.db(m.db);
   };
@@ -550,7 +554,8 @@ try {
   if (result && typeof result.toArray === "function" && typeof result.limit === "function") {
     result = await result.limit(100).toArray();
   }
-  await write({ type: "result", ok: true, ejson: serialize({ v: result }) });
+  const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);
+  await write({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
 } catch (e) {
   await write({ type: "result", ok: false, error: String(e && e.message ? e.message : e) });
 } finally {
