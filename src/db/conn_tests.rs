@@ -135,6 +135,32 @@ fn live_ssh_tunnel_carries_megabytes() {
     round_trip("ssh", &uri, Net { ssh: Some((conf, secrets)), ..Default::default() });
 }
 
+/// A result past the 64 MB the app reads is refused by the runner with its size, both when its BSON is already too big
+/// (refused before it becomes text) and when only its Extended JSON is, as with many small numbers.
+#[test]
+fn live_shell_refuses_a_result_too_big_to_show() {
+    let Ok(uri) = std::env::var("QUARRY_TEST_MONGO") else { return };
+    let rt = rt();
+    rt.block_on(async {
+        let db = mongodb::Client::with_uri_str(&uri).await.unwrap().database("quarry_test");
+        let strings = db.collection::<Document>("conn_big_bson");
+        strings.drop().await.unwrap();
+        let s = "x".repeat(15 << 20);
+        strings.insert_many((0..5).map(|i| doc! { "_id": i, "s": s.as_str() })).await.unwrap();
+        let numbers = db.collection::<Document>("conn_big_ejson");
+        numbers.drop().await.unwrap();
+        let ns: Vec<i32> = (0..400_000).collect();
+        numbers.insert_many((0..10).map(|i| doc! { "_id": i, "ns": ns.clone() })).await.unwrap();
+    });
+    for (coll, bson_mb) in [("conn_big_bson", 75), ("conn_big_ejson", 48)] {
+        let code = format!("async function run() {{ return await db.collection('{coll}').find({{}}).toArray(); }}");
+        let Some((r, took)) = shell(&uri, serde_json::Value::Null, &code, 30_000) else { return };
+        let e = r.expect_err(&format!("{coll} ({bson_mb} MB of BSON) was shown"));
+        assert!(e.contains("more than the 64 MB the Shell can show") && e.contains("projection"), "{coll}: {e}");
+        assert!(took < Duration::from_secs(60), "{coll} took {took:?}");
+    }
+}
+
 /// A relay to QUARRY_TEST_MONGO that passes each connection's handshake reply and then holds every later reply, like a
 /// tunnel or port forward that stops carrying data. Before the runner set a socket timeout this run never ended.
 #[test]

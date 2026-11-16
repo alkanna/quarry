@@ -18,6 +18,11 @@ const require = createRequire(import.meta.url);
 const write = (o) => new Promise((r) => process.stdout.write(JSON.stringify(o) + "\n", r));
 const out = (o) => void write(o);
 
+// The app stops reading a line at LINE_MAX (src/db/shell.rs), so a bigger result is refused here, with its size and a way out.
+const LINE_MAX = 64 << 20;
+const tooBig = (bytes) =>
+  new Error(`The result is about ${Math.ceil(bytes / (1 << 20))} MB, more than the ${LINE_MAX >> 20} MB the Shell can show. Return fewer documents, or only the fields you need with a projection.`);
+
 // The driver is loaded only when an entry needs it, so a SQL-only run starts without it.
 let mongodb = null;
 
@@ -558,7 +563,17 @@ try {
     result = await result.toArray();
   }
   const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);
-  await write({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
+  // Extended JSON is never smaller than BSON, so a result already too big as BSON is refused before it is turned into text.
+  let size = 0;
+  try {
+    if (mongodb) size = mongodb.BSON.calculateObjectSize({ v: result });
+  } catch {}
+  if (size >= LINE_MAX) throw tooBig(size);
+  // The line is measured, not the Extended JSON alone: quoting it inside the line escapes every quote again.
+  const line = JSON.stringify({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
+  const bytes = Buffer.byteLength(line);
+  if (bytes >= LINE_MAX) throw tooBig(bytes);
+  await new Promise((r) => process.stdout.write(line + "\n", r));
 } catch (e) {
   await write({ type: "result", ok: false, error: String(e && e.message ? e.message : e) });
 } finally {
