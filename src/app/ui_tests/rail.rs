@@ -34,6 +34,22 @@ fn clicking_a_folder_opens_and_closes_it() {
 }
 
 #[test]
+fn a_folder_with_one_open_member_shows_its_tile() {
+    let Some(mut ui) = demo_ui(|a| {
+        with_group(a);
+        a.conns.retain(|c| c.meta.id != 7);
+    }) else {
+        return;
+    };
+    ui.show("Switch to beta");
+    // Clicking its name does not fold the lone tile away.
+    ui.click("Fleet folder");
+    ui.h.run_steps(2);
+    ui.show("Switch to beta");
+    assert!(!ui.app().rail_open.contains(&1));
+}
+
+#[test]
 fn dropping_a_tile_on_another_makes_a_group() {
     let Some(mut ui) = demo_ui(without_group) else { return };
     assert!(ui.app().groups.groups.is_empty());
