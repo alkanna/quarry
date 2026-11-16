@@ -1359,7 +1359,6 @@ impl App {
                 }
             }
         }
-        let tab_coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         let set_rows = |app: &App, idx: &Option<Vec<usize>>| -> Vec<Document> {
             let Some(s) = app.t().and_then(|t| t.sql.as_ref()) else { return Vec::new() };
             let rows = &s.sets[sel.min(s.sets.len().saturating_sub(1))].rows;
@@ -1386,7 +1385,7 @@ impl App {
         if let Some((fmt, idx)) = copy {
             let rows = set_rows(self, &idx);
             let cols: Vec<CopyCol> = self.tabs[cur].sql.as_ref().map(|s| s.sets[sel].cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
-            let table = if tab_coll.is_empty() { "result".to_string() } else { tab_coll };
+            let table = self.insert_table(super::super::export::Src::Query);
             let ctx = ui.ctx().clone();
             self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[], self.sql_bs());
         }

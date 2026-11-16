@@ -88,6 +88,37 @@ pub fn single_table(stmt: &str, d: Dialect) -> Option<(Option<String>, String)> 
     }
 }
 
+/// The first table a statement reads, after its first top-level FROM, without its schema. A guess for the table an
+/// INSERT of the result writes to, so unlike `single_table` it accepts joins, expressions and aliases.
+pub fn first_table(stmt: &str, d: Dialect) -> Option<String> {
+    let toks: Vec<(Tok, &str)> = lex::tokens(stmt, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).map(|(t, r)| (t, &stmt[r])).collect();
+    let mut depth = 0usize;
+    for (i, (t, s)) in toks.iter().enumerate() {
+        match (t, *s) {
+            (Tok::Punct, "(") => depth += 1,
+            (Tok::Punct, ")") => depth = depth.saturating_sub(1),
+            (Tok::Word, w) if depth == 0 && w.eq_ignore_ascii_case("from") => {
+                let mut j = i + 1;
+                let mut name = None;
+                while let Some((t, s)) = toks.get(j) {
+                    match t {
+                        Tok::Quoted => name = Some(lex::unquote_ident(s)),
+                        Tok::Word if !is_clause(s) => name = Some(s.to_string()),
+                        _ => break,
+                    }
+                    if !toks.get(j + 1).is_some_and(|(t, s)| *t == Tok::Punct && *s == ".") {
+                        break;
+                    }
+                    j += 2;
+                }
+                return name;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Words that start what follows a table's name, so none of them is taken for its alias.
 const CLAUSES: [&str; 13] = ["where", "group", "having", "order", "limit", "offset", "fetch", "for", "window", "lock", "into", "procedure", "partition"];
 /// Words that bring another table or query into the statement.
@@ -137,5 +168,14 @@ mod tests {
         ] {
             assert_eq!(single_table(s, m), None, "{s}");
         }
+    }
+
+    #[test]
+    fn the_first_table_is_the_one_after_the_top_level_from() {
+        let d = Dialect::Postgres;
+        assert_eq!(first_table("SELECT b.id, exists (SELECT 1 FROM c) FROM bookings AS b JOIN si ON true", d).as_deref(), Some("bookings"));
+        assert_eq!(first_table("select * from \"Sales\".\"Order Lines\" where x", d).as_deref(), Some("Order Lines"));
+        assert_eq!(first_table("SELECT 1", d), None);
+        assert_eq!(first_table("SELECT * FROM (SELECT 1) t", d), None);
     }
 }

@@ -102,6 +102,8 @@ pub(super) struct ExportForm {
     pub(super) paged: bool,
     /// An xlsx file gets an About sheet with where its rows came from.
     pub(super) about: bool,
+    /// The table SQL INSERT and UPDATE write to.
+    pub(super) table: String,
 }
 
 /// A Query result streaming to a file or the clipboard, with what Cancel needs.
@@ -180,6 +182,21 @@ impl App {
         }
     }
 
+    /// The table a SQL INSERT of `src`'s rows writes to. A Content grid writes its own table. A Query result writes the
+    /// base table of the saved script the tab is bound to, else the first table its statement reads, else the tab's table.
+    pub(in crate::app) fn insert_table(&self, src: Src) -> String {
+        let Some(t) = self.t() else { return "result".into() };
+        if src == Src::Content && !t.sel.coll.is_empty() {
+            return t.sel.coll.clone();
+        }
+        let base = match t.script.as_ref().map(|b| &b.r) {
+            Some(crate::library::ScriptRef::Saved(id)) => self.library.scripts.iter().find(|s| s.id == *id && s.kind == "sql").map(|s| s.coll.clone()),
+            _ => None,
+        };
+        let stmt = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map(|x| x.stmt.as_str()).unwrap_or_default();
+        [base, db::sql::source::first_table(stmt, self.sql_dialect()), Some(t.sel.coll.clone())].into_iter().flatten().find(|n| !n.trim().is_empty()).unwrap_or_else(|| "result".into())
+    }
+
     /// Opens the dialog for the current grid. `selected` are the rows to offer as "Selected rows".
     pub(super) fn open_export(&mut self, selected: Vec<Document>, all_pages: bool) {
         let src = self.grid_src();
@@ -204,7 +221,7 @@ impl App {
         });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
-        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged, about: false })));
+        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged, about: false, table: self.insert_table(src) })));
     }
 
     /// Every row of a SQL Content grid: the SELECT of the last page asked for, never the bar text being typed, with its WHERE,
@@ -317,6 +334,13 @@ impl App {
                 let mut on = f.header || f.fmt == Format::Xlsx;
                 ui.add_enabled_ui(has_header, |ui| toggle(ui, if has_header { &mut f.header } else { &mut on }));
             });
+            if matches!(f.fmt, Format::T(Fmt::SqlInsert | Fmt::SqlUpdate)) {
+                let bound = f.src == Src::Query && self.t().is_some_and(|t| matches!(t.script.as_ref().map(|b| &b.r), Some(crate::library::ScriptRef::Saved(_))));
+                rows.row("Table", if bound { "Kept as the script's base table" } else { "The statements write to it" }, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.table).desired_width(ui.available_width()).margin(egui::Margin { left: 10, right: 10, top: 5, bottom: 5 }));
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Insert table"));
+                });
+            }
             if f.fmt == Format::Xlsx {
                 rows.row("About sheet", "A second sheet with the source, filter and statement", |ui| {
                     let on = f.about;
@@ -434,7 +458,10 @@ impl App {
     }
 
     fn export_run(&mut self, f: &ExportForm, path: PathBuf) {
-        let table = self.export_sheet(f.src, &[]).1;
+        let table = if f.table.trim().is_empty() { self.export_sheet(f.src, &[]).1 } else { f.table.trim().to_string() };
+        if matches!(f.fmt, Format::T(Fmt::SqlInsert | Fmt::SqlUpdate)) {
+            self.keep_base_table(f.src, &table);
+        }
         // The text format to stream, or for a workbook the CSV slot it leaves unused.
         let (fmt, xlsx) = match f.fmt {
             Format::T(fmt) => (Some(fmt), None),
@@ -471,7 +498,7 @@ impl App {
         }
         let text = match f.fmt {
             Format::T(fmt) => {
-                let (cols, table, pk) = self.export_sheet(f.src, &rows);
+                let (cols, _, pk) = self.export_sheet(f.src, &rows);
                 let text = copy::format(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
                     return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
@@ -484,6 +511,16 @@ impl App {
             Format::Xlsx => return,
         };
         self.write_export(&path, format!("{text}\n").as_bytes(), rows.len());
+    }
+
+    /// A Query result exported as SQL to another table than its script's base table makes that table the new base table,
+    /// so the next Copy as SQL INSERT writes to it.
+    fn keep_base_table(&mut self, src: Src, table: &str) {
+        let Some(Some(crate::library::ScriptRef::Saved(id))) = self.t().filter(|_| src == Src::Query).map(|t| t.script.as_ref().map(|b| b.r.clone())) else { return };
+        if let Some(s) = self.library.scripts.iter_mut().find(|s| s.id == id && s.kind == "sql" && s.coll != table) {
+            s.coll = table.to_string();
+            self.save_library();
+        }
     }
 
     fn write_export(&mut self, path: &std::path::Path, bytes: &[u8], n: usize) {
