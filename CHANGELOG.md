@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.53.1](https://github.com/alkanna/quarry/compare/v0.53.0...v0.53.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* a Shell query on a stalled connection ends at the query timeout, and a result too big to show is refused with its size ([#274](https://github.com/alkanna/quarry/issues/274)) ([f62f2d7](https://github.com/alkanna/quarry/commit/f62f2d71f0b4903e97e53c09519240a20c3170ad))
+* Open query in Shell carries the query options, and Shell results show the query time ([#272](https://github.com/alkanna/quarry/issues/272)) ([5fe1bc6](https://github.com/alkanna/quarry/commit/5fe1bc6983222d5cc6404a440c914aebdd2faf85))
+
 ## [0.53.0](https://github.com/alkanna/quarry/compare/v0.52.1...v0.53.0) (2026-11-16)
 
 
