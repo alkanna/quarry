@@ -38,10 +38,11 @@ pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
+/// `chain` follows find(); a pasted shell command carries its own options, so it is left out there.
 pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     let f = filter.trim().trim_end_matches(';');
     if db::is_shell(f) {
-        return format!("async function run() {{\n\treturn await {f}{chain}\n}}");
+        return format!("async function run() {{\n\treturn await {f}\n}}");
     }
     let f = if f.is_empty() { "{}" } else { f };
     let expanded = db::expand_shortcuts(f);
@@ -49,25 +50,31 @@ pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f}){chain}\n}}", collection_ref(coll))
 }
 
-/// The tab's sort, projection, skip, limit, hint and collation as cursor calls for query_script.
-pub(super) fn cursor_chain(t: &Tab) -> String {
+/// A parsed query's sort, projection, skip, limit, hint and collation as cursor calls for query_script.
+/// Written from the parsed values so shortcuts are expanded and the text is valid JavaScript.
+pub(super) fn cursor_chain(q: &db::Query) -> String {
+    let sh = |d: &Document| db::shell_text(&Bson::Document(d.clone()));
     let mut out = String::new();
-    let mut add = |m: &str, v: &str| {
-        if !v.is_empty() {
-            out += &format!(".{m}({v})");
-        }
-    };
-    add("sort", t.sort_txt.trim());
-    add("project", t.proj_txt.trim());
-    add("skip", t.skip_txt.trim());
-    let limit = t.limit_txt.trim();
-    add("limit", if limit == "0" { "" } else { limit });
-    // An index name may be typed bare, as find_query accepts it.
-    let h = t.hint_txt.trim();
-    add("hint", &if h.is_empty() || h.starts_with(['{', '"', '\'']) { h.to_string() } else { format!("{h:?}") });
-    add("collation", t.collation_txt.trim());
+    if let Some(d) = &q.sort {
+        out += &format!(".sort({})", sh(d));
+    }
+    if let Some(d) = &q.projection {
+        out += &format!(".project({})", sh(d));
+    }
+    if q.skip > 0 {
+        out += &format!(".skip({})", q.skip);
+    }
+    if let Some(n) = q.limit {
+        out += &format!(".limit({n})");
+    }
+    if let Some(h) = &q.hint {
+        out += &format!(".hint({})", db::shell_text(h));
+    }
+    if let Some(d) = &q.collation {
+        out += &format!(".collation({})", sh(d));
+    }
     // The runner caps a returned cursor at 100 documents, which would override a larger limit.
-    if !limit.is_empty() && limit != "0" {
+    if q.limit.is_some() {
         out += ".toArray()";
     }
     out
@@ -943,10 +950,15 @@ mod tests {
         assert!(query_script("x", "db.x.find({});", "").ends_with("return await db.x.find({})\n}"));
         assert!(query_script("orders", "{ name: ~\"a.b\" }", "").contains(r#"$regex: "a\\.b", $options: "i""#));
         let mut t = Tab::new(Sel { coll: "o".into(), ..Default::default() });
-        (t.sort_txt, t.limit_txt, t.skip_txt, t.hint_txt) = ("{ a: -1 }".into(), "500".into(), "20".into(), "a_1".into());
-        assert_eq!(cursor_chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1").toArray()"#);
-        t.limit_txt = "0".into();
-        assert_eq!(cursor_chain(&t), r#".sort({ a: -1 }).skip(20).hint("a_1")"#);
+        (t.filter_txt, t.sort_txt, t.limit_txt, t.skip_txt, t.hint_txt) = ("{}".into(), "{ a: -1 }".into(), "500".into(), "20".into(), "a_1".into());
+        let chain = |t: &Tab| cursor_chain(&super::super::run::find_query(t).unwrap());
+        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1").toArray()"#);
+        // A limit read as none must not turn the cursor into an array, which would skip the runner's cap.
+        t.limit_txt = "00".into();
+        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).hint("a_1")"#);
+        t.proj_txt = "{ at: { $gt: #today } }".into();
+        assert!(!chain(&t).contains('#'), "shortcuts are expanded");
+        assert!(query_script("x", "db.x.aggregate([])", ".sort({ a: 1 })").ends_with("db.x.aggregate([])\n}"));
         assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
         assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);

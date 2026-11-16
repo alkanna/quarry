@@ -460,7 +460,16 @@ impl App {
                 }
                 if ui.button("Open query in Shell").clicked() {
                     let t = &app.tabs[app.cur];
-                    app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt, &cursor_chain(t)));
+                    // A pasted shell command carries its own options, so only a plain filter needs them parsed.
+                    let script = match super::run::find_query(t) {
+                        Ok(q) => Ok(query_script(&t.sel.coll, &t.filter_txt, &cursor_chain(&q))),
+                        Err(_) if db::is_shell(t.filter_txt.trim().trim_end_matches(';')) => Ok(query_script(&t.sel.coll, &t.filter_txt, "")),
+                        Err(e) => Err(e),
+                    };
+                    match script {
+                        Ok(code) => app.open_in_shell(code),
+                        Err(e) => app.warn(e),
+                    }
                     ui.close();
                 }
                 let t = app.t().unwrap();
