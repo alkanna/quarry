@@ -82,6 +82,9 @@ impl App {
     /// and the hovered row alone. Each slot has one request in flight; an answer to an older one is dropped.
     fn sql_filter_tick(&mut self, ctx: &egui::Context, conn: u64, db: &str, schema: &str, table: &str) {
         use crate::app::sql::filter_panel::Tick;
+        if !self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.bar.panel.open && !s.bar.c.sql) {
+            return;
+        }
         // The demo has no session, and a PostgreSQL tab without its schema has nothing to count in.
         let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
         if schema.is_empty() && self.is_pg(conn) {
@@ -95,10 +98,10 @@ impl App {
         let Some(s) = t.sql.as_mut().filter(|s| s.bar.panel.open && !s.bar.c.sql) else { return };
         let p = &mut s.bar.panel;
         // The same text on another table, schema, database or connection is another count.
-        let place = format!("{conn}\u{1f}{db}\u{1f}{schema}\u{1f}{table}");
-        if p.table != place {
+        let (c, d0, s0, t0) = &p.place;
+        if (*c, d0.as_str(), s0.as_str(), t0.as_str()) != (conn, db, schema, table) {
             p.forget_counts();
-            p.table = place;
+            p.place = (conn, db.to_string(), schema.to_string(), table.to_string());
         }
         match p.count.tick(&text, now) {
             Tick::Ask => {

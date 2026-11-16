@@ -90,7 +90,7 @@ pub(in crate::app) struct Panel {
     pub(in crate::app) hover_count: Count,
     pub(in crate::app) hover_cache: HashMap<String, Counted>,
     /// Where the counts are from (connection, database, schema and table), since a tab can move.
-    pub(in crate::app) table: String,
+    pub(in crate::app) place: (u64, String, String, String),
 }
 
 impl Panel {
@@ -253,6 +253,12 @@ pub(super) fn add(tree: &mut Tree, p: &mut Panel, parent: u32, group: bool, cols
 /// `keys` is false while a dialog is over the page, which then owns Esc and Cmd+Enter.
 pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[Col], d: Dialect, bs: bool, keys: bool, hints: &mut Hints) -> Out {
     let mut out = Out::default();
+    let t = fold::openness(ui.ctx(), fold_id(), p.open);
+    if t <= 0.0 && !p.open {
+        // The same auto ids a closed fold body takes, so what follows keeps its ids.
+        ui.skip_ahead_auto_ids(2);
+        return out;
+    }
     let (text, spans) = filter::spans(tree, d, bs);
     // The row a server error points into: the narrowest span that holds the position.
     let bad = match p.count.shown(&text) {
@@ -265,7 +271,6 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
     let typing = ui.ctx().egui_wants_keyboard_input() || ui.memory(|m| m.focused().is_some());
     let drag = egui::DragAndDrop::payload::<FilterDrag>(ui.ctx()).filter(|_| !drag_cancelled(ui.ctx())).map(|d| d.0);
     let cx = Cx { cols, d, bs, bad };
-    let t = fold::openness(ui.ctx(), fold_id(), p.open);
     let mut acts = Vec::new();
     let mut apply = false;
     let mut area = egui::Rect::NOTHING;
@@ -465,11 +470,8 @@ fn drop_at(ui: &egui::Ui, targets: &[Target], tree: &Tree, id: u32, acts: &mut V
 /// or off, Cmd+G groups, Cmd+Shift+G takes out of the group, Cmd+Backspace removes.
 fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
     let order = tree.rows_in_order();
-    let at = p.sel.and_then(|s| order.iter().position(|x| *x == s));
     // Without a selection in the panel the keys are the page's, the grid's arrows say.
-    if at.is_none() {
-        return;
-    }
+    let Some(at) = p.sel.and_then(|s| order.iter().position(|x| *x == s)) else { return };
     let none = egui::Modifiers::NONE;
     let (down, up, enter, space, unwrap, wrap, del) = ui.input_mut(|i| {
         (
@@ -483,20 +485,9 @@ fn row_keys(ui: &egui::Ui, tree: &Tree, p: &mut Panel, acts: &mut Vec<Act>) {
             i.consume_key(egui::Modifiers::COMMAND, Key::Backspace),
         )
     });
-    if down || up {
-        p.sel = match (at, down) {
-            (Some(i), true) => order.get(i + 1).or(order.get(i)).copied(),
-            (Some(i), false) => order.get(i.saturating_sub(1)).copied(),
-            (None, true) => order.first().copied(),
-            (None, false) => order.last().copied(),
-        };
-    }
-    let Some(sel) = p.sel.filter(|s| tree.find(*s).is_some()) else {
-        if enter {
-            acts.push(Act::Add(0, false));
-        }
-        return;
-    };
+    let at = if down { (at + 1).min(order.len() - 1) } else if up { at.saturating_sub(1) } else { at };
+    let sel = order[at];
+    p.sel = Some(sel);
     let group = matches!(tree.find(sel).map(|n| &n.item), Some(Item::Group(_)));
     if enter {
         // A row is followed by a new one; a group gets one at its end.

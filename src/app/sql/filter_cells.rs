@@ -244,17 +244,6 @@ impl Hints<'_> {
     }
 }
 
-/// Whether text reads as a uuid, with or without its hyphens.
-fn is_uuid(s: &str) -> bool {
-    let s = s.trim();
-    let hex = |t: &str| t.chars().all(|c| c.is_ascii_hexdigit());
-    match s.len() {
-        32 => hex(s),
-        36 => s.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() }),
-        _ => false,
-    }
-}
-
 /// A small toggle with a mono label, such as Aa and .*, accent filled while on.
 fn text_toggle(ui: &mut egui::Ui, text: &str, on: bool, name: &str, tip: &str) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(26.0, BUTTON_H), Sense::click());
@@ -371,10 +360,10 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
                 });
             } else {
                 let hint = if date { "2026-11-01 00:00" } else if group == rules::Group::Number { "number" } else if r.kind == Kind::Uuid { "uuid" } else { "value" };
-                let bad = r.kind == Kind::Uuid && !r.values[0].trim().is_empty() && !is_uuid(&r.values[0]);
+                let bad = r.kind == Kind::Uuid && !r.values[0].trim().is_empty() && crate::db::sql::value::uuid_text(r.values[0].trim()).is_none();
                 let resp = value_field(ui, &mut r.values[0], 170.0, hint, salt.with("v0"), bad);
                 if bad {
-                    resp.clone().on_hover_text("Not a uuid: 32 hex digits, with or without hyphens");
+                    resp.clone().on_hover_text("Not a uuid: 32 hex digits, with or without hyphens and braces");
                 }
                 changed |= resp.changed();
                 enter |= entered(ui, &resp);
@@ -391,14 +380,14 @@ pub(super) fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: 
             }
         }
         Input::Path => {
-            let keys = hints.facts(&r.col, r.kind).map(|f| f.keys.clone()).unwrap_or_default();
+            let keys: &[String] = hints.facts(&r.col, r.kind).map_or(&[], |f| f.keys.as_slice());
             let a = ui.add(mono_edit(&mut r.values[0], 110.0, "$.path").id(salt.with("v0")));
             if !keys.is_empty() {
                 let k = pill_combo(ui, "key", "", 52.0, MUTED());
                 egui::Popup::menu(&k).width(180.0).show(|ui| {
                     menu_look(ui);
                     egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                        for key in &keys {
+                        for key in keys {
                             if menu_row(ui, key, TEXT(), false, "").clicked() {
                                 // A key that is not a plain name is quoted, as jsonpath and MySQL's paths both read it.
                                 let plain = key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !key.starts_with(|c: char| c.is_ascii_digit());
@@ -507,7 +496,7 @@ fn labels(r: &Rule, cols: &[Col], hints: &mut Hints) -> Vec<String> {
     hints.facts(&r.col, r.kind).map(|f| f.labels.clone()).unwrap_or_default()
 }
 
-/// A pill of the date shortcuts, filled while on.
+/// A pill of the date shortcuts, filled while on. Smaller than `chip`, so six of them fit a row beside its cells.
 fn text_pill(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_CAPTION), if on { PRIMARY() } else { MUTED() });
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 14.0, BUTTON_H - 4.0), Sense::click());
@@ -529,15 +518,18 @@ const SHOWN_CHIPS: usize = 3;
 fn list_cell(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, hints: &mut Hints) -> bool {
     let mut changed = false;
     let mut remove = None;
-    let shown: Vec<(usize, String)> = r.values.iter().cloned().enumerate().filter(|(_, v)| !v.trim().is_empty()).collect();
-    for (i, v) in shown.iter().take(SHOWN_CHIPS) {
-        if value_chip(ui, v, r.kind) {
-            remove = Some(*i);
+    let shown: Vec<usize> = r.values.iter().enumerate().filter(|(_, v)| !v.trim().is_empty()).map(|(i, _)| i).collect();
+    for &i in shown.iter().take(SHOWN_CHIPS) {
+        if value_chip(ui, &r.values[i], r.kind) {
+            remove = Some(i);
         }
     }
     if shown.len() > SHOWN_CHIPS {
-        let rest: Vec<&str> = shown[SHOWN_CHIPS..].iter().map(|(_, v)| v.as_str()).collect();
-        ui.label(RichText::new(format!("+{}", rest.len())).font(FontId::monospace(TXT_CAPTION)).color(MUTED())).on_hover_text(rest.join(", "));
+        let more = ui.label(RichText::new(format!("+{}", shown.len() - SHOWN_CHIPS)).font(FontId::monospace(TXT_CAPTION)).color(MUTED()));
+        // The full list only when someone looks.
+        if more.hovered() {
+            more.on_hover_text(shown[SHOWN_CHIPS..].iter().map(|&i| r.values[i].as_str()).collect::<Vec<_>>().join(", "));
+        }
     }
     let id = salt.with("entry");
     let mut buf = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
@@ -656,11 +648,5 @@ mod tests {
         // A uuid column has no case flag, and its rule reads back the way a new one would have it.
         set_col(&mut r, "u".into(), Kind::Uuid, d);
         assert_eq!(r.case, rules::default_case(r.op, d));
-    }
-
-    #[test]
-    fn uuids_read_with_or_without_hyphens() {
-        assert!(is_uuid("123e4567-e89b-12d3-a456-426614174000") && is_uuid("123e4567e89b12d3a456426614174000"));
-        assert!(!is_uuid("123e4567-e89b-12d3-a456") && !is_uuid("zz3e4567-e89b-12d3-a456-426614174000"));
     }
 }

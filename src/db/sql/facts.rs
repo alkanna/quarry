@@ -70,8 +70,7 @@ async fn short_reads(db: &Db, ms: u64, sqls: &[String]) -> Res<Vec<Result<Vec<Sq
 
 /// The server stopped the statement at its time limit.
 fn timed_out(err: &sqlx::Error) -> bool {
-    let Some(d) = err.as_database_error() else { return false };
-    d.code().is_some_and(|c| c == "57014") || d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().is_some_and(|m| matches!(m.number(), 3024 | 1969))
+    crate::db::classify(&e(err)) == crate::db::ErrKind::Timeout
 }
 
 /// `err` worded for the WHERE text, which starts `pre` bytes into `sql`, with where it points when the server says.

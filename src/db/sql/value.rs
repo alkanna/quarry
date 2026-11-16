@@ -367,7 +367,7 @@ pub fn text_like(k: Kind) -> bool {
 
 /// A UUID in the canonical lowercase form, from the spellings PostgreSQL reads: optional braces, and hyphens after any
 /// group of four digits. Written back canonical so a cell edited to the value it already has stays unchanged.
-fn uuid_text(t: &str) -> Option<String> {
+pub(crate) fn uuid_text(t: &str) -> Option<String> {
     let body = t.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(t);
     let hex: String = body.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || body.starts_with('-') || body.ends_with('-') || body.contains("--") {

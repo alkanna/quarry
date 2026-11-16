@@ -739,9 +739,13 @@ pub(super) fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Ru
     Some(r)
 }
 
+/// A rule read with its case flag as the text spelled it.
+fn cased(r: Option<Rule>, case: bool) -> Option<Rule> {
+    r.map(|r| Rule { case, ..r })
+}
+
 fn rule_at(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
     let mk = |col: &str, op: Op, values: Vec<String>| Some(Rule { col: col.into(), kind: kind_of(cols, col)?, op, values, case: default_case(op, d) });
-    let cased = |r: Option<Rule>, case: bool| r.map(|r| Rule { case, ..r });
     if d == Dialect::Postgres && let Some(r) = pg_rule_of(t, &mk) {
         return Some(r);
     }
@@ -848,7 +852,6 @@ fn rule_at(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
 /// The forms `pg_rule_sql` writes, read back. `t` has its `::text` casts after a column already cut.
 fn pg_rule_of(t: &[T], mk: &impl Fn(&str, Op, Vec<String>) -> Option<Rule>) -> Option<Rule> {
     let jsonb = |a: &T, b: &T| *a == T::Cast && word(b, "JSONB");
-    let cased = |r: Option<Rule>, case: bool| r.map(|r| Rule { case, ..r });
     let path_first = |t: &[T]| -> Option<(String, String)> {
         match t {
             [f, T::P('('), T::Id(c), x, y, T::P(','), T::Str(p), T::P(')'), T::Cmp("#>>"), T::Str(all)] if word(f, "JSONB_PATH_QUERY_FIRST") && jsonb(x, y) && all == "{}" => Some((c.clone(), p.clone())),

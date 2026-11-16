@@ -72,6 +72,8 @@ pub(in crate::app) struct Bar {
     pub(in crate::app) want_facts: Option<(String, Kind)>,
     /// The WHERE text the tree was last written as; a different `filter_txt` came from elsewhere.
     src: String,
+    /// The tree was read again, so the text is written back once, in the tree's spelling.
+    rewrite: bool,
     fold_open: bool,
     gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
@@ -598,6 +600,7 @@ fn read_tree(b: &mut Bar, text: &str, pairs: &[(String, Kind)], d: Dialect, bs: 
             None => b.c.sql = true,
         }
         b.src = text.to_string();
+        b.rewrite = true;
     }
     read
 }
@@ -913,8 +916,10 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         if let Some(column) = hints.want_values.take() {
             b.wants.values = Some(crate::ui::sql_complete::Need { table: table.clone(), column, prefix: None });
         }
-        // Written every frame, so a text read in another spelling is shown as the tree writes it.
-        write_tree(b, &mut t.filter_txt, &pairs, d, bs);
+        // After a read too, so a text read in another spelling is shown as the tree writes it.
+        if std::mem::take(&mut b.rewrite) || out.changed {
+            write_tree(b, &mut t.filter_txt, &pairs, d, bs);
+        }
         if out.changed {
             b.tree_json = filter::to_json(&b.tree);
         }
