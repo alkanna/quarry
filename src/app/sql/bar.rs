@@ -1192,7 +1192,8 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                     ui.spacing_mut().item_spacing = LINE_GAP;
                     if b.c.sql {
-                        let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
+                        // Leaves room for the field's side margins, the gap and the "+" that ends the row, or the "+" wraps under the text.
+                        let w = (ui.max_rect().right() - ui.cursor().left() - (BUTTON_H + 4.0 + LINE_GAP.x + 8.0)).max(160.0);
                         if b.preset.ac {
                             open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
                         }
