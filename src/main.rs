@@ -12,6 +12,7 @@ mod library;
 #[cfg(target_os = "macos")]
 mod menu;
 mod ssh;
+mod sysmem;
 mod ui;
 mod update;
 mod vault;
