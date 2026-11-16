@@ -52,11 +52,14 @@ impl Worker {
                 ctx.request_repaint();
             };
             let start = Instant::now();
-            let (res, query_ms) = match run_shell(req, &job, &send, cancel).await {
-                Ok((out, q)) => (Ok(out), q),
+            let ran = run_shell(req, &job, &send, cancel).await;
+            let ms = start.elapsed().as_millis();
+            let (res, query_ms) = match ran {
+                // Blocking, because a 64 MB result takes a while and the runtime has only two threads.
+                Ok((out, q)) => (tokio::task::spawn_blocking(move || shell_value(&out)).await.unwrap_or_else(|e| Err(e.to_string())), q),
                 Err(e) => (Err(e), None),
             };
-            send(Msg::ShellDone { req, res, ms: start.elapsed().as_millis(), query_ms });
+            send(Msg::ShellDone { req, res, ms, query_ms });
         });
     }
 
