@@ -1240,6 +1240,11 @@ mod tests {
 
     /// Runs the runner with this input line and these SQL relays, returning the queries it reported and its result.
     fn shell_run(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>) {
+        let (queries, res, _) = shell_run_timed(w, rx, input, sql);
+        (queries, res)
+    }
+
+    fn shell_run_timed(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
         let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql };
         let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
         w.shell(5, job, cancel_rx);
@@ -1247,7 +1252,7 @@ mod tests {
         loop {
             match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
                 Msg::ShellQuery { q, .. } => queries.push(q),
-                Msg::ShellDone { res, .. } => return (queries, res),
+                Msg::ShellDone { res, ms, query_ms, .. } => return (queries, res, (ms, query_ms)),
                 _ => {}
             }
         }
@@ -1369,9 +1374,11 @@ mod tests {
         let mongo = serde_json::json!([{ "name": "docs", "uri": uri, "db": "quarry_attach_d", "proxy": null, "collections": ["users"], "readOnly": false }]);
         // One connection: no Mongo query lines.
         let input = serde_json::json!({ "code": "async function run() { return { n: (await db.collection('users').find({}).toArray()).length } }", "packages": [], "timeoutMs": 30000, "main": "docs", "mongo": mongo, "sql": [] });
-        let (queries, res) = shell_run(&w, &rx, input, vec![]);
+        let (queries, res, (ms, query_ms)) = shell_run_timed(&w, &rx, input, vec![]);
         assert_eq!(decode(&res.expect("script result")).get_i32("n").unwrap(), 1);
         assert!(queries.is_empty(), "{}", query_names(&queries));
+        // The query time leaves out starting Bun and connecting, even without command monitoring.
+        assert!(query_ms.is_some_and(|q| u128::from(q) < ms), "{query_ms:?} of {ms} ms");
         // The two long filters put an emoji across the 2000 character cut in one of the two parities.
         let script = "async function run() {
   const u = db.collection('users');

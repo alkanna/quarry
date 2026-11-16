@@ -1173,7 +1173,7 @@ async fn agent_shell(s: &AgentShell, rules: &Rules, l: &Limits) -> Res<Answer> {
     // Held until the script ends: a dropped sender reads as Stop in the runner.
     let (_stop, cancel) = tokio::sync::oneshot::channel::<()>();
     let mut stop = StopRelays { relays: &job.sql, done: false };
-    let res = run_shell_gated(0, job, gate.as_ref().map(|g| g as &dyn sql::RelayGate), &send, cancel).await;
+    let res = run_shell_gated(0, job, gate.as_ref().map(|g| g as &dyn sql::RelayGate), &send, cancel).await.map(|(out, _)| out);
     stop.done = true;
     let log = log.into_inner().unwrap_or_default();
     shell_answer(res, log, &clean, max, margin, note)

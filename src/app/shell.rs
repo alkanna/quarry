@@ -38,7 +38,8 @@ pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
-pub(super) fn query_script(coll: &str, filter: &str) -> String {
+/// `chain` follows find(); a pasted shell command carries its own options, so it is left out there.
+pub(super) fn query_script(coll: &str, filter: &str, chain: &str) -> String {
     let f = filter.trim().trim_end_matches(';');
     if db::is_shell(f) {
         return format!("async function run() {{\n\treturn await {f}\n}}");
@@ -46,7 +47,12 @@ pub(super) fn query_script(coll: &str, filter: &str) -> String {
     let f = if f.is_empty() { "{}" } else { f };
     let expanded = db::expand_shortcuts(f);
     let f = expanded.as_deref().unwrap_or(f);
-    format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
+    format!("async function run() {{\n\treturn await {}.find({f}){chain}\n}}", collection_ref(coll))
+}
+
+pub(super) fn cursor_chain(q: &db::Query) -> String {
+    let proj = q.projection.as_ref().map(|p| format!(".project({})", db::shell_text(&Bson::Document(p.clone()))));
+    proj.unwrap_or_default() + &db::mongosh_chain(q)
 }
 
 /// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
@@ -734,7 +740,12 @@ impl App {
                     ui.label(RichText::new(text).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
                 }
                 if let Some(ms) = t.shell.ms {
-                    ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(if sql { MUTED() } else { SUCCESS() }));
+                    ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(if sql { MUTED() } else { SUCCESS() }))
+                        .on_hover_text("From Run to the result, with starting the script and connecting");
+                }
+                if let Some(q) = t.shell.query_ms {
+                    ui.label(RichText::new(format!("· query {q} ms")).font(FontId::monospace(TXT_SMALL)).color(MUTED()))
+                        .on_hover_text("From the first connection being ready to the result");
                 }
                 let pages = t.shell.docs.len().div_ceil(PAGE_SIZE as usize);
                 if has_table && pages > 1 {
@@ -914,10 +925,19 @@ mod tests {
 
     #[test]
     fn shell_scripts() {
-        assert_eq!(query_script("orders", "{ a: 1 }"), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
-        assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
-        assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
-        assert!(query_script("orders", "{ name: ~\"a.b\" }").contains(r#"$regex: "a\\.b", $options: "i""#));
+        assert_eq!(query_script("orders", "{ a: 1 }", ""), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
+        assert!(query_script("my.coll", "", "").contains("db.collection(\"my.coll\").find({})"));
+        assert!(query_script("x", "db.x.find({});", "").ends_with("return await db.x.find({})\n}"));
+        assert!(query_script("orders", "{ name: ~\"a.b\" }", "").contains(r#"$regex: "a\\.b", $options: "i""#));
+        let mut t = Tab::new(Sel { coll: "o".into(), ..Default::default() });
+        (t.filter_txt, t.sort_txt, t.limit_txt, t.skip_txt, t.hint_txt) = ("{}".into(), "{ a: -1 }".into(), "500".into(), "20".into(), "a_1".into());
+        let chain = |t: &Tab| cursor_chain(&super::super::run::find_query(t).unwrap());
+        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).limit(500).hint("a_1")"#);
+        t.limit_txt = "00".into();
+        assert_eq!(chain(&t), r#".sort({ a: -1 }).skip(20).hint("a_1")"#);
+        t.proj_txt = "{ at: { $gt: #today } }".into();
+        assert!(!chain(&t).contains('#'), "shortcuts are expanded");
+        assert!(query_script("x", "db.x.aggregate([])", ".sort({ a: 1 })").ends_with("db.x.aggregate([])\n}"));
         assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
         assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);

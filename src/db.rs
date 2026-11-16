@@ -344,7 +344,8 @@ pub enum Msg {
     ShellQuery { req: u64, q: ShellQuery },
     /// Every column of a SQL database, for the shell editor types.
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
-    ShellDone { req: u64, res: Res<String>, ms: u128 },
+    /// `query_ms` runs from the script's first MongoDB connection being ready, so it leaves out starting and connecting.
+    ShellDone { req: u64, res: Res<String>, ms: u128, query_ms: Option<u64> },
     /// One change event from the Watch view's change stream `req`.
     WatchEvent { req: u64, doc: Document },
     /// The change stream `req` ended: stopped (Ok) or failed.

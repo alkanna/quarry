@@ -304,6 +304,7 @@ impl App {
             let docs: Vec<Bson> = t.docs.iter().take(3).map(db::Row::owned).map(|d| Bson::Document(doc! { "_id": d.get("_id").cloned().unwrap(), "number": d.get("number").cloned().unwrap(), "total": d.get("total").cloned().unwrap() })).collect();
             t.shell.set_value(Bson::Array(docs));
             t.shell.ms = Some(42);
+            t.shell.query_ms = Some(18);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
         }
         // Test switch: the shell with parameter hints and a suggestion list, see shell_sig_demo.

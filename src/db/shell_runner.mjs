@@ -440,6 +440,8 @@ const input = await inputLine;
 const mongoEntries = input.mongo || [];
 const sqlEntries = input.sql || [];
 const clients = [];
+// Query time starts at the first checkout, once connected and signed in; CMAP events need no command monitoring, which slows reads.
+let firstOut;
 try {
   // Names pick the connection a query goes to, so a repeated one would send queries to the wrong place.
   const seen = new Set();
@@ -472,6 +474,7 @@ try {
     // The driver connects on the first database call, so plain scripts run without a server.
     const client = new mongodb.MongoClient(m.uri, options);
     clients.push(client);
+    client.once("connectionCheckedOut", () => (firstOut ??= performance.now()));
     if (monitor) watchCommands(client, m.name);
     return client.db(m.db);
   };
@@ -548,9 +551,12 @@ try {
   if (result === null) throw new Error("No results");
   if (result === undefined) throw new Error('No results. Did you forget to "return" something in the function?');
   if (result && typeof result.toArray === "function" && typeof result.limit === "function") {
-    result = await result.limit(100).toArray();
+    // limit() would replace the script's own limit. findOptions is driver state, not public API.
+    if (!result.findOptions?.limit) result.limit(100);
+    result = await result.toArray();
   }
-  await write({ type: "result", ok: true, ejson: serialize({ v: result }) });
+  const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);
+  await write({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
 } catch (e) {
   await write({ type: "result", ok: false, error: String(e && e.message ? e.message : e) });
 } finally {
