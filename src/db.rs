@@ -378,8 +378,10 @@ pub enum Msg {
     /// A line printed by mongodump or mongorestore.
     ToolLog(String),
     ToolDone(Res<String>),
-    /// Update check: Some(version) once a newer version is installed.
-    Update(Res<Option<String>>),
+    /// Update check, and whether the user asked for it: Some when a newer release can be installed.
+    UpdateChecked(Res<Option<crate::update::Available>>, bool),
+    /// The update's version once installed, or why it was not.
+    UpdateInstalled(Res<String>),
     /// The MongoDB Database Tools were installed or updated to this version; None when already current.
     ToolsInstalled(Res<Option<String>>),
     /// An answer from gcloud for the Cloud SQL browser's load `req`; a downloaded or installed proxy comes with req 0.

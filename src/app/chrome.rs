@@ -361,16 +361,8 @@ impl App {
                     if search_pill(ui).clicked() {
                         self.open_palette();
                     }
-                    if let Some(v) = &self.updated {
-                        let r = ui.add(primary_button(ui, format!("Restart for {v}"), SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
-                        if r.clicked() {
-                            if self.busy() {
-                                self.warn("Save or discard your edits and wait for running scripts first.");
-                            } else {
-                                self.restart();
-                            }
-                        }
-                    }
+                    ui.add_space(4.0);
+                    self.update_pill(ui);
                 });
             });
             if win {

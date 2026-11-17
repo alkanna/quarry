@@ -991,6 +991,20 @@ pub(super) enum Danger {
     SqlDropUser { conn: u64, acct: db::sql::users::Account },
 }
 
+/// Where the updater is. Automatic checks that fail stay Idle; their reason shows in Settings.
+pub(super) enum Upd {
+    Idle,
+    Checking { manual: bool },
+    /// After a manual check found nothing; the header says so for a few seconds.
+    UpToDate(std::time::Instant),
+    /// Found with automatic updates off, waiting for a click.
+    Available(crate::update::Available),
+    Downloading { info: crate::update::Available, prog: Arc<crate::update::Progress>, started: std::time::Instant },
+    /// Installed; starts on restart.
+    Ready(crate::update::Available),
+    Failed { info: Option<crate::update::Available>, msg: String },
+}
+
 /// What to run once writes are allowed.
 pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
@@ -1762,13 +1776,17 @@ impl App {
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
     pub(super) fn busy(&self) -> bool {
+        self.modal.is_some() || self.busy_work()
+    }
+
+    /// Work a restart would lose, without counting the dialog the check runs from.
+    pub(super) fn busy_work(&self) -> bool {
         !self.drafts.is_empty()
             || !self.saving.is_empty()
             || self.json_edit.is_some()
             || self.insert.is_some()
             || self.inline.is_some()
             || self.new_field.is_some()
-            || self.modal.is_some()
             || self.tool.as_ref().is_some_and(|t| t.done.is_none())
             || self.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
     }

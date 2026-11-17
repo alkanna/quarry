@@ -352,14 +352,46 @@ impl App {
                 });
             }
             SettingsCat::Updates => {
-                settings_section(ui, "", |ui| {
-                    let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
-                    setting_row(ui, "Update automatically", &desc, |ui| {
+                let current = env!("CARGO_PKG_VERSION");
+                let (title, line, button) = self.update_status();
+                let mut clicked = false;
+                let mut notes = false;
+                settings_section(ui, "THIS VERSION", |ui| {
+                    setting_row(ui, &title, &line, |ui| {
+                        if let Some(b) = button {
+                            let r = if b == "Check now" || b == "Cancel" { ui.button(b) } else { ui.add_enabled(b != "Restart now" || !self.busy_work(), primary_button(ui, b, PRIMARY())) };
+                            clicked = r.clicked();
+                        } else if matches!(self.upd, Upd::Checking { .. }) {
+                            ui.add(egui::Spinner::new().size(14.0).color(MUTED()));
+                        }
+                    });
+                    ui.separator();
+                    setting_row(ui, &format!("What's new in {current}"), "The release notes of the version you are running.", |ui| {
+                        notes = ui.button("Show").clicked();
+                    });
+                });
+                ui.add_space(12.0);
+                settings_section(ui, "AUTOMATIC UPDATES", |ui| {
+                    setting_row(ui, "Download and install new releases", "In the background, installed only when they match their published checksum. Off: the header offers each release and you pick when.", |ui| {
                         toggle(ui, &mut self.prefs.auto_update);
                     });
                 });
-                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() && ui.button("Check now").clicked() {
-                    self.check_update();
+                if clicked {
+                    match std::mem::replace(&mut self.upd, Upd::Idle) {
+                        Upd::Available(a) | Upd::Failed { info: Some(a), .. } => self.start_download(a),
+                        Upd::Ready(a) => {
+                            self.upd = Upd::Ready(a);
+                            self.restart_now();
+                        }
+                        Upd::Downloading { info, prog, started } => {
+                            self.upd = Upd::Downloading { info, prog, started };
+                            self.cancel_download();
+                        }
+                        _ => self.check_update(true),
+                    }
+                }
+                if notes {
+                    self.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(crate::update::changelog("", current), ""))));
                 }
             }
         }

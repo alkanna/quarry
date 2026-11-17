@@ -91,40 +91,114 @@ pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
     }
 }
 
-/// Ok(None) when up to date, Ok(Some(version)) once a newer version is installed and a restart
-/// will start it.
-pub fn check_and_install() -> Result<Option<String>, String> {
-    let Some(target) = install_target() else { return Ok(None) };
+/// A newer release with a build for this platform.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Available {
+    pub version: String,
+    /// The archive's file name, as `asset_name` gives it.
+    pub name: String,
+    pub url: String,
+    /// In bytes, as GitHub lists it; 0 when unknown.
+    pub size: u64,
+    pub sum_url: String,
+    /// The release body, parsed like CHANGELOG.md.
+    pub notes: Vec<Section>,
+}
+
+/// Ok(None) when up to date, or when Quarry runs from somewhere it never updates (a cargo build).
+pub fn check() -> Result<Option<Available>, String> {
+    if install_target().is_none() {
+        return Ok(None);
+    }
     let Some(name) = asset_name() else { return Ok(None) };
     let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let json = run(Command::new("curl").args(["-fsSL", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: quarry-updater", &api]))?;
     let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let tag = v["tag_name"].as_str().ok_or("The latest release has no tag.")?;
-    if !newer(env!("CARGO_PKG_VERSION"), tag) {
-        return Ok(None);
-    }
-    // The release is published minutes before the build jobs attach their files: until then it
-    // counts as up to date and the next check picks it up.
-    let asset_url = |n: &str| v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == n)).and_then(|x| x["browser_download_url"].as_str());
-    let Some(url) = asset_url(&name) else { return Ok(None) };
-    // The build jobs upload the checksum before the archive, so an archive without one is from a
-    // release older than checksums or a broken build, never one still being attached.
-    let sum_url = asset_url(&format!("{name}.sha256")).ok_or_else(|| format!("Quarry {tag} publishes no checksum for {name}, so it was not installed."))?;
-    let sum = run(Command::new("curl").args(["-fsSL", sum_url]))?;
-    let sha = parse_checksum(&sum).ok_or_else(|| format!("The checksum of {name} is unreadable, so Quarry {tag} was not installed."))?;
-    let dir = fresh_temp_dir("quarry-update")?;
-    let installed = download_and_install(&dir, &name, url, &sha, &target);
-    remove(&dir);
-    installed?;
-    Ok(Some(tag.trim_start_matches('v').to_string()))
+    available(&v, &name, env!("CARGO_PKG_VERSION"))
 }
 
-fn download_and_install(dir: &Path, name: &str, url: &str, sha: &str, target: &Path) -> Result<(), String> {
+fn available(v: &serde_json::Value, name: &str, current: &str) -> Result<Option<Available>, String> {
+    let tag = v["tag_name"].as_str().ok_or("The latest release has no tag.")?;
+    if !newer(current, tag) {
+        return Ok(None);
+    }
+    let asset = |n: &str| v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == n));
+    // The release is published minutes before the build jobs attach their files: until then it
+    // counts as up to date and the next check picks it up.
+    let Some(a) = asset(name) else { return Ok(None) };
+    let url = a["browser_download_url"].as_str().ok_or_else(|| format!("{name} has no download address."))?;
+    // The build jobs upload the checksum before the archive, so an archive without one is from a
+    // release older than checksums or a broken build, never one still being attached.
+    let sum_url = asset(&format!("{name}.sha256")).and_then(|x| x["browser_download_url"].as_str()).ok_or_else(|| format!("Quarry {tag} publishes no checksum for {name}, so it was not installed."))?;
+    Ok(Some(Available { version: tag.trim_start_matches('v').to_string(), name: name.to_string(), url: url.to_string(), size: a["size"].as_u64().unwrap_or(0), sum_url: sum_url.to_string(), notes: parse_body(v["body"].as_str().unwrap_or("")) }))
+}
+
+/// Shared with the UI while an update downloads: bytes on disk so far, whether the download is
+/// done and being checked, and a request to stop.
+#[derive(Default, Debug)]
+pub struct Progress {
+    pub bytes: std::sync::atomic::AtomicU64,
+    pub verifying: std::sync::atomic::AtomicBool,
+    pub cancel: std::sync::atomic::AtomicBool,
+}
+
+/// The error of a download stopped through `Progress::cancel`.
+pub const CANCELLED: &str = "The download was cancelled.";
+
+/// How far a download of `size` bytes is, when the size is known.
+pub fn percent(bytes: u64, size: u64) -> Option<u8> {
+    (size > 0).then(|| (bytes.saturating_mul(100) / size).min(100) as u8)
+}
+
+/// Downloads, checks and installs the release; returns its version, which starts on restart.
+pub fn download(a: &Available, prog: &Progress) -> Result<String, String> {
+    let target = install_target().ok_or("Quarry is not running from an installed copy, so it cannot update itself.")?;
+    let sum = run(Command::new("curl").args(["-fsSL", &a.sum_url]))?;
+    let sha = parse_checksum(&sum).ok_or_else(|| format!("The checksum of {} is unreadable, so Quarry {} was not installed.", a.name, a.version))?;
+    let dir = fresh_temp_dir("quarry-update")?;
+    let installed = fetch(&dir.join(&a.name), &a.url, prog).and_then(|archive| {
+        prog.verifying.store(true, std::sync::atomic::Ordering::Relaxed);
+        unpack_and_install(&dir, &a.name, &archive, &sha, &target)
+    });
+    remove(&dir);
+    installed.map(|_| a.version.clone())
+}
+
+/// curl into `to`, reporting the bytes written every 100 ms and stopping on cancel.
+fn fetch(to: &Path, url: &str, prog: &Progress) -> Result<PathBuf, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", "-o"]).arg(to).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, CREATE_NO_WINDOW);
+    let mut child = cmd.spawn().map_err(|e| format!("curl: {e}"))?;
+    let size = || std::fs::metadata(to).map_or(0, |m| m.len());
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| format!("curl: {e}"))? {
+            prog.bytes.store(size(), Relaxed);
+            if st.success() {
+                return Ok(to.to_path_buf());
+            }
+            let mut err = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut s, &mut err);
+            }
+            return Err(format!("curl: {}", err.trim()));
+        }
+        if prog.cancel.load(Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        prog.bytes.store(size(), Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn unpack_and_install(dir: &Path, name: &str, archive: &Path, sha: &str, target: &Path) -> Result<(), String> {
     let out = dir.join("x");
     std::fs::create_dir(&out).map_err(|e| e.to_string())?;
-    let archive = dir.join(name);
-    run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(url))?;
-    if !sha256_matches(&archive, sha)? {
+    if !sha256_matches(archive, sha)? {
         return Err(format!("The downloaded {name} does not match its published checksum; nothing was installed."));
     }
     if cfg!(target_os = "macos") {
@@ -576,6 +650,36 @@ mod tests {
         assert_eq!(releases(text, "", "0.3.0")[0].date, "2026-11-17");
         // A release whose notes have no section heading still lists its entries.
         assert_eq!(notes_text(&releases(text, "", "0.2.0")), "- A");
+    }
+
+    #[test]
+    fn latest_release() {
+        let asset = |n: &str, size: u64| serde_json::json!({ "name": n, "size": size, "browser_download_url": format!("https://x/{n}") });
+        let v = serde_json::json!({ "tag_name": "v0.55.0", "body": "### Bug Fixes\n\n* b ([#9](u))\n", "assets": [asset("a.zip.sha256", 64), asset("a.zip", 1000)] });
+        let a = available(&v, "a.zip", "0.54.0").unwrap().unwrap();
+        assert_eq!((a.version.as_str(), a.size, a.url.as_str(), a.sum_url.as_str()), ("0.55.0", 1000, "https://x/a.zip", "https://x/a.zip.sha256"));
+        assert_eq!(a.notes[0].entries[0].pr, Some(9));
+        assert_eq!(available(&v, "a.zip", "0.55.0"), Ok(None));
+        // Files still being attached count as up to date; an archive without a checksum is refused.
+        assert_eq!(available(&v, "b.zip", "0.54.0"), Ok(None));
+        let bare = serde_json::json!({ "tag_name": "v0.55.0", "assets": [asset("a.zip", 1)] });
+        assert!(available(&bare, "a.zip", "0.54.0").unwrap_err().contains("no checksum"));
+        assert_eq!((percent(50, 200), percent(300, 200), percent(5, 0)), (Some(25), Some(100), None));
+    }
+
+    #[test]
+    fn fetch_reports_the_bytes_written() {
+        let dir = fresh_temp_dir("quarry-test").unwrap();
+        let src = dir.join("src.bin");
+        std::fs::write(&src, vec![7u8; 4096]).unwrap();
+        let url = format!("file://{}", src.display().to_string().replace('\\', "/"));
+        let url = if url.starts_with("file:///") { url } else { url.replacen("file://", "file:///", 1) };
+        let prog = Progress::default();
+        let got = fetch(&dir.join("out.bin"), &url, &prog).unwrap();
+        assert_eq!(std::fs::read(got).unwrap().len(), 4096);
+        assert_eq!(prog.bytes.load(std::sync::atomic::Ordering::Relaxed), 4096);
+        assert!(fetch(&dir.join("missing"), "file:///nowhere/at/all", &Progress::default()).is_err());
+        remove(&dir);
     }
 
     #[test]

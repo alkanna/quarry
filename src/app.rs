@@ -67,6 +67,7 @@ mod users;
 mod value_edit;
 #[cfg(test)]
 mod ui_tests;
+mod update_pill;
 mod watch;
 mod whats_new;
 use column_menu::*;
@@ -322,11 +323,12 @@ pub struct App {
     /// Uids of tabs left and tabs gone back from, for Cmd+[ and Cmd+], newest last.
     nav_back: Vec<u64>,
     nav_fwd: Vec<u64>,
-    /// Version installed by the updater, waiting for a restart.
-    updated: Option<String>,
+    upd: Upd,
+    /// Why the last automatic check failed, shown in Settings; those failures stay quiet otherwise.
     update_note: String,
     update_checked: Option<std::time::Instant>,
-    last_input: std::time::Instant,
+    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
+    upd_popup: bool,
     started: std::time::Instant,
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
 }
@@ -471,10 +473,10 @@ impl App {
             closed: Vec::new(),
             nav_back: Vec::new(),
             nav_fwd: Vec::new(),
-            updated: None,
+            upd: Upd::Idle,
             update_note: String::new(),
             update_checked: None,
-            last_input: std::time::Instant::now(),
+            upd_popup: false,
             started: std::time::Instant::now(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
         }
@@ -698,13 +700,7 @@ impl App {
         use crate::menu::Act;
         match a {
             Act::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            // Same rule as Settings' "Check now": dev builds and the demo never install releases.
-            Act::CheckUpdates => {
-                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() {
-                    self.check_update();
-                }
-                self.modal = Some(Modal::Settings);
-            }
+            Act::CheckUpdates => self.check_now(),
             Act::Export if !self.tabs.is_empty() => self.export(),
             Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
             Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),

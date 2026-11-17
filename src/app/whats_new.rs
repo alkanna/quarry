@@ -197,7 +197,7 @@ fn kind_caption(ui: &mut egui::Ui, k: Kind, title: &str, n: usize) {
 
 /// The head of an open release or the whole row of a folded one, which toggles it.
 fn release_head(ui: &mut egui::Ui, r: &Release, open: bool) -> bool {
-    let id = ui.id().with(("release", &r.version));
+    let id = egui::Id::unique(("whats-new-release", &r.version));
     let hovered = ui.ctx().read_response(id).is_some_and(|x| x.hovered());
     let frame = if open { egui::Frame::new().inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 4 }).corner_radius(R_MD) } else { card_frame().inner_margin(egui::Margin::symmetric(14, 10)) };
     let fill = match (open, hovered) {
@@ -312,7 +312,8 @@ mod tests {
         assert!(looks_like_code("$getField") && looks_like_code("select_rows") && looks_like_code("db::Msg"));
         assert!(!looks_like_code("UTF-8") && !looks_like_code("0.102") && !looks_like_code("_"));
         let job = entry_job(None, "Fenced $objectToArray, OR groups", 400.0);
-        let mono: Vec<&str> = job.sections.iter().filter(|s| s.format.font_id.family == egui::FontFamily::Monospace).map(|s| &job.text[s.byte_range.clone()]).collect();
-        assert_eq!(mono, ["$objectToArray"]);
+        let mono = job.sections.iter().filter(|s| s.format.font_id.family == egui::FontFamily::Monospace).count();
+        assert_eq!(mono, 1, "only $objectToArray is code, the comma after it is not");
+        assert_eq!(job.text, "Fenced $objectToArray, OR groups");
     }
 }

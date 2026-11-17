@@ -27,6 +27,7 @@ pub(super) enum Cmd {
     NewConn,
     CloudSql,
     Settings,
+    CheckUpdates,
     Log,
     Reopen,
     Undo,
@@ -235,6 +236,9 @@ impl App {
         }
         add(g, Row::cmd("Query log", Glyph::Prompt, keys(false, false, "L"), Cmd::Log));
         add(g, Row::cmd("Settings", Glyph::Prompt, keys(false, false, ","), Cmd::Settings));
+        if self.can_update() {
+            add(g, Row::cmd("Check for updates", Glyph::Prompt, "", Cmd::CheckUpdates));
+        }
         add(g, Row::cmd("Keyboard shortcuts", Glyph::Prompt, keys(false, false, "/"), Cmd::Shortcuts));
         out
     }
@@ -376,6 +380,7 @@ impl App {
             Cmd::NewConn => self.new_conn_modal(),
             Cmd::CloudSql => self.open_cloud_browser(false),
             Cmd::Settings => self.modal = Some(Modal::Settings),
+            Cmd::CheckUpdates => self.check_now(),
             Cmd::Log => self.log.open = !self.log.open,
             Cmd::Reopen => self.reopen_tab(),
             Cmd::Undo => self.modal = Some(Modal::Undo),

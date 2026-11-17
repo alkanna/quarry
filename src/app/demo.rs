@@ -395,6 +395,45 @@ impl App {
             let from = if n > 1 { all.get(n).map(|r| r.version.clone()).unwrap_or_default() } else { String::new() };
             self.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(all.into_iter().take(n).collect(), &from))));
         }
+        // QUARRY_TEST_UPDATE=<state>[,open] shows the header's update pill in that state, and its popover with ",open".
+        if let Ok(v) = std::env::var("QUARRY_TEST_UPDATE") {
+            self.demo_update(&v);
+        }
+    }
+
+    fn demo_update(&mut self, v: &str) {
+        use std::time::{Duration, Instant};
+        let (state, open) = v.split_once(',').map_or((v, false), |(s, o)| (s, o == "open"));
+        let current = env!("CARGO_PKG_VERSION");
+        let mut parts = current.split('.').map(|n| n.parse::<u64>().unwrap_or(0));
+        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        let notes = crate::update::changelog("", current).into_iter().next().map(|r| r.sections).unwrap_or_default();
+        let info = crate::update::Available { version: format!("{major}.{}.0", minor + 1), name: "Quarry-macos-arm64.zip".into(), url: String::new(), size: 19_293_798, sum_url: String::new(), notes };
+        let downloading = |info: crate::update::Available, verifying: bool| {
+            let prog = Arc::new(crate::update::Progress::default());
+            prog.bytes.store(info.size * 42 / 100, std::sync::atomic::Ordering::Relaxed);
+            prog.verifying.store(verifying, std::sync::atomic::Ordering::Relaxed);
+            Upd::Downloading { info, prog, started: Instant::now().checked_sub(Duration::from_secs(6)).unwrap_or_else(Instant::now) }
+        };
+        self.upd = match state {
+            "checking" => Upd::Checking { manual: true },
+            "uptodate" => Upd::UpToDate(Instant::now() + Duration::from_secs(3600)),
+            "available" => Upd::Available(info),
+            "downloading" => downloading(info, false),
+            "verifying" => downloading(info, true),
+            "ready" => Upd::Ready(info),
+            "busy" => {
+                // A running comparison is work a restart would lose.
+                if let Some(t) = self.tabs.first_mut() {
+                    t.compare.running = true;
+                }
+                Upd::Ready(info)
+            }
+            "failed" => Upd::Failed { msg: format!("The downloaded {} does not match its published checksum; nothing was installed.", info.name), info: Some(info) },
+            _ => return,
+        };
+        self.update_checked = Some(Instant::now());
+        self.upd_popup = open;
     }
 
     pub(super) fn demo_dialog(&mut self, which: &str) {
