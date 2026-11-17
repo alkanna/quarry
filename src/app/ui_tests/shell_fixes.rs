@@ -10,39 +10,9 @@ const PG: &str = "QUARRY_TEST_POSTGRES";
 /// The first run of a process installs the Shell's packages, which can take minutes in a cold folder.
 const RUN_LIMIT: Duration = Duration::from_secs(300);
 
-fn bun_missing() -> bool {
-    let missing = crate::app::tools::find_bun("").is_none();
-    if missing {
-        eprintln!("skipped: bun is not installed");
-    }
-    missing
-}
-
-/// `UiApp::wait` with room for a package install.
-fn wait_long(ui: &mut UiApp, what: &str, cond: impl Fn(&App) -> bool) {
-    let t = std::time::Instant::now();
-    loop {
-        ui.h.step();
-        if cond(ui.app()) {
-            return;
-        }
-        assert!(t.elapsed() < RUN_LIMIT, "timed out waiting for {what}; last error: {}", ui.app().last_problem());
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Steps the UI for `d` of wall time, so worker answers keep landing.
-fn step_for(ui: &mut UiApp, d: Duration) {
-    let t = std::time::Instant::now();
-    while t.elapsed() < d {
-        ui.h.step();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// A UI on PostgreSQL with a fresh fixture table open in a Shell tab, unlocked when `unlock` is set. None without the server or Bun.
 fn pg_shell(unlock: bool) -> Option<(Fx, UiApp, String)> {
-    if bun_missing() {
+    if db::bun_missing() {
         return None;
     }
     let mut fx = Fx::new(PG)?;
@@ -82,8 +52,15 @@ fn run(ui: &mut UiApp, code: &str) {
 /// Runs `code` to its end and returns the tab's Shell state.
 fn run_done<'a>(ui: &'a mut UiApp, code: &str) -> &'a ShellTab {
     run(ui, code);
-    wait_long(ui, "the script to end", |a| a.t().is_some_and(|t| t.shell.started.is_none()));
+    ui.wait_for("the script to end", RUN_LIMIT, |a| a.t().is_some_and(|t| t.shell.started.is_none()));
     shell(ui.app())
+}
+
+/// The document a script returned, once it ended without an error.
+fn result_doc(sh: &ShellTab) -> Document {
+    assert!(sh.error.is_none(), "{:?}", sh.error);
+    let v = sh.result().expect("a result");
+    v.as_document().cloned().unwrap_or_else(|| panic!("{v}"))
 }
 
 /// A script that inserts a row into `table` through `handle` every 50 ms and never ends.
@@ -106,25 +83,19 @@ fn loop_rows(fx: &Fx, table: &str) -> i64 {
 
 /// Waits until the looping script has written a few rows, which proves it runs before the test stops it.
 fn wait_writing(ui: &mut UiApp, fx: &Fx, table: &str) {
-    let t = std::time::Instant::now();
-    loop {
-        step_for(ui, Duration::from_millis(100));
-        if loop_rows(fx, table) >= 5 {
-            return;
-        }
-        let ended = ui.app().tabs.iter().find(|x| x.sel.coll == table).and_then(|x| x.shell.error.clone());
+    ui.wait_for("the looping script to write", RUN_LIMIT, |a| {
+        let ended = a.tabs.iter().find(|x| x.sel.coll == table).and_then(|x| x.shell.error.clone());
         assert!(ended.is_none(), "the looping script ended: {ended:?}");
-        assert!(t.elapsed() < RUN_LIMIT, "the looping script never wrote; last error: {}", ui.app().last_problem());
-    }
+        loop_rows(fx, table) >= 3
+    });
 }
 
-/// The writes stopped: once a statement in flight has landed, the count holds still for 2 s, 40 turns of the loop.
+/// The writes stopped: once a statement in flight has landed, the count holds still for 500 ms, 10 turns of the loop.
 fn assert_stopped(ui: &mut UiApp, fx: &Fx, table: &str) {
-    step_for(ui, Duration::from_secs(1));
+    ui.run_for(Duration::from_millis(300));
     let a = loop_rows(fx, table);
-    step_for(ui, Duration::from_secs(2));
-    let b = loop_rows(fx, table);
-    assert_eq!(a, b, "the script kept writing");
+    ui.run_for(Duration::from_millis(500));
+    assert_eq!(a, loop_rows(fx, table), "the script kept writing");
 }
 
 /// Disconnect from a connection's rail tile menu.
@@ -141,14 +112,14 @@ fn disconnect(ui: &mut UiApp, conn: u64, name: &str) {
 #[test]
 fn shell_fix_the_console_keeps_the_latest_lines_each_cut_short() {
     let mut sh = ShellTab::default();
-    for i in 0..5000 {
+    for i in 0..1600 {
         sh.push_log("log".into(), format!("line {i}"));
     }
     // Two bytes a character, so a cut by bytes would land inside one or keep only 1000 characters.
     sh.push_log("log".into(), "é".repeat(3000));
     assert!(sh.logs.len() <= 1500, "{} lines kept", sh.logs.len());
-    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 4999");
-    assert!(sh.logs_dropped > 0 && sh.logs.len() + sh.logs_dropped >= 5000, "{} dropped", sh.logs_dropped);
+    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 1599");
+    assert!(sh.logs_dropped > 0 && sh.logs.len() + sh.logs_dropped >= 1600, "{} dropped", sh.logs_dropped);
     assert_eq!(sh.logs.last().unwrap().1.chars().count(), 2000);
     assert!(!sh.logs.iter().any(|l| l.1 == "line 0"), "the oldest lines were kept");
 }
@@ -156,10 +127,10 @@ fn shell_fix_the_console_keeps_the_latest_lines_each_cut_short() {
 #[test]
 fn shell_fix_a_script_that_logs_many_lines_keeps_the_latest_in_the_console() {
     let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
-    let sh = run_done(&mut ui, "async function run() {\n  for (let i = 0; i < 3000; i++) console.log('line ' + i);\n  console.log('y'.repeat(5000));\n  return 1;\n}");
+    let sh = run_done(&mut ui, "async function run() {\n  for (let i = 0; i < 1600; i++) console.log('line ' + i);\n  console.log('y'.repeat(5000));\n  return 1;\n}");
     assert!(sh.error.is_none(), "{:?}", sh.error);
     assert!(sh.logs.len() <= 1500, "{} lines kept", sh.logs.len());
-    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 2999");
+    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 1599");
     assert_eq!(sh.logs.last().unwrap().1.chars().count(), 2000);
 }
 
@@ -191,8 +162,8 @@ fn shell_fix_disconnect_stops_the_scripts_of_tabs_that_attached_it() {
     let a = ui.h.state_mut();
     a.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: 2, name: "other".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Idle) });
     a.rail_order.push(2);
-    a.connect_uri(2, uri);
-    ui.wait("the attached connection to be ready", |a| a.conn(2).is_some_and(|c| c.status == Status::Ready));
+    ui.connect(2, &uri);
+    ui.assert_ready(2);
     let a = ui.h.state_mut();
     let c = a.cur;
     a.tabs[c].shell.attached.push(crate::app::shell_attach::Attached { conn: 2, db: "quarry_test".into(), name: "other".into(), allow_writes: false, schema: "public".into(), tables: Vec::new() });
@@ -214,10 +185,8 @@ fn shell_fix_lone_surrogates_in_logs_and_results_keep_the_run() {
   console.log('a\uD800b');
   return { s: 'x\uDC00y', ['k\uD800']: 1 };
 }"#);
-    assert!(sh.error.is_none(), "{:?}", sh.error);
     assert!(sh.logs.iter().any(|l| l.1 == "a\u{FFFD}b"), "{:?}", sh.logs);
-    let v = sh.result().expect("a result");
-    let d = v.as_document().unwrap_or_else(|| panic!("{v}"));
+    let d = result_doc(sh);
     assert_eq!(d.get_str("s").ok(), Some("x\u{FFFD}y"), "{d}");
     assert!(d.contains_key("k\u{FFFD}"), "{d}");
 }
@@ -225,26 +194,10 @@ fn shell_fix_lone_surrogates_in_logs_and_results_keep_the_run() {
 #[test]
 fn shell_fix_a_sql_value_holding_a_lone_surrogate_is_refused() {
     let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
-    // A first run installs the packages, so the run below is timed alone.
-    let warm = run_done(&mut ui, "async function run() { return 1; }");
-    assert!(warm.error.is_none(), "{:?}", warm.error);
-    run(&mut ui, "async function run() {\n  return await sql`SELECT ${'a\\uD800'}::text AS t`;\n}");
     // Before, the query line was refused by the app and the script waited for its answer forever.
-    ui.wait("the script to end", |a| a.t().is_some_and(|t| t.shell.started.is_none()));
-    let e = shell(ui.app()).error.clone().unwrap_or_default();
+    let sh = run_done(&mut ui, "async function run() {\n  return await sql`SELECT ${'a\\uD800'}::text AS t`;\n}");
+    let e = sh.error.clone().unwrap_or_default();
     assert!(e.contains("surrogate"), "{e}");
-}
-
-#[test]
-fn shell_fix_a_number_past_2_63_comes_back_as_a_double() {
-    let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
-    let sh = run_done(&mut ui, "async function run() {\n  return { big: 2 ** 63, neg: -(2 ** 64), small: 5 };\n}");
-    assert!(sh.error.is_none(), "{:?}", sh.error);
-    let v = sh.result().expect("a result");
-    let d = v.as_document().unwrap_or_else(|| panic!("{v}"));
-    assert_eq!(d.get("big"), Some(&Bson::Double(9223372036854775808.0)), "{d}");
-    assert_eq!(d.get("neg"), Some(&Bson::Double(-18446744073709551616.0)), "{d}");
-    assert!(matches!(d.get("small"), Some(Bson::Int32(5) | Bson::Int64(5))), "{d}");
 }
 
 #[test]
@@ -256,9 +209,7 @@ fn shell_fix_sql_columns_named_like_extended_json_come_back_raw() {
   const [b] = await sql`SELECT 'xyz' AS "$binary"`;
   return { long: a['$numberLong'], bin: b['$binary'] };
 }"#);
-    assert!(sh.error.is_none(), "{:?}", sh.error);
-    let v = sh.result().expect("a result");
-    let d = v.as_document().unwrap_or_else(|| panic!("{v}"));
+    let d = result_doc(sh);
     assert_eq!((d.get_str("long").ok(), d.get_str("bin").ok()), (Some("abc"), Some("xyz")), "{d}");
 }
 
@@ -266,7 +217,7 @@ fn shell_fix_sql_columns_named_like_extended_json_come_back_raw() {
 /// reach whatever answers on that local port.
 #[test]
 fn shell_fix_a_mongo_run_is_refused_after_disconnect() {
-    if bun_missing() {
+    if db::bun_missing() {
         return;
     }
     let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };

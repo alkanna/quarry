@@ -6,63 +6,82 @@ use futures_util::TryStreamExt;
 use mongodb::bson::{Document, doc};
 
 const VAR: &str = "QUARRY_TEST_MONGO";
-const DB: &str = "quarry_ui_edit";
+pub(super) const DB: &str = "quarry_ui_edit";
 
-/// A collection with its own runtime and client, seeded with the test documents and dropped on drop.
-struct Fixture {
-    rt: tokio::runtime::Runtime,
-    coll: mongodb::Collection<Document>,
-    name: String,
+/// Collections of one test in `DB`, each seeded with its documents, with their own runtime and client, dropped on drop.
+pub(super) struct Fixture {
+    pub rt: tokio::runtime::Runtime,
+    db: mongodb::Database,
+    pub names: Vec<String>,
 }
 
 impl Fixture {
-    fn new(test: &str, docs: Vec<Document>) -> Option<Fixture> {
+    /// One collection seeded with `docs`.
+    pub fn new(test: &str, docs: Vec<Document>) -> Option<Fixture> {
+        Self::many(test, vec![docs])
+    }
+
+    /// One collection per list of documents, named after `test` with a letter for each.
+    pub fn many(test: &str, colls: Vec<Vec<Document>>) -> Option<Fixture> {
         let uri = std::env::var(VAR).ok()?;
         // Unique per run so a crashed earlier run and parallel tests never share a collection.
-        let name = format!("{test}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let names: Vec<String> = (0..colls.len()).map(|i| format!("{test}_{}_{stamp}", (b'a' + i as u8) as char)).collect();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let coll = rt.block_on(async {
-            let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
-            let coll = client.database(DB).collection::<Document>(&name);
-            coll.insert_many(docs).await.unwrap();
-            coll
-        });
-        Some(Fixture { rt, coll, name })
-    }
-
-    /// Steps the UI until the server holds `want`. The undo entry leaves the list when the undo is sent, not when the server has
-    /// applied it, so reading the collection right after the click races a loaded machine.
-    fn expect(&self, ui: &mut UiApp, want: Vec<Document>) {
-        let t = std::time::Instant::now();
-        loop {
-            ui.h.step();
-            let got = self.all();
-            if got == want {
-                return;
+        let db = rt.block_on(async {
+            let db = mongodb::Client::with_uri_str(&uri).await.unwrap().database(DB);
+            for (n, docs) in names.iter().zip(colls) {
+                db.collection::<Document>(n).insert_many(docs).await.unwrap();
             }
-            assert!(t.elapsed() < LIMIT, "the server holds {got:?}, wanted {want:?}; last error: {}", ui.app().last_problem());
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            db
+        });
+        Some(Fixture { rt, db, names })
     }
 
-    fn all(&self) -> Vec<Document> {
-        self.rt.block_on(async { self.coll.find(doc! {}).sort(doc! { "_id": 1 }).await.unwrap().try_collect().await.unwrap() })
+    pub fn coll(&self, i: usize) -> mongodb::Collection<Document> {
+        self.db.collection(&self.names[i])
+    }
+
+    /// The documents of the first collection, by _id.
+    pub fn all(&self) -> Vec<Document> {
+        self.all_in(0)
+    }
+
+    pub fn all_in(&self, i: usize) -> Vec<Document> {
+        self.rt.block_on(async { self.coll(i).find(doc! {}).sort(doc! { "_id": 1 }).await.unwrap().try_collect().await.unwrap() })
+    }
+
+    pub fn exists(&self, i: usize) -> bool {
+        self.rt.block_on(async { self.db.list_collection_names().await.unwrap() }).contains(&self.names[i])
+    }
+
+    /// Steps the UI until the first collection holds `want`.
+    pub fn expect(&self, ui: &mut UiApp, want: Vec<Document>) {
+        self.expect_in(ui, 0, want);
+    }
+
+    /// Steps the UI until collection `i` holds `want`. A write lands some frames after its click, and the undo entry leaves the list
+    /// when the undo is sent, not when the server has applied it, so reading the collection right after the click races a loaded machine.
+    pub fn expect_in(&self, ui: &mut UiApp, i: usize, want: Vec<Document>) {
+        ui.wait(&format!("{} to hold {want:?}", self.names[i]), |_| self.all_in(i) == want);
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.rt.block_on(async { self.coll.drop().await.ok() });
+        for i in 0..self.names.len() {
+            self.rt.block_on(async { self.coll(i).drop().await.ok() });
+        }
     }
 }
 
-fn seed() -> Vec<Document> {
+pub(super) fn seed() -> Vec<Document> {
     vec![doc! { "_id": 1, "name": "alpha", "qty": 1 }, doc! { "_id": 2, "name": "beta", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]
 }
 
 fn open(f: &Fixture) -> UiApp {
     let mut ui = ui_app(VAR).unwrap();
-    ui.open_table(DB, "", &f.name);
+    ui.open_table(DB, "", &f.names[0]);
     ui
 }
 
@@ -77,7 +96,7 @@ impl UiApp {
     }
 
     /// Replaces the text of the focused editor. The inline editor does not select its text when it opens.
-    fn type_over(&mut self, text: &str) {
+    pub(super) fn type_over(&mut self, text: &str) {
         self.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
         self.h.event(egui::Event::Text(text.into()));
         self.settle();
@@ -96,11 +115,23 @@ impl UiApp {
 
     /// Takes back the most recent action through the toolbar and its dialog, then closes the dialog.
     fn undo_latest(&mut self) {
+        self.undo_latest_open();
+        self.close_recent_changes();
+    }
+
+    /// Takes back the most recent action through the toolbar and Recent changes, leaving that dialog open for a test that waits for
+    /// the answer first.
+    pub(super) fn undo_latest_open(&mut self) {
         let before = self.app().undo.len();
         self.click(&format!("Undo ({before})"));
         self.click("Undo change 1");
-        // A toast for the last write may still show a Close button of its own, so the dialog's is the one nearest its title.
+    }
+
+    /// Closes Recent changes. A toast for the last write may still show a Close button of its own, so the dialog's is the one
+    /// nearest its title.
+    pub(super) fn close_recent_changes(&mut self) {
         self.click_near("Close", "Recent changes");
+        self.wait("Recent changes to close", |a| a.modal.is_none());
     }
 
     /// Clicks the widget named `label` that sits closest, vertically, to the one named `anchor`.

@@ -4,12 +4,8 @@
 use super::*;
 
 fn open_form(engine: db::sql::Engine, scheme: &str) -> UiApp {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let mut ui = UiApp { h };
     let addr = db::sql::Addr { scheme: scheme.into(), host: "db.internal".into(), user: "app".into(), port: db::sql::Addr::default_port(scheme), ..Default::default() };
-    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "shop".into(), engine, addr, tab: ConnTab::Proxy, ..Default::default() })));
-    ui.settle();
-    ui
+    open_form_with(ConnForm { name: "shop".into(), engine, addr, tab: ConnTab::Proxy, ..Default::default() })
 }
 
 #[test]

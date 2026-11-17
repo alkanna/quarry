@@ -932,6 +932,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::bun_missing;
     use std::sync::atomic::AtomicU64;
     use super::super::relay::fill;
     use super::super::{ResultSet, RUN_ROWS_MAX};
@@ -1262,14 +1263,6 @@ mod tests {
     fn shell_script(w: &Worker, rx: &Receiver<Msg>, db: &Db, code: &str, tables: &[&str], read_only: bool) -> (Vec<crate::db::ShellQuery>, Res<String>) {
         let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [{ "name": "shop", "db": "quarry_test", "tables": tables }] });
         shell_run(w, rx, input, vec![("shop".into(), relay(db, read_only))])
-    }
-
-    fn bun_missing() -> bool {
-        let missing = std::process::Command::new("bun").arg("--version").output().is_err();
-        if missing {
-            println!("skipped: bun is not installed");
-        }
-        missing
     }
 
     fn query_names(queries: &[crate::db::ShellQuery]) -> String {

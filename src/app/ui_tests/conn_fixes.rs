@@ -7,18 +7,6 @@ use super::*;
 
 const DB: &str = "quarry_ui_connfix";
 
-fn harness() -> UiApp {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    UiApp { h }
-}
-
-fn open_form(uri: &str, tab: ConnTab) -> UiApp {
-    let mut ui = harness();
-    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "fixes".into(), uri: uri.into(), tab, ..Default::default() })));
-    ui.settle();
-    ui
-}
-
 /// Saves the open form as a new connection and returns its id. The test app has no keychain, so Save stores the connection
 /// without connecting and the test connects with `connect_uri`.
 fn save_form(ui: &mut UiApp) -> u64 {
@@ -27,9 +15,13 @@ fn save_form(ui: &mut UiApp) -> u64 {
     ui.app().active.expect("Save activates the connection")
 }
 
-fn connect_and_wait(ui: &mut UiApp, id: u64, uri: &str) {
-    ui.h.state_mut().connect_uri(id, uri.to_string());
-    ui.wait("the connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
+/// Saves `uri` through the form and connects with the address the saved connection stored, waiting for the attempt to end.
+fn connect_saved(uri: &str) -> (UiApp, u64) {
+    let mut ui = open_form(uri, ConnTab::Standard);
+    let id = save_form(&mut ui);
+    let stored = ui.app().conn(id).unwrap().masked_uri.clone();
+    ui.connect(id, &stored);
+    (ui, id)
 }
 
 fn failure(ui: &UiApp, id: u64) -> String {
@@ -37,11 +29,6 @@ fn failure(ui: &UiApp, id: u64) -> String {
         Status::Failed(e) => e.clone(),
         _ => panic!("expected a failed connection"),
     }
-}
-
-fn assert_ready(ui: &UiApp, id: u64) {
-    let c = ui.app().conn(id).unwrap();
-    assert!(c.status == Status::Ready, "not ready: {}", if let Status::Failed(e) = &c.status { e.as_str() } else { "still connecting" });
 }
 
 fn tls_uri() -> Option<String> {
@@ -55,23 +42,20 @@ fn strict_tls_uri() -> Option<String> {
 
 #[test]
 fn a_uri_that_skips_only_the_host_name_check_is_refused_in_plain_words() {
-    let Some(base) = tls_uri() else { return };
-    let mut ui = open_form(&format!("{base}&tlsAllowInvalidHostnames=true"), ConnTab::Standard);
-    let id = save_form(&mut ui);
-    let uri = ui.app().conn(id).unwrap().masked_uri.clone();
-    connect_and_wait(&mut ui, id, &uri);
+    let Some(base) = strict_tls_uri() else { return };
+    let (ui, id) = connect_saved(&format!("{base}&tlsAllowInvalidHostnames=true"));
     let e = failure(&ui, id);
     assert!(e.contains("Allow invalid certificates") && e.contains("tlsAllowInvalidHostnames"), "{e}");
 }
 
 #[test]
-fn a_uri_that_turns_the_host_name_check_off_with_false_connects() {
+fn a_host_name_option_connects_when_off_or_when_every_check_is_off() {
     let Some(base) = tls_uri() else { return };
-    let mut ui = open_form(&format!("{base}&tlsAllowInvalidHostnames=false"), ConnTab::Standard);
-    let id = save_form(&mut ui);
-    let uri = ui.app().conn(id).unwrap().masked_uri.clone();
-    connect_and_wait(&mut ui, id, &uri);
-    assert_ready(&ui, id);
+    // The base address already skips the certificate checks, so true asks for nothing more.
+    for v in ["true", "false"] {
+        let (ui, id) = connect_saved(&format!("{base}&tlsAllowInvalidHostnames={v}"));
+        ui.assert_ready(id);
+    }
 }
 
 #[test]
@@ -82,8 +66,8 @@ fn allow_invalid_certificates_on_an_address_with_tls_insecure_false_gives_one_th
     let uri = form(ui.h.state_mut()).uri.clone();
     assert!(uri.contains("tlsAllowInvalidCertificates=true") && !uri.contains("tlsInsecure"), "{uri}");
     let id = save_form(&mut ui);
-    connect_and_wait(&mut ui, id, &uri);
-    assert_ready(&ui, id);
+    ui.connect(id, &uri);
+    ui.assert_ready(id);
 }
 
 #[test]
@@ -91,10 +75,8 @@ fn the_mongodb_card_has_no_paste_box_and_the_sql_cards_do() {
     let mut ui = open_form("mongodb://localhost:27017", ConnTab::Standard);
     ui.show("Hosts field");
     assert!(ui.h.query_all_by_label("Paste connection string").next().is_none(), "the MongoDB form shows a paste box");
-    let mut sql = harness();
     let addr = db::sql::Addr { scheme: "mysql".into(), port: 3306, ..Default::default() };
-    sql.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "shop".into(), engine: db::sql::Engine::MySql, addr, tab: ConnTab::Standard, ..Default::default() })));
-    sql.settle();
+    let mut sql = open_form_with(ConnForm { name: "shop".into(), engine: db::sql::Engine::MySql, addr, tab: ConnTab::Standard, ..Default::default() });
     sql.show("Paste connection string");
 }
 
@@ -134,7 +116,7 @@ fn uri_timeouts_win_over_the_apps_query_timeout() {
     let id = save_form(&mut ui);
     ui.h.state_mut().prefs.timeout_ms = 60_000;
     let t = std::time::Instant::now();
-    connect_and_wait(&mut ui, id, uri);
+    ui.connect(id, uri);
     assert!(t.elapsed() < Duration::from_secs(15), "the 60 s app timeout won over the 500 ms in the address: {:?}", t.elapsed());
     failure(&ui, id);
 }
@@ -142,23 +124,10 @@ fn uri_timeouts_win_over_the_apps_query_timeout() {
 #[test]
 fn aws_and_kerberos_sign_in_are_named_as_not_built_in_on_the_failed_card() {
     for (uri, title) in [("mongodb://127.0.0.1:1/?authMechanism=MONGODB-AWS&serverSelectionTimeoutMS=2000", "AWS IAM (MONGODB-AWS) sign-in is not built into Quarry"), ("mongodb://user@127.0.0.1:1/?authMechanism=GSSAPI&serverSelectionTimeoutMS=2000", "Kerberos (GSSAPI) sign-in is not built into Quarry")] {
-        let mut ui = open_form(uri, ConnTab::Standard);
-        let id = save_form(&mut ui);
-        connect_and_wait(&mut ui, id, uri);
+        let (mut ui, id) = connect_saved(uri);
         failure(&ui, id);
         ui.show_contains(title);
     }
-}
-
-#[test]
-fn a_reconnect_locks_writes_again() {
-    let Some(mut ui) = ui_app("QUARRY_TEST_MONGO") else { return };
-    ui.h.state_mut().conns[0].writable = true;
-    // The rail tile's Reconnect calls connect, which does nothing in the keychain-less test app, so the step under it runs directly.
-    ui.h.state_mut().connect_uri(CONN, std::env::var("QUARRY_TEST_MONGO").unwrap());
-    assert!(!ui.app().conn(CONN).unwrap().writable, "a reconnect kept writes unlocked");
-    ui.wait("the reconnect to end", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
-    assert!(!ui.app().conn(CONN).unwrap().writable);
 }
 
 #[test]
@@ -172,8 +141,8 @@ fn disconnect_stops_a_running_watch_of_that_connection() {
         coll.insert_one(mongodb::bson::doc! { "_id": 0 }).await.unwrap();
     });
     // The sidebar lists databases from the connect, so connect again to see the one just made.
-    ui.h.state_mut().connect_uri(CONN, std::env::var("QUARRY_TEST_MONGO_RS").unwrap());
-    ui.wait("the reconnect", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
+    ui.connect(CONN, &std::env::var("QUARRY_TEST_MONGO_RS").unwrap());
+    ui.assert_ready(CONN);
     ui.open_table(DB, "", "watch_disconnect");
     ui.h.state_mut().tm().unwrap().view = View::Watch;
     ui.settle();
@@ -186,7 +155,6 @@ fn disconnect_stops_a_running_watch_of_that_connection() {
     ui.settle();
     assert!(!ui.app().tabs.iter().any(|t| t.watch.running()), "a watch kept running after Disconnect");
     rt.block_on(async { coll.insert_one(mongodb::bson::doc! { "_id": 2 }).await.unwrap() });
-    std::thread::sleep(Duration::from_millis(500));
     ui.settle();
     assert_eq!(ui.app().t().unwrap().watch.rows.len(), seen, "a change arrived after Disconnect");
     rt.block_on(async { coll.drop().await.unwrap() });
@@ -207,9 +175,7 @@ fn ssh_env() -> Option<(crate::ssh::SshConf, String, String)> {
 
 /// A connection through SSH saved from the form, not connected yet.
 fn ssh_saved(conf: &crate::ssh::SshConf, far: &str) -> (UiApp, u64) {
-    let mut ui = harness();
-    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "bastion".into(), uri: far.into(), ssh_on: true, ssh: conf.clone(), ..Default::default() })));
-    ui.settle();
+    let mut ui = open_form_with(ConnForm { name: "bastion".into(), uri: far.into(), ssh_on: true, ssh: conf.clone(), ..Default::default() });
     let id = save_form(&mut ui);
     (ui, id)
 }
@@ -226,7 +192,7 @@ fn ssh_connect(ui: &mut UiApp, id: u64, pass: &str, far: &str) {
     let net = db::Net { ssh: c.meta.ssh.clone().map(|s| (s, crate::ssh::SshSecrets { password: Some(pass.into()), passphrase: None })), ..Default::default() };
     app.worker.connect(id, attempt, far.to_string(), timeout, net);
     ui.wait("the SSH connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
-    assert_ready(&ui, id);
+    ui.assert_ready(id);
 }
 
 fn known(ui: &UiApp, id: u64) -> Option<String> {

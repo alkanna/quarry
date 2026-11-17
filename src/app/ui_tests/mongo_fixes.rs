@@ -3,76 +3,11 @@
 //! tab, a duplicated tab, a pasted query for another collection, an answer that waits for an open dialog and the lock after a
 //! reconnect. Each test owns its collections, made before the app connects so the sidebar lists them.
 
+use super::mongo_edit::{DB, Fixture, seed};
 use super::*;
-use futures_util::TryStreamExt;
-use mongodb::bson::{Document, doc};
+use mongodb::bson::doc;
 
 const VAR: &str = "QUARRY_TEST_MONGO";
-const DB: &str = "quarry_ui_fixes";
-
-/// Collections of one test with their own runtime and client, dropped on drop.
-struct Fx {
-    rt: tokio::runtime::Runtime,
-    db: mongodb::Database,
-    names: Vec<String>,
-}
-
-impl Fx {
-    fn new(test: &str, colls: Vec<Vec<Document>>) -> Option<Fx> {
-        let uri = std::env::var(VAR).ok()?;
-        // Unique per run so a crashed earlier run and parallel tests never share a collection.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let names: Vec<String> = (0..colls.len()).map(|i| format!("{test}_{}_{stamp}", (b'a' + i as u8) as char)).collect();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let db = rt.block_on(async {
-            let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
-            let db = client.database(DB);
-            for (n, docs) in names.iter().zip(colls) {
-                db.collection::<Document>(n).insert_many(docs).await.unwrap();
-            }
-            db
-        });
-        Some(Fx { rt, db, names })
-    }
-
-    fn coll(&self, i: usize) -> mongodb::Collection<Document> {
-        self.db.collection(&self.names[i])
-    }
-
-    fn all(&self, i: usize) -> Vec<Document> {
-        self.rt.block_on(async { self.coll(i).find(doc! {}).sort(doc! { "_id": 1 }).await.unwrap().try_collect().await.unwrap() })
-    }
-
-    fn exists(&self, i: usize) -> bool {
-        self.rt.block_on(async { self.db.list_collection_names().await.unwrap() }).contains(&self.names[i])
-    }
-
-    /// Steps the UI until the server holds `want` in collection `i`, since a write lands some frames after its click.
-    fn expect(&self, ui: &mut UiApp, i: usize, want: Vec<Document>) {
-        let t = std::time::Instant::now();
-        loop {
-            ui.h.step();
-            let got = self.all(i);
-            if got == want {
-                return;
-            }
-            assert!(t.elapsed() < LIMIT, "{} holds {got:?}, wanted {want:?}; last error: {}", self.names[i], ui.app().last_problem());
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-impl Drop for Fx {
-    fn drop(&mut self) {
-        for i in 0..self.names.len() {
-            self.rt.block_on(async { self.coll(i).drop().await.ok() });
-        }
-    }
-}
-
-fn seed() -> Vec<Document> {
-    vec![doc! { "_id": 1, "name": "alpha", "qty": 1 }, doc! { "_id": 2, "name": "beta", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]
-}
 
 fn tab_of(a: &App, coll: &str) -> usize {
     a.tabs.iter().position(|t| t.sel.coll == coll).unwrap_or_else(|| panic!("no tab shows {coll}"))
@@ -94,80 +29,45 @@ fn go_tab(ui: &mut UiApp, coll: &str) {
     ui.wait("the tab to be current", |a| a.t().is_some_and(|t| t.sel.coll == coll && !t.loading));
 }
 
-/// Replaces the text of the focused editor. The inline editor does not select its text when it opens.
-fn type_over(ui: &mut UiApp, text: &str) {
-    ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    ui.h.event(egui::Event::Text(text.into()));
-    ui.settle();
-}
-
-/// Takes back the most recent action through the toolbar and Recent changes, leaving that dialog open: the answer may raise a
-/// toast with a Close button of its own, which a close clicked meanwhile could hit instead of the dialog's.
-fn undo_latest(ui: &mut UiApp) {
-    let n = ui.app().undo.len();
-    ui.click(&format!("Undo ({n})"));
-    ui.click("Undo change 1");
-}
-
-/// Closes Recent changes once no toast is left to share its Close label.
-fn close_recent_changes(ui: &mut UiApp) {
-    ui.h.state_mut().toasts.clear();
-    ui.settle();
-    ui.click("Close");
-    ui.wait("Recent changes to close", |a| a.modal.is_none());
-}
-
-/// Opens the Documents bar's menu and the typed confirmation of `item`, then types `coll` into it.
-fn typed_confirm_of(ui: &mut UiApp, item: &str, coll: &str) {
+/// Opens two collections in tabs and the typed confirmation of `item` on the first, makes the second current while the dialog
+/// is open, as a shortcut or a link answered meanwhile can, then confirms.
+fn confirm_on_another_tab(f: &Fixture, item: &str) -> UiApp {
+    let (a, b) = (&f.names[0], &f.names[1]);
+    let mut ui = ui_app(VAR).unwrap();
+    open_two(&mut ui, a, b);
+    ui.unlock();
     ui.click("Document actions");
     ui.click(item);
-    ui.wait("the typed confirmation", |a| matches!(&a.modal, Some(Modal::Typed { expect, .. }) if expect == coll));
-    ui.fill("Confirmation", coll);
+    ui.wait("the typed confirmation", |x| matches!(&x.modal, Some(Modal::Typed { expect, .. }) if expect == a));
+    ui.fill("Confirmation", a);
+    let ib = tab_of(ui.app(), b);
+    ui.h.state_mut().set_cur(ib);
+    ui.settle();
+    ui.click_last("Confirm");
+    ui
 }
 
 #[test]
 fn delete_all_matching_runs_on_the_tab_it_was_opened_on() {
-    let Some(f) = Fx::new("delpin", vec![seed(), seed()]) else { return };
-    let (a, b) = (f.names[0].clone(), f.names[1].clone());
-    let mut ui = ui_app(VAR).unwrap();
-    open_two(&mut ui, &a, &b);
-    ui.unlock();
-    typed_confirm_of(&mut ui, "Delete all matching documents…", &a);
-    // Another tab becomes current while the dialog is open, as a shortcut or a link answered meanwhile can make it.
-    let ib = tab_of(ui.app(), &b);
-    ui.h.state_mut().set_cur(ib);
-    ui.settle();
-    ui.click_last("Confirm");
-    f.expect(&mut ui, 0, vec![]);
-    assert_eq!(f.all(1), seed(), "the tab that became current lost its documents");
-    assert_eq!(ui.app().t().unwrap().sel.coll, b, "running the action moved off the current tab");
+    let Some(f) = Fixture::many("delpin", vec![seed(), seed()]) else { return };
+    let mut ui = confirm_on_another_tab(&f, "Delete all matching documents…");
+    f.expect(&mut ui, vec![]);
+    assert_eq!(f.all_in(1), seed(), "the tab that became current lost its documents");
+    assert_eq!(ui.app().t().unwrap().sel.coll, f.names[1], "running the action moved off the current tab");
 }
 
 #[test]
 fn drop_collection_drops_the_collection_it_names() {
-    let Some(f) = Fx::new("droppin", vec![seed(), seed()]) else { return };
-    let (a, b) = (f.names[0].clone(), f.names[1].clone());
-    let mut ui = ui_app(VAR).unwrap();
-    open_two(&mut ui, &a, &b);
-    ui.unlock();
-    typed_confirm_of(&mut ui, "Drop collection…", &a);
-    let ib = tab_of(ui.app(), &b);
-    ui.h.state_mut().set_cur(ib);
-    ui.settle();
-    ui.click_last("Confirm");
-    let t = std::time::Instant::now();
-    while f.exists(0) {
-        assert!(t.elapsed() < LIMIT, "{a} was not dropped; last error: {}", ui.app().last_problem());
-        ui.h.step();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(f.exists(1) && f.all(1) == seed(), "the tab that became current was dropped");
-    ui.wait("the dropped collection's tab to close", |x| x.tabs.iter().all(|t| t.sel.coll != a));
+    let Some(f) = Fixture::many("droppin", vec![seed(), seed()]) else { return };
+    let mut ui = confirm_on_another_tab(&f, "Drop collection…");
+    ui.wait("the first collection to be dropped", |_| !f.exists(0));
+    assert!(f.exists(1) && f.all_in(1) == seed(), "the tab that became current was dropped");
+    ui.wait("the dropped collection's tab to close", |x| x.tabs.iter().all(|t| t.sel.coll != f.names[0]));
 }
 
 #[test]
 fn projected_rows_refuse_edits_duplicates_and_deletes() {
-    let Some(f) = Fx::new("proj", vec![seed()]) else { return };
+    let Some(f) = Fixture::new("proj", seed()) else { return };
     let mut ui = ui_app(VAR).unwrap();
     ui.open_table(DB, "", &f.names[0]);
     ui.unlock();
@@ -180,7 +80,7 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
     // An inline edit is not staged: its row holds only some fields, so saving it would fail or drop the others.
     ui.double_click_cell("name", 1);
     ui.wait("the inline editor", |a| a.inline.is_some());
-    type_over(&mut ui, "changed");
+    ui.type_over("changed");
     ui.h.key_press(egui::Key::Enter);
     ui.settle();
     assert!(ui.app().drafts.is_empty(), "a projected row was staged");
@@ -201,21 +101,22 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
     ui.click_last("Duplicate");
     assert!(ui.app().insert.is_none(), "Duplicate opened the insert editor on a projected row");
     assert!(ui.said(refused), "no warning for Duplicate: {}", ui.app().last_problem());
-    assert_eq!(f.all(0), seed());
+    assert_eq!(f.all(), seed());
 }
 
 #[test]
 fn a_count_past_the_time_limit_still_shows_the_page() {
-    // Each document from _id 60 on costs 5 ms of server JavaScript, so counting them all takes about 15 s while the first page,
-    // read in insertion order, is instant. $where would be simpler, but count_documents runs an aggregation, where it is refused.
-    let docs = (0..3000).map(|i| doc! { "_id": i, "n": i }).collect();
-    let Some(f) = Fx::new("slowcount", vec![docs]) else { return };
+    // Each document from _id 60 on costs 10 ms of server JavaScript, so counting them all takes about 3.4 s, past the 1.5 s limit,
+    // while the first page, read in insertion order, is instant. $where would be simpler, but count_documents runs an aggregation,
+    // where it is refused.
+    let docs = (0..400).map(|i| doc! { "_id": i, "n": i }).collect();
+    let Some(f) = Fixture::new("slowcount", docs) else { return };
     let mut ui = ui_app(VAR).unwrap();
     // Set once connected, since the query timeout also bounds the connect.
     ui.h.state_mut().prefs.timeout_ms = 1500;
     ui.open_table(DB, "", &f.names[0]);
     let a = ui.h.state_mut();
-    a.tm().unwrap().filter_txt = r#"{ $expr: { $function: { body: "function(id) { if (id < 60) return true; var end = Date.now() + 5; while (Date.now() < end) {} return true; }", args: ["$_id"], lang: "js" } } }"#.into();
+    a.tm().unwrap().filter_txt = r#"{ $expr: { $function: { body: "function(id) { if (id < 60) return true; var end = Date.now() + 10; while (Date.now() < end) {} return true; }", args: ["$_id"], lang: "js" } } }"#.into();
     a.run_query();
     let size = ui.app().page_size();
     ui.wait("the slow filter's page", |a| a.t().is_some_and(|t| !t.loading && t.query.filter.contains_key("$expr")));
@@ -228,7 +129,7 @@ fn a_count_past_the_time_limit_still_shows_the_page() {
 
 #[test]
 fn a_failed_undo_stays_in_the_list() {
-    let Some(f) = Fx::new("undofail", vec![seed()]) else { return };
+    let Some(f) = Fixture::new("undofail", seed()) else { return };
     let mut ui = ui_app(VAR).unwrap();
     ui.open_table(DB, "", &f.names[0]);
     ui.unlock();
@@ -238,19 +139,20 @@ fn a_failed_undo_stays_in_the_list() {
     ui.wait("the delete and its undo entry", |a| a.undo.len() == 1 && a.t().is_some_and(|t| !t.loading && t.docs.len() == 2));
     // The document comes back another way, so putting it back again fails on its _id.
     f.rt.block_on(async { f.coll(0).insert_one(doc! { "_id": 2, "name": "beta", "qty": 2 }).await.unwrap() });
-    undo_latest(&mut ui);
+    // The dialog stays open until the answer, whose error toast brings a Close button of its own.
+    ui.undo_latest_open();
     ui.wait("the failed undo to come back", |a| a.undo.len() == 1 && a.last_problem().contains("E11000"));
-    assert_eq!(f.all(0), seed());
-    close_recent_changes(&mut ui);
+    assert_eq!(f.all(), seed());
+    ui.close_recent_changes();
     // Once the blocker is gone, the same entry still undoes the delete.
     f.rt.block_on(async { f.coll(0).delete_one(doc! { "_id": 2 }).await.unwrap() });
-    undo_latest(&mut ui);
-    f.expect(&mut ui, 0, seed());
+    ui.undo_latest_open();
+    f.expect(&mut ui, seed());
 }
 
 #[test]
 fn a_write_for_another_tab_keeps_the_open_editor() {
-    let Some(f) = Fx::new("otherwrite", vec![seed(), seed()]) else { return };
+    let Some(f) = Fixture::many("otherwrite", vec![seed(), seed()]) else { return };
     let (a, b) = (f.names[0].clone(), f.names[1].clone());
     let mut ui = ui_app(VAR).unwrap();
     open_two(&mut ui, &a, &b);
@@ -258,7 +160,7 @@ fn a_write_for_another_tab_keeps_the_open_editor() {
     ui.unlock();
     ui.double_click_cell("name", 1);
     ui.wait("the inline editor", |x| x.inline.is_some());
-    type_over(&mut ui, "typing");
+    ui.type_over("typing");
     // A write for the other tab's collection finishes while the editor is open.
     let app = ui.h.state_mut();
     let sel = app.tabs[tab_of(app, &a)].sel.clone();
@@ -266,7 +168,7 @@ fn a_write_for_another_tab_keeps_the_open_editor() {
     app.worker.insert(CONN, target, doc! { "_id": 10, "name": "delta" }, None);
     let mut want = seed();
     want.push(doc! { "_id": 10, "name": "delta" });
-    f.expect(&mut ui, 0, want);
+    f.expect(&mut ui, want);
     ui.wait("the other tab to reload", |x| x.tabs[tab_of(x, &a)].docs.len() == 4 && !x.tabs[tab_of(x, &a)].loading);
     ui.settle();
     assert!(ui.app().inline.as_ref().is_some_and(|i| i.text == "typing"), "a write for another tab closed the editor");
@@ -274,7 +176,7 @@ fn a_write_for_another_tab_keeps_the_open_editor() {
 
 #[test]
 fn duplicate_tab_keeps_a_typed_filter_marked_unrun() {
-    let Some(f) = Fx::new("duptab", vec![seed()]) else { return };
+    let Some(f) = Fixture::new("duptab", seed()) else { return };
     let coll = f.names[0].clone();
     let mut ui = ui_app(VAR).unwrap();
     ui.open_table(DB, "", &coll);
@@ -293,7 +195,7 @@ fn duplicate_tab_keeps_a_typed_filter_marked_unrun() {
 
 #[test]
 fn a_pasted_query_for_another_collection_keeps_that_tabs_work() {
-    let Some(f) = Fx::new("paste", vec![seed(), seed()]) else { return };
+    let Some(f) = Fixture::many("paste", vec![seed(), seed()]) else { return };
     let (a, b) = (f.names[0].clone(), f.names[1].clone());
     let mut ui = ui_app(VAR).unwrap();
     open_two(&mut ui, &a, &b);
@@ -318,34 +220,32 @@ fn a_pasted_query_for_another_collection_keeps_that_tabs_work() {
 
 #[test]
 fn an_explain_waits_for_the_open_dialog() {
-    let Some(f) = Fx::new("late", vec![seed()]) else { return };
+    let Some(f) = Fixture::new("late", seed()) else { return };
+    let coll = f.names[0].clone();
     let mut ui = ui_app(VAR).unwrap();
-    ui.open_table(DB, "", &f.names[0]);
+    ui.open_table(DB, "", &coll);
     // In one frame, so the dialog is open before the plan can arrive.
     let a = ui.h.state_mut();
     a.explain();
     a.modal = Some(Modal::Text { title: "Held".into(), body: "typed".into(), code: false });
-    ui.wait("the plan to arrive", |a| !a.late_modals.is_empty());
+    // The query log shows when the server has answered; the frames after it let the answer reach the app.
+    let answered = || db::log().iter().any(|e| e.name == "explain" && e.ms.is_some() && e.cmd.contains(coll.as_str()));
+    ui.wait("the server to answer the explain", |_| answered());
+    ui.run_for(Duration::from_millis(300));
     assert!(matches!(&ui.app().modal, Some(Modal::Text { title, .. }) if title == "Held"), "the plan replaced the open dialog");
     ui.key(egui::Modifiers::NONE, egui::Key::Escape);
     ui.wait("the plan to open", |a| matches!(a.modal, Some(Modal::Explain { .. })));
 }
 
-/// Connects the test connection again and waits until it is ready.
-fn reconnect(ui: &mut UiApp, uri: &str) {
-    let before = ui.app().conn(CONN).unwrap().attempt;
-    ui.h.state_mut().connect_uri(CONN, uri.into());
-    ui.wait("the reconnect", |a| a.conn(CONN).is_some_and(|c| c.attempt != before && c.status == Status::Ready));
-}
-
 #[test]
 fn a_reconnect_locks_writes_again() {
-    let Some(f) = Fx::new("relock", vec![seed()]) else { return };
+    let Some(f) = Fixture::new("relock", seed()) else { return };
     let uri = std::env::var(VAR).unwrap();
     let mut ui = ui_app(VAR).unwrap();
     ui.open_table(DB, "", &f.names[0]);
     ui.unlock();
-    reconnect(&mut ui, &uri);
+    ui.connect(CONN, &uri);
+    ui.assert_ready(CONN);
     assert!(!ui.app().conn(CONN).unwrap().writable, "the reconnected connection kept writes on");
     ui.wait("the rows", |a| a.t().is_some_and(|t| !t.loading && t.docs.len() == 3));
     ui.double_click_cell("name", 1);
@@ -354,8 +254,9 @@ fn a_reconnect_locks_writes_again() {
     assert!(ui.app().inline.is_none() && ui.app().drafts.is_empty());
     // Always allow writes turns them back on after a reconnect.
     ui.h.state_mut().prefs.always_writable = true;
-    reconnect(&mut ui, &uri);
+    ui.connect(CONN, &uri);
+    ui.assert_ready(CONN);
     ui.settle();
     assert!(ui.app().conn(CONN).unwrap().writable, "Always allow writes did not turn writes back on");
-    assert_eq!(f.all(0), seed());
+    assert_eq!(f.all(), seed());
 }

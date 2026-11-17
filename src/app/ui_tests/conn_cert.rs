@@ -18,8 +18,7 @@ fn form_mut(app: &mut App) -> &mut ConnForm {
 
 #[test]
 fn the_tls_tab_takes_a_client_certificate_and_test_signs_in_with_it() {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let mut ui = UiApp { h };
+    let mut ui = harness();
     open_form(&mut ui, db::sql::Engine::MySql, db::sql::Addr { scheme: "mysql".into(), port: 3306, ..Default::default() });
     ui.show("CA file");
     // MySQL takes the certificate and key files but has no passphrase field, since its driver cannot read an encrypted key.

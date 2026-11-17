@@ -621,6 +621,16 @@ pub fn shell_text(b: &Bson) -> String {
     }
 }
 
+/// Whether a test that runs scripts must skip. The live tests run the runtime as plain `bun`, so it must be on PATH.
+#[cfg(test)]
+pub(crate) fn bun_missing() -> bool {
+    let missing = std::process::Command::new("bun").arg("--version").output().is_err();
+    if missing {
+        eprintln!("skipped: bun is not on PATH");
+    }
+    missing
+}
+
 /// Runs a script to its end for a live test, with the queries it sent, as the Shell tab would see them.
 #[cfg(test)]
 pub(crate) fn run_shell_blocking(w: &super::Worker, job: &ShellJob) -> (Vec<super::ShellQuery>, Res<(String, Option<u64>)>) {

@@ -3,22 +3,32 @@
 //! its address from the keychain, so the parts that need the driver are here. Each test works in its own database of
 //! QUARRY_TEST_MONGO and skips when that is unset or Bun is missing. The package install test also needs the network a live run has.
 
-use super::shell::{ShellJob, prepare_shell_dir, runner_package};
+use super::shell::{ShellJob, bun_missing, prepare_shell_dir, runner_package};
 use super::{Msg, Res, Worker};
 use mongodb::bson::{Bson, Document, doc};
 use std::time::Duration;
 
-fn bun_missing() -> bool {
-    let missing = std::process::Command::new("bun").arg("--version").output().is_err();
-    if missing {
-        println!("skipped: bun is not installed");
-    }
-    missing
-}
-
 struct Run {
     logs: Vec<String>,
     res: Res<Bson>,
+}
+
+impl Run {
+    /// The document the script returned.
+    fn doc(self) -> Document {
+        match self.res {
+            Ok(Bson::Document(d)) => d,
+            other => panic!("{other:?} {:?}", self.logs),
+        }
+    }
+
+    /// The rows the script returned.
+    fn rows(self) -> Vec<Bson> {
+        match self.res {
+            Ok(Bson::Array(a)) => a,
+            other => panic!("{other:?} {:?}", self.logs),
+        }
+    }
 }
 
 /// Runs `code` on QUARRY_TEST_MONGO with `db` as its database, writes allowed, as the Shell tab would.
@@ -72,16 +82,10 @@ fn live_shell_fix_returns_an_aggregation_ending_in_out_or_merge() {
 fn live_shell_fix_returns_the_rows_of_list_collections_and_list_indexes() {
     let db = "quarry_shell_fix_list";
     let Some(r) = run(db, "async function run() { await db.dropDatabase(); await db.collection('alpha').insertOne({ a: 1 }); await db.collection('alpha').createIndex({ a: 1 }); return db.listCollections(); }") else { return };
-    let rows = match r.res {
-        Ok(Bson::Array(a)) => a,
-        other => panic!("{other:?}"),
-    };
+    let rows = r.rows();
     assert!(rows.iter().any(|d| d.as_document().and_then(|d| d.get_str("name").ok()) == Some("alpha")), "{rows:?}");
     let Some(r) = run(db, "async function run() { return db.collection('alpha').listIndexes(); }") else { return };
-    let rows = match r.res {
-        Ok(Bson::Array(a)) => a,
-        other => panic!("{other:?}"),
-    };
+    let rows = r.rows();
     let names: Vec<&str> = rows.iter().filter_map(|d| d.as_document()?.get_str("name").ok()).collect();
     assert_eq!(names, ["_id_", "a_1"]);
 }
@@ -117,10 +121,7 @@ fn live_shell_fix_numbers_past_2_63_come_back_as_doubles() {
   return { read: d.v, made: -(2 ** 64), small: 5 };
 }";
     let Some(r) = run("quarry_shell_fix_num", code) else { return };
-    let d = match r.res {
-        Ok(Bson::Document(d)) => d,
-        other => panic!("{other:?}"),
-    };
+    let d = r.doc();
     assert_eq!(d.get("read"), Some(&Bson::Double(9223372036854775808.0)), "{d}");
     assert_eq!(d.get("made"), Some(&Bson::Double(-18446744073709551616.0)), "{d}");
     assert_eq!(d.get("small"), Some(&Bson::Int32(5)), "{d}");
@@ -133,13 +134,11 @@ fn live_shell_fix_lone_surrogates_with_the_driver_loaded() {
   return { s: 'x\uDC00y', ['k\uD800']: [1, 'z\uD800'] };
 }"#;
     let Some(r) = run("quarry_shell_fix_utf", code) else { return };
-    let d = match r.res {
-        Ok(Bson::Document(d)) => d,
-        other => panic!("{other:?} {:?}", r.logs),
-    };
+    let logs = r.logs.clone();
+    let d = r.doc();
     assert_eq!(d.get_str("s").ok(), Some("x\u{FFFD}y"), "{d}");
     assert_eq!(d.get_array("k\u{FFFD}").ok().and_then(|a| a.get(1)).and_then(Bson::as_str), Some("z\u{FFFD}"), "{d}");
-    assert!(r.logs.len() == 1 && r.logs[0].starts_with("a\u{FFFD}b") && r.logs[0].contains("c\u{FFFD}"), "{:?}", r.logs);
+    assert!(logs.len() == 1 && logs[0].starts_with("a\u{FFFD}b") && logs[0].contains("c\u{FFFD}"), "{logs:?}");
 }
 
 /// An install that failed or was stopped must be tried again on the next run. Comparing package.json with what the app would

@@ -4,17 +4,9 @@
 
 use crate::db::sql::testing::{every_pg, live, LivePg};
 use crate::db::sql::Db;
-use crate::db::{Msg, Res, ShellJob, ShellQuery, SqlRelay, Worker};
+use crate::db::{bun_missing, Msg, Res, ShellJob, ShellQuery, SqlRelay, Worker};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
-
-fn bun_missing() -> bool {
-    let missing = std::process::Command::new("bun").arg("--version").output().is_err();
-    if missing {
-        println!("skipped: bun is not installed");
-    }
-    missing
-}
 
 /// Fresh schemas of the shared database with `ddl` run in the first, and the `Db` pointing at that database.
 fn fixture(l: &LivePg, schemas: &[&str], ddl: &str) -> Db {
