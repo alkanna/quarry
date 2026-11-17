@@ -228,15 +228,8 @@ impl App {
                         }
                     }
                 }
-                Msg::Update(res) => match res {
-                    Ok(Some(v)) => {
-                        self.update_note = format!("Version {v} is installed and starts on restart.");
-                        self.updated = Some(v);
-                    }
-                    Ok(None) => self.update_note = format!("Up to date (version {}).", env!("CARGO_PKG_VERSION")),
-                    // Offline or rate-limited checks stay quiet; the reason shows in Settings.
-                    Err(e) => self.update_note = format!("Last check failed: {e}"),
-                },
+                Msg::UpdateChecked(res) => self.on_update_checked(res),
+                Msg::UpdateInstalled(res) => self.on_update_installed(res),
                 Msg::ToolsInstalled(res) => {
                     // Only a click shows failures; a background update that fails stays quiet, like the app's own.
                     let manual = std::mem::take(&mut self.tools_installing);

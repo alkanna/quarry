@@ -91,40 +91,120 @@ pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
     }
 }
 
-/// Ok(None) when up to date, Ok(Some(version)) once a newer version is installed and a restart
-/// will start it.
-pub fn check_and_install() -> Result<Option<String>, String> {
-    let Some(target) = install_target() else { return Ok(None) };
+/// A newer release with a build for this platform.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Available {
+    pub version: String,
+    /// The archive's file name, as `asset_name` gives it.
+    pub name: String,
+    pub url: String,
+    /// In bytes, as GitHub lists it; 0 when unknown.
+    pub size: u64,
+    pub sum_url: String,
+    /// The release body, parsed like CHANGELOG.md.
+    pub notes: Vec<Section>,
+}
+
+/// Ok(None) when up to date, or when Quarry runs from somewhere it never updates (a cargo build).
+pub fn check() -> Result<Option<Available>, String> {
+    if install_target().is_none() {
+        return Ok(None);
+    }
     let Some(name) = asset_name() else { return Ok(None) };
     let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let json = run(Command::new("curl").args(["-fsSL", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: quarry-updater", &api]))?;
     let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let tag = v["tag_name"].as_str().ok_or("The latest release has no tag.")?;
-    if !newer(env!("CARGO_PKG_VERSION"), tag) {
-        return Ok(None);
-    }
-    // The release is published minutes before the build jobs attach their files: until then it
-    // counts as up to date and the next check picks it up.
-    let asset_url = |n: &str| v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == n)).and_then(|x| x["browser_download_url"].as_str());
-    let Some(url) = asset_url(&name) else { return Ok(None) };
-    // The build jobs upload the checksum before the archive, so an archive without one is from a
-    // release older than checksums or a broken build, never one still being attached.
-    let sum_url = asset_url(&format!("{name}.sha256")).ok_or_else(|| format!("Quarry {tag} publishes no checksum for {name}, so it was not installed."))?;
-    let sum = run(Command::new("curl").args(["-fsSL", sum_url]))?;
-    let sha = parse_checksum(&sum).ok_or_else(|| format!("The checksum of {name} is unreadable, so Quarry {tag} was not installed."))?;
-    let dir = fresh_temp_dir("quarry-update")?;
-    let installed = download_and_install(&dir, &name, url, &sha, &target);
-    remove(&dir);
-    installed?;
-    Ok(Some(tag.trim_start_matches('v').to_string()))
+    available(&v, &name, env!("CARGO_PKG_VERSION"))
 }
 
-fn download_and_install(dir: &Path, name: &str, url: &str, sha: &str, target: &Path) -> Result<(), String> {
+fn available(v: &serde_json::Value, name: &str, current: &str) -> Result<Option<Available>, String> {
+    let tag = v["tag_name"].as_str().ok_or("The latest release has no tag.")?;
+    if !newer(current, tag) {
+        return Ok(None);
+    }
+    let asset = |n: &str| v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == n));
+    // The release is published minutes before the build jobs attach their files: until then it
+    // counts as up to date and the next check picks it up.
+    let Some(a) = asset(name) else { return Ok(None) };
+    let url = a["browser_download_url"].as_str().ok_or_else(|| format!("{name} has no download address."))?;
+    // The build jobs upload the checksum before the archive, so an archive without one is from a
+    // release older than checksums or a broken build, never one still being attached.
+    let sum_url = asset(&format!("{name}.sha256")).and_then(|x| x["browser_download_url"].as_str()).ok_or_else(|| format!("Quarry {tag} publishes no checksum for {name}, so it was not installed."))?;
+    Ok(Some(Available { version: tag.trim_start_matches('v').to_string(), name: name.to_string(), url: url.to_string(), size: a["size"].as_u64().unwrap_or(0), sum_url: sum_url.to_string(), notes: parse_body(v["body"].as_str().unwrap_or("")) }))
+}
+
+/// Shared with the UI while an update downloads.
+#[derive(Default, Debug)]
+pub struct Progress {
+    pub bytes: std::sync::atomic::AtomicU64,
+    pub verifying: std::sync::atomic::AtomicBool,
+    pub cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Progress {
+    /// How far the download is, when its size is known; full once it is being checked.
+    pub fn percent(&self, size: u64) -> Option<u8> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.verifying.load(Relaxed) { Some(100) } else { percent(self.bytes.load(Relaxed), size) }
+    }
+}
+
+/// The error of a download stopped through `Progress::cancel`.
+const CANCELLED: &str = "The download was cancelled.";
+
+pub fn percent(bytes: u64, size: u64) -> Option<u8> {
+    (size > 0).then(|| (bytes.saturating_mul(100) / size).min(100) as u8)
+}
+
+/// Downloads, checks and installs the release; returns its version, which starts on restart.
+pub fn download(a: &Available, prog: &Progress) -> Result<String, String> {
+    let target = install_target().ok_or("Quarry is not running from an installed copy, so it cannot update itself.")?;
+    let sum = run(Command::new("curl").args(["-fsSL", &a.sum_url]))?;
+    let sha = parse_checksum(&sum).ok_or_else(|| format!("The checksum of {} is unreadable, so Quarry {} was not installed.", a.name, a.version))?;
+    let dir = fresh_temp_dir("quarry-update")?;
+    let installed = fetch(&dir.join(&a.name), &a.url, prog).and_then(|archive| {
+        prog.verifying.store(true, std::sync::atomic::Ordering::Relaxed);
+        unpack_and_install(&dir, &a.name, &archive, &sha, &target)
+    });
+    remove(&dir);
+    installed.map(|_| a.version.clone())
+}
+
+/// curl into `to`, reporting the bytes written every 100 ms and stopping on cancel.
+fn fetch(to: &Path, url: &str, prog: &Progress) -> Result<PathBuf, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", "-o"]).arg(to).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, CREATE_NO_WINDOW);
+    let mut child = cmd.spawn().map_err(|e| format!("curl: {e}"))?;
+    let size = || std::fs::metadata(to).map_or(0, |m| m.len());
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| format!("curl: {e}"))? {
+            prog.bytes.store(size(), Relaxed);
+            if st.success() {
+                return Ok(to.to_path_buf());
+            }
+            let mut err = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut s, &mut err);
+            }
+            return Err(format!("curl: {}", err.trim()));
+        }
+        if prog.cancel.load(Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        prog.bytes.store(size(), Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn unpack_and_install(dir: &Path, name: &str, archive: &Path, sha: &str, target: &Path) -> Result<(), String> {
     let out = dir.join("x");
     std::fs::create_dir(&out).map_err(|e| e.to_string())?;
-    let archive = dir.join(name);
-    run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(url))?;
-    if !sha256_matches(&archive, sha)? {
+    if !sha256_matches(archive, sha)? {
         return Err(format!("The downloaded {name} does not match its published checksum; nothing was installed."));
     }
     if cfg!(target_os = "macos") {
@@ -325,45 +405,155 @@ fn install(new: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The notes of every release after `since` up to `version`, newest first, from CHANGELOG.md
-/// (written by release-please), as plain text. An update can skip releases, for example when
-/// Quarry was not opened for a while, so the notes cover all of them. An unknown `since`, as in
-/// settings from 0.2.0 and earlier, gives the notes of `version` alone.
-pub fn changelog(since: &str, version: &str) -> Option<String> {
-    changelog_in(include_str!("../CHANGELOG.md"), since, version)
+/// What a section of release notes is about, from its release-please heading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    New,
+    Fixed,
+    Faster,
+    Other,
 }
 
-fn changelog_in(text: &str, since: &str, version: &str) -> Option<String> {
-    // Release headings are "## [1.2.0](compare link) (date)", section headings "### Features".
-    fn release(l: &str) -> Option<&str> {
-        l.strip_prefix('#')?.trim_start_matches('#').trim_start().strip_prefix('[')?.split(']').next()
+impl Kind {
+    fn of(heading: &str) -> Kind {
+        match heading {
+            "Features" => Kind::New,
+            "Bug Fixes" => Kind::Fixed,
+            "Performance Improvements" => Kind::Faster,
+            _ => Kind::Other,
+        }
     }
-    let (top, from) = (parse(version)?, parse(since));
+}
+
+/// One line of release notes: "agents: fenced $objectToArray ..." from PR #279.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub scope: Option<String>,
+    pub text: String,
+    pub pr: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub kind: Kind,
+    /// The heading as written, kept for copied text.
+    pub title: String,
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    pub version: String,
+    /// As in the heading, 2026-11-17, or empty.
+    pub date: String,
+    pub sections: Vec<Section>,
+}
+
+impl Release {
+    pub fn count(&self, kind: Kind) -> usize {
+        self.sections.iter().filter(|s| s.kind == kind).map(|s| s.entries.len()).sum()
+    }
+}
+
+/// The notes of every release after `since` up to `version`, newest first, from CHANGELOG.md
+/// (written by release-please). An update can skip releases, for example when Quarry was not
+/// opened for a while, so the notes cover all of them. An unknown `since`, as in settings from
+/// 0.2.0 and earlier, gives the notes of `version` alone.
+pub fn changelog(since: &str, version: &str) -> Vec<Release> {
+    releases(include_str!("../CHANGELOG.md"), since, version)
+}
+
+fn releases(text: &str, since: &str, version: &str) -> Vec<Release> {
+    // Release headings are "## [1.2.0](compare link) (2026-11-17)".
+    fn heading(l: &str) -> Option<(&str, &str)> {
+        let rest = l.strip_prefix('#')?.trim_start_matches('#').trim_start().strip_prefix('[')?;
+        let (v, after) = rest.split_once(']')?;
+        let date = after.rsplit_once('(').map_or("", |(_, d)| d.trim_end_matches(')').trim());
+        Some((v, date))
+    }
+    let Some(top) = parse(version) else { return Vec::new() };
+    let from = parse(since);
     let wanted = |v: &str| parse(v).is_some_and(|v| v <= top && from.map_or(v == top, |f| v > f));
-    let mut sections: Vec<(String, String)> = Vec::new();
-    let mut cur: Option<(String, String)> = None;
-    for l in text.lines() {
-        if let Some(v) = release(l) {
-            sections.extend(cur.take());
-            cur = wanted(v).then(|| (v.to_string(), String::new()));
-            continue;
-        }
-        let Some((_, out)) = cur.as_mut() else { continue };
-        // Drops the trailing commit link, " ([abc1234](https://...))", and bold scopes.
-        let l = l.find(" ([").map_or(l, |i| &l[..i]).replace("**", "");
-        let l = l.trim_start_matches('#').trim();
-        let l = l.strip_prefix("* ").map_or(l.to_string(), |b| format!("- {b}"));
-        if !l.is_empty() || !out.ends_with("\n\n") {
-            out.push_str(&l);
-            out.push('\n');
+    fn close(cur: Option<(Release, String)>, out: &mut Vec<Release>) {
+        if let Some((mut r, body)) = cur {
+            r.sections = parse_body(&body);
+            if !r.sections.is_empty() {
+                out.push(r);
+            }
         }
     }
-    sections.extend(cur);
-    let sections: Vec<(String, String)> = sections.into_iter().map(|(v, b)| (v, b.trim().to_string())).filter(|(_, b)| !b.is_empty()).collect();
-    match sections.as_slice() {
-        [] => None,
-        [(_, body)] => Some(body.clone()),
-        many => Some(many.iter().map(|(v, b)| format!("Quarry {v}\n\n{b}")).collect::<Vec<_>>().join("\n\n")),
+    let mut out = Vec::new();
+    let mut cur: Option<(Release, String)> = None;
+    for l in text.lines() {
+        if let Some((v, date)) = heading(l) {
+            close(cur.take(), &mut out);
+            cur = wanted(v).then(|| (Release { version: v.to_string(), date: date.to_string(), sections: Vec::new() }, String::new()));
+        } else if let Some((_, body)) = cur.as_mut() {
+            body.push_str(l);
+            body.push('\n');
+        }
+    }
+    close(cur, &mut out);
+    out
+}
+
+/// The sections of one release's notes, as release-please writes them in CHANGELOG.md and in
+/// the GitHub release body: "### Features" headings over "* **scope:** text ([#1](..)) ([abc](..))".
+pub fn parse_body(text: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for l in text.lines() {
+        let t = l.trim();
+        if let Some(h) = t.strip_prefix("###") {
+            let title = h.trim().to_string();
+            out.push(Section { kind: Kind::of(&title), title, entries: Vec::new() });
+        } else if let Some(b) = t.strip_prefix("* ").or_else(|| t.strip_prefix("- ")) {
+            if out.is_empty() {
+                out.push(Section { kind: Kind::Other, title: String::new(), entries: Vec::new() });
+            }
+            out.last_mut().unwrap().entries.push(entry(b));
+        }
+    }
+    out.retain(|s| !s.entries.is_empty());
+    out
+}
+
+fn entry(line: &str) -> Entry {
+    let pr = line.find("([#").and_then(|i| line[i + 3..].split(']').next()?.parse().ok());
+    // The links go: " ([#279](https://...)) ([8a8be5a](https://...))".
+    let line = line.find(" ([").map_or(line, |i| &line[..i]).trim();
+    let (scope, text) = match line.strip_prefix("**").and_then(|r| r.split_once(":**")) {
+        Some((s, t)) => (Some(unescape(s.trim())), t.trim()),
+        None => (None, line),
+    };
+    let text = unescape(text);
+    let mut c = text.chars();
+    let text = c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect());
+    Entry { scope, text, pr }
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&gt;", ">").replace("&lt;", "<").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+}
+
+/// The notes as plain text for the clipboard. Several releases each get a "Quarry x.y.z" line.
+pub fn notes_text(rs: &[Release]) -> String {
+    let body = |r: &Release| {
+        r.sections
+            .iter()
+            .map(|s| {
+                let items = s.entries.iter().map(|e| match &e.scope {
+                    Some(sc) => format!("- {sc}: {}", e.text),
+                    None => format!("- {}", e.text),
+                });
+                let items = items.collect::<Vec<_>>().join("\n");
+                if s.title.is_empty() { items } else { format!("{}\n\n{items}", s.title) }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    match rs {
+        [one] => body(one),
+        many => many.iter().map(|r| format!("Quarry {}\n\n{}", r.version, body(r))).collect::<Vec<_>>().join("\n\n"),
     }
 }
 
@@ -456,12 +646,57 @@ mod tests {
 
     #[test]
     fn changelog_section() {
-        assert_eq!(changelog("", "0.2.0").as_deref(), Some("Features\n\n- initial release of Quarry, a native MongoDB workbench"));
-        assert_eq!(changelog("", "9.9.9"), None);
-        let text = "# Changelog\n\n## [0.3.0](x) (d)\n\n### Features\n\n* c ([1](y))\n\n## [0.2.1](x) (d)\n\n### Bug Fixes\n\n* b\n\n## [0.2.0](x) (d)\n\n* a\n";
+        assert_eq!(notes_text(&changelog("", "0.2.0")), "Features\n\n- Initial release of Quarry, a native MongoDB workbench");
+        assert!(changelog("", "9.9.9").is_empty());
+        let text = "# Changelog\n\n## [0.3.0](x) (2026-11-17)\n\n### Features\n\n* c ([1](y))\n\n## [0.2.1](x) (d)\n\n### Bug Fixes\n\n* b\n\n## [0.2.0](x) (d)\n\n* a\n";
         // Skipped releases are included, newest first, each under its version.
-        assert_eq!(changelog_in(text, "0.2.0", "0.3.0").as_deref(), Some("Quarry 0.3.0\n\nFeatures\n\n- c\n\nQuarry 0.2.1\n\nBug Fixes\n\n- b"));
-        assert_eq!(changelog_in(text, "0.2.1", "0.3.0").as_deref(), Some("Features\n\n- c"));
-        assert_eq!(changelog_in(text, "", "0.2.1").as_deref(), Some("Bug Fixes\n\n- b"));
+        assert_eq!(notes_text(&releases(text, "0.2.0", "0.3.0")), "Quarry 0.3.0\n\nFeatures\n\n- C\n\nQuarry 0.2.1\n\nBug Fixes\n\n- B");
+        assert_eq!(notes_text(&releases(text, "0.2.1", "0.3.0")), "Features\n\n- C");
+        assert_eq!(notes_text(&releases(text, "", "0.2.1")), "Bug Fixes\n\n- B");
+        assert_eq!(releases(text, "", "0.3.0")[0].date, "2026-11-17");
+        // A release whose notes have no section heading still lists its entries.
+        assert_eq!(notes_text(&releases(text, "", "0.2.0")), "- A");
+    }
+
+    #[test]
+    fn latest_release() {
+        let asset = |n: &str, size: u64| serde_json::json!({ "name": n, "size": size, "browser_download_url": format!("https://x/{n}") });
+        let v = serde_json::json!({ "tag_name": "v0.55.0", "body": "### Bug Fixes\n\n* b ([#9](u))\n", "assets": [asset("a.zip.sha256", 64), asset("a.zip", 1000)] });
+        let a = available(&v, "a.zip", "0.54.0").unwrap().unwrap();
+        assert_eq!((a.version.as_str(), a.size, a.url.as_str(), a.sum_url.as_str()), ("0.55.0", 1000, "https://x/a.zip", "https://x/a.zip.sha256"));
+        assert_eq!(a.notes[0].entries[0].pr, Some(9));
+        assert_eq!(available(&v, "a.zip", "0.55.0"), Ok(None));
+        // Files still being attached count as up to date; an archive without a checksum is refused.
+        assert_eq!(available(&v, "b.zip", "0.54.0"), Ok(None));
+        let bare = serde_json::json!({ "tag_name": "v0.55.0", "assets": [asset("a.zip", 1)] });
+        assert!(available(&bare, "a.zip", "0.54.0").unwrap_err().contains("no checksum"));
+        assert_eq!((percent(50, 200), percent(300, 200), percent(5, 0)), (Some(25), Some(100), None));
+    }
+
+    #[test]
+    fn fetch_reports_the_bytes_written() {
+        let dir = fresh_temp_dir("quarry-test").unwrap();
+        let src = dir.join("src.bin");
+        std::fs::write(&src, vec![7u8; 4096]).unwrap();
+        let url = format!("file://{}", src.display().to_string().replace('\\', "/"));
+        let url = if url.starts_with("file:///") { url } else { url.replacen("file://", "file:///", 1) };
+        let prog = Progress::default();
+        let got = fetch(&dir.join("out.bin"), &url, &prog).unwrap();
+        assert_eq!(std::fs::read(got).unwrap().len(), 4096);
+        assert_eq!(prog.bytes.load(std::sync::atomic::Ordering::Relaxed), 4096);
+        assert!(fetch(&dir.join("missing"), "file:///nowhere/at/all", &Progress::default()).is_err());
+        remove(&dir);
+    }
+
+    #[test]
+    fn release_entries() {
+        let body = "### Features\n\n* **agents:** fenced $objectToArray in pipelines ([#279](https://x/279)) ([8a8be5a](https://x/c))\n* Linux header, switched in Settings &gt; Appearance ([#263](u)) ([18aa1c7](u))\n\n### Performance Improvements\n\n* faster grid\n";
+        let s = parse_body(body);
+        assert_eq!(s.iter().map(|s| s.kind).collect::<Vec<_>>(), [Kind::New, Kind::Faster]);
+        assert_eq!(s[0].entries[0], Entry { scope: Some("agents".into()), text: "Fenced $objectToArray in pipelines".into(), pr: Some(279) });
+        assert_eq!(s[0].entries[1], Entry { scope: None, text: "Linux header, switched in Settings > Appearance".into(), pr: Some(263) });
+        assert_eq!(s[1].entries[0].pr, None);
+        let r = Release { version: "1.0.0".into(), date: String::new(), sections: s };
+        assert_eq!((r.count(Kind::New), r.count(Kind::Fixed), r.count(Kind::Faster)), (2, 0, 1));
     }
 }

@@ -67,8 +67,12 @@ mod users;
 mod value_edit;
 #[cfg(test)]
 mod ui_tests;
+mod update_pill;
 mod watch;
+mod whats_new;
 use column_menu::*;
+use auto_update::{HELD, UpdBtn};
+use whats_new::WhatsNew;
 use errors::*;
 use config::*;
 use groups::{Group, Groups, Place};
@@ -320,11 +324,12 @@ pub struct App {
     /// Uids of tabs left and tabs gone back from, for Cmd+[ and Cmd+], newest last.
     nav_back: Vec<u64>,
     nav_fwd: Vec<u64>,
-    /// Version installed by the updater, waiting for a restart.
-    updated: Option<String>,
+    upd: Upd,
+    /// Why the last automatic check failed, shown in Settings; those failures stay quiet otherwise.
     update_note: String,
     update_checked: Option<std::time::Instant>,
-    last_input: std::time::Instant,
+    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
+    upd_popup: bool,
     started: std::time::Instant,
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
 }
@@ -469,10 +474,10 @@ impl App {
             closed: Vec::new(),
             nav_back: Vec::new(),
             nav_fwd: Vec::new(),
-            updated: None,
+            upd: Upd::Idle,
             update_note: String::new(),
             update_checked: None,
-            last_input: std::time::Instant::now(),
+            upd_popup: false,
             started: std::time::Instant::now(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
         }
@@ -675,12 +680,11 @@ impl App {
             if app.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
-                if ui_json.is_some()
-                    && let Some(body) = crate::update::changelog(&app.prefs.last_version, current)
-                {
-                    // Several releases come each under a "Quarry x.y.z" heading.
-                    let title = if body.starts_with("Quarry ") { format!("What's new since Quarry {}", app.prefs.last_version) } else { format!("What's new in Quarry {current}") };
-                    app.modal = Some(Modal::Text { title, body, code: false });
+                if ui_json.is_some() {
+                    let notes = crate::update::changelog(&app.prefs.last_version, current);
+                    if !notes.is_empty() {
+                        app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.prefs.last_version))));
+                    }
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();
@@ -699,13 +703,7 @@ impl App {
         use crate::menu::Act;
         match a {
             Act::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            // Same rule as Settings' "Check now": dev builds and the demo never install releases.
-            Act::CheckUpdates => {
-                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() {
-                    self.check_update();
-                }
-                self.modal = Some(Modal::Settings);
-            }
+            Act::CheckUpdates => self.check_now(),
             Act::Export if !self.tabs.is_empty() => self.export(),
             Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
             Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),

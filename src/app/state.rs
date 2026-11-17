@@ -991,6 +991,30 @@ pub(super) enum Danger {
     SqlDropUser { conn: u64, acct: db::sql::users::Account },
 }
 
+/// Where the updater is. Automatic checks that fail stay Idle; their reason shows in Settings.
+pub(super) enum Upd {
+    Idle,
+    Checking { manual: bool },
+    /// After a manual check found nothing; the header says so for a few seconds.
+    UpToDate(std::time::Instant),
+    /// Found with automatic updates off, waiting for a click.
+    Available(crate::update::Available),
+    Downloading { info: crate::update::Available, prog: Arc<crate::update::Progress>, started: std::time::Instant },
+    /// Installed; starts on restart.
+    Ready(crate::update::Available),
+    Failed { info: Option<crate::update::Available>, msg: String },
+}
+
+impl Upd {
+    /// The release this state is about, once a check found one.
+    pub(super) fn info(&self) -> Option<&crate::update::Available> {
+        match self {
+            Upd::Available(a) | Upd::Ready(a) | Upd::Downloading { info: a, .. } | Upd::Failed { info: Some(a), .. } => Some(a),
+            _ => None,
+        }
+    }
+}
+
 /// What to run once writes are allowed.
 pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
@@ -1049,6 +1073,7 @@ pub(super) enum Modal {
     ErrorDetails(Box<super::errors::ErrEntry>),
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
+    WhatsNew(Box<WhatsNew>),
     Rename { doc: Document, path: Vec<String>, name: String },
     /// `preview` keeps the stages it was made from; Apply only runs when they equal the current
     /// ones, so a late reply for older inputs cannot approve newer stages.
@@ -1760,14 +1785,15 @@ impl App {
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
-    pub(super) fn busy(&self) -> bool {
-        !self.drafts.is_empty()
+    /// Work a restart would lose. Settings does not count, since Restart sits in it; every other dialog may hold typed input.
+    pub(super) fn busy_work(&self) -> bool {
+        self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Settings))
+            || !self.drafts.is_empty()
             || !self.saving.is_empty()
             || self.json_edit.is_some()
             || self.insert.is_some()
             || self.inline.is_some()
             || self.new_field.is_some()
-            || self.modal.is_some()
             || self.tool.as_ref().is_some_and(|t| t.done.is_none())
             || self.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
     }

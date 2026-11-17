@@ -287,6 +287,7 @@ impl App {
                     });
                 }
                 Modal::ErrorDetails(e) => keep = self.error_details(ui, e),
+                Modal::WhatsNew(w) => keep = self.whats_new_dialog(ui, w),
                 Modal::Text { title, body, code } => {
                     // Wide enough for the longest line, so column layouts like the Query help do not wrap.
                     let longest = body.lines().map(|l| l.chars().count()).max().unwrap_or(0);

@@ -248,7 +248,7 @@ fn head_band(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&mut egui::Ui)) -> 
         band_spacing(ui);
         ui.horizontal(|ui| {
             if let Some(g) = h.glyph {
-                tile(ui, g, h.tone.unwrap_or_else(PRIMARY));
+                head_tile(ui, g, h.tone.unwrap_or_else(PRIMARY));
                 ui.add_space(4.0);
             }
             ui.vertical(|ui| {
@@ -286,7 +286,7 @@ fn head_band(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&mut egui::Ui)) -> 
 }
 
 /// The tinted square with the dialog's glyph.
-fn tile(ui: &mut egui::Ui, g: Glyph, tone: Color32) {
+pub(crate) fn head_tile(ui: &mut egui::Ui, g: Glyph, tone: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(HEAD_TILE, HEAD_TILE), Sense::hover());
     ui.painter().rect(rect, R_BAR, tint(tone, 36), Stroke::new(1.0, tint(tone, 72)), egui::StrokeKind::Inside);
     g(ui.painter(), rect.center(), tone);

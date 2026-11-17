@@ -9,12 +9,6 @@ fn fold_id(gid: u64) -> egui::Id {
     egui::Id::unique(("rail-fold", gid))
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum RailIcon {
-    Search,
-    Settings,
-}
-
 impl App {
     /// Returns the rail's top-right corner, where the page's rounded corner goes.
     pub(super) fn rail(&mut self, ui: &mut egui::Ui) -> egui::Pos2 {
@@ -31,11 +25,7 @@ impl App {
             for a in acts {
                 self.rail_act(a);
             }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                if rail_button(ui, RailIcon::Settings, matches!(self.modal, Some(Modal::Settings)), true, "Settings (Cmd+,)").clicked() {
-                    self.modal = Some(Modal::Settings);
-                }
-            });
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| self.settings_tile(ui));
         });
         shown.response.rect.right_top()
     }
@@ -156,6 +146,16 @@ impl App {
             } else {
                 self.rail_act(RailAct::Manage);
             }
+        }
+    }
+
+    fn settings_tile(&mut self, ui: &mut egui::Ui) {
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
+        let on = matches!(self.modal, Some(Modal::Settings));
+        pinned_face(ui, &r, rect, on, glyphs::gear);
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Settings (Cmd+,)"));
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings (Cmd+,)").clicked() {
+            self.modal = Some(Modal::Settings);
         }
     }
 
@@ -1117,50 +1117,10 @@ fn conn_tip(ui: &mut egui::Ui, c: &Conn, tabs: usize) {
     ui.label(RichText::new(format!("{state} \u{b7} {tabs} tab{}", if tabs == 1 { "" } else { "s" })).color(FAINT()));
 }
 
-/// A 28 px square icon button: a `HOVER` fill on hover, `PRESSED` while held, and an accent
-/// tint with a bright icon while its panel is open.
-fn rail_button(ui: &mut egui::Ui, icon: RailIcon, active: bool, enabled: bool, tip: &str) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), if enabled { Sense::click() } else { Sense::hover() });
-    // A disabled button only senses hover, so it never reports a press.
-    let state = state_of(&r);
-    let fill = if active { tint(PRIMARY(), if state == 2 { 90 } else { 64 }) } else if enabled { hover_fill(state) } else { Color32::TRANSPARENT };
-    let p = ui.painter();
-    p.rect_filled(rect, R_MD, fill);
-    let color = if !enabled { FAINT() } else if active || state > 0 { BRIGHT() } else { MUTED() };
-    paint_icon(p, rect.center(), icon, Stroke::new(1.3, color));
-    focus_ring(ui, &r, rect, R_MD as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
-    let r = r.on_hover_text(tip);
-    if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
-}
-
-/// Line icons drawn in a 16 px box, so they need no icon font.
-pub(super) fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: Stroke) {
-    p.extend(icon_shapes(c, icon, s));
-}
-
-/// The shapes of a rail icon centered on `c`.
-fn icon_shapes(c: egui::Pos2, icon: RailIcon, s: Stroke) -> Vec<egui::Shape> {
-    use egui::Shape;
-    let v = egui::vec2;
-    let mut out = Vec::new();
-    match icon {
-        RailIcon::Search => {
-            out.push(Shape::circle_stroke(c + v(-1.5, -1.5), 5.0, s));
-            out.push(Shape::line_segment([c + v(2.2, 2.2), c + v(6.0, 6.0)], s));
-        }
-        // A gear: ring, hub and eight teeth.
-        RailIcon::Settings => {
-            out.push(Shape::circle_stroke(c, 4.6, s));
-            out.push(Shape::circle_stroke(c, 1.8, s));
-            for k in 0..8 {
-                let a = k as f32 * std::f32::consts::FRAC_PI_4;
-                let d = v(a.cos(), a.sin());
-                out.push(Shape::line_segment([c + d * 4.6, c + d * 7.0], s));
-            }
-        }
-    }
-    out
+/// A magnifier in a 16 px box, painted so it needs no icon font.
+pub(super) fn search_icon(p: &egui::Painter, c: egui::Pos2, s: Stroke) {
+    p.circle_stroke(c + egui::vec2(-1.5, -1.5), 5.0, s);
+    p.line_segment([c + egui::vec2(2.2, 2.2), c + egui::vec2(6.0, 6.0)], s);
 }
 
 #[cfg(test)]
