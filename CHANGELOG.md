@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.55.0](https://github.com/alkanna/quarry/compare/v0.54.0...v0.55.0) (2026-11-17)
+
+
+### Features
+
+* Shell Run turns into Stop with the live run time, and a rerun keeps the last result dimmed ([#284](https://github.com/alkanna/quarry/issues/284)) ([73fd14e](https://github.com/alkanna/quarry/commit/73fd14e4bcbc26f8e0ec6b34f82ee3404f2d5ca1))
+* updates show their progress in a header pill, and What's new reads as release notes ([#282](https://github.com/alkanna/quarry/issues/282)) ([982e89e](https://github.com/alkanna/quarry/commit/982e89e22b831c43d59a16ef1242749e6f16b92e))
+
 ## [0.54.0](https://github.com/alkanna/quarry/compare/v0.53.1...v0.54.0) (2026-11-17)
 
 
