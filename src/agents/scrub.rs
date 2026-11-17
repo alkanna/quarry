@@ -195,7 +195,67 @@ pub(crate) fn levels(path: &str) -> Vec<&str> {
     path.split('.').filter(|s| !s.is_empty() && !s.starts_with('$')).collect()
 }
 
+/// Where `norm_key` puts a `_` in a raw key: the start, after a non-alphanumeric, or before a capital (a superset of
+/// its camel case splits). Lookarounds, for MongoDB's PCRE, so `cc` does not match inside `4acc`.
+const START: &str = "(?:^|(?<=[^A-Za-z0-9])|(?=[A-Z]))";
+const END: &str = "(?=$|[^A-Za-z0-9]|[A-Z])";
+/// A `_` of a normalized key: any separators in the raw key, or none at a camel case split.
+const SEP: &str = "[^A-Za-z0-9]*";
+
+/// A preset key pattern, which runs on `norm_key` output, rewritten to run case-sensitively on the raw key and match
+/// at least every key whose normalized form it matches. None for a construct it does not know.
+fn loose_key(p: &str) -> Option<String> {
+    let p = p.replace("(^|_)", "\u{1}").replace("(_|$)", "\u{2}").replace("[a-z_]*", "\u{3}").replace("_?", "_");
+    let mut out = String::new();
+    let mut cs = p.chars();
+    while let Some(c) = cs.next() {
+        match c {
+            '\u{1}' => out.push_str(START),
+            '\u{2}' => out.push_str(END),
+            '\u{3}' => out.push_str(".*"),
+            '_' => out.push_str(SEP),
+            '^' | '$' | '|' | '(' | ')' => out.push(c),
+            '[' => {
+                let class: String = cs.by_ref().take_while(|&c| c != ']').collect();
+                if class.is_empty() || !class.chars().all(|c| c.is_ascii_lowercase()) {
+                    return None;
+                }
+                out.push_str(&format!("[{class}{}]", class.to_ascii_uppercase()));
+            }
+            c if c.is_ascii_lowercase() => out.push_str(&format!("[{c}{}]", c.to_ascii_uppercase())),
+            c if c.is_ascii_digit() => out.push(c),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A custom field name rule as PCRE, when it uses only what Rust's regex and PCRE read the same way.
+fn loose_name(s: &str) -> Option<String> {
+    let (ci, body) = s.strip_prefix("(?i)").map_or((false, s), |b| (true, b));
+    if body.contains("(?") || !body.chars().all(|c| c.is_ascii_alphanumeric() || "_|()^$?-".contains(c)) {
+        return None;
+    }
+    Some(body.chars().map(|c| if ci && c.is_ascii_alphabetic() { format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase()) } else { c.to_string() }).collect())
+}
+
 impl Rules {
+    /// A case-sensitive PCRE for MongoDB's `$regexMatch` that matches every key a preset or name rule could hide or
+    /// mask, whatever its scope or mode, or None when a custom rule can't be written that way. `guard::fence` drops
+    /// matching keys where `$objectToArray` or a computed `$getField` turns keys into values, out of reach of the
+    /// key rules.
+    pub fn fence(&self) -> Option<String> {
+        let presets = self.key_set.patterns().iter().map(String::as_str).chain(self.gates.iter().map(|g| g.key.as_str()));
+        let mut alts = presets.map(loose_key).collect::<Option<Vec<_>>>()?;
+        for r in &self.custom {
+            if let Kind::Name(re) = &r.kind {
+                alts.push(loose_name(re.as_str())?);
+            }
+        }
+        // No key rule: a pattern that never matches.
+        Some(if alts.is_empty() { "(?!)".into() } else { alts.iter().map(|a| format!("(?:{a})")).collect::<Vec<_>>().join("|") })
+    }
+
     /// `over` is the connection's preset override; `global` and `conn` are the user's own rules.
     pub fn compile(presets: &Presets, over: &PresetOverride, global: &[RuleSpec], conn: &[RuleSpec], hash_key: &[u8; 32]) -> Result<Rules, RuleErr> {
         let mut custom = Vec::new();
@@ -721,6 +781,22 @@ mod tests {
     fn scrubbed(rules: &Rules, mut d: Document) -> Document {
         rules.for_ns("shop", "users").scrub_doc(&mut d);
         d
+    }
+
+    /// The match itself runs in MongoDB's PCRE; `db::agent`'s live tests check which keys it drops.
+    #[test]
+    fn fence_regex() {
+        assert_eq!(loose_key(r"(^|_)(e_?mail|ssn[a-z_]*)(_|$)|_key$").unwrap(), format!("{START}([eE]{SEP}[mM][aA][iI][lL]|[sS][sS][nN].*){END}|{SEP}[kK][eE][yY]$"));
+        assert_eq!(loose_key(r"(^|_)(driver_?licen[cs]e)(_|$)").unwrap(), format!("{START}([dD][rR][iI][vV][eE][rR]{SEP}[lL][iI][cC][eE][nN][csCS][eE]){END}"));
+        assert_eq!(loose_key(r"\d+"), None);
+        let f = defaults().fence().unwrap();
+        assert!(f.contains("[pP][aA][sS][sS][wW][oO][rR][dD]") && f.contains("[iI][bB][aA][nN]"), "presets and gates: {f}");
+        assert_eq!(one(rule(Matcher::FieldPath("a.b".into()), Action::Remove)).fence().unwrap(), "(?!)", "path rules are the guard's");
+        assert_eq!(one(rule(Matcher::FieldName("(?i)^pin$".into()), Action::Remove)).fence().unwrap(), "(?:^[pP][iI][nN]$)");
+        assert_eq!(one(rule(Matcher::FieldName("^pin_?code$".into()), Action::Remove)).fence().unwrap(), "(?:^pin_?code$)");
+        for unsure in [r"^\w+$", "(?x)pin", "p.n", "[a-z]+pin"] {
+            assert_eq!(one(rule(Matcher::FieldName(unsure.into()), Action::Remove)).fence(), None, "{unsure}");
+        }
     }
 
     #[test]

@@ -113,33 +113,39 @@ fn lit(db: &Db, v: &Value) -> String {
     }
 }
 
-/// The WHERE text of `select_rows`: each test on a quoted column, values written by `lit`.
-pub(in crate::db) fn where_sql(db: &Db, wher: &[Cond]) -> String {
-    let d = db.dialect;
-    let tests: Vec<String> = wher
+/// The WHERE text of `select_rows`: groups joined with AND, the tests of a group with OR, each test on a quoted
+/// column with values written by `lit`.
+pub(in crate::db) fn where_sql(db: &Db, wher: &[Vec<Cond>]) -> String {
+    let groups: Vec<String> = wher
         .iter()
-        .map(|c| {
-            let col = d.quote_ident(&c.col);
-            let op = match c.op {
-                CondOp::Eq => "=",
-                CondOp::Ne => "<>",
-                CondOp::Lt => "<",
-                CondOp::Le => "<=",
-                CondOp::Gt => ">",
-                CondOp::Ge => ">=",
-                CondOp::IsNull => return format!("{col} IS NULL"),
-                CondOp::NotNull => return format!("{col} IS NOT NULL"),
-                CondOp::In => {
-                    let list: Vec<String> = c.value.as_array().map(|a| a.iter().map(|v| lit(db, v)).collect()).unwrap_or_default();
-                    return format!("{col} IN ({})", list.join(", "));
-                }
-                CondOp::Like if d == Dialect::Postgres => return format!("{col}::text LIKE {}", lit(db, &c.value)),
-                CondOp::Like => "LIKE",
-            };
-            format!("{col} {op} {}", lit(db, &c.value))
+        .map(|g| {
+            let tests: Vec<String> = g.iter().map(|c| test_sql(db, c)).collect();
+            if tests.len() > 1 { format!("({})", tests.join(" OR ")) } else { tests.concat() }
         })
         .collect();
-    if tests.is_empty() { String::new() } else { format!(" WHERE {}", tests.join(" AND ")) }
+    if groups.is_empty() { String::new() } else { format!(" WHERE {}", groups.join(" AND ")) }
+}
+
+fn test_sql(db: &Db, c: &Cond) -> String {
+    let d = db.dialect;
+    let col = d.quote_ident(&c.col);
+    let op = match c.op {
+        CondOp::Eq => "=",
+        CondOp::Ne => "<>",
+        CondOp::Lt => "<",
+        CondOp::Le => "<=",
+        CondOp::Gt => ">",
+        CondOp::Ge => ">=",
+        CondOp::IsNull => return format!("{col} IS NULL"),
+        CondOp::NotNull => return format!("{col} IS NOT NULL"),
+        CondOp::In => {
+            let list: Vec<String> = c.value.as_array().map(|a| a.iter().map(|v| lit(db, v)).collect()).unwrap_or_default();
+            return format!("{col} IN ({})", list.join(", "));
+        }
+        CondOp::Like if d == Dialect::Postgres => return format!("{col}::text LIKE {}", lit(db, &c.value)),
+        CondOp::Like => "LIKE",
+    };
+    format!("{col} {op} {}", lit(db, &c.value))
 }
 
 /// The columns of a table in their order, as result columns, from the catalog.
@@ -160,7 +166,7 @@ async fn table_cols(db: &Db, schema: &str, table: &str) -> Res<Vec<Col>> {
 
 /// Rows of one table from structured arguments: quoted names, literals Quarry writes, a row cap of its own.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn select_rows(db: &Db, schema: &str, table: &str, columns: &[String], wher: &[Cond], order: &[(String, bool)], limit: Option<u32>, offset: u64, rules: &Rules, limits: &Limits) -> Res<Answer> {
+pub(in crate::db) async fn select_rows(db: &Db, schema: &str, table: &str, columns: &[String], wher: &[Vec<Cond>], order: &[(String, bool)], limit: Option<u32>, offset: u64, rules: &Rules, limits: &Limits) -> Res<Answer> {
     let d = db.dialect;
     let nsr = rules.for_ns(schema, table);
     let all = table_cols(db, schema, table).await.map_err(|e| failure(&e, &nsr, "read the table's columns"))?;
@@ -168,7 +174,7 @@ pub(in crate::db) async fn select_rows(db: &Db, schema: &str, table: &str, colum
         return Err(format!("No table {schema}.{table}, or this login cannot see its columns."));
     }
     let known = |c: &str| all.iter().any(|x| x.name == c);
-    if let Some(bad) = columns.iter().chain(wher.iter().map(|c| &c.col)).chain(order.iter().map(|o| &o.0)).find(|c| !known(c)) {
+    if let Some(bad) = columns.iter().chain(wher.iter().flatten().map(|c| &c.col)).chain(order.iter().map(|o| &o.0)).find(|c| !known(c)) {
         return Err(format!("{schema}.{table} has no column `{bad}`. Call describe for its columns."));
     }
     let cols: Vec<Col> = if columns.is_empty() { all } else { columns.iter().filter_map(|c| all.iter().find(|x| x.name == *c).cloned()).collect() };
@@ -342,8 +348,8 @@ pub(in crate::db) async fn prepare(db: &Db, call: &Call, l: &Limits) -> Res<Snap
     let known = |c: &str| cols.iter().any(|x| x.name == c);
     let named: Vec<&String> = match call {
         Call::SqlInsertRows { rows, .. } => rows.iter().flat_map(|r| r.keys()).collect(),
-        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(wher.iter().map(|c| &c.col)).collect(),
-        Call::SqlDeleteRows { wher, .. } => wher.iter().map(|c| &c.col).collect(),
+        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(wher.iter().flatten().map(|c| &c.col)).collect(),
+        Call::SqlDeleteRows { wher, .. } => wher.iter().flatten().map(|c| &c.col).collect(),
         _ => Vec::new(),
     };
     if let Some(bad) = named.into_iter().find(|c| !known(c)) {
@@ -587,8 +593,9 @@ mod tests {
         Limits { rows, bytes, ..Limits::default() }
     }
 
-    fn cond(col: &str, op: CondOp, value: Value) -> Cond {
-        Cond { col: col.into(), op, value }
+    /// A `where` group of one test.
+    fn cond(col: &str, op: CondOp, value: Value) -> Vec<Cond> {
+        vec![Cond { col: col.into(), op, value }]
     }
 
     /// A table of five users on each MySQL family server, in a database of this test's own.
@@ -620,6 +627,10 @@ mod tests {
             assert!(rows(&a).is_empty(), "{var}");
             let a = rt.block_on(select_rows(&l.db, &db, "users", &["id".into()], &[cond("id", CondOp::In, json!([2, 3]))], &[("id".into(), true)], None, 0, &r, &limits(200, 1 << 20))).unwrap();
             assert_eq!(rows(&a), vec![json!({ "id": 3 }), json!({ "id": 2 })]);
+            // An any group is one parenthesized OR, joined to the rest with AND.
+            let any = [cond("id", CondOp::In, json!([1])), cond("age", CondOp::Eq, json!(55))].concat();
+            let a = rt.block_on(select_rows(&l.db, &db, "users", &["id".into()], &[cond("age", CondOp::Lt, json!(58)), any], &[("id".into(), false)], None, 0, &r, &limits(200, 1 << 20))).unwrap();
+            assert_eq!(rows(&a), vec![json!({ "id": 1 }), json!({ "id": 4 })], "{var}");
             // The row cap: two of five, and the agent is told more match.
             let a = rt.block_on(select_rows(&l.db, &db, "users", &["id".into()], &[], &[("id".into(), false)], None, 0, &r, &limits(2, 1 << 20))).unwrap();
             assert_eq!(rows(&a).len(), 2);
@@ -687,6 +698,9 @@ mod tests {
             assert_eq!(got[0]["active"], json!(true));
             let a = rt.block_on(select_rows(&f.db, "agent_pg", "users", &["id".into()], &[cond("email", CondOp::Like, json!("bob%"))], &[], None, 0, &r, &limits(200, 1 << 20))).unwrap();
             assert_eq!(rows(&a), vec![json!({ "id": 2 })], "{var}");
+            let any = [cond("email", CondOp::Like, json!("bob%")), cond("id", CondOp::Eq, json!(3))].concat();
+            let a = rt.block_on(select_rows(&f.db, "agent_pg", "users", &["id".into()], &[any, cond("id", CondOp::Gt, json!(1))], &[("id".into(), false)], None, 0, &r, &limits(200, 1 << 20))).unwrap();
+            assert_eq!(rows(&a), vec![json!({ "id": 2 }), json!({ "id": 3 })], "{var}");
             let h = RunHandle::default();
             let e = rt.block_on(query_sql(&f.db, "agent_pg", "UPDATE users SET password = 'x'", None, &r, &limits(200, 1 << 20), &h)).unwrap_err();
             assert!(e.to_lowercase().contains("read"), "{var}: {e}");

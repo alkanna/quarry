@@ -514,7 +514,9 @@ impl App {
     /// `snap` is for writes: what the write was decided on. It keeps its undo unless the snapshot says it could not
     /// (a change over the undo caps was offered only as Allow without undo). `writable` is whether it may write,
     /// decided by the caller: for a call that waited for approval, as it was when it was queued.
-    fn agent_start(&mut self, id: u64, call: Call, conn: u64, rules: Arc<Rules>, reply: Reply, approved: bool, snap: Option<db::Snapshot>, writable: bool) {
+    fn agent_start(&mut self, id: u64, mut call: Call, conn: u64, rules: Arc<Rules>, reply: Reply, approved: bool, snap: Option<db::Snapshot>, writable: bool) {
+        // The guard let fenceable expressions through on the promise that this runs.
+        guard::fence(&mut call, &rules);
         let keep_undo = snap.as_ref().is_some_and(|s| s.no_undo.is_none());
         let Some(target) = self.agent_target(conn) else {
             return self.agent_fail(id, reply, "not_open", CLOSED.into(), approved);

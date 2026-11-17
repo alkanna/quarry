@@ -1451,6 +1451,31 @@ mod tests {
         assert!(colls["collections"].as_array().unwrap().contains(&json!("agent_reads")));
     }
 
+    /// The fence's pattern runs in the server's PCRE: keys a rule could match are dropped before they become values,
+    /// others (ids, hex, `companyID`) stay.
+    #[test]
+    fn live_mongo_fence_drops_rule_keys_turned_into_values() {
+        let Some((w, rx, c)) = live("agent_fence") else { return };
+        let kept = ["a", "companyID", "aacc0000-4acc-11ee-8ccc-0242ac120002", "e35924f1-5c00-45d1-aa52-10dd51d7e2b2"];
+        let dropped = ["token", "userPassword", "api-Key", "accessKey", "sessionId", "cdsKey", "SSN", "zip"];
+        let mut m = Document::new();
+        for (i, k) in kept.iter().chain(&dropped).enumerate() {
+            m.insert(*k, i as i32 + 1);
+        }
+        w.rt.block_on(c.database("quarry_test").collection::<Document>("agent_fence").insert_one(doc! { "_id": "fence", "m": m })).unwrap();
+        let named = |f: &str| doc! { "$getField": { "field": { "$concat": [f, ""] }, "input": "$m" } };
+        let pipeline = vec![doc! { "$match": { "_id": "fence" } }, doc! { "$project": { "_id": 0, "kv": { "$objectToArray": "$m" }, "tok": named("token"), "one": named("a") } }];
+        let mut call = Call::Aggregate { ns: ns("agent_fence"), pipeline, limit: None };
+        crate::agents::guard::check(&call, &rules()).unwrap();
+        crate::agents::guard::fence(&mut call, &rules());
+        let v = run(&w, &rx, &c, call, Limits::default()).0.unwrap();
+        let d = &v["documents"][0];
+        let keys: Vec<&str> = d["kv"].as_array().unwrap().iter().map(|e| e["k"].as_str().unwrap()).collect();
+        assert_eq!(keys, kept, "{d}");
+        assert_eq!(d["one"], json!(1));
+        assert!(d.get("tok").is_none(), "{d}");
+    }
+
     #[test]
     fn live_mongo_errors_lose_their_values() {
         let Some((w, rx, c)) = live("agent_errors") else { return };

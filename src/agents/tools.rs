@@ -52,8 +52,8 @@ pub enum CondOp {
     NotNull,
 }
 
-/// One `column op value` test of a structured SQL tool; tests are joined with AND and values are bound, never
-/// written into the text.
+/// One `column op value` test of a structured SQL tool. A `where` is a list of groups joined with AND, each group a
+/// list of tests joined with OR; values are quoted by Quarry, never taken as SQL.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cond {
     pub col: String,
@@ -78,7 +78,7 @@ pub enum Call {
     Aggregate { ns: Ns, pipeline: Vec<Document>, limit: Option<u32> },
     Count { ns: Ns, filter: Document },
     Explain { ns: Ns, filter: Document, sort: Option<Document>, pipeline: Option<Vec<Document>> },
-    SelectRows { ns: Ns, columns: Vec<String>, wher: Vec<Cond>, order: Vec<(String, bool)>, limit: Option<u32>, offset: u64 },
+    SelectRows { ns: Ns, columns: Vec<String>, wher: Vec<Vec<Cond>>, order: Vec<(String, bool)>, limit: Option<u32>, offset: u64 },
     QuerySql { conn: ConnRef, db: Option<String>, sql: String, limit: Option<u32> },
     /// The plan of one read-only statement, with the same checks as QuerySql.
     ExplainSql { conn: ConnRef, db: Option<String>, sql: String },
@@ -87,8 +87,8 @@ pub enum Call {
     Delete { ns: Ns, filter: Document, many: bool },
     AggregateInto { ns: Ns, pipeline: Vec<Document> },
     SqlInsertRows { ns: Ns, rows: Vec<Map<String, Value>> },
-    SqlUpdateRows { ns: Ns, set: Map<String, Value>, wher: Vec<Cond> },
-    SqlDeleteRows { ns: Ns, wher: Vec<Cond> },
+    SqlUpdateRows { ns: Ns, set: Map<String, Value>, wher: Vec<Vec<Cond>> },
+    SqlDeleteRows { ns: Ns, wher: Vec<Vec<Cond>> },
     CreateCollection { ns: Ns },
     DropCollection { ns: Ns },
     CreateIndex { ns: Ns, keys: Document, name: Option<String>, unique: bool },
@@ -162,14 +162,16 @@ fn limit_p() -> Value {
 }
 
 fn where_p() -> Value {
-    json!({ "type": "array", "description": "Tests joined with AND. Quarry quotes every value itself.", "items": {
+    let test = json!({
         "type": "object", "additionalProperties": false, "required": ["column"],
         "properties": {
             "column": { "type": "string" },
             "op": { "type": "string", "enum": ["=", "!=", "<", "<=", ">", ">=", "like", "in", "is null", "is not null"], "default": "=" },
             "value": {},
         },
-    } })
+    });
+    let any = json!({ "type": "object", "additionalProperties": false, "required": ["any"], "properties": { "any": { "type": "array", "minItems": 1, "items": test } } });
+    json!({ "type": "array", "description": "Tests joined with AND. An item {any: [tests]} matches when one of its tests does. Quarry quotes every value itself.", "items": { "anyOf": [test, any] } })
 }
 
 fn sql_p() -> Value {
@@ -359,40 +361,49 @@ impl Args<'_> {
         }).collect()
     }
 
-    fn wher(&self) -> Result<Vec<Cond>, ArgErr> {
+    fn wher(&self) -> Result<Vec<Vec<Cond>>, ArgErr> {
         let Some(v) = self.m.get("where").filter(|v| !v.is_null()) else { return Ok(Vec::new()) };
         let Value::Array(a) = v else { return bad("`where` must be an array of {column, op, value}") };
-        a.iter().map(|c| {
-            let Value::Object(m) = c else { return bad("every `where` item must be an object") };
-            if let Some(k) = m.keys().find(|k| !matches!(k.as_str(), "column" | "op" | "value")) {
-                return bad(format!("unknown key `{k}` in `where`"));
-            }
-            let a = Args { m };
-            let col = a.name("column")?;
-            let op = match a.opt_str("op")?.as_deref().map(str::to_ascii_lowercase).as_deref() {
-                None | Some("=") => CondOp::Eq,
-                Some("!=") | Some("<>") => CondOp::Ne,
-                Some("<") => CondOp::Lt,
-                Some("<=") => CondOp::Le,
-                Some(">") => CondOp::Gt,
-                Some(">=") => CondOp::Ge,
-                Some("like") => CondOp::Like,
-                Some("in") => CondOp::In,
-                Some("is null") => CondOp::IsNull,
-                Some("is not null") => CondOp::NotNull,
-                Some(o) => return bad(format!("unknown operator `{o}` in `where`")),
-            };
-            let value = m.get("value").cloned().unwrap_or(Value::Null);
-            match (op, &value) {
-                (CondOp::IsNull | CondOp::NotNull, _) => {}
-                (CondOp::In, Value::Array(a)) if !a.is_empty() && a.iter().all(scalar) => {}
-                (CondOp::In, _) => return bad(format!("`in` on `{col}` needs a non-empty array of values")),
-                (_, v) if scalar(v) && !v.is_null() => {}
-                _ => return bad(format!("`{col}` needs a string, number or boolean value")),
-            }
-            Ok(Cond { col, op, value })
+        a.iter().map(|c| match c {
+            Value::Object(m) if m.len() == 1 && m.contains_key("any") => match &m["any"] {
+                Value::Array(any) if !any.is_empty() => any.iter().map(where_item).collect(),
+                _ => bad("`any` in `where` needs a non-empty array of {column, op, value}"),
+            },
+            c => Ok(vec![where_item(c)?]),
         }).collect()
     }
+}
+
+/// One `{column, op, value}` item of a `where`.
+fn where_item(c: &Value) -> Result<Cond, ArgErr> {
+    let Value::Object(m) = c else { return bad("every `where` item must be an object") };
+    if let Some(k) = m.keys().find(|k| !matches!(k.as_str(), "column" | "op" | "value")) {
+        return bad(format!("unknown key `{k}` in `where`"));
+    }
+    let a = Args { m };
+    let col = a.name("column")?;
+    let op = match a.opt_str("op")?.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("=") => CondOp::Eq,
+        Some("!=") | Some("<>") => CondOp::Ne,
+        Some("<") => CondOp::Lt,
+        Some("<=") => CondOp::Le,
+        Some(">") => CondOp::Gt,
+        Some(">=") => CondOp::Ge,
+        Some("like") => CondOp::Like,
+        Some("in") => CondOp::In,
+        Some("is null") => CondOp::IsNull,
+        Some("is not null") => CondOp::NotNull,
+        Some(o) => return bad(format!("unknown operator `{o}` in `where`")),
+    };
+    let value = m.get("value").cloned().unwrap_or(Value::Null);
+    match (op, &value) {
+        (CondOp::IsNull | CondOp::NotNull, _) => {}
+        (CondOp::In, Value::Array(a)) if !a.is_empty() && a.iter().all(scalar) => {}
+        (CondOp::In, _) => return bad(format!("`in` on `{col}` needs a non-empty array of values")),
+        (_, v) if scalar(v) && !v.is_null() => {}
+        _ => return bad(format!("`{col}` needs a string, number or boolean value")),
+    }
+    Ok(Cond { col, op, value })
 }
 
 fn scalar(v: &Value) -> bool {
@@ -444,7 +455,7 @@ pub fn col_type(s: &str) -> Result<String, ArgErr> {
     Ok(t.to_string())
 }
 
-fn no_empty_where(w: &[Cond], tool: &str) -> Result<(), ArgErr> {
+fn no_empty_where(w: &[Vec<Cond>], tool: &str) -> Result<(), ArgErr> {
     if w.is_empty() {
         return bad(format!("{tool} needs a `where`; use run_sql to change every row"));
     }
@@ -945,9 +956,18 @@ mod tests {
         let c = p("select_rows", json!({ "connection": 1, "database": "shop", "table": "orders", "columns": ["id", "total"], "where": [{ "column": "total", "op": ">", "value": 5 }, { "column": "id", "op": "in", "value": [1, 2] }, { "column": "note", "op": "is null" }], "order": [{ "column": "id", "desc": true }] })).unwrap();
         let Call::SelectRows { wher, order, columns, .. } = c else { panic!() };
         assert_eq!(columns, ["id", "total"]);
-        assert_eq!(wher.iter().map(|c| c.op).collect::<Vec<_>>(), [CondOp::Gt, CondOp::In, CondOp::IsNull]);
+        assert_eq!(wher.iter().map(|g| g.iter().map(|c| c.op).collect::<Vec<_>>()).collect::<Vec<_>>(), [[CondOp::Gt], [CondOp::In], [CondOp::IsNull]]);
         assert_eq!(order, [("id".to_string(), true)]);
         let t = json!({ "connection": 1, "database": "shop", "table": "orders" });
+        let mut a = t.clone();
+        a["where"] = json!([{ "column": "total", "op": ">", "value": 5 }, { "any": [{ "column": "pnr", "op": "in", "value": ["A"] }, { "column": "ref", "op": "in", "value": ["A"] }] }]);
+        let Call::SelectRows { wher, .. } = p("select_rows", a).unwrap() else { panic!() };
+        assert_eq!(wher.iter().map(|g| g.iter().map(|c| c.col.as_str()).collect::<Vec<_>>()).collect::<Vec<_>>(), [vec!["total"], vec!["pnr", "ref"]]);
+        for bad in [json!([{ "any": [] }]), json!([{ "any": [{ "column": "a" }], "column": "b" }]), json!([{ "any": [{ "any": [{ "column": "a" }] }] }])] {
+            let mut a = t.clone();
+            a["where"] = bad.clone();
+            assert!(p("select_rows", a).is_err(), "{bad}");
+        }
         let mut a = t.clone();
         a["where"] = json!([{ "column": "id", "op": "between", "value": 1 }]);
         assert!(p("select_rows", a).is_err());
