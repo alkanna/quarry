@@ -97,12 +97,10 @@ pub fn secret_opt_values(uri: &str) -> Vec<String> {
     let Some(i) = query_at(uri) else { return Vec::new() };
     let mut out = Vec::new();
     for (_, v) in uri[i + 1..].split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| secret_opt(k, v)) {
-        // Text may quote the token alone, without the rest of the option.
-        let d = super::pct::decode(v);
-        if let Some(at) = d.to_ascii_uppercase().find("AWS_SESSION_TOKEN:") {
-            let token = d[at + 18..].split(',').next().unwrap_or_default();
-            if !token.is_empty() {
-                out.push(token.to_string());
+        // authMechanismProperties is name:value pairs; text may quote a secret value alone.
+        for (name, value) in super::pct::decode(v).split(',').filter_map(|p| p.split_once(':').map(|(a, b)| (a.trim().to_string(), b.to_string()))) {
+            if name.eq_ignore_ascii_case("AWS_SESSION_TOKEN") && !value.is_empty() {
+                out.push(value);
             }
         }
         out.push(v.to_string());

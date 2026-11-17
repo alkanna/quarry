@@ -530,7 +530,10 @@ impl Worker {
             // what was not must stay undoable.
             let kind = match (a.kind, redo) {
                 // The insert is ordered, so what went in is the first ids.len() documents.
-                (UndoKind::DeleteMany { mut old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => UndoKind::DeleteMany { old: old.split_off(ids.len().min(old.len())) },
+                (UndoKind::DeleteMany { mut old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => {
+                    debug_assert!(old.iter().zip(&ids).all(|(d, i)| d.get("_id") == Some(i)), "an ordered insert writes a prefix");
+                    UndoKind::DeleteMany { old: old.split_off(ids.len().min(old.len())) }
+                }
                 (kind, _) => kind,
             };
             (res, Some(UndoAction { kind, ..a }))

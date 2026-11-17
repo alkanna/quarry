@@ -143,12 +143,10 @@ const broken = (v) =>
   : Array.isArray(v) ? v.some(broken)
   : v !== null && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype ? Object.entries(v).some(([k, x]) => !k.isWellFormed() || broken(x))
   : false;
-const BROKEN = "holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji";
 
 // What a value becomes on the wire. Quarry turns each one into a literal; nothing here is spliced into text.
 function wire(v, pg) {
   if (v === undefined || v === null) return null;
-  if (broken(v)) throw new Error(`A query value ${BROKEN}`);
   // PostgreSQL has a boolean type that 1 does not satisfy.
   if (typeof v === "boolean") return pg ? { $bool: v } : v ? 1 : 0;
   if (typeof v === "bigint") return v >= -9007199254740991n && v <= 9007199254740991n ? Number(v) : { $int: v.toString() };
@@ -172,7 +170,8 @@ function query(conn, text, params) {
   const pg = dialects.get(conn) === "postgres";
   let wired;
   try {
-    if (broken(text)) throw new Error(`The query text ${BROKEN}`);
+    // One check over everything the query sends, before any of it is turned into text.
+    if (broken([text, ...params])) throw new Error("The query holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji");
     wired = params.map((v) => wire(v, pg));
   } catch (e) {
     return Promise.reject(e);
