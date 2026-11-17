@@ -180,11 +180,30 @@ impl App {
                 });
             }
         });
-        let hint = if je.kind == "string" { "Type null for a null value. Applying keeps it as an unsaved edit until you press Save." } else { "JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save." };
+        if je.kind == "binary" && !je.enc.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Show bytes as").size(TXT_SMALL).color(MUTED()));
+                let old = je.enc;
+                segmented(ui, &mut je.enc, &db::BIN_ENCODINGS.map(|e| (e, e)));
+                if je.enc != old {
+                    // Re-write the same bytes in the new encoding; text that does not decode stays as it was.
+                    let bytes = db::decode_bytes(&je.text, old);
+                    let bin = bytes.map(|bytes| mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes });
+                    match bin.and_then(|b| db::encode_bytes(&b, je.enc)) {
+                        Ok(t) => je.text = t,
+                        Err(e) => {
+                            je.enc = old;
+                            self.warn(e);
+                        }
+                    }
+                }
+            });
+        }
+        let hint = if je.kind == "binary" && !je.enc.is_empty() { "The subtype is kept. Applying keeps it as an unsaved edit until you press Save." } else if je.kind == "string" { "Type null for a null value. Applying keeps it as an unsaved edit until you press Save." } else { "JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save." };
         ui.label(RichText::new(hint).size(TXT_SMALL).color(MUTED()));
         ui.add_space(4.0);
         let null = (!je.path.is_empty()).then_some("Set null");
-        value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, je.kind != "string", &mut je.focus, &mut je.dirty, None, null, rows, max_h)
+        value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, !matches!(je.kind, "string" | "binary"), &mut je.focus, &mut je.dirty, None, null, rows, max_h)
     }
 
     fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
@@ -204,6 +223,10 @@ impl App {
                     _ => {}
                 }
                 Ok(new)
+            }),
+            ValueAct::Apply if je.kind == "binary" && !je.enc.is_empty() => db::decode_bytes(&je.text, je.enc).and_then(|bytes| {
+                let subtype = je.subtype;
+                db::edit_path(&je.base, &je.path, Some(Bson::Binary(mongodb::bson::Binary { subtype, bytes })))
             }),
             ValueAct::Apply => db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v))),
         };

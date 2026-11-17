@@ -114,6 +114,13 @@ impl App {
         }
         self.new_field = None;
         let kind = db::type_name_kind(&v);
+        if let ("binary", Bson::Binary(bin)) = (kind, &v) {
+            let enc = db::default_encoding(&bin.bytes);
+            self.inline = None;
+            let text = db::encode_bytes(bin, enc).unwrap_or_default();
+            self.json_edit = Some(JsonEdit { enc, subtype: bin.subtype, ..JsonEdit::new(d.clone(), path, text, kind) });
+            return;
+        }
         let container = matches!(v, Bson::Document(_) | Bson::Array(_));
         let text = if container { db::to_edit_value(&v) } else { db::inline_text(&v) };
         // With the panel open, a double-click loads the new field into it, so the panel follows the selection.

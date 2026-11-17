@@ -834,7 +834,7 @@ pub fn group_count_pipeline(path: &str, value: &Bson, filter: Document) -> Res<V
 
 // The useful subset of the original's fieldTypes table (renderer line 30729): string, number kinds,
 // bool, date, ObjectId, null, object, array, regular expression and UUID.
-pub const KINDS: [&str; 13] = ["string", "int", "long", "double", "decimal", "bool", "date", "objectId", "null", "object", "array", "regex", "uuid"];
+pub const KINDS: [&str; 14] = ["string", "int", "long", "double", "decimal", "bool", "date", "objectId", "null", "object", "array", "regex", "uuid", "binary"];
 
 fn uuid_of(b: &Bson) -> Option<mongodb::bson::Uuid> {
     match b {
@@ -870,6 +870,7 @@ pub fn type_name_kind(b: &Bson) -> &'static str {
         Bson::Array(_) => "array",
         Bson::RegularExpression(_) => "regex",
         b if uuid_of(b).is_some() => "uuid",
+        Bson::Binary(_) => "binary",
         _ => "object",
     }
 }
@@ -902,6 +903,36 @@ pub fn value_text(b: &Bson) -> String {
         Bson::RegularExpression(r) => format!("/{}/{}", r.pattern, r.options),
         b if uuid_of(b).is_some() => uuid_of(b).unwrap().to_string(),
         other => compact(other),
+    }
+}
+
+/// The ways the large editor can show the bytes of a binary. The bytes and subtype are never rewritten by the choice.
+pub const BIN_ENCODINGS: [&str; 3] = ["Base64", "Hex", "UTF-8"];
+
+/// The bytes as text when they read as text: valid UTF-8 with no control characters other than whitespace.
+pub fn bytes_as_text(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes).ok().filter(|t| !t.chars().any(|c| c.is_control() && !c.is_whitespace()))
+}
+
+/// The encoding a binary opens in: its text when it reads as text, else Base64.
+pub fn default_encoding(bytes: &[u8]) -> &'static str {
+    if bytes_as_text(bytes).is_some() { "UTF-8" } else { "Base64" }
+}
+
+pub fn encode_bytes(bin: &mongodb::bson::Binary, enc: &str) -> Res<String> {
+    match enc {
+        "Hex" => Ok(sql::value::hex_digits(&bin.bytes, false)),
+        "UTF-8" => String::from_utf8(bin.bytes.clone()).map_err(|_| "These bytes are not valid UTF-8; use Base64 or Hex.".to_string()),
+        _ => Ok(Bson::Binary(bin.clone()).into_relaxed_extjson()["$binary"]["base64"].as_str().unwrap_or_default().to_string()),
+    }
+}
+
+pub fn decode_bytes(text: &str, enc: &str) -> Res<Vec<u8>> {
+    let squeezed: String = text.split_whitespace().collect();
+    match enc {
+        "Hex" => (squeezed.len().is_multiple_of(2) && squeezed.bytes().all(|c| c.is_ascii_hexdigit())).then(|| (0..squeezed.len()).step_by(2).map(|i| u8::from_str_radix(&squeezed[i..i + 2], 16).unwrap()).collect()).ok_or("Hex needs pairs of digits 0-9 and a-f.".to_string()),
+        "UTF-8" => Ok(text.as_bytes().to_vec()),
+        _ => mongodb::bson::Binary::from_base64(&squeezed, None).map(|b| b.bytes).map_err(|_| "Not valid Base64.".to_string()),
     }
 }
 
@@ -942,6 +973,8 @@ pub fn make_value(kind: &str, text: &str) -> Res<Bson> {
             Bson::RegularExpression(mongodb::bson::Regex { pattern: pattern.into(), options: opts.into_iter().collect() })
         }
         "uuid" => Bson::Binary(mongodb::bson::Binary::from_uuid(mongodb::bson::Uuid::parse_str(t).map_err(|_| bad("UUID"))?)),
+        // A new field takes Base64; an existing binary is edited through the encoding switch of the large editor.
+        "binary" => Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: decode_bytes(t, "Base64")? }),
         _ => return Err(format!("Unknown type {kind}")),
     })
 }
@@ -1173,6 +1206,13 @@ mod tests {
         assert_eq!((type_name_kind(&r), value_text(&r)), ("regex", "/ab+c/im".to_string()));
         let u = make_value("uuid", "67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
         assert_eq!(type_name_kind(&u), "uuid");
+        let bin = mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Md5, bytes: vec![0, 255, b'a'] };
+        for e in BIN_ENCODINGS.iter().filter(|e| **e != "UTF-8") {
+            assert_eq!(decode_bytes(&encode_bytes(&bin, e).unwrap(), e), Ok(bin.bytes.clone()), "{e}");
+        }
+        assert_eq!([default_encoding(b"hi (x)\n"), default_encoding(&[0, 1, 2, b'a'])], ["UTF-8", "Base64"]);
+        assert!(encode_bytes(&bin, "UTF-8").is_err() && decode_bytes("zz", "Hex").is_err() && decode_bytes("+f+f", "Hex").is_err());
+        assert_eq!(make_value("binary", "AP9h"), Ok(Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: bin.bytes })));
         assert!(possible_timestamp(&Bson::Int64(1_700_000_000)).is_some() && possible_timestamp(&Bson::Int32(42)).is_none());
     }
 
