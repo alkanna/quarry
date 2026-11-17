@@ -1049,6 +1049,7 @@ pub(super) enum Modal {
     ErrorDetails(Box<super::errors::ErrEntry>),
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
+    WhatsNew(Box<WhatsNew>),
     Rename { doc: Document, path: Vec<String>, name: String },
     /// `preview` keeps the stages it was made from; Apply only runs when they equal the current
     /// ones, so a late reply for older inputs cannot approve newer stages.

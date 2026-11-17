@@ -68,7 +68,9 @@ mod value_edit;
 #[cfg(test)]
 mod ui_tests;
 mod watch;
+mod whats_new;
 use column_menu::*;
+use whats_new::WhatsNew;
 use errors::*;
 use config::*;
 use groups::{Group, Groups, Place};
@@ -675,12 +677,9 @@ impl App {
             if app.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
-                if ui_json.is_some()
-                    && let Some(body) = crate::update::changelog(&app.prefs.last_version, current)
-                {
-                    // Several releases come each under a "Quarry x.y.z" heading.
-                    let title = if body.starts_with("Quarry ") { format!("What's new since Quarry {}", app.prefs.last_version) } else { format!("What's new in Quarry {current}") };
-                    app.modal = Some(Modal::Text { title, body, code: false });
+                let notes = crate::update::changelog(&app.prefs.last_version, current);
+                if ui_json.is_some() && !notes.is_empty() {
+                    app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.prefs.last_version))));
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();

@@ -325,45 +325,155 @@ fn install(new: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The notes of every release after `since` up to `version`, newest first, from CHANGELOG.md
-/// (written by release-please), as plain text. An update can skip releases, for example when
-/// Quarry was not opened for a while, so the notes cover all of them. An unknown `since`, as in
-/// settings from 0.2.0 and earlier, gives the notes of `version` alone.
-pub fn changelog(since: &str, version: &str) -> Option<String> {
-    changelog_in(include_str!("../CHANGELOG.md"), since, version)
+/// What a section of release notes is about, from its release-please heading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    New,
+    Fixed,
+    Faster,
+    Other,
 }
 
-fn changelog_in(text: &str, since: &str, version: &str) -> Option<String> {
-    // Release headings are "## [1.2.0](compare link) (date)", section headings "### Features".
-    fn release(l: &str) -> Option<&str> {
-        l.strip_prefix('#')?.trim_start_matches('#').trim_start().strip_prefix('[')?.split(']').next()
+impl Kind {
+    fn of(heading: &str) -> Kind {
+        match heading {
+            "Features" => Kind::New,
+            "Bug Fixes" => Kind::Fixed,
+            "Performance Improvements" => Kind::Faster,
+            _ => Kind::Other,
+        }
     }
-    let (top, from) = (parse(version)?, parse(since));
+}
+
+/// One line of release notes: "agents: fenced $objectToArray ..." from PR #279.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub scope: Option<String>,
+    pub text: String,
+    pub pr: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub kind: Kind,
+    /// The heading as written, kept for copied text.
+    pub title: String,
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    pub version: String,
+    /// As in the heading, 2026-11-17, or empty.
+    pub date: String,
+    pub sections: Vec<Section>,
+}
+
+impl Release {
+    pub fn count(&self, kind: Kind) -> usize {
+        self.sections.iter().filter(|s| s.kind == kind).map(|s| s.entries.len()).sum()
+    }
+}
+
+/// The notes of every release after `since` up to `version`, newest first, from CHANGELOG.md
+/// (written by release-please). An update can skip releases, for example when Quarry was not
+/// opened for a while, so the notes cover all of them. An unknown `since`, as in settings from
+/// 0.2.0 and earlier, gives the notes of `version` alone.
+pub fn changelog(since: &str, version: &str) -> Vec<Release> {
+    releases(include_str!("../CHANGELOG.md"), since, version)
+}
+
+fn releases(text: &str, since: &str, version: &str) -> Vec<Release> {
+    // Release headings are "## [1.2.0](compare link) (2026-11-17)".
+    fn heading(l: &str) -> Option<(&str, &str)> {
+        let rest = l.strip_prefix('#')?.trim_start_matches('#').trim_start().strip_prefix('[')?;
+        let (v, after) = rest.split_once(']')?;
+        let date = after.rsplit_once('(').map_or("", |(_, d)| d.trim_end_matches(')').trim());
+        Some((v, date))
+    }
+    let Some(top) = parse(version) else { return Vec::new() };
+    let from = parse(since);
     let wanted = |v: &str| parse(v).is_some_and(|v| v <= top && from.map_or(v == top, |f| v > f));
-    let mut sections: Vec<(String, String)> = Vec::new();
-    let mut cur: Option<(String, String)> = None;
-    for l in text.lines() {
-        if let Some(v) = release(l) {
-            sections.extend(cur.take());
-            cur = wanted(v).then(|| (v.to_string(), String::new()));
-            continue;
-        }
-        let Some((_, out)) = cur.as_mut() else { continue };
-        // Drops the trailing commit link, " ([abc1234](https://...))", and bold scopes.
-        let l = l.find(" ([").map_or(l, |i| &l[..i]).replace("**", "");
-        let l = l.trim_start_matches('#').trim();
-        let l = l.strip_prefix("* ").map_or(l.to_string(), |b| format!("- {b}"));
-        if !l.is_empty() || !out.ends_with("\n\n") {
-            out.push_str(&l);
-            out.push('\n');
+    fn close(cur: Option<(Release, String)>, out: &mut Vec<Release>) {
+        if let Some((mut r, body)) = cur {
+            r.sections = parse_body(&body);
+            if !r.sections.is_empty() {
+                out.push(r);
+            }
         }
     }
-    sections.extend(cur);
-    let sections: Vec<(String, String)> = sections.into_iter().map(|(v, b)| (v, b.trim().to_string())).filter(|(_, b)| !b.is_empty()).collect();
-    match sections.as_slice() {
-        [] => None,
-        [(_, body)] => Some(body.clone()),
-        many => Some(many.iter().map(|(v, b)| format!("Quarry {v}\n\n{b}")).collect::<Vec<_>>().join("\n\n")),
+    let mut out = Vec::new();
+    let mut cur: Option<(Release, String)> = None;
+    for l in text.lines() {
+        if let Some((v, date)) = heading(l) {
+            close(cur.take(), &mut out);
+            cur = wanted(v).then(|| (Release { version: v.to_string(), date: date.to_string(), sections: Vec::new() }, String::new()));
+        } else if let Some((_, body)) = cur.as_mut() {
+            body.push_str(l);
+            body.push('\n');
+        }
+    }
+    close(cur, &mut out);
+    out
+}
+
+/// The sections of one release's notes, as release-please writes them in CHANGELOG.md and in
+/// the GitHub release body: "### Features" headings over "* **scope:** text ([#1](..)) ([abc](..))".
+pub fn parse_body(text: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for l in text.lines() {
+        let t = l.trim();
+        if let Some(h) = t.strip_prefix("###") {
+            let title = h.trim().to_string();
+            out.push(Section { kind: Kind::of(&title), title, entries: Vec::new() });
+        } else if let Some(b) = t.strip_prefix("* ").or_else(|| t.strip_prefix("- ")) {
+            if out.is_empty() {
+                out.push(Section { kind: Kind::Other, title: String::new(), entries: Vec::new() });
+            }
+            out.last_mut().unwrap().entries.push(entry(b));
+        }
+    }
+    out.retain(|s| !s.entries.is_empty());
+    out
+}
+
+fn entry(line: &str) -> Entry {
+    let pr = line.find("([#").and_then(|i| line[i + 3..].split(']').next()?.parse().ok());
+    // The links go: " ([#279](https://...)) ([8a8be5a](https://...))".
+    let line = line.find(" ([").map_or(line, |i| &line[..i]).trim();
+    let (scope, text) = match line.strip_prefix("**").and_then(|r| r.split_once(":**")) {
+        Some((s, t)) => (Some(unescape(s.trim())), t.trim()),
+        None => (None, line),
+    };
+    let text = unescape(text);
+    let mut c = text.chars();
+    let text = c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect());
+    Entry { scope, text, pr }
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&gt;", ">").replace("&lt;", "<").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+}
+
+/// The notes as plain text for the clipboard. Several releases each get a "Quarry x.y.z" line.
+pub fn notes_text(rs: &[Release]) -> String {
+    let body = |r: &Release| {
+        r.sections
+            .iter()
+            .map(|s| {
+                let items = s.entries.iter().map(|e| match &e.scope {
+                    Some(sc) => format!("- {sc}: {}", e.text),
+                    None => format!("- {}", e.text),
+                });
+                let items = items.collect::<Vec<_>>().join("\n");
+                if s.title.is_empty() { items } else { format!("{}\n\n{items}", s.title) }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    match rs {
+        [one] => body(one),
+        many => many.iter().map(|r| format!("Quarry {}\n\n{}", r.version, body(r))).collect::<Vec<_>>().join("\n\n"),
     }
 }
 
@@ -456,12 +566,27 @@ mod tests {
 
     #[test]
     fn changelog_section() {
-        assert_eq!(changelog("", "0.2.0").as_deref(), Some("Features\n\n- initial release of Quarry, a native MongoDB workbench"));
-        assert_eq!(changelog("", "9.9.9"), None);
-        let text = "# Changelog\n\n## [0.3.0](x) (d)\n\n### Features\n\n* c ([1](y))\n\n## [0.2.1](x) (d)\n\n### Bug Fixes\n\n* b\n\n## [0.2.0](x) (d)\n\n* a\n";
+        assert_eq!(notes_text(&changelog("", "0.2.0")), "Features\n\n- Initial release of Quarry, a native MongoDB workbench");
+        assert!(changelog("", "9.9.9").is_empty());
+        let text = "# Changelog\n\n## [0.3.0](x) (2026-11-17)\n\n### Features\n\n* c ([1](y))\n\n## [0.2.1](x) (d)\n\n### Bug Fixes\n\n* b\n\n## [0.2.0](x) (d)\n\n* a\n";
         // Skipped releases are included, newest first, each under its version.
-        assert_eq!(changelog_in(text, "0.2.0", "0.3.0").as_deref(), Some("Quarry 0.3.0\n\nFeatures\n\n- c\n\nQuarry 0.2.1\n\nBug Fixes\n\n- b"));
-        assert_eq!(changelog_in(text, "0.2.1", "0.3.0").as_deref(), Some("Features\n\n- c"));
-        assert_eq!(changelog_in(text, "", "0.2.1").as_deref(), Some("Bug Fixes\n\n- b"));
+        assert_eq!(notes_text(&releases(text, "0.2.0", "0.3.0")), "Quarry 0.3.0\n\nFeatures\n\n- C\n\nQuarry 0.2.1\n\nBug Fixes\n\n- B");
+        assert_eq!(notes_text(&releases(text, "0.2.1", "0.3.0")), "Features\n\n- C");
+        assert_eq!(notes_text(&releases(text, "", "0.2.1")), "Bug Fixes\n\n- B");
+        assert_eq!(releases(text, "", "0.3.0")[0].date, "2026-11-17");
+        // A release whose notes have no section heading still lists its entries.
+        assert_eq!(notes_text(&releases(text, "", "0.2.0")), "- A");
+    }
+
+    #[test]
+    fn release_entries() {
+        let body = "### Features\n\n* **agents:** fenced $objectToArray in pipelines ([#279](https://x/279)) ([8a8be5a](https://x/c))\n* Linux header, switched in Settings &gt; Appearance ([#263](u)) ([18aa1c7](u))\n\n### Performance Improvements\n\n* faster grid\n";
+        let s = parse_body(body);
+        assert_eq!(s.iter().map(|s| s.kind).collect::<Vec<_>>(), [Kind::New, Kind::Faster]);
+        assert_eq!(s[0].entries[0], Entry { scope: Some("agents".into()), text: "Fenced $objectToArray in pipelines".into(), pr: Some(279) });
+        assert_eq!(s[0].entries[1], Entry { scope: None, text: "Linux header, switched in Settings > Appearance".into(), pr: Some(263) });
+        assert_eq!(s[1].entries[0].pr, None);
+        let r = Release { version: "1.0.0".into(), date: String::new(), sections: s };
+        assert_eq!((r.count(Kind::New), r.count(Kind::Fixed), r.count(Kind::Faster)), (2, 0, 1));
     }
 }

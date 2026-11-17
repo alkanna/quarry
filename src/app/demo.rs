@@ -388,6 +388,13 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_DIALOG") {
             self.demo_dialog(&v);
         }
+        // QUARRY_TEST_WHATSNEW=one|many shows the notes of the running release, or of the last three since an older one.
+        if let Ok(v) = std::env::var("QUARRY_TEST_WHATSNEW") {
+            let all = crate::update::changelog("0.0.0", env!("CARGO_PKG_VERSION"));
+            let n = if v == "many" { 3 } else { 1 };
+            let from = if n > 1 { all.get(n).map(|r| r.version.clone()).unwrap_or_default() } else { String::new() };
+            self.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(all.into_iter().take(n).collect(), &from))));
+        }
     }
 
     pub(super) fn demo_dialog(&mut self, which: &str) {
