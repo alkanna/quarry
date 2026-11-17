@@ -3,8 +3,9 @@
 //! `begin` reads this pass's keys before anything draws. While the results grid has the keys, h j k l move a cell cursor
 //! in it, or a line cursor in the record Tab opens, and a few more keys act on the cell under it. Anywhere else that no
 //! text field has the keys, such as a focused sidebar row or the Library tree, h j k l, gg and G become the arrows, Home
-//! and End that those already take, and `end` moves egui's focus for the arrows nothing took. Ctrl+h j k l (Alt where
-//! Ctrl is the command key) move between the sidebar, the query and the grid, from anywhere, editors included.
+//! and End that those already take, and `end` moves egui's focus for the arrows nothing took. Ctrl+h j k l move between
+//! the sidebar, the query and the grid, from anywhere, editors included. Where Ctrl is the command key, Alt stands in for
+//! it in those and in Ctrl+d u f b.
 
 use super::*;
 use egui::{Event, FocusDirection, Modifiers};
@@ -138,14 +139,9 @@ fn feed(pending: &mut String, c: char) -> (bool, Option<Cmd>) {
     (ours, cmd)
 }
 
-/// Pane keys: Ctrl where it is not the command key, as on macOS, else Alt.
+/// Pane and screen keys: Ctrl where it is not the command key, as on macOS, else Alt.
 fn pane_mods(m: &Modifiers) -> bool {
     !m.shift && !m.command && ((m.ctrl && !m.alt) || (cfg!(not(target_os = "macos")) && m.alt && !m.ctrl))
-}
-
-/// Screen keys: Ctrl only where it is not the command key.
-fn ctrl_only(m: &Modifiers) -> bool {
-    m.ctrl && !m.command && !m.shift && !m.alt
 }
 
 fn arrow(dir: FocusDirection) -> Key {
@@ -261,7 +257,7 @@ impl App {
                     }
                     // Esc drops a half typed command before it closes anything.
                     Event::Key { key: Key::Escape, pressed: true, modifiers, .. } if modifiers.is_none() && !pending.is_empty() => pending.clear(),
-                    Event::Key { key: k @ (Key::D | Key::U | Key::F | Key::B), pressed, modifiers, .. } if grid.is_some() && ctrl_only(modifiers) => {
+                    Event::Key { key: k @ (Key::D | Key::U | Key::F | Key::B), pressed, modifiers, .. } if grid.is_some() && pane_mods(modifiers) => {
                         if *pressed {
                             cmds.push(match k {
                                 Key::D => Cmd::Half(true),

@@ -140,7 +140,7 @@ const SHORTCUTS: [(&str, &str); 47] = [
     ("", "With Vim motions on, where no text field has the keys:"),
     ("h j k l, w b", "Move the grid's cell cursor; in a record, j and k walk its lines and h and l fold its JSON"),
     ("gg, G, {n}G, 0, $", "First, last or nth row; first or last column"),
-    ("Ctrl+d/u, Ctrl+f/b", "Half a screen or a screen of rows down or up"),
+    ("Ctrl+d/u, Ctrl+f/b", "Half a screen or a screen of rows down or up (Alt where Ctrl is the command key)"),
     ("i, v", "Edit the cell under the cursor, or view its value in full"),
     ("yy, Y", "Copy the cell's value, or the row as JSON"),
     ("gt, gT, {n}gt", "Next, previous or nth tab"),
