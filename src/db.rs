@@ -1101,6 +1101,7 @@ mod tests {
         assert_eq!(mask_uri("mongodb://u:p@h/?appName=me@corp&proxyPassword=hunter2"), "mongodb://u:****@h/?appName=me@corp&proxyPassword=****");
         assert_eq!(mask_uri("mongodb://u:p?q@h/?proxyPassword=p@ss"), "mongodb://u:****@h/?proxyPassword=****");
         assert_eq!(mask_uri("mongodb://h/?authMechanismProperties=SERVICE_NAME:mongodb"), "mongodb://h/?authMechanismProperties=SERVICE_NAME:mongodb");
+        assert_eq!(crate::db::tools::secret_opt_values("mongodb://h/?authMechanismProperties=AWS_SESSION_TOKEN%3AAa3tok,X:y"), ["Aa3tok", "AWS_SESSION_TOKEN%3AAa3tok,X:y"]);
         assert_eq!(agent::Redact::new("mongodb://h/?proxyPassword=hunter2", &[]).apply("proxy hunter2 failed"), "proxy [hidden] failed");
         assert_eq!(to_edit_line(&Bson::Document(doc! { "n": 5i64, "s": "x" })), r#"{"n":{"$numberLong":"5"},"s":"x"}"#);
     }

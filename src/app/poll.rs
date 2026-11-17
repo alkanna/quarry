@@ -683,12 +683,10 @@ impl App {
         }
     }
 
-    /// Whether an answer that wants a dialog may open it. An open dialog holds typed input or a pending choice, so the
-    /// answer is dropped with a note instead of replacing it.
     /// An answer that opens a dialog waits for the one already open, which may hold the user's typing.
     fn show_late(&mut self, m: Modal) {
         if self.modal.is_some() {
-            self.late_modal = Some(m);
+            self.late_modals.push(m);
         } else {
             self.modal = Some(m);
         }

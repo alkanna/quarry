@@ -529,7 +529,8 @@ impl Worker {
             // A many-document restore can stop partway: what was put back must not be inserted again on a retry, and
             // what was not must stay undoable.
             let kind = match (a.kind, redo) {
-                (UndoKind::DeleteMany { old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => UndoKind::DeleteMany { old: old.into_iter().filter(|d| !d.get("_id").is_some_and(|i| ids.contains(i))).collect() },
+                // The insert is ordered, so what went in is the first ids.len() documents.
+                (UndoKind::DeleteMany { mut old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => UndoKind::DeleteMany { old: old.split_off(ids.len().min(old.len())) },
                 (kind, _) => kind,
             };
             (res, Some(UndoAction { kind, ..a }))

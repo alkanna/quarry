@@ -284,7 +284,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
         ui.set_min_height(SHELL_PANEL_H - 12.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            let (n_log, n_q) = (sh.logs.len(), sh.queries.len());
+            let (n_log, n_q) = (sh.logs.len() + sh.logs_dropped, sh.queries.len());
             if view_tab(ui, &format!("Console  {n_log}"), !sh.queries_tab).clicked() {
                 sh.queries_tab = false;
             }
@@ -300,6 +300,9 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             if !sh.queries_tab {
                 if sh.logs.is_empty() {
                     ui.label(mono("Nothing printed".into(), FAINT()));
+                }
+                if sh.logs_dropped > 0 {
+                    ui.label(mono(format!("{} earlier lines not kept", sh.logs_dropped), FAINT()));
                 }
                 for (level, text) in &sh.logs {
                     let c = match level.as_str() {

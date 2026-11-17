@@ -26,6 +26,7 @@ impl ShellTab {
         if self.logs.len() > 1500 {
             let over = self.logs.len() - 1000;
             self.logs.drain(..over);
+            self.logs_dropped += over;
         }
     }
 
@@ -698,6 +699,8 @@ pub(super) struct ShellTab {
     /// Other saved connections whose data is a global of the script, saved with the tab.
     pub(super) attached: Vec<Attached>,
     pub(super) logs: Vec<(String, String)>,
+    /// Older console lines let go by push_log, said in the console so a long log does not look complete.
+    pub(super) logs_dropped: usize,
     /// The returned value when it is not documents; see `result` for the whole of it.
     pub(super) value: Option<Bson>,
     /// Returned documents, one or an array of them, as BSON bytes for the table.
@@ -1557,8 +1560,6 @@ pub(super) enum Open {
     NewTab,
     /// A link in data: a tab showing it without work in it, else a new tab. The current tab is never replaced.
     Link,
-    /// The current tab whatever it holds: the Shell switching its own collection.
-    Replace,
 }
 
 #[derive(Clone, Copy)]
@@ -1690,6 +1691,7 @@ impl App {
     /// Connects with a known address, so tests need no keychain.
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
         let tools = self.cloud_tools();
+        self.stop_conn_work(id);
         self.req += 1;
         let attempt = self.req;
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };

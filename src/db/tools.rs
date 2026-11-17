@@ -95,7 +95,19 @@ fn query_at(uri: &str) -> Option<usize> {
 /// The raw values of the secret options in a URI, for hiding them from text.
 pub fn secret_opt_values(uri: &str) -> Vec<String> {
     let Some(i) = query_at(uri) else { return Vec::new() };
-    uri[i + 1..].split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| secret_opt(k, v)).map(|(_, v)| v.to_string()).collect()
+    let mut out = Vec::new();
+    for (_, v) in uri[i + 1..].split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| secret_opt(k, v)) {
+        // Text may quote the token alone, without the rest of the option.
+        let d = super::pct::decode(v);
+        if let Some(at) = d.to_ascii_uppercase().find("AWS_SESSION_TOKEN:") {
+            let token = d[at + 18..].split(',').next().unwrap_or_default();
+            if !token.is_empty() {
+                out.push(token.to_string());
+            }
+        }
+        out.push(v.to_string());
+    }
+    out
 }
 
 pub fn mask_uri(uri: &str) -> String {

@@ -325,7 +325,7 @@ fn an_explain_waits_for_the_open_dialog() {
     let a = ui.h.state_mut();
     a.explain();
     a.modal = Some(Modal::Text { title: "Held".into(), body: "typed".into(), code: false });
-    ui.wait("the plan to arrive", |a| a.late_modal.is_some());
+    ui.wait("the plan to arrive", |a| !a.late_modals.is_empty());
     assert!(matches!(&ui.app().modal, Some(Modal::Text { title, .. }) if title == "Held"), "the plan replaced the open dialog");
     ui.key(egui::Modifiers::NONE, egui::Key::Escape);
     ui.wait("the plan to open", |a| matches!(a.modal, Some(Modal::Explain { .. })));

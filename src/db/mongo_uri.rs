@@ -204,7 +204,9 @@ impl MongoUri {
 /// certificate check instead must be the user's choice.
 pub fn for_driver(uri: &str) -> Result<String, String> {
     let Some(mut m) = MongoUri::parse(uri).filter(|m| m.has_opt("tlsAllowInvalidHostnames")) else { return Ok(uri.to_string()) };
-    if m.opt("tlsAllowInvalidHostnames").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+    let on = |k: &str| m.opt(k).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    // With every certificate check already off, the name check goes too, so the option adds nothing.
+    if on("tlsAllowInvalidHostnames") && !on("tlsAllowInvalidCertificates") && !on("tlsInsecure") {
         return Err("Quarry cannot skip only the host name check (tlsAllowInvalidHostnames). Edit the connection and turn on Allow invalid certificates, which skips every certificate check, or remove the option.".into());
     }
     m.set_opt("tlsAllowInvalidHostnames", None);
@@ -402,6 +404,7 @@ mod tests {
         assert!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=true&w=1").unwrap_err().contains("Allow invalid certificates"));
         assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidHostnames=false&w=1").unwrap(), "mongodb://h/?tls=true&w=1");
         assert_eq!(for_driver("mongodb://h/?tls=true").unwrap(), "mongodb://h/?tls=true");
+        assert_eq!(for_driver("mongodb://h/?tls=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true").unwrap(), "mongodb://h/?tls=true&tlsAllowInvalidCertificates=true");
         let mut m = MongoUri::parse("mongodb://h/?tlsInsecure=false").unwrap();
         m.set_allow_invalid(true);
         assert_eq!(m.to_string(), "mongodb://h/?tlsAllowInvalidCertificates=true");

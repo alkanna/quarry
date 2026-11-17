@@ -112,7 +112,7 @@ impl App {
             Open::NewTab => None,
             // A link sets its own filter, so it never takes a tab with work in it.
             Open::Link => (0..self.tabs.len()).find(|&i| self.tabs[i].sel == sel && !self.holds_work(i)),
-            Open::Here | Open::Replace => self.tabs.iter().position(|t| t.sel == sel),
+            Open::Here => self.tabs.iter().position(|t| t.sel == sel),
         };
         self.reset_doc_state();
         if let Some(i) = shown {
@@ -120,18 +120,15 @@ impl App {
             return false;
         }
         let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
-        let replace = !self.tabs.is_empty() && (how == Open::Replace || how == Open::Here && !keep);
+        let replace = !self.tabs.is_empty() && how == Open::Here && !keep;
         if replace {
             let old = &self.tabs[self.cur];
             // Content, Structure and the like carry over to the next table of the same kind of engine.
-            let view = if how == Open::Replace || old.sql.is_some() == engine.is_sql() { old.view } else { View::Documents };
+            let view = if old.sql.is_some() == engine.is_sql() { old.view } else { View::Documents };
             let new = Tab { view, ..Tab::new(sel).for_engine(engine) };
-            let mut old = std::mem::replace(&mut self.tabs[self.cur], new);
-            if how == Open::Here {
-                // Cmd+Shift+T brings the replaced tab back, as it does a closed one.
-                old.watch.stop();
-                self.remember_closed(old);
-            }
+            // Cmd+Shift+T brings the replaced tab back, as it does a closed one.
+            let old = std::mem::replace(&mut self.tabs[self.cur], new);
+            self.remember_closed(old);
             self.show_tab(self.cur);
         } else {
             let at = if self.tabs.is_empty() { 0 } else { self.cur + 1 };

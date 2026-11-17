@@ -136,9 +136,19 @@ let first = true;
   pending.clear();
 })();
 
+// Half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji. Written out it would become a
+// replacement character, storing other text than the script holds, so a query holding one is refused.
+const broken = (v) =>
+  typeof v === "string" ? !v.isWellFormed()
+  : Array.isArray(v) ? v.some(broken)
+  : v !== null && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype ? Object.entries(v).some(([k, x]) => !k.isWellFormed() || broken(x))
+  : false;
+const BROKEN = "holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji";
+
 // What a value becomes on the wire. Quarry turns each one into a literal; nothing here is spliced into text.
 function wire(v, pg) {
   if (v === undefined || v === null) return null;
+  if (broken(v)) throw new Error(`A query value ${BROKEN}`);
   // PostgreSQL has a boolean type that 1 does not satisfy.
   if (typeof v === "boolean") return pg ? { $bool: v } : v ? 1 : 0;
   if (typeof v === "bigint") return v >= -9007199254740991n && v <= 9007199254740991n ? Number(v) : { $int: v.toString() };
@@ -154,8 +164,6 @@ function wire(v, pg) {
   }
   if (v instanceof Uint8Array) return { $hex: Buffer.from(v).toString("hex") };
   if (typeof v === "object") return JSON.stringify(walk(v, asLog));
-  // Written out it would become a replacement character, storing other text than the script holds.
-  if (typeof v === "string" && !v.isWellFormed()) throw new Error("A query value holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji");
   return v;
 }
 
@@ -164,6 +172,7 @@ function query(conn, text, params) {
   const pg = dialects.get(conn) === "postgres";
   let wired;
   try {
+    if (broken(text)) throw new Error(`The query text ${BROKEN}`);
     wired = params.map((v) => wire(v, pg));
   } catch (e) {
     return Promise.reject(e);

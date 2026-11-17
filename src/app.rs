@@ -243,7 +243,7 @@ pub struct App {
     explain_req: u64,
     modal: Option<Modal>,
     /// An answer that arrived while a dialog was open, shown once that dialog closes.
-    late_modal: Option<Modal>,
+    late_modals: Vec<Modal>,
     status: String,
     log: LogUi,
     toasts: Vec<Toast>,
@@ -426,7 +426,7 @@ impl App {
             undo_bytes: Default::default(),
             explain_req: 0,
             modal: None,
-            late_modal: None,
+            late_modals: Vec::new(),
             status: "Ready. All connections start read-only.".into(),
             toasts: Vec::new(),
             errors: Vec::new(),

@@ -148,6 +148,7 @@ fn shell_fix_the_console_keeps_the_latest_lines_each_cut_short() {
     sh.push_log("log".into(), "é".repeat(3000));
     assert!(sh.logs.len() <= 1500, "{} lines kept", sh.logs.len());
     assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 4999");
+    assert!(sh.logs_dropped > 0 && sh.logs.len() + sh.logs_dropped >= 5000, "{} dropped", sh.logs_dropped);
     assert_eq!(sh.logs.last().unwrap().1.chars().count(), 2000);
     assert!(!sh.logs.iter().any(|l| l.1 == "line 0"), "the oldest lines were kept");
 }
