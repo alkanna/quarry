@@ -306,6 +306,10 @@ impl App {
             t.shell.ms = Some(42);
             t.shell.query_ms = Some(18);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
+            // QUARRY_TEST_SHELL=running: a rerun two minutes in, Stop with its time over the last result dimmed.
+            if std::env::var("QUARRY_TEST_SHELL").is_ok_and(|v| v == "running") {
+                t.shell.started = std::time::Instant::now().checked_sub(std::time::Duration::from_millis(128_400));
+            }
         }
         // Test switch: the shell with parameter hints and a suggestion list, see shell_sig_demo.
         if let Some(code) = shell_ls::shell_sig_code().filter(|_| std::env::var("QUARRY_TEST_SQL").is_err()) {

@@ -424,16 +424,7 @@ pub(crate) fn danger_item(ui: &mut egui::Ui, text: impl Into<String>) -> egui::R
     .inner
 }
 
-/// The main action of a query card: a play mark, the label and its key hint, on the accent.
-/// Painted, not a Button with one text job: the glyph, the label and the smaller key hint share
-/// a baseline there, so the triangle (from a fallback font) and the hint sat off center. Here
-/// each part is centered on its own.
-pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Response {
-    let (label, hint, w) = run_text(ui, text, keys, true);
-    run_face(ui, text, label, hint, w, egui::CornerRadius::same(R_MD), true)
-}
-
-/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip, named `tip_name`, opens a menu of what to
+/// A Run (play mark, label, key hint on the accent; see `run_stop`) with a narrow tip on its right edge, as in JetBrains IDEs: the tip, named `tip_name`, opens a menu of what to
 /// run. A query line passes `loud` only while it holds a query the rows below did not come from; otherwise its Run is a quiet
 /// outlined button of the same size, so the line does not reflow. Returns the button, then the tip.
 pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, loud: bool, tip_name: &str) -> (egui::Response, egui::Response) {
@@ -483,7 +474,8 @@ fn split_row<R>(ui: &mut egui::Ui, main_w: f32, add: impl FnOnce(&mut egui::Ui) 
     add(&mut row)
 }
 
-/// The button part of a Run: on the accent when `loud`, else outlined on the panel.
+/// The button part of a Run: on the accent when `loud`, else outlined on the panel. Painted, not a Button with one text
+/// job: the triangle (from a fallback font) and the smaller key hint sat off center on a shared baseline.
 fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, hint: std::sync::Arc<egui::Galley>, w: f32, corners: egui::CornerRadius, loud: bool) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), Sense::click());
     let p = ui.painter();
@@ -506,6 +498,52 @@ fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, 
     let enabled = ui.is_enabled();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The main action of a script: Run while `started` is None, else Stop with the time since `started`, in one footprint: the width fits both and the
+/// longest clock, so the row after it never moves. The caller reads a click as Run or Stop from `started`.
+pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time::Instant>) -> egui::Response {
+    let (label, hint, run_w) = run_text(ui, "Run", keys, true);
+    let stop = ui.painter().layout_job(egui::text::LayoutJob::single_section("Stop".into(), ui_fmt(TXT_BODY, ALERT(), W_SEMIBOLD, 0.0)));
+    let widest = ui.painter().layout_job(egui::text::LayoutJob::single_section("9:59:59".into(), mono_fmt(TXT_CAPTION, ALERT(), 400.0)));
+    let w = run_w.max(RUN_TRI + 8.0 + stop.size().x + 10.0 + widest.size().x + 28.0);
+    let Some(at) = started else { return run_face(ui, "Run", label, hint, w, egui::CornerRadius::same(R_MD), true) };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), Sense::click());
+    let p = ui.painter();
+    let fill = [tint(ALERT(), 33), tint(ALERT(), 50), tint(ALERT(), 70)][state_of(&r)];
+    p.rect(rect, R_MD, fill, Stroke::new(1.0, tint(ALERT(), 140)), egui::StrokeKind::Inside);
+    // Laid out as Run is, so the mark and the word sit where the triangle and "Run" were.
+    let content = RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
+    let (cy, x) = (rect.center().y, rect.center().x - content / 2.0);
+    p.rect_filled(egui::Rect::from_center_size(egui::pos2(x + RUN_TRI / 2.0, cy), egui::vec2(RUN_TRI, RUN_TRI)), 1.5, ALERT());
+    let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
+    p.galley(centered(&stop, x + RUN_TRI + 8.0), stop, ALERT());
+    let clock = ui.painter().layout_job(egui::text::LayoutJob::single_section(run_clock(at.elapsed()), mono_fmt(TXT_CAPTION, tint(ALERT(), 205), 400.0)));
+    p.galley(centered(&clock, rect.right() - 14.0 - clock.size().x), clock, ALERT());
+    // A segment sliding along the bottom edge says the script is alive; it holds still while the window is in the background.
+    let track = egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - 4.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 2.0));
+    p.rect_filled(track, 1.0, tint(ALERT(), 46));
+    let seg = 36.0_f32.min(track.width());
+    let t = if ui.input(|i| i.viewport().focused.unwrap_or(true)) { (ui.input(|i| i.time) as f32 * 0.8).fract() } else { 0.0 };
+    let x0 = track.left() + (track.width() + seg) * t - seg;
+    let (a, b) = (x0.max(track.left()), (x0 + seg).min(track.right()));
+    if b > a {
+        p.rect_filled(egui::Rect::from_x_y_ranges(a..=b, track.y_range()), 1.0, ALERT());
+    }
+    focus_ring(ui, &r, rect, R_MD as f32);
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Stop"));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A running time that stays short: tenths of a second for the first minute, then m:ss and h:mm:ss.
+pub(crate) fn run_clock(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{:.1} s", (d.as_secs_f32() * 10.0).floor() / 10.0),
+        60..3600 => format!("{}:{:02}", s / 60, s % 60),
+        _ => format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60),
+    }
 }
 
 /// A filled triangle pointing right, its left edge centered on `left`, `w` wide and `half_h` above and below its middle.
@@ -1395,4 +1433,20 @@ pub(crate) fn wavy_line(p: &egui::Painter, x: std::ops::RangeInclusive<f32>, y: 
     let xs = (0..).map(|i| x0 + i as f32 * 2.5).take_while(|&v| v < x1).chain([x1]);
     let pts = xs.enumerate().map(|(i, v)| egui::pos2(v, y + if i % 2 == 0 { 1.0 } else { -1.0 })).collect();
     p.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_clock;
+    use std::time::Duration;
+
+    #[test]
+    fn run_clock_stays_short() {
+        let at = |ms: u64| run_clock(Duration::from_millis(ms));
+        assert_eq!(at(400), "0.4 s");
+        assert_eq!(at(59_990), "59.9 s");
+        assert_eq!(at(60_000), "1:00");
+        assert_eq!(at(128_400), "2:08");
+        assert_eq!(at(3_600_000), "1:00:00");
+    }
 }

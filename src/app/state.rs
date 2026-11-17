@@ -46,6 +46,8 @@ impl ShellTab {
             Ok(rows) => (rows, None),
             Err(_) => (Vec::new(), Some(v)),
         };
+        // A rerun keeps the last result until this one, so its cut notice must not outlive it.
+        self.cut = false;
         self.shown();
     }
 
