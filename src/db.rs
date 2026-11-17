@@ -925,7 +925,7 @@ pub fn encode_bytes(bin: &mongodb::bson::Binary, enc: &str) -> Res<String> {
 pub fn decode_bytes(text: &str, enc: &str) -> Res<Vec<u8>> {
     let squeezed: String = text.split_whitespace().collect();
     match enc {
-        "Hex" => crate::agents::link::unhex(&squeezed).ok_or("Hex needs pairs of digits 0-9 and a-f.".to_string()),
+        "Hex" => (squeezed.len().is_multiple_of(2) && squeezed.bytes().all(|c| c.is_ascii_hexdigit())).then(|| (0..squeezed.len()).step_by(2).map(|i| u8::from_str_radix(&squeezed[i..i + 2], 16).unwrap()).collect()).ok_or("Hex needs pairs of digits 0-9 and a-f.".to_string()),
         "UTF-8" => Ok(text.as_bytes().to_vec()),
         _ => mongodb::bson::Binary::from_base64(&squeezed, None).map(|b| b.bytes).map_err(|_| "Not valid Base64.".to_string()),
     }
@@ -1205,7 +1205,7 @@ mod tests {
         for e in BIN_ENCODINGS.iter().filter(|e| **e != "UTF-8") {
             assert_eq!(decode_bytes(&encode_bytes(&bin, e).unwrap(), e), Ok(bin.bytes.clone()), "{e}");
         }
-        assert!(encode_bytes(&bin, "UTF-8").is_err() && decode_bytes("zz", "Hex").is_err());
+        assert!(encode_bytes(&bin, "UTF-8").is_err() && decode_bytes("zz", "Hex").is_err() && decode_bytes("+f+f", "Hex").is_err());
         assert_eq!(make_value("binary", "AP9h"), Ok(Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: bin.bytes })));
         assert!(possible_timestamp(&Bson::Int64(1_700_000_000)).is_some() && possible_timestamp(&Bson::Int32(42)).is_none());
     }

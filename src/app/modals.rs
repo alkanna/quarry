@@ -737,7 +737,7 @@ pub(super) fn typed_confirm(ui: &mut egui::Ui, expect: &str, typed: &mut String)
 
 /// Changed fields with the old value struck through and the new one after it, in a table card.
 fn diff_table(ui: &mut egui::Ui, id: &str, rows: impl Iterator<Item = (String, Option<Bson>, Option<Bson>)>) {
-    let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+    let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", if matches!(v, Bson::Binary(_)) { db::value_text(v) } else { leaf_text(v) }, db::type_name(v))).unwrap_or("(none)".into());
     table_card(ui, |ui| {
         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(id).max_height(320.0).show(ui, |ui| {

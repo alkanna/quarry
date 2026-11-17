@@ -118,7 +118,7 @@ impl App {
             let enc = db::default_encoding(&bin.bytes);
             self.inline = None;
             let text = db::encode_bytes(bin, enc).unwrap_or_default();
-            self.json_edit = Some(JsonEdit { enc, ..JsonEdit::new(d.clone(), path, text, kind) });
+            self.json_edit = Some(JsonEdit { enc, subtype: bin.subtype, ..JsonEdit::new(d.clone(), path, text, kind) });
             return;
         }
         let container = matches!(v, Bson::Document(_) | Bson::Array(_));

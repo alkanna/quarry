@@ -1038,6 +1038,8 @@ pub(super) struct JsonEdit {
     pub(super) kind: &'static str,
     /// How a binary's bytes are written in `text` (one of `db::BIN_ENCODINGS`); empty for every other value.
     pub(super) enc: &'static str,
+    /// The binary's subtype, kept here because a field name with a dot cannot be found again by path.
+    pub(super) subtype: mongodb::bson::spec::BinarySubtype,
     pub(super) focus: bool,
     /// Edited since it opened, so the side panel must not drop it for another value.
     pub(super) dirty: bool,
@@ -1045,7 +1047,7 @@ pub(super) struct JsonEdit {
 
 impl JsonEdit {
     pub(super) fn new(base: Document, path: Vec<String>, text: String, kind: &'static str) -> Self {
-        Self { base, path, text, kind, enc: "", focus: true, dirty: false }
+        Self { base, path, text, kind, enc: "", subtype: mongodb::bson::spec::BinarySubtype::Generic, focus: true, dirty: false }
     }
 }
 

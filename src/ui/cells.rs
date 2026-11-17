@@ -168,9 +168,10 @@ pub(crate) fn leaf_text(b: &Bson) -> String {
         Bson::Int64(n) => n.to_string(),
         Bson::Document(d) => format!("{{{} fields}}", d.len()),
         Bson::Array(a) => format!("[{} items]", a.len()),
+        b @ Bson::Binary(_) if db::type_name_kind(b) == "uuid" => db::value_text(b),
         Bson::Binary(b) => match std::str::from_utf8(&b.bytes) {
             Ok(t) => format!("Binary({} B) {}", b.bytes.len(), t.split_whitespace().collect::<Vec<_>>().join(" ")),
-            Err(_) => format!("Binary({} B)", b.bytes.len()),
+            Err(_) => format!("Binary({} B) 0x{}{}", b.bytes.len(), db::sql::value::hex_digits(&b.bytes[..b.bytes.len().min(32)], false), if b.bytes.len() > 32 { "…" } else { "" }),
         },
         other => db::compact(other),
     }
