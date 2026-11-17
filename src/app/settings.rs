@@ -267,7 +267,7 @@ impl App {
                         toggle(ui, &mut self.prefs.always_writable);
                     });
                     ui.separator();
-                    setting_row(ui, "Vim motions", "Modal editing in the code editors. They open in Normal mode: i to type, Esc to go back.", |ui| {
+                    setting_row(ui, "Vim motions", "Modal editing in the code editors, which open in Normal mode: i to type, Esc to go back. Elsewhere h j k l move in the grid and lists, and Ctrl+h j k l between the sidebar, the query and the grid.", |ui| {
                         toggle(ui, &mut self.prefs.vim);
                     });
                     ui.separator();

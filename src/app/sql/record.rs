@@ -64,8 +64,16 @@ impl App {
         let type_w = (width(&small, cols.iter().flatten().map(|c| c.ty.chars().count()).max().unwrap_or(0)) + 16.0).clamp(40.0, 160.0);
         let rid = ui.scope_id().with(("sql-record", i));
         let key = docs.id(i);
-        for (c, col) in names.iter().zip(&cols) {
+        // The Vim cursor's line, scrolled into view after a Vim key moved it.
+        let cur = self.prefs.vim.then(|| self.t().map_or(0, |t| t.vcol).min(names.len().saturating_sub(1)));
+        let scroll = cur.is_some() && std::mem::take(&mut self.vnav.scroll);
+        self.vnav.lines = names.len();
+        for (li, (c, col)) in names.iter().zip(&cols).enumerate() {
             let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
+            let here = cur == Some(li);
+            if here && scroll {
+                ui.scroll_to_rect(line, None);
+            }
             let open_id = rid.with(("json", c));
             let room = open_id.with("h");
             // Lines scrolled out of view keep their space but skip the work, like the grid's rows.
@@ -95,6 +103,9 @@ impl App {
             });
             let p = ui.painter();
             p.rect_filled(line, R_SM, hover_fill(state_of(&r)));
+            if here {
+                crate::app::table::paint_cursor(ui, line);
+            }
             focus_ring(ui, &r, val, R_SM as f32);
             let label = |text: String, f: &FontId, color: Color32| p.layout_no_wrap(text, f.clone(), color);
             let g = label(c.clone(), &font, MUTED());
@@ -109,6 +120,18 @@ impl App {
             }
             let json = text.is_some_and(|s| kind == Kind::Json || json_tree::looks_like(s));
             let mut open = json && ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
+            // Vim's l unfolds the cursor's JSON value and h folds it.
+            if here && let Some(crate::app::vim_nav::Act::Fold(o)) = self.vnav.act {
+                self.vnav.act = None;
+                if json && o != open {
+                    open = o;
+                    ui.data_mut(|d| d.insert_temp(open_id, open));
+                    if !open {
+                        json_tree::forget(ui.ctx(), tree_id(c));
+                        ui.data_mut(|d| d.remove::<f32>(room));
+                    }
+                }
+            }
             let fk = v.filter(|v| !v.is_null()).and_then(|_| fks.iter().position(|f| col.as_ref().is_some_and(|k| f.cols.contains(&k.src))));
             let text_x = val.left() + if json { 20.0 } else { 6.0 };
             let clip = p.with_clip_rect(val);

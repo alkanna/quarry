@@ -300,13 +300,19 @@ struct GridOut {
     head: Vec<(String, HeadAct)>,
     /// A cell menu pick: the row, the column name and the action.
     cell: Option<(usize, String, CellAct)>,
+    /// The column a plain click landed in, as a place among the columns shown, for the Vim cursor.
+    col: Option<usize>,
+    /// The column names in the order shown.
+    shown: Vec<String>,
 }
 
 /// The rows of one result set as a grid with a checkbox column. Checked rows are tinted, and the menu of a
 /// checked row acts on every checked row. `record` draws the selected row's record under it.
 /// `prefs` are the column choices of this result, and `filter` whether the result came from one table, which
 /// turns a cell into a filter on it.
-fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, filter: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
+/// `cursor` is the Vim cursor's place among the columns shown, scrolled into view with `scroll`.
+#[allow(clippy::too_many_arguments)]
+fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, cursor: Option<usize>, filter: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
     let mono = FontId::monospace(TXT_SMALL);
     let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     // Widths from the headers and the first rows, so a wide cell further down is cut with an ellipsis.
@@ -324,7 +330,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
     let total = lead + order.iter().map(|&ci| widths[ci]).sum::<f32>();
     let aligns: Vec<u8> = set.cols.iter().enumerate().map(|(ci, c)| prefs.align.get(&names[ci]).copied().unwrap_or(if is_numeric(c.kind) { 2 } else { 0 })).collect();
     let pins = shown.iter().filter(|c| prefs.pinned.contains(*c)).count();
-    let mut out = GridOut::default();
+    let mut out = GridOut { shown: order.iter().map(|&ci| names[ci].clone()).collect(), ..Default::default() };
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
         let (head, _) = ui.allocate_exact_size(egui::vec2(view_w, TABLE_HEAD_H), Sense::hover());
@@ -338,6 +344,11 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     if scroll && sel == Some(i) {
                         resp.scroll_to_me(None);
+                        // After the row's own scroll, so the cell's wins sideways.
+                        if let Some(k) = cursor.filter(|&k| k < order.len()) {
+                            let x = rr.left() + lead + order[..k].iter().map(|&ci| widths[ci]).sum::<f32>();
+                            ui.scroll_to_rect(egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(widths[order[k]], ROW_H)), None);
+                        }
                     }
                     if ui.is_rect_visible(rr) {
                         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, format!("Result row {}", i + 1)));
@@ -348,10 +359,11 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                             out.check = Some((i, shift));
                         }
                         let mut x = rr.left() + lead;
-                        for &ci in &order {
+                        for (k, &ci) in order.iter().enumerate() {
                             let (c, w) = (&set.cols[ci], &widths[ci]);
                             let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
                             x += w;
+                            let here = sel == Some(i) && cursor.map(|c| c.min(order.len() - 1)) == Some(k);
                             if !ui.is_rect_visible(cell) {
                                 continue;
                             }
@@ -372,6 +384,9 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                             let g = ui.fonts_mut(|f| f.layout_job(job));
                             let gx = table::align_x(aligns[ci], cell.left(), *w, g.size().x);
                             ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                            if here {
+                                table::paint_cursor(ui, cell);
+                            }
                             if let Some(v) = table::view_button(ui, cell, 0.0, v, ("eye", i, ci), || format!("View {} row {}", c.name, i + 1)) {
                                 out.view = Some((c.name.clone(), v));
                             }
@@ -382,6 +397,13 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                                 out.check = Some((i, shift));
                             } else {
                                 out.select = Some(i);
+                                if let Some(p) = resp.interact_pointer_pos() {
+                                    let mut x = rr.left() + lead;
+                                    out.col = order.iter().position(|&ci| {
+                                        x += widths[ci];
+                                        p.x < x
+                                    });
+                                }
                             }
                         }
                         // The menu knows its cell only from where the right click landed, so that is kept for it.
@@ -1328,15 +1350,26 @@ impl App {
                 let prefs = s.qprefs.get(&colnames).cloned().unwrap_or_default();
                 // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
                 let filter = sets[sel].kind == "SELECT" && sets[sel].stmt.len() < 20_000 && db::sql::source::single_table(&sets[sel].stmt, dialect).is_some();
-                let scroll = std::mem::take(&mut self.scroll_sel);
+                let vim = self.prefs.vim && !record_open;
+                let cursor = vim.then_some(self.tabs[cur].vcol);
+                let scroll = std::mem::take(&mut self.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
-                let out = grid(ui, &sets[sel], &prefs, &checked, qsel, scroll, filter, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
+                let out = grid(ui, &sets[sel], &prefs, &checked, qsel, scroll, cursor, filter, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
+                if !record_open {
+                    self.vnav.cols = out.shown.len();
+                }
+                // The record walks every column, the grid only those shown.
+                let shown = if record_open { &names } else { &out.shown };
+                let vim_act = self.vim_cell_act(ui.ctx(), qsel, self.tabs[cur].vcol, shown, Rows::Raw(&sets[sel].rows));
+                if let Some(c) = out.col {
+                    self.tabs[cur].vcol = c;
+                }
                 let Some(s) = self.tabs[cur].sql.as_mut() else { return };
                 (s.sets, s.qchecked) = (sets, checked);
                 view = out.view.or(rec.view);
                 head_acts = out.head;
-                cell_act = out.cell;
+                cell_act = out.cell.or(vim_act);
                 if let Some(i) = out.select {
                     s.qsel = Some(i);
                 }

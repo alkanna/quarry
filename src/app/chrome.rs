@@ -133,16 +133,7 @@ impl App {
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
             self.set_view(View::Documents);
-            let d = self.sql_dialect();
-            // Rules mode opens the filter panel; SQL mode focuses its WHERE field, and Mongo its query.
-            match self.tm().and_then(|t| t.sql.as_mut()) {
-                Some(s) if !s.bar.c.sql => {
-                    let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-                    s.bar.open_filters(ctx, &cols, d);
-                }
-                Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
-                None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),
-            }
+            self.focus_query(ctx);
         }
         if k(cmd, Key::Comma) {
             self.modal = Some(Modal::Settings);
@@ -251,6 +242,19 @@ impl App {
             }
         }
         self.tree_filter.clear();
+    }
+
+    /// The Documents view's query: rules mode opens the filter panel, SQL mode focuses its WHERE field, and Mongo its query.
+    pub(super) fn focus_query(&mut self, ctx: &egui::Context) {
+        let d = self.sql_dialect();
+        match self.tm().and_then(|t| t.sql.as_mut()) {
+            Some(s) if !s.bar.c.sql => {
+                let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+                s.bar.open_filters(ctx, &cols, d);
+            }
+            Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
+            None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),
+        }
     }
 
     pub(super) fn shortcuts_modal(&mut self) {

@@ -645,6 +645,7 @@ impl App {
                     r.scroll_to_me(Some(egui::Align::Center));
                     revealed = true;
                 }
+                super::vim_nav::side_row(ui.ctx(), &r, false);
                 if r.clicked() {
                     toggle = Some(db_name.clone());
                 }
@@ -825,6 +826,7 @@ impl App {
                                 r.scroll_to_me(Some(egui::Align::Center));
                                 revealed = true;
                             }
+                            super::vim_nav::side_row(ui.ctx(), &r, active);
                             let this = || Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() };
                             if new_tab_click(&r) {
                                 open = Some((this(), Open::NewTab));
