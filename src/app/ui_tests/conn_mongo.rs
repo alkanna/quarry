@@ -6,14 +6,6 @@ use super::*;
 
 const URI: &str = "mongodb://app:s3cret@a:27017,b:27018/shop?retryWrites=true&w=majority&appName=quarry";
 
-fn open_form(uri: &str, tab: ConnTab) -> UiApp {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let mut ui = UiApp { h };
-    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "docs".into(), uri: uri.into(), tab, ..Default::default() })));
-    ui.settle();
-    ui
-}
-
 fn value_of(ui: &mut UiApp, field: &str) -> String {
     ui.show(field);
     ui.h.get_by_label(field).value().unwrap_or_default().to_string()

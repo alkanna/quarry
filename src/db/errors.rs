@@ -454,6 +454,12 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.title = if cx.what.is_empty() { "The server rejected the request".into() } else { format!("The server rejected {}", cx.what.trim_start_matches("run ")) };
             ex.hint = said.clone();
         }
+        // The driver is built without the aws-auth and gssapi-auth features, and its words name Cargo flags.
+        ErrKind::Other if low.contains("auth is only supported with the") => {
+            let which = if low.contains("gssapi") { "Kerberos (GSSAPI)" } else { "AWS IAM (MONGODB-AWS)" };
+            ex.title = format!("{which} sign-in is not built into Quarry");
+            ex.hint = "Edit the connection to sign in with a user name and password, or with an X.509 certificate.".into();
+        }
         ErrKind::Other => {
             // Our own messages read "Could not write x: reason"; the part before the colon is the title.
             let first = raw.lines().next().unwrap_or(raw).trim();
@@ -870,6 +876,13 @@ mod tests {
         assert_eq!(my.title, "Another row already has number 4410");
         let pg = explain("error returned from database: 23505: duplicate key value violates unique constraint \"u\"\nKey (email)=(a@b.c) already exists.", &cx());
         assert!(pg.title.starts_with("Another row already has"));
+    }
+
+    #[test]
+    fn a_sign_in_method_left_out_of_the_driver_is_named() {
+        let ex = explain("An invalid argument was provided: MONGODB-AWS auth is only supported with the aws-auth feature flag and the tokio runtime", &cx());
+        assert_eq!(ex.title, "AWS IAM (MONGODB-AWS) sign-in is not built into Quarry");
+        assert!(explain("An invalid argument was provided: GSSAPI auth is only supported with the gssapi-auth feature flag", &cx()).title.starts_with("Kerberos"));
     }
 
     #[test]

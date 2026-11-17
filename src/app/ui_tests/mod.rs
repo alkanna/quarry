@@ -20,6 +20,7 @@ mod fold;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
+mod conn_fixes;
 mod conns_panel;
 mod crumbs;
 mod library_linked;
@@ -29,12 +30,14 @@ mod library_picker;
 mod library_save;
 mod mongo_create;
 mod mongo_edit;
+mod mongo_fixes;
 mod conn_mongo;
 mod conn_paste;
 mod conn_proxy;
 mod pg_roles;
 mod pg_server;
 mod rail;
+mod shell_fixes;
 mod sidebar;
 mod sidebar_resize;
 mod sql_bulk;
@@ -93,18 +96,35 @@ pub(super) struct UiApp {
     pub h: Harness<'static, App>,
 }
 
-/// A harness with the server of `var` added as the only connection, connecting. None when `var` is unset.
+/// The real app with no server, no connection and no window.
+pub(super) fn harness() -> UiApp {
+    UiApp { h: Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc)) }
+}
+
+/// `harness` with the connection form open on `f`.
+pub(super) fn open_form_with(f: ConnForm) -> UiApp {
+    let mut ui = harness();
+    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(f)));
+    ui.settle();
+    ui
+}
+
+/// The MongoDB connection form on `uri`, open on `tab`.
+pub(super) fn open_form(uri: &str, tab: ConnTab) -> UiApp {
+    open_form_with(ConnForm { name: "test".into(), uri: uri.into(), tab, ..Default::default() })
+}
+
+/// A harness with the server of `var` added as the only connection, connected. None when `var` is unset.
 pub(super) fn ui_app(var: &str) -> Option<UiApp> {
     let uri = std::env::var(var).ok()?;
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let app = h.state_mut();
+    let mut ui = harness();
+    let app = ui.h.state_mut();
     let engine = db::sql::Engine::from_uri(&uri).unwrap_or_default();
     app.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: CONN, name: "test".into(), engine, ..Default::default() }, Status::Idle) });
     app.active = Some(CONN);
     app.rail_order.push(CONN);
-    app.connect_uri(CONN, uri);
-    let mut ui = UiApp { h };
-    ui.wait("the connection to be ready", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready));
+    ui.connect(CONN, &uri);
+    ui.assert_ready(CONN);
     Some(ui)
 }
 
@@ -115,14 +135,13 @@ pub(super) fn demo_ui(load: fn(&mut App)) -> Option<UiApp> {
         eprintln!("skipped: a QUARRY_TEST_ switch is set, which changes the demo");
         return None;
     }
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let app = h.state_mut();
+    let mut ui = harness();
+    let app = ui.h.state_mut();
     app.demo = true;
     load(app);
     for c in &mut app.conns {
         c.writable = true;
     }
-    let mut ui = UiApp { h };
     ui.h.run_steps(5);
     Some(ui)
 }
@@ -150,16 +169,38 @@ impl UiApp {
     }
 
     /// Steps frames until `cond` holds. Spinners keep asking for repaints, so `run()` never settles and is not used.
-    pub fn wait(&mut self, what: &str, cond: impl Fn(&App) -> bool) {
+    pub fn wait(&mut self, what: &str, cond: impl FnMut(&App) -> bool) {
+        self.wait_for(what, LIMIT, cond);
+    }
+
+    /// `wait` with its own time limit, for what can take longer than `LIMIT`, such as a first Shell run installing its packages.
+    pub fn wait_for(&mut self, what: &str, limit: Duration, mut cond: impl FnMut(&App) -> bool) {
         let t = std::time::Instant::now();
         loop {
             self.h.step();
             if cond(self.h.state()) {
                 return;
             }
-            assert!(t.elapsed() < LIMIT, "timed out waiting for {what}; last error: {}", self.app().last_problem());
+            assert!(t.elapsed() < limit, "timed out waiting for {what}; last error: {}", self.app().last_problem());
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Steps frames for `d` of wall time, so worker answers keep landing meanwhile.
+    pub fn run_for(&mut self, d: Duration) {
+        let t = std::time::Instant::now();
+        self.wait_for("the time to pass", d + LIMIT, |_| t.elapsed() >= d);
+    }
+
+    /// Connects `id` to `uri` as Reconnect does, then waits until that attempt has ended, ready or failed.
+    pub fn connect(&mut self, id: u64, uri: &str) {
+        self.h.state_mut().connect_uri(id, uri.into());
+        self.wait("the connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
+    }
+
+    pub fn assert_ready(&self, id: u64) {
+        let c = self.app().conn(id).expect("the connection");
+        assert!(c.status == Status::Ready, "not ready: {}", if let Status::Failed(e) = &c.status { e.as_str() } else { "still connecting" });
     }
 
     /// Waits until no tab has a read in flight. A tab that is still reading its table holds a lock on it, and an undo or a drop takes

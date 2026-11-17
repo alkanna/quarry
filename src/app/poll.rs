@@ -112,7 +112,7 @@ impl App {
                     }
                     Err(e) => self.err(e),
                 },
-                Msg::Docs { req, res } => self.on_docs(req, res),
+                Msg::Docs { req, res, approx } => self.on_docs(req, res, approx),
                 Msg::Indexes { req, res } => match (res, self.tabs.iter().position(|t| t.idx_req == req)) {
                     (Ok(v), Some(i)) => {
                         let t = &mut self.tabs[i];
@@ -125,7 +125,9 @@ impl App {
                     _ => {}
                 },
                 Msg::Explained { req, res } if req == self.explain_req => match res {
-                    Ok(raw) => self.modal = Some(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false }),
+                    Ok(raw) => {
+                        self.show_late(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false });
+                    }
                     Err(e) => self.err(e),
                 },
                 Msg::Explained { .. } => {}
@@ -157,11 +159,11 @@ impl App {
                 }
                 Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(ctx, conn, op, coll, path, res),
                 Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
-                Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
+                Msg::Notice { title, body } => self.show_late(Modal::Text { title, body, code: false }),
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
                     Ok(rows) => {
                         self.ok(format!("{} distinct values of {path}", rows.len()));
-                        self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
+                        self.show_late(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
                     }
                     Err(e) => self.err(e),
                 },
@@ -285,7 +287,7 @@ impl App {
                 }
                 Msg::ShellLog { req, level, text } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
-                        t.shell.logs.push((level, text));
+                        t.shell.push_log(level, text);
                     }
                 }
                 Msg::ShellQuery { req, q } => {
@@ -313,14 +315,7 @@ impl App {
                     sh.cancel = None;
                     sh.started = None;
                     (sh.ms, sh.query_ms) = (Some(ms), query_ms);
-                    let parsed = res.and_then(|ejson| {
-                        let v: serde_json::Value = serde_json::from_str(&ejson).map_err(|e| e.to_string())?;
-                        match Bson::try_from(v).map_err(|e| e.to_string())? {
-                            Bson::Document(mut d) => Ok(d.remove("v").unwrap_or(Bson::Null)),
-                            _ => Err("Unexpected result from the shell".to_string()),
-                        }
-                    });
-                    match parsed {
+                    match res {
                         Ok(v) => {
                             sh.set_value(v);
                             if sql {
@@ -588,11 +583,12 @@ impl App {
         }
     }
 
-    fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>) {
+    fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>, approx: bool) {
         let Some(i) = self.tabs.iter().position(|t| t.req == req) else { return };
         let t = &mut self.tabs[i];
         t.rows_replaced();
         t.loading = false;
+        t.count_approx = approx;
         match res {
             Ok((docs, count, ms)) => {
                 // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
@@ -687,10 +683,22 @@ impl App {
         }
     }
 
+    /// An answer that opens a dialog waits for the one already open, which may hold the user's typing.
+    fn show_late(&mut self, m: Modal) {
+        if self.modal.is_some() {
+            self.late_modals.push(m);
+        } else {
+            self.modal = Some(m);
+        }
+    }
+
     fn on_written(&mut self, at: (String, String), res: db::Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)>) {
         match res {
             Ok(s) => {
-                self.reset_doc_state();
+                // A write that ran for another tab must not close an editor being typed in this one.
+                if self.t().is_some_and(|t| t.sel.space() == at.0 && t.sel.coll == at.1) {
+                    self.reset_doc_state();
+                }
                 self.ok(s);
             }
             Err(e) => {

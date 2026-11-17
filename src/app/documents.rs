@@ -451,9 +451,9 @@ impl App {
         let t = self.t().unwrap();
         // The collection's data size and index count, which the header used to carry.
         let stats = t.stats.map(|(_, size, nidx)| [human_bytes(size as usize), format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" })]);
-        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", approx: false, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
+        let info = BarInfo { page: t.page, size: self.page_size(), total: t.count, unit: "docs", about: if t.count_approx { "at least " } else { "" }, ms: t.ms, loading: t.loading, stats: stats.as_ref().map_or(&[][..], |s| &s[..]), grouped: None };
         let out = self.results_bar(ui, &info, |app, ui| {
-            dots_menu(ui, |ui| {
+            let more = dots_menu(ui, |ui| {
                 if ui.button("Export").on_hover_text("Export these documents").clicked() {
                     app.export();
                     ui.close();
@@ -480,21 +480,25 @@ impl App {
                         title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
                         expect: coll.clone(),
                         typed: String::new(),
-                        action: Danger::DeleteMatching(scope),
+                        action: app.pinned(Danger::DeleteMatching(scope)),
                     });
                     ui.close();
                 }
                 if danger_item(ui, "Drop collection…").clicked() {
+                    let sel = app.t().unwrap().sel.clone();
                     app.modal = Some(Modal::Typed {
                         title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
                         expect: coll,
                         typed: String::new(),
-                        action: Danger::DropCollection,
+                        // Named here rather than pinned: the drop closes this tab, so the tab to come back to is gone.
+                        action: Danger::DropCollAt { conn: sel.conn, db: sel.db, coll: sel.coll },
                     });
                     ui.close();
                 }
             })
             .on_hover_text("More actions");
+            // The button shows only painted dots, so screen readers and the UI tests need a name.
+            a11y(&more, egui::Role::Button, "Document actions");
             if app.prefs.table {
                 app.columns_menu(ui, false);
             }
@@ -718,6 +722,9 @@ impl App {
         }
         if self.t().is_some_and(|t| t.sql.is_some()) {
             return self.sql_docs_act(ctx, act, docs);
+        }
+        if matches!(act, DocsAct::Duplicate | DocsAct::Delete) && self.projected() {
+            return;
         }
         // Asked before the dialog opens, like an inline edit, rather than refused after the user confirmed it.
         if matches!(act, DocsAct::Duplicate | DocsAct::Delete) && !self.sel_writable() {

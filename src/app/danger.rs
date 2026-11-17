@@ -3,7 +3,18 @@
 use super::*;
 
 impl App {
+    /// Ties a tab-scoped action to the current tab, so a tab switch before Confirm cannot redirect it.
+    pub(super) fn pinned(&self, d: Danger) -> Danger {
+        match self.t() {
+            Some(t) => Danger::At(t.sel.clone(), Box::new(d)),
+            None => d,
+        }
+    }
+
     pub(super) fn danger(&mut self, action: Danger) {
+        if let Danger::At(sel, d) = action {
+            return self.on_tab(&sel, |a| a.danger(*d));
+        }
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
             if !self.ephemeral {
@@ -98,11 +109,6 @@ impl App {
             Danger::DeleteMatching(s) => self.worker.delete_many(target, s),
             Danger::DropIndex(name) => self.worker.drop_index(target, name),
             Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
-            Danger::DropCollection => {
-                // The sidebar's drop also reloads the collection list, which keeps a refused drop visible.
-                let Sel { conn, db, coll, .. } = self.t().unwrap().sel.clone();
-                self.danger(Danger::DropCollAt { conn, db, coll });
-            }
             Danger::RenameMany { scope, from, to } => self.worker.rename_many(target, scope, from, to),
             Danger::UpdateMany { scope, stages } => self.worker.update_many(target, scope, stages),
             Danger::Upsert { key } => {
@@ -111,7 +117,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::At(..) | Danger::DropCollection | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

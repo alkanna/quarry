@@ -873,7 +873,7 @@ impl Worker {
                 }
                 Err(err) => Err(err),
             };
-            let _ = tx.send(Msg::Docs { req, res });
+            let _ = tx.send(Msg::Docs { req, res, approx: false });
             ctx.request_repaint();
         });
     }
@@ -932,6 +932,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::bun_missing;
     use std::sync::atomic::AtomicU64;
     use super::super::relay::fill;
     use super::super::{ResultSet, RUN_ROWS_MAX};
@@ -1244,18 +1245,14 @@ mod tests {
         (queries, res)
     }
 
-    fn shell_run_timed(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
+    /// Calls run_shell itself rather than Worker::shell, whose ShellDone carries the parsed value: these tests read the runner's text.
+    fn shell_run_timed(w: &Worker, _rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>, (u128, Option<u64>)) {
         let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql };
-        let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
-        w.shell(5, job, cancel_rx);
-        let mut queries = Vec::new();
-        loop {
-            match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
-                Msg::ShellQuery { q, .. } => queries.push(q),
-                Msg::ShellDone { res, ms, query_ms, .. } => return (queries, res, (ms, query_ms)),
-                _ => {}
-            }
-        }
+        let start = std::time::Instant::now();
+        let (queries, res) = crate::db::shell::run_shell_blocking(w, &job);
+        let ms = start.elapsed().as_millis();
+        let query_ms = res.as_ref().ok().and_then(|r| r.1);
+        (queries, res.map(|r| r.0), (ms, query_ms))
     }
 
     fn relay(db: &Db, read_only: bool) -> crate::db::SqlRelay {
@@ -1266,14 +1263,6 @@ mod tests {
     fn shell_script(w: &Worker, rx: &Receiver<Msg>, db: &Db, code: &str, tables: &[&str], read_only: bool) -> (Vec<crate::db::ShellQuery>, Res<String>) {
         let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [{ "name": "shop", "db": "quarry_test", "tables": tables }] });
         shell_run(w, rx, input, vec![("shop".into(), relay(db, read_only))])
-    }
-
-    fn bun_missing() -> bool {
-        let missing = std::process::Command::new("bun").arg("--version").output().is_err();
-        if missing {
-            println!("skipped: bun is not installed");
-        }
-        missing
     }
 
     fn query_names(queries: &[crate::db::ShellQuery]) -> String {

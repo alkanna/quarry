@@ -608,8 +608,20 @@ impl App {
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
         c.forget_lists();
         let name = c.meta.name.clone();
+        self.stop_conn_work(id);
         self.pg_tables_asked.forget(id, None, None);
         Some(name)
+    }
+
+    /// A watch holds its own client and a Shell run its own tunnel or relay, any of which would keep an old session alive.
+    pub(super) fn stop_conn_work(&mut self, id: u64) {
+        for t in &mut self.tabs {
+            if t.sel.conn == id {
+                t.stop_work();
+            } else if t.shell.attached.iter().any(|a| a.conn == id) {
+                t.shell.stop();
+            }
+        }
     }
 }
 

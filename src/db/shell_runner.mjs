@@ -15,7 +15,10 @@ import { createRequire } from "module";
 // Packages added in Quarry are installed next to this file; scripts load them with require() or import().
 const require = createRequire(import.meta.url);
 
-const write = (o) => new Promise((r) => process.stdout.write(JSON.stringify(o) + "\n", r));
+// JSON.stringify writes a lone surrogate as an escape serde_json refuses, which would lose the whole line. Keys here
+// are fixed names, so the values are all there is to mend; SQL values are refused in wire() instead of changed.
+const wellFormed = (_, v) => (typeof v === "string" ? v.toWellFormed() : v);
+const write = (o) => new Promise((r) => process.stdout.write(JSON.stringify(o, wellFormed) + "\n", r));
 const out = (o) => void write(o);
 
 // The app stops reading a line at LINE_MAX (src/db/shell.rs), so a bigger result is refused here, with its size and a way out.
@@ -27,9 +30,12 @@ const tooBig = (bytes) =>
 let mongodb = null;
 
 // Rows hold bigints and bytes that JSON.stringify would refuse or spell out as an object of numbers.
-// bigint says how a BigInt is spelled: Extended JSON for results, a plain number or string for logs.
+// bigint says how a BigInt, or a number at or past 2^63, is spelled: Extended JSON for results, plain for logs.
 const walk = (v, bigint) => {
   if (typeof v === "bigint") return bigint(v);
+  // js-bson writes 2^63 as a $numberLong no int64 holds, and Quarry would refuse the whole result.
+  if (typeof v === "number" && Number.isInteger(v) && Math.abs(v) >= 2 ** 63) return bigint(v);
+  if (typeof v === "string") return v.toWellFormed();
   if (v instanceof Uint8Array) return { $binary: { base64: Buffer.from(v).toString("base64"), subType: "00" } };
   // An invalid Date or one past what BSON and ISO parsing accept (years 0 to 9999) would make Quarry refuse the whole result.
   if (v instanceof Date) {
@@ -41,13 +47,13 @@ const walk = (v, bigint) => {
   if (v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
     const o = {};
     // defineProperty, because assigning "__proto__" would change the prototype and drop the key.
-    for (const k of Object.keys(v)) Object.defineProperty(o, k, { value: walk(v[k], bigint), enumerable: true, writable: true, configurable: true });
+    for (const k of Object.keys(v)) Object.defineProperty(o, k.toWellFormed(), { value: walk(v[k], bigint), enumerable: true, writable: true, configurable: true });
     return o;
   }
   return v;
 };
-const asLong = (v) => (v >= -(2n ** 63n) && v < 2n ** 63n ? { $numberLong: v.toString() } : v.toString());
-const asLog = (v) => (Number.isSafeInteger(Number(v)) ? Number(v) : v.toString());
+const asLong = (v) => (typeof v === "number" ? { $numberDouble: String(v) } : v >= -(2n ** 63n) && v < 2n ** 63n ? { $numberLong: v.toString() } : v.toString());
+const asLog = (v) => (typeof v === "number" || Number.isSafeInteger(Number(v)) ? Number(v) : v.toString());
 const serialize = (v) => {
   const w = walk(v, asLong);
   if (mongodb) return mongodb.BSON.EJSON.stringify(w, { relaxed: false });
@@ -59,8 +65,20 @@ const serialize = (v) => {
 };
 const fmt = (m) => {
   if (typeof m === "string") return m;
-  const w = walk(m, asLog);
-  return (mongodb ? mongodb.BSON.EJSON.stringify(w, { relaxed: true }, 2) : JSON.stringify(w, null, 2)) ?? String(m);
+  // An Error's message and stack are not enumerable, so stringify would print {}. Driver errors keep their details,
+  // such as code and errInfo, in enumerable fields.
+  if (m instanceof Error) {
+    const s = m.stack || String(m);
+    const own = Object.fromEntries(Object.entries(m));
+    return Object.keys(own).length ? `${s}\n${fmt(own)}` : s;
+  }
+  try {
+    const w = walk(m, asLog);
+    return (mongodb ? mongodb.BSON.EJSON.stringify(w, { relaxed: true }, 2) : JSON.stringify(w, null, 2)) ?? String(m);
+  } catch {
+    // A circular value such as db or a cursor would otherwise end the script. depth keeps a client's internals short.
+    return Bun.inspect(m, { depth: 2 });
+  }
 };
 const makeLog = (level) => (...m) => out({ type: "log", level, text: m.map(fmt).join(" ") });
 const console2 = { log: makeLog("log"), info: makeLog("log"), warn: makeLog("warn"), error: makeLog("error") };
@@ -83,8 +101,11 @@ let first = true;
     // Bytes and integers beyond 2^53 come back as Extended JSON, which a plain number could not hold.
     const m = JSON.parse(line, (_, v) => {
       if (v && typeof v === "object") {
-        if (v.$binary) return Buffer.from(v.$binary.base64, "base64");
-        if (typeof v.$numberLong === "string") return BigInt(v.$numberLong);
+        // A SQL column can be named $binary or $numberLong. Its value then stays as it came.
+        try {
+          if (v.$binary) return Buffer.from(v.$binary.base64, "base64");
+          if (typeof v.$numberLong === "string") return BigInt(v.$numberLong);
+        } catch {}
       }
       return v;
     });
@@ -115,6 +136,14 @@ let first = true;
   pending.clear();
 })();
 
+// Half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji. Written out it would become a
+// replacement character, storing other text than the script holds, so a query holding one is refused.
+const broken = (v) =>
+  typeof v === "string" ? !v.isWellFormed()
+  : Array.isArray(v) ? v.some(broken)
+  : v !== null && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype ? Object.entries(v).some(([k, x]) => !k.isWellFormed() || broken(x))
+  : false;
+
 // What a value becomes on the wire. Quarry turns each one into a literal; nothing here is spliced into text.
 function wire(v, pg) {
   if (v === undefined || v === null) return null;
@@ -141,6 +170,8 @@ function query(conn, text, params) {
   const pg = dialects.get(conn) === "postgres";
   let wired;
   try {
+    // One check over everything the query sends, before any of it is turned into text.
+    if (broken([text, ...params])) throw new Error("The query holds half of a UTF-16 surrogate pair, often from cutting a string in the middle of an emoji");
     wired = params.map((v) => wire(v, pg));
   } catch (e) {
     return Promise.reject(e);
@@ -557,9 +588,13 @@ try {
   let result = await fn();
   if (result === null) throw new Error("No results");
   if (result === undefined) throw new Error('No results. Did you forget to "return" something in the function?');
-  if (result && typeof result.toArray === "function" && typeof result.limit === "function") {
-    // limit() would replace the script's own limit. findOptions is driver state, not public API.
-    if (!result.findOptions?.limit) result.limit(100);
+  if (result && typeof result.toArray === "function") {
+    // limit() would replace a find cursor's own limit. findOptions is driver state, not public API.
+    // On an aggregation it appends a $limit stage, which may not follow $out or $merge.
+    const last = Array.isArray(result.pipeline) ? result.pipeline.at(-1) : undefined;
+    const writes = last && typeof last === "object" && ("$out" in last || "$merge" in last);
+    // listCollections and listIndexes cursors have no limit and are read whole.
+    if (typeof result.limit === "function" && !result.findOptions?.limit && !writes) result.limit(100);
     result = await result.toArray();
   }
   const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);

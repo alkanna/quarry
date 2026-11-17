@@ -396,7 +396,7 @@ impl App {
         self.modal = Some(match which {
             "unlock" => Modal::Unlock(1, None),
             "delete" => Modal::Delete(sel, docs),
-            "typed" => Modal::Typed { title: "Drop the collection orders in shop? Its 1,284 documents and 4 indexes are deleted for good.".into(), expect: "orders".into(), typed: "ord".into(), action: Danger::DropCollection },
+            "typed" => Modal::Typed { title: "Drop the collection orders in shop? Its 1,284 documents and 4 indexes are deleted for good.".into(), expect: "orders".into(), typed: "ord".into(), action: Danger::DropCollAt { conn: 1, db: "shop".into(), coll: "orders".into() } },
             "newcoll" => Modal::MongoNewColl(Box::new(super::mongo_create::MongoNewColl { conn: 1, db: "shop".into(), new_db: false, name: "invoice_lines".into(), form: Default::default() })),
             "newmongodb" => Modal::MongoNewColl(Box::new(super::mongo_create::MongoNewColl { conn: 1, db: "reports".into(), new_db: true, name: "daily".into(), form: crate::db::collopts::CollForm { kind: crate::db::collopts::Kind::TimeSeries, ts_time: "at".into(), ..Default::default() } })),
             "newview" => Modal::NewCollection { conn: 1, db: "shop".into(), name: "orders_paid".into(), view: true, source: "orders".into(), pipeline: "[\n  { $match: { status: 'paid' } },\n  { $project: { total: 1, paidAt: 1 } }\n]".into() },

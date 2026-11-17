@@ -66,7 +66,12 @@ impl App {
             t.bar_err = None;
         }
         if sh.coll != cur.coll {
-            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, Open::Replace);
+            // The pasted text belongs to the other collection, so this tab's bar goes back to what it last ran.
+            if let Some(t) = self.tm() {
+                t.filter_txt = t.ran_txt[0].clone();
+            }
+            // Open::Link never takes a tab that holds work, so another collection's own query is not overwritten.
+            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, Open::Link);
         }
         let t = self.tm().unwrap();
         t.selected = None;

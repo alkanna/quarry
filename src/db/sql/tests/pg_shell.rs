@@ -4,17 +4,9 @@
 
 use crate::db::sql::testing::{every_pg, live, LivePg};
 use crate::db::sql::Db;
-use crate::db::{Msg, Res, ShellJob, ShellQuery, SqlRelay, Worker};
+use crate::db::{bun_missing, Msg, Res, ShellJob, ShellQuery, SqlRelay, Worker};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
-
-fn bun_missing() -> bool {
-    let missing = std::process::Command::new("bun").arg("--version").output().is_err();
-    if missing {
-        println!("skipped: bun is not installed");
-    }
-    missing
-}
 
 /// Fresh schemas of the shared database with `ddl` run in the first, and the `Db` pointing at that database.
 fn fixture(l: &LivePg, schemas: &[&str], ddl: &str) -> Db {
@@ -38,17 +30,10 @@ fn job(input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> ShellJob {
 }
 
 /// Runs the runner with this input line and these relays, returning the queries it reported and its result.
-fn run(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> (Vec<ShellQuery>, Res<String>) {
-    let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
-    w.shell(5, job(input, sql), cancel_rx);
-    let mut queries = Vec::new();
-    loop {
-        match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
-            Msg::ShellQuery { q, .. } => queries.push(q),
-            Msg::ShellDone { res, .. } => return (queries, res),
-            _ => {}
-        }
-    }
+/// Calls run_shell itself rather than Worker::shell, whose ShellDone carries the parsed value: these tests read the runner's text.
+fn run(w: &Worker, _rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> (Vec<ShellQuery>, Res<String>) {
+    let (queries, res) = crate::db::shell::run_shell_blocking(w, &job(input, sql));
+    (queries, res.map(|(out, _)| out))
 }
 
 /// A script on the one PostgreSQL connection "pg", and the value it returned.

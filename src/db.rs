@@ -23,6 +23,8 @@ pub(crate) mod pct;
 mod shell;
 #[cfg(test)]
 mod conn_tests;
+#[cfg(test)]
+mod shell_fix_tests;
 pub mod sql;
 pub mod collopts;
 pub mod copy;
@@ -320,7 +322,8 @@ pub enum Msg {
     /// `copied` names the collection a duplicate wrote, to end its spinner.
     /// `dropped` names what a drop removed: the collection, or empty for the whole database.
     DbChanged { conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: Res<String> },
-    Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
+    /// `approx`: the count timed out, so the total is only a lower bound that says whether another page follows.
+    Docs { req: u64, res: Res<(Vec<Row>, u64, u128)>, approx: bool },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },
@@ -345,9 +348,9 @@ pub enum Msg {
     /// A query the Shell script sent to the SQL relay, with what came back.
     ShellQuery { req: u64, q: ShellQuery },
     /// Every column of a SQL database, for the shell editor types.
-    /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
+    /// The Shell script finished: its return value, parsed off the UI thread.
     /// `query_ms` runs from the script's first MongoDB connection being ready, so it leaves out starting and connecting.
-    ShellDone { req: u64, res: Res<String>, ms: u128, query_ms: Option<u64> },
+    ShellDone { req: u64, res: Res<Bson>, ms: u128, query_ms: Option<u64> },
     /// One change event from the Watch view's change stream `req`.
     WatchEvent { req: u64, doc: Document },
     /// The change stream `req` ended: stopped (Ok) or failed.
@@ -1126,6 +1129,13 @@ mod tests {
         let t = to_table(&[doc! { "a": "x,\"y\"" }, doc! { "b": false }], ',');
         assert_eq!(t, "a,b\n\"x,\"\"y\"\"\",\n,false");
         assert_eq!(mask_uri("mongodb://u:secret@h:27017/db"), "mongodb://u:****@h:27017/db");
+        assert_eq!(mask_uri("mongodb://u:p@h/db?tls=true&proxyPassword=hunter2&tlsCertificateKeyFilePassword=k3y&authMechanismProperties=AWS_SESSION_TOKEN:tok"), "mongodb://u:****@h/db?tls=true&proxyPassword=****&tlsCertificateKeyFilePassword=****&authMechanismProperties=****");
+        assert_eq!(mask_uri("mongodb://h/?proxyPassword=hunter2"), "mongodb://h/?proxyPassword=****");
+        assert_eq!(mask_uri("mongodb://u:p@h/?appName=me@corp&proxyPassword=hunter2"), "mongodb://u:****@h/?appName=me@corp&proxyPassword=****");
+        assert_eq!(mask_uri("mongodb://u:p?q@h/?proxyPassword=p@ss"), "mongodb://u:****@h/?proxyPassword=****");
+        assert_eq!(mask_uri("mongodb://h/?authMechanismProperties=SERVICE_NAME:mongodb"), "mongodb://h/?authMechanismProperties=SERVICE_NAME:mongodb");
+        assert_eq!(crate::db::tools::secret_opt_values("mongodb://h/?authMechanismProperties=AWS_SESSION_TOKEN%3AAa3tok,X:y"), ["Aa3tok", "AWS_SESSION_TOKEN%3AAa3tok,X:y"]);
+        assert_eq!(agent::Redact::new("mongodb://h/?proxyPassword=hunter2", &[]).apply("proxy hunter2 failed"), "proxy [hidden] failed");
         assert_eq!(to_edit_line(&Bson::Document(doc! { "n": 5i64, "s": "x" })), r#"{"n":{"$numberLong":"5"},"s":"x"}"#);
     }
 

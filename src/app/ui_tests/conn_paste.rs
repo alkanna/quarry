@@ -5,12 +5,8 @@ use super::sql_structure::replace;
 use super::*;
 
 fn open_form(scheme: &str) -> UiApp {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    let mut ui = UiApp { h };
     let addr = db::sql::Addr { scheme: scheme.into(), port: 3306, ..Default::default() };
-    ui.h.state_mut().modal = Some(Modal::Conn(Box::new(ConnForm { name: "shop".into(), engine: db::sql::Engine::MySql, addr, tab: ConnTab::Standard, ..Default::default() })));
-    ui.settle();
-    ui
+    open_form_with(ConnForm { name: "shop".into(), engine: db::sql::Engine::MySql, addr, tab: ConnTab::Standard, ..Default::default() })
 }
 
 fn form(app: &App) -> &ConnForm {

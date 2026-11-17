@@ -200,7 +200,7 @@ impl App {
             size: self.page_size(),
             total: t.count,
             unit: if grouped.is_some() { "groups" } else { "rows" },
-            approx: t.sql.as_ref().is_some_and(|s| s.estimated),
+            about: if t.sql.as_ref().is_some_and(|s| s.estimated) { "~" } else { "" },
             ms: t.ms,
             loading: t.loading,
             stats: &[],

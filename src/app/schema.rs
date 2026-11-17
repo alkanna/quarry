@@ -201,7 +201,7 @@ impl App {
                 Ok(v) => {
                     let level = ["off", "moderate", "strict"][t.schema.vlevel as usize];
                     let cmd = doc! { "collMod": &t.sel.coll, "validator": v, "validationLevel": level, "validationAction": if t.schema.vwarn { "warn" } else { t.schema.vaction.as_deref().unwrap_or("error") } };
-                    self.modal = Some(Modal::Typed { title: format!("Change the validator of {}? Writes that fail it may be rejected.", t.sel.coll), expect: t.sel.coll.clone(), typed: String::new(), action: Danger::Validator(cmd) });
+                    self.modal = Some(Modal::Typed { title: format!("Change the validator of {}? Writes that fail it may be rejected.", t.sel.coll), expect: t.sel.coll.clone(), typed: String::new(), action: self.pinned(Danger::Validator(cmd)) });
                 }
                 Err(e) => self.err(e),
             }

@@ -52,11 +52,14 @@ impl Worker {
                 ctx.request_repaint();
             };
             let start = Instant::now();
-            let (res, query_ms) = match run_shell(req, &job, &send, cancel).await {
-                Ok((out, q)) => (Ok(out), q),
+            let ran = run_shell(req, &job, &send, cancel).await;
+            let ms = start.elapsed().as_millis();
+            let (res, query_ms) = match ran {
+                // Blocking, because a 64 MB result takes a while and the runtime has only two threads.
+                Ok((out, q)) => (tokio::task::spawn_blocking(move || shell_value(&out)).await.unwrap_or_else(|e| Err(e.to_string())), q),
                 Err(e) => (Err(e), None),
             };
-            send(Msg::ShellDone { req, res, ms: start.elapsed().as_millis(), query_ms });
+            send(Msg::ShellDone { req, res, ms, query_ms });
         });
     }
 
@@ -270,46 +273,63 @@ impl Worker {
                 let start = Instant::now();
                 let c = t.c();
                 let (hint, co) = (q.driver_hint(), q.driver_collation()?);
+                let offset = page * size;
                 // An empty filter on a huge collection is the common case; the estimate is instant.
-                let count = if q.filter.is_empty() {
-                    c.estimated_document_count().max_time(t.timeout).await
-                } else {
-                    let mut n = c.count_documents(q.filter.clone()).max_time(t.timeout);
+                let counting = async {
+                    if q.filter.is_empty() {
+                        c.estimated_document_count().max_time(t.timeout).await
+                    } else {
+                        let mut n = c.count_documents(q.filter.clone()).max_time(t.timeout);
+                        if let Some(h) = hint.clone() {
+                            n = n.hint(h);
+                        }
+                        if let Some(co) = co.clone() {
+                            n = n.collation(co);
+                        }
+                        n.await
+                    }
+                };
+                // Read as BSON bytes: the page is kept that way, see `Row`. One row past the page says whether another
+                // follows when the count runs out of time.
+                let reading = async {
+                    let take = q.limit.map_or(size + 1, |l| l.saturating_sub(offset).min(size + 1)).max(1);
+                    let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
+                    let mut f = raw.find(q.filter.clone()).skip(q.skip.saturating_add(offset)).limit(take as i64).max_time(t.timeout);
                     if let Some(h) = hint.clone() {
-                        n = n.hint(h);
+                        f = f.hint(h);
                     }
                     if let Some(co) = co.clone() {
-                        n = n.collation(co);
+                        f = f.collation(co);
                     }
-                    n.await
-                }
-                .map_err(e)?;
-                let count = q.limit.map_or(count.saturating_sub(q.skip), |l| count.saturating_sub(q.skip).min(l));
-                let take = count.saturating_sub(page * size).min(size).max(1);
-                // Read as BSON bytes: the page is kept that way, see `Row`.
-                let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
-                let mut f = raw.find(q.filter).skip(q.skip.saturating_add(page * size)).limit(take as i64).max_time(t.timeout);
-                if let Some(h) = hint {
-                    f = f.hint(h);
-                }
-                if let Some(co) = co {
-                    f = f.collation(co);
-                }
-                if let Some(s) = q.sort {
-                    f = f.sort(s);
-                }
-                if let Some(p) = q.projection {
-                    f = f.projection(p);
-                }
-                let docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
+                    if let Some(s) = q.sort.clone() {
+                        f = f.sort(s);
+                    }
+                    if let Some(p) = q.projection.clone() {
+                        f = f.projection(p);
+                    }
+                    f.await.map_err(e)?.map_ok(Row::from_raw).try_collect::<Vec<Row>>().await.map_err(e)
+                };
+                // Side by side, so an unindexed filter on a huge collection, whose count can pass the time limit while
+                // the page itself is instant, does not hold the page back.
+                let (count, docs) = tokio::join!(counting, reading);
+                let mut docs = docs?;
+                let more = docs.len() as u64 > size;
+                docs.truncate(size as usize);
+                let (count, approx) = match count {
+                    Ok(n) => (q.limit.map_or(n.saturating_sub(q.skip), |l| n.saturating_sub(q.skip).min(l)), false),
+                    // A lower bound: what was read, plus one when another page follows.
+                    Err(err) if timed_out(&err) => (offset + docs.len() as u64 + more as u64, true),
+                    Err(err) => return Err(e(err)),
+                };
                 // One row at a time, so checking never holds more than one decoded document.
                 for r in &docs {
                     r.decode()?;
                 }
-                Ok((docs, count, start.elapsed().as_millis()))
+                Ok((docs, count, start.elapsed().as_millis(), approx))
             }
             .await;
-            Msg::Docs { req, res }
+            let approx = res.as_ref().is_ok_and(|r| r.3);
+            Msg::Docs { req, res: res.map(|(d, n, ms, _)| (d, n, ms)), approx }
         });
     }
 
@@ -415,7 +435,7 @@ impl Worker {
                     // the sample does not. It is left out then; any other failure is a real error.
                     let n = match counted {
                         Ok(d) => Some(d.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?),
-                        Err(err) if matches!(&*err.kind, mongodb::error::ErrorKind::Command(c) if c.code == 50) => None,
+                        Err(err) if timed_out(&err) => None,
                         Err(err) => return Err(e(err)),
                     };
                     (n, docs)
@@ -486,20 +506,38 @@ impl Worker {
         self.spawn(async move {
             let at = t.at();
             let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
-            let (res, undo) = match t.c().insert_one(d).await {
-                Ok(r) => (
-                    Ok(format!("Inserted document {}", short(&r.inserted_id))),
-                    Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
-                ),
-                Err(err) => (Err(e(err)), None),
-            };
+            let (res, undo) = insert_doc(conn, t, d).await;
             Msg::Written { at, res, undo, reload: true, retry }
         });
     }
 
-    /// Replaces `old` with `new`, but only if the server still holds exactly `old`.
-    pub fn replace(&self, conn: u64, t: Target, old: Document, new: Document, record_undo: bool) {
-        self.write(t.at(), replace_doc(conn, t, old, new, record_undo));
+    /// Runs a user undo. A failed one hands the action back in the answer so it stays in the list, like the SQL undo does.
+    pub fn undo_doc(&self, t: Target, a: UndoAction) {
+        self.write(t.at(), async move {
+            let c = t.c();
+            let (res, redo) = match &a.kind {
+                UndoKind::Insert { id } => (c.delete_one(doc! { "_id": id.clone() }).await.map(|r| format!("Undo removed {} document", r.deleted_count)).map_err(e), None),
+                UndoKind::InsertMany { ids } => (c.delete_many(doc! { "_id": { "$in": ids.clone() } }).await.map(|r| format!("Undo removed {} imported documents", r.deleted_count)).map_err(e), None),
+                UndoKind::Delete { old } => insert_doc(a.conn, t, old.clone()).await,
+                UndoKind::DeleteMany { old } => import_docs(a.conn, t, old.clone(), None).await,
+                UndoKind::Update { old, new } => replace_doc(a.conn, t, new.clone(), old.clone(), false).await,
+                UndoKind::Sql { .. } => (Err("Not a MongoDB change".into()), None),
+            };
+            if res.is_ok() {
+                return (res, redo);
+            }
+            // A many-document restore can stop partway: what was put back must not be inserted again on a retry, and
+            // what was not must stay undoable.
+            let kind = match (a.kind, redo) {
+                // The insert is ordered, so what went in is the first ids.len() documents.
+                (UndoKind::DeleteMany { mut old }, Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. })) => {
+                    debug_assert!(old.iter().zip(&ids).all(|(d, i)| d.get("_id") == Some(i)), "an ordered insert writes a prefix");
+                    UndoKind::DeleteMany { old: old.split_off(ids.len().min(old.len())) }
+                }
+                (kind, _) => kind,
+            };
+            (res, Some(UndoAction { kind, ..a }))
+        });
     }
 
     /// Writes one document's staged edits; the answer names the draft so it can be kept on failure.
@@ -542,15 +580,6 @@ impl Worker {
                 msg += &format!(", {skipped} skipped because they changed or were already deleted");
             }
             (Ok(msg), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
-        });
-    }
-
-    pub fn delete_by_id(&self, t: Target, id: Bson) {
-        self.write(t.at(), async move {
-            match t.c().delete_one(doc! { "_id": id }).await {
-                Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
-                Err(err) => (Err(e(err)), None),
-            }
         });
     }
 
@@ -905,63 +934,7 @@ impl Worker {
     /// Writes imported documents: insert all (ordered, in batches), or upsert each by `key` with
     /// $set like the original's import (bulkWrite of updateOne upserts).
     pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
-        const BATCH: usize = 1000;
-        self.write(t.at(), async move {
-            let c = t.c();
-            let mut docs = docs;
-            match upsert_by {
-                None => {
-                    // Like the original's generateNewDocumentId: documents without _id get one of the
-                    // kind the collection already uses. ObjectIds are made here rather than by the
-                    // driver so a failed batch still knows the ids of what it did insert.
-                    if docs.iter().any(|d| !d.contains_key("_id")) {
-                        let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
-                        assign_ids(&mut docs, last);
-                    }
-                    let mut ids = Vec::with_capacity(docs.len());
-                    for chunk in docs.chunks(BATCH) {
-                        match c.insert_many(chunk.to_vec()).await {
-                            Ok(r) => ids.extend(r.inserted_ids.into_values()),
-                            Err(err) => {
-                                let done = inserted_before(&err, chunk.len());
-                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
-                                let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
-                                let undo = (!ids.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
-                                return (Err(msg), undo);
-                            }
-                        }
-                    }
-                    let n = ids.len();
-                    (Ok(format!("Imported {n} documents")), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
-                }
-                Some(key) => {
-                    let (mut matched, mut upserted) = (0u64, 0u64);
-                    for d in docs {
-                        // A CSV header like address.zip is a top-level key; a dotted path into nested fields is the fallback.
-                        let Some(v) = d.get(&key).or_else(|| crate::db::get_path(&d, &key)).cloned() else {
-                            return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
-                        };
-                        match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {
-                            Ok(r) => {
-                                matched += r.matched_count;
-                                upserted += r.upserted_id.is_some() as u64;
-                            }
-                            Err(err) => return (Err(format!("Stopped ({matched} updated, {upserted} added): {}", e(err))), None),
-                        }
-                    }
-                    (Ok(format!("Import done: {matched} updated, {upserted} added")), None)
-                }
-            }
-        });
-    }
-
-    pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
-        self.write(t.at(), async move {
-            match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
-                Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
-                Err(err) => (Err(e(err)), None),
-            }
-        });
+        self.write(t.at(), import_docs(conn, t, docs, upsert_by));
     }
 
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
@@ -1048,15 +1021,21 @@ impl Worker {
     }
 }
 
+/// MaxTimeMSExpired: the server stopped a command at its time limit.
+fn timed_out(err: &mongodb::error::Error) -> bool {
+    matches!(&*err.kind, mongodb::error::ErrorKind::Command(c) if c.code == 50)
+}
+
 pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None, false).await?),
         None => None,
     };
-    let mut o = ClientOptions::parse(uri).await.map_err(e)?;
-    o.connect_timeout = Some(timeout);
-    o.server_selection_timeout = Some(timeout);
+    let mut o = ClientOptions::parse(super::mongo_uri::for_driver(uri)?).await.map_err(e)?;
+    // A timeout written in the URI is the user's choice; the setting only fills in what the URI left out.
+    o.connect_timeout.get_or_insert(timeout);
+    o.server_selection_timeout.get_or_insert(timeout);
     o.app_name.get_or_insert_with(|| "quarry".into());
     o.command_event_handler = Some(mongodb::event::EventHandler::callback(move |ev| log_event(conn, ev)));
     if let Some(t) = &tunnel {
@@ -1069,6 +1048,66 @@ pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &N
     let mut dbs = client.list_database_names().await.map_err(e)?;
     dbs.sort();
     Ok((client, dbs, tunnel))
+}
+
+/// The body of `Worker::import`, shared with the undo of a delete.
+async fn import_docs(conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) -> (Res<String>, Option<UndoAction>) {
+    const BATCH: usize = 1000;
+    let c = t.c();
+    let mut docs = docs;
+    match upsert_by {
+        None => {
+            // Like the original's generateNewDocumentId: documents without _id get one of the
+            // kind the collection already uses. ObjectIds are made here rather than by the
+            // driver so a failed batch still knows the ids of what it did insert.
+            if docs.iter().any(|d| !d.contains_key("_id")) {
+                let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
+                assign_ids(&mut docs, last);
+            }
+            let mut ids = Vec::with_capacity(docs.len());
+            for chunk in docs.chunks(BATCH) {
+                match c.insert_many(chunk.to_vec()).await {
+                    Ok(r) => ids.extend(r.inserted_ids.into_values()),
+                    Err(err) => {
+                        let done = inserted_before(&err, chunk.len());
+                        ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
+                        let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
+                        let undo = (!ids.is_empty()).then(|| UndoAction { agent: None, at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
+                        return (Err(msg), undo);
+                    }
+                }
+            }
+            let n = ids.len();
+            (Ok(format!("Imported {n} documents")), Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
+        }
+        Some(key) => {
+            let (mut matched, mut upserted) = (0u64, 0u64);
+            for d in docs {
+                // A CSV header like address.zip is a top-level key; a dotted path into nested fields is the fallback.
+                let Some(v) = d.get(&key).or_else(|| crate::db::get_path(&d, &key)).cloned() else {
+                    return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
+                };
+                match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {
+                    Ok(r) => {
+                        matched += r.matched_count;
+                        upserted += r.upserted_id.is_some() as u64;
+                    }
+                    Err(err) => return (Err(format!("Stopped ({matched} updated, {upserted} added): {}", e(err))), None),
+                }
+            }
+            (Ok(format!("Import done: {matched} updated, {upserted} added")), None)
+        }
+    }
+}
+
+async fn insert_doc(conn: u64, t: Target, d: Document) -> (Res<String>, Option<UndoAction>) {
+    match t.c().insert_one(d).await {
+        Ok(r) => (
+            Ok(format!("Inserted document {}", short(&r.inserted_id))),
+            Some(UndoAction { agent: None, at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
+        ),
+        Err(err) => (Err(e(err)), None),
+    }
 }
 
 pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Document, record_undo: bool) -> (Res<String>, Option<UndoAction>) {
@@ -1376,11 +1415,54 @@ mod tests {
         w.import(1, t.clone(), docs, None);
         let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
         assert!(res.unwrap_err().starts_with("Stopped after 2 documents"));
-        let Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. }) = undo else { panic!("expected an undo") };
-        assert_eq!(ids, [Bson::Int32(1), Bson::Int32(2)]);
-        w.delete_ids(t.clone(), ids);
+        let Some(a) = undo else { panic!("expected an undo") };
+        assert!(matches!(&a.kind, UndoKind::InsertMany { ids } if *ids == [Bson::Int32(1), Bson::Int32(2)]));
+        w.undo_doc(t.clone(), a);
         next(&rx);
         assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
+    }
+
+    fn undo_of(t: &Target, kind: UndoKind) -> UndoAction {
+        UndoAction { agent: None, at: Instant::now(), conn: 1, db: t.db.clone(), coll: t.coll.clone(), kind }
+    }
+
+    #[test]
+    fn live_mongo_fixes_a_failed_undo_hands_its_action_back() {
+        let Some((w, rx, t)) = live("mongo_fixes_undo_back") else { return };
+        seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }]);
+        // Undoing a delete whose document is back fails on its _id.
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::Delete { old: doc! { "_id": 1, "a": 1 } }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert!(res.is_err());
+        let Some(UndoAction { kind: UndoKind::Delete { old }, .. }) = undo else { panic!("the failed delete undo was not handed back") };
+        assert_eq!(old, doc! { "_id": 1, "a": 1 });
+        // Undoing an edit of a document changed meanwhile is refused and handed back too.
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::Update { old: doc! { "_id": 1, "a": 0 }, new: doc! { "_id": 1, "a": 5 } }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert_eq!(res, Err(CONFLICT.to_string()));
+        let Some(UndoAction { kind: UndoKind::Update { old, new }, .. }) = undo else { panic!("the failed update undo was not handed back") };
+        assert_eq!((old, new), (doc! { "_id": 1, "a": 0 }, doc! { "_id": 1, "a": 5 }));
+        assert_eq!(all(&w, &t), [doc! { "_id": 1, "a": 1 }]);
+    }
+
+    #[test]
+    fn live_mongo_fixes_a_partial_undo_keeps_only_what_was_not_restored() {
+        let Some((w, rx, t)) = live("mongo_fixes_undo_part") else { return };
+        let docs = vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "a": 2 }, doc! { "_id": 3, "a": 3 }];
+        // The second document is back already, so the ordered restore stops after the first.
+        seed(&w, &t, vec![docs[1].clone()]);
+        w.undo_doc(t.clone(), undo_of(&t, UndoKind::DeleteMany { old: docs.clone() }));
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert!(res.is_err());
+        let Some(a) = undo else { panic!("the partial undo was not handed back") };
+        assert!(matches!(&a.kind, UndoKind::DeleteMany { old } if *old == docs[1..]), "the restored document is still in the undo");
+        assert_eq!(all(&w, &t), docs[..2]);
+        // Once the blocker is gone, the rest comes back without inserting the first one twice.
+        w.rt.block_on(async { t.c().delete_one(doc! { "_id": 2 }).await.unwrap() });
+        w.undo_doc(t.clone(), a);
+        let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
+        res.unwrap();
+        assert_eq!(all(&w, &t), docs);
     }
 
     #[test]

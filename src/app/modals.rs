@@ -42,6 +42,9 @@ impl App {
             }
         }
 
+        if self.modal.is_none() && !self.late_modals.is_empty() {
+            self.modal = Some(self.late_modals.remove(0));
+        }
         // Settings looks for gcloud each time it opens, so it forgets the answer once closed.
         if self.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
             self.gcloud_forget();
@@ -597,7 +600,7 @@ impl App {
                     title: format!("Rename {from} to {} in every document of {coll} matching the current filter ({reach})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
                     expect: coll,
                     typed: String::new(),
-                    action: Danger::RenameMany { scope, from: from.clone(), to: to.join(".") },
+                    action: self.pinned(Danger::RenameMany { scope, from: from.clone(), to: to.join(".") }),
                 });
                 *keep = false;
             }
@@ -660,7 +663,7 @@ impl App {
                     title: format!("Update every document in {coll} matching the current filter ({n})?"),
                     expect: coll,
                     typed: String::new(),
-                    action: Danger::UpdateMany { scope: scope.clone(), stages: stages.clone().unwrap_or_default() },
+                    action: self.pinned(Danger::UpdateMany { scope: scope.clone(), stages: stages.clone().unwrap_or_default() }),
                 });
                 *keep = false;
             }

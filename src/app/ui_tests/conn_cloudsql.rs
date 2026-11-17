@@ -15,12 +15,6 @@ const PROD: &str = r#"[
   {"connectionName":"acme-prod:us-central1:billing-legacy","name":"billing-legacy","region":"us-central1","databaseVersion":"POSTGRES_13","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"activationPolicy":"NEVER"}}
 ]"#;
 
-/// The real app with no server and no connection.
-fn bare() -> UiApp {
-    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
-    UiApp { h }
-}
-
 fn form(app: &App) -> &ConnForm {
     match &app.modal {
         Some(Modal::Conn(f)) => f,
@@ -43,7 +37,7 @@ fn feed(ui: &mut UiApp, found: Found, what: &str, taken: impl Fn(&App) -> bool) 
 
 #[test]
 fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_password() {
-    let mut ui = bare();
+    let mut ui = harness();
     ui.h.state_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
     // The instance lists first: a project already answered is not asked again when the project list arrives.
@@ -132,7 +126,7 @@ const QUEUE: &str = r#"[
 
 #[test]
 fn a_mysql_instance_with_iam_on_fills_the_mysql_form_with_an_iam_sign_in() {
-    let mut ui = bare();
+    let mut ui = harness();
     ui.h.state_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
     feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(QUEUE) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
@@ -155,7 +149,7 @@ fn a_mysql_instance_with_iam_on_fills_the_mysql_form_with_an_iam_sign_in() {
 /// its proxy or tunnel. No server is needed, since the answers are sent the way the worker sends them.
 #[test]
 fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
-    let mut ui = bare();
+    let mut ui = harness();
     // 71 was disconnected while connecting, 72 was connected again since, 73 still waits for attempt 5.
     for (id, engine, status, attempt) in [(71, db::sql::Engine::Postgres, Status::Idle, 3), (72, db::sql::Engine::Mongo, Status::Connecting, 4), (73, db::sql::Engine::Postgres, Status::Connecting, 5)] {
         let mut c = Conn::new(ConnMeta { id, name: format!("c{id}"), engine, ..Default::default() }, status);
@@ -174,7 +168,7 @@ fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
 /// Settings looks for gcloud off the UI thread once it opens, and the demo shows a fixed path instead of the real one.
 #[test]
 fn settings_finds_gcloud_once_and_the_demo_shows_no_real_path() {
-    let mut ui = bare();
+    let mut ui = harness();
     let app = ui.h.state_mut();
     app.demo = true;
     app.settings_cat = super::super::settings::SettingsCat::Tools;
@@ -196,7 +190,7 @@ fn browser_h(ui: &UiApp) -> f32 {
 
 #[test]
 fn refresh_in_the_cloud_sql_browser_keeps_the_window_size_while_it_checks_again() {
-    let mut ui = bare();
+    let mut ui = harness();
     ui.h.state_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
     let missing = || Start { gcloud: None, proxy: None, components: false, account: None, projects: Ok(Vec::new()), adc: false };

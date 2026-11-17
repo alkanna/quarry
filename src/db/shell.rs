@@ -102,14 +102,20 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     };
     std::fs::create_dir_all(dir).map_err(e)?;
     let package = runner_package(packages);
-    let mut deps_changed = false;
+    let mut written = false;
     for (name, body) in [("runner.mjs", RUNNER), ("package.json", package.as_str()), ("tsconfig.json", TSCONFIG)] {
         let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(body) {
             std::fs::write(&path, body).map_err(e)?;
-            deps_changed |= name == "package.json";
+            written |= name == "package.json";
         }
     }
+    // The package.json of the last install that finished. Comparing with package.json itself would skip the retry after
+    // an install that failed offline or was stopped, and keep running the old versions. A folder from before this
+    // marker trusts its package.json, so an upgrade does not force an install that fails offline.
+    let installed = dir.join("installed.json");
+    let marker = std::fs::read_to_string(&installed).ok();
+    let deps_changed = marker.as_ref().map_or(written, |m| *m != package);
     let modules = dir.join("node_modules");
     let missing = !modules.join("mongodb").exists()
         || SHELL_BUILTINS.iter().chain(&EDITOR_PACKAGES).any(|(n, _)| !modules.join(n).exists())
@@ -125,6 +131,9 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
         note("Packages ready.");
+    }
+    if marker.as_deref() != Some(package.as_str()) {
+        std::fs::write(&installed, &package).map_err(e)?;
     }
     Ok(())
 }
@@ -300,6 +309,15 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
             let _ = child.kill().await;
             Err("Stopped.".into())
         }
+    }
+}
+
+/// The value in the runner's `{"v": ...}` Extended JSON. Parsed on the worker, since a result can be 64 MB.
+pub(crate) fn shell_value(ejson: &str) -> Res<Bson> {
+    let v: serde_json::Value = serde_json::from_str(ejson).map_err(|e| e.to_string())?;
+    match Bson::try_from(v).map_err(|e| e.to_string())? {
+        Bson::Document(mut d) => Ok(d.remove("v").unwrap_or(Bson::Null)),
+        _ => Err("Unexpected result from the shell".to_string()),
     }
 }
 
@@ -603,6 +621,30 @@ pub fn shell_text(b: &Bson) -> String {
     }
 }
 
+/// Whether a test that runs scripts must skip. The live tests run the runtime as plain `bun`, so it must be on PATH.
+#[cfg(test)]
+pub(crate) fn bun_missing() -> bool {
+    let missing = std::process::Command::new("bun").arg("--version").output().is_err();
+    if missing {
+        eprintln!("skipped: bun is not on PATH");
+    }
+    missing
+}
+
+/// Runs a script to its end for a live test, with the queries it sent, as the Shell tab would see them.
+#[cfg(test)]
+pub(crate) fn run_shell_blocking(w: &super::Worker, job: &ShellJob) -> (Vec<super::ShellQuery>, Res<(String, Option<u64>)>) {
+    let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    let queries = std::sync::Mutex::new(Vec::new());
+    let send = |m: Msg| {
+        if let Msg::ShellQuery { q, .. } = m {
+            queries.lock().unwrap().push(q);
+        }
+    };
+    let res = w.rt.block_on(run_shell(5, job, &send, cancel_rx));
+    (queries.into_inner().unwrap(), res)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,6 +655,13 @@ mod tests {
         assert_eq!(sql_args(Some(&v), sql::Dialect::Postgres).unwrap()[0], sql::Arg::Bool(true));
         // On MySQL the same object is a plain value, as it was before PostgreSQL support.
         assert_eq!(sql_args(Some(&v), sql::Dialect::MySql).unwrap()[0], sql::Arg::Val(sql_param(&v[0]).unwrap()));
+    }
+
+    #[test]
+    fn shell_value_takes_v_out() {
+        assert_eq!(shell_value(r#"{"v":{"$numberDouble":"9223372036854776000"}}"#), Ok(Bson::Double(9223372036854775808.0)));
+        assert_eq!(shell_value("{}"), Ok(Bson::Null));
+        assert!(shell_value(r#"{"v":{"$numberLong":"9223372036854776000"}}"#).is_err());
     }
 
     #[test]

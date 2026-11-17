@@ -75,10 +75,56 @@ pub fn restore_args(uri: &str, archive: &str, from_db: &str, coll: Option<&str>,
     a
 }
 
-pub fn mask_uri(uri: &str) -> String {
-    // Hide the password between "user:" and "@".
-    if let (Some(s), Some(at)) = (uri.find("://"), uri.rfind('@')) && let Some(colon) = uri[s + 3..at].find(':') {
-        return format!("{}****{}", &uri[..s + 3 + colon + 1], &uri[at..]);
+/// Whether a URI option's value is a secret. authMechanismProperties is one only when it carries an AWS session token;
+/// otherwise it holds plain names such as SERVICE_NAME.
+fn secret_opt(k: &str, v: &str) -> bool {
+    !v.is_empty() && (["proxyPassword", "tlsCertificateKeyFilePassword"].iter().any(|s| s.eq_ignore_ascii_case(k)) || (k.eq_ignore_ascii_case("authMechanismProperties") && v.to_ascii_uppercase().contains("AWS_SESSION_TOKEN")))
+}
+
+/// Where the options start. Hosts never hold "/", so the first "?" after the first "/" past the userinfo is it: a
+/// password may hold "?" and an option value may hold "@". Without a path, the last "@" bounds the userinfo.
+fn query_at(uri: &str) -> Option<usize> {
+    let s = uri.find("://").map_or(0, |i| i + 3);
+    let from = uri.rfind('@').filter(|&at| at > s && !uri[s..at].contains('/')).unwrap_or(s);
+    match uri[from..].find('/') {
+        Some(p) => uri[from + p..].find('?').map(|i| from + p + i),
+        None => uri[from..].find('?').map(|i| from + i),
     }
-    uri.to_string()
+}
+
+/// The raw values of the secret options in a URI, for hiding them from text.
+pub fn secret_opt_values(uri: &str) -> Vec<String> {
+    let Some(i) = query_at(uri) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (_, v) in uri[i + 1..].split('&').filter_map(|p| p.split_once('=')).filter(|(k, v)| secret_opt(k, v)) {
+        // authMechanismProperties is name:value pairs; text may quote a secret value alone.
+        for (name, value) in super::pct::decode(v).split(',').filter_map(|p| p.split_once(':').map(|(a, b)| (a.trim().to_string(), b.to_string()))) {
+            if name.eq_ignore_ascii_case("AWS_SESSION_TOKEN") && !value.is_empty() {
+                out.push(value);
+            }
+        }
+        out.push(v.to_string());
+    }
+    out
+}
+
+pub fn mask_uri(uri: &str) -> String {
+    let (head, query) = match query_at(uri) {
+        Some(i) => (&uri[..i], Some(&uri[i + 1..])),
+        None => (uri, None),
+    };
+    // Hide the password between "user:" and "@".
+    let mut out = head.to_string();
+    if let (Some(s), Some(at)) = (head.find("://"), head.rfind('@')) && let Some(colon) = head[s + 3..at].find(':') {
+        out = format!("{}****{}", &head[..s + 3 + colon + 1], &head[at..]);
+    }
+    if let Some(q) = query {
+        let parts: Vec<String> = q.split('&').map(|p| match p.split_once('=') {
+            Some((k, v)) if secret_opt(k, v) => format!("{k}=****"),
+            _ => p.to_string(),
+        }).collect();
+        out.push('?');
+        out.push_str(&parts.join("&"));
+    }
+    out
 }

@@ -2,7 +2,34 @@
 
 use super::*;
 
+impl Tab {
+    /// A tab that leaves, closed or removed, must not keep a stream reading or a script writing and holding SQL locks;
+    /// its answers would never land.
+    pub(super) fn stop_work(&mut self) {
+        self.watch.stop();
+        self.shell.stop();
+    }
+}
+
 impl ShellTab {
+    pub(super) fn stop(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            let _ = c.send(());
+        }
+    }
+
+    /// Every line is laid out each frame and a logging loop can print millions, so only the latest are kept, each cut short.
+    pub(super) fn push_log(&mut self, level: String, text: String) {
+        let text = if text.len() > 2000 { text.chars().take(2000).collect() } else { text };
+        self.logs.push((level, text));
+        // Trimmed in batches so a loop does not shift a thousand lines per print.
+        if self.logs.len() > 1500 {
+            let over = self.logs.len() - 1000;
+            self.logs.drain(..over);
+            self.logs_dropped += over;
+        }
+    }
+
     pub(super) fn set_value(&mut self, v: Bson) {
         self.count = match &v {
             Bson::Array(a) => Some(a.len()),
@@ -370,6 +397,8 @@ pub(super) struct Tab {
     /// Arc::make_mut then makes a new pointer, so the Shell can tell a change by identity.
     pub(super) field_info: Arc<crate::ui::complete::Fields>,
     pub(super) count: u64,
+    /// The count ran out of time, so `count` is a lower bound.
+    pub(super) count_approx: bool,
     pub(super) ms: u128,
     pub(super) req: u64,
     /// Index list requests have their own id, so they never cancel a documents load.
@@ -670,6 +699,8 @@ pub(super) struct ShellTab {
     /// Other saved connections whose data is a global of the script, saved with the tab.
     pub(super) attached: Vec<Attached>,
     pub(super) logs: Vec<(String, String)>,
+    /// Older console lines let go by push_log, said in the console so a long log does not look complete.
+    pub(super) logs_dropped: usize,
     /// The returned value when it is not documents; see `result` for the whole of it.
     pub(super) value: Option<Bson>,
     /// Returned documents, one or an array of them, as BSON bytes for the table.
@@ -814,7 +845,13 @@ impl Tab {
     /// How many documents an action on every match of the filter reaches, as a phrase. The results
     /// count stops at the limit and skip, which such actions ignore.
     pub(super) fn bulk_count(&self) -> String {
-        if self.query.limit.is_some() || self.query.skip > 0 { "every match, ignoring the limit and skip".into() } else { format!("about {}", self.count) }
+        if self.query.limit.is_some() || self.query.skip > 0 {
+            "every match, ignoring the limit and skip".into()
+        } else if self.count_approx {
+            format!("at least {}, the count ran out of time", self.count)
+        } else {
+            format!("about {}", self.count)
+        }
     }
 
     /// Marks the tab as one of a SQL connection.
@@ -843,6 +880,7 @@ impl Tab {
             paths: Vec::new(),
             field_info: Default::default(),
             count: 0,
+            count_approx: false,
             ms: 0,
             req: 0,
             idx_req: 0,
@@ -886,7 +924,10 @@ impl Tab {
 }
 
 pub(super) enum Danger {
+    /// An action on one tab's collection, run on that tab even if another became current while its dialog was open.
+    At(Sel, Box<Danger>),
     DeleteMatching(db::Scope),
+    /// Never run: the placeholder left in a confirm dialog once its action is taken out.
     DropCollection,
     DropIndex(String),
     RemoveConnection(u64),
@@ -1167,6 +1208,8 @@ pub(super) enum ZoneKind {
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    /// Forget was clicked on the SSH host key, so Save must not bring back the stored one.
+    pub(super) forget_key: bool,
     /// A new connection joins this group when it is saved, from "New connection in <group>" in the Connections panel.
     pub(super) group: Option<u64>,
     pub(super) engine: db::sql::Engine,
@@ -1521,8 +1564,6 @@ pub(super) enum Open {
     NewTab,
     /// A link in data: a tab showing it without work in it, else a new tab. The current tab is never replaced.
     Link,
-    /// The current tab whatever it holds: the Shell switching its own collection.
-    Replace,
 }
 
 #[derive(Clone, Copy)]
@@ -1654,6 +1695,7 @@ impl App {
     /// Connects with a known address, so tests need no keychain.
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
         let tools = self.cloud_tools();
+        self.stop_conn_work(id);
         self.req += 1;
         let attempt = self.req;
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
@@ -1662,6 +1704,8 @@ impl App {
         c.client = None;
         c.sql = None;
         c.tunnel = None;
+        // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
+        c.writable = false;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let mut net = net_of(&c.meta);

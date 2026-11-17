@@ -10,8 +10,8 @@ pub(super) struct BarInfo<'a> {
     pub size: u64,
     pub total: u64,
     pub unit: &'static str,
-    /// Whether the total is an estimate.
-    pub approx: bool,
+    /// Written before the total: "~" for an estimate, "at least " when counting ran out of time, else empty.
+    pub about: &'static str,
     pub ms: u128,
     pub loading: bool,
     /// Plain facts after the time, such as a collection's size.
@@ -29,18 +29,17 @@ pub(super) struct BarOut {
 
 /// "1-50 of 4,410 rows". A hyphen, not a dash, so the text stays plain in every font. The last page is cut at the
 /// total, and an empty result has no range at all.
-pub(super) fn range_text(page: u64, size: u64, total: u64, unit: &str, approx: bool) -> String {
+pub(super) fn range_text(page: u64, size: u64, total: u64, unit: &str, about: &str) -> String {
     if total == 0 {
         return format!("0 {unit}");
     }
     let first = page.saturating_mul(size).saturating_add(1).min(total);
     let last = first.saturating_add(size.max(1) - 1).min(total);
     let unit = if total == 1 { unit.strip_suffix('s').unwrap_or(unit) } else { unit };
-    let approx = if approx { "~" } else { "" };
     if first == last {
-        format!("{first} of {approx}{} {unit}", group(&total.to_string()))
+        format!("{first} of {about}{} {unit}", group(&total.to_string()))
     } else {
-        format!("{first}-{last} of {approx}{} {unit}", group(&total.to_string()))
+        format!("{first}-{last} of {about}{} {unit}", group(&total.to_string()))
     }
 }
 
@@ -67,7 +66,7 @@ impl App {
         ui.horizontal(|ui| {
             // The count is also the page-size control, so the bar has one control fewer.
             let mut size = self.page_size();
-            let text = semibold(mono(range_text(info.page, info.size, info.total, info.unit, info.approx), BRIGHT()));
+            let text = semibold(mono(range_text(info.page, info.size, info.total, info.unit, info.about), BRIGHT()));
             let (r, _) = ui
                 .scope(|ui| {
                     quiet_look(ui);
@@ -118,24 +117,25 @@ mod tests {
 
     #[test]
     fn the_first_page_reads_one_to_fifty() {
-        assert_eq!(range_text(0, 50, 4410, "rows", false), "1-50 of 4,410 rows");
+        assert_eq!(range_text(0, 50, 4410, "rows", ""), "1-50 of 4,410 rows");
     }
 
     #[test]
     fn the_last_page_stops_at_the_total() {
-        assert_eq!(range_text(88, 50, 4410, "rows", false), "4401-4410 of 4,410 rows");
-        assert_eq!(range_text(1, 50, 60, "docs", false), "51-60 of 60 docs");
+        assert_eq!(range_text(88, 50, 4410, "rows", ""), "4401-4410 of 4,410 rows");
+        assert_eq!(range_text(1, 50, 60, "docs", ""), "51-60 of 60 docs");
     }
 
     #[test]
     fn a_single_row_and_an_empty_result_have_no_range() {
-        assert_eq!(range_text(0, 50, 1, "rows", false), "1 of 1 row");
-        assert_eq!(range_text(0, 50, 0, "rows", false), "0 rows");
+        assert_eq!(range_text(0, 50, 1, "rows", ""), "1 of 1 row");
+        assert_eq!(range_text(0, 50, 0, "rows", ""), "0 rows");
     }
 
     #[test]
     fn an_estimate_marks_the_total() {
-        assert_eq!(range_text(0, 50, 1_200_000, "rows", true), "1-50 of ~1,200,000 rows");
+        assert_eq!(range_text(0, 50, 1_200_000, "rows", "~"), "1-50 of ~1,200,000 rows");
+        assert_eq!(range_text(0, 50, 51, "docs", "at least "), "1-50 of at least 51 docs");
     }
 
     #[test]
@@ -147,6 +147,6 @@ mod tests {
     #[test]
     fn the_grouped_note_counts_source_rows() {
         assert_eq!(grouped_text(1234), "from 1,234 rows, read-only");
-        assert_eq!(range_text(0, 50, 3, "groups", false), "1-3 of 3 groups");
+        assert_eq!(range_text(0, 50, 3, "groups", ""), "1-3 of 3 groups");
     }
 }

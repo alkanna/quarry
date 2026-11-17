@@ -242,6 +242,8 @@ pub struct App {
     undo_bytes: std::cell::RefCell<HashMap<std::time::Instant, usize>>,
     explain_req: u64,
     modal: Option<Modal>,
+    /// An answer that arrived while a dialog was open, shown once that dialog closes.
+    late_modals: Vec<Modal>,
     status: String,
     log: LogUi,
     toasts: Vec<Toast>,
@@ -424,6 +426,7 @@ impl App {
             undo_bytes: Default::default(),
             explain_req: 0,
             modal: None,
+            late_modals: Vec::new(),
             status: "Ready. All connections start read-only.".into(),
             toasts: Vec::new(),
             errors: Vec::new(),
@@ -525,7 +528,7 @@ impl App {
             app.req += 1;
             app.tabs[0].req = app.req;
             let n = rows.len() as u64;
-            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)) });
+            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)), approx: false });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in either theme regardless of the system, and with

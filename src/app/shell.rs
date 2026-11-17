@@ -284,7 +284,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
         ui.set_min_height(SHELL_PANEL_H - 12.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            let (n_log, n_q) = (sh.logs.len(), sh.queries.len());
+            let (n_log, n_q) = (sh.logs.len() + sh.logs_dropped, sh.queries.len());
             if view_tab(ui, &format!("Console  {n_log}"), !sh.queries_tab).clicked() {
                 sh.queries_tab = false;
             }
@@ -300,6 +300,9 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             if !sh.queries_tab {
                 if sh.logs.is_empty() {
                     ui.label(mono("Nothing printed".into(), FAINT()));
+                }
+                if sh.logs_dropped > 0 {
+                    ui.label(mono(format!("{} earlier lines not kept", sh.logs_dropped), FAINT()));
                 }
                 for (level, text) in &sh.logs {
                     let c = match level.as_str() {
@@ -460,6 +463,10 @@ impl App {
                 sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
             }
         } else {
+            // Without a live client there is no SSH tunnel either, and the stored address would then reach whatever answers locally.
+            if self.conn(sel.conn).is_none_or(|c| c.client.is_none()) {
+                return self.warn_offline();
+            }
             let uri = match stored_uri(sel.conn) {
                 Ok(u) => u,
                 Err(e) => return self.err(uri_err(e)),
@@ -762,7 +769,7 @@ impl App {
                     export = ui.button("Export…").clicked();
                     ui.scope(|ui| {
                         quiet_look(ui);
-                        ui.menu_button("Copy as ▾", |ui| {
+                        ui.menu_button("Copy as", |ui| {
                             menu_look(ui);
                             let docs: Vec<Document> = t.shell.docs.iter().map(db::Row::owned).collect();
                             let mut text = None;
@@ -853,8 +860,8 @@ impl App {
         if let Some(f) = editor {
             self.js_editor(ui.ctx(), f, &colls);
         }
-        if stop && let Some(c) = self.tabs[self.cur].shell.cancel.take() {
-            let _ = c.send(());
+        if stop {
+            self.tabs[self.cur].shell.stop();
         }
         if let Some(i) = detach {
             self.tabs[self.cur].shell.attached.remove(i);
