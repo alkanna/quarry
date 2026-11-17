@@ -1,5 +1,5 @@
-//! Fixes in how a MongoDB connection is set up and kept: the form, URI options, masking, the SSH host key, Disconnect and
-//! Reconnect. The form and the rail are driven as a person drives them; a connect that needs a server runs on the live
+//! Fixes in how a MongoDB connection is set up and kept: the form, URI options, masking, the SSH host key and Disconnect.
+//! The form and the rail are driven as a person drives them; a connect that needs a server runs on the live
 //! ones (QUARRY_TEST_MONGO, QUARRY_TEST_MONGO_RS, QUARRY_TEST_MONGO_TLS, QUARRY_TEST_SSH) and skips without them. Each test
 //! uses its own harness and collection, so they run side by side.
 

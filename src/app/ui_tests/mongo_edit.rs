@@ -116,7 +116,8 @@ impl UiApp {
     /// Takes back the most recent action through the toolbar and its dialog, then closes the dialog.
     fn undo_latest(&mut self) {
         self.undo_latest_open();
-        self.close_recent_changes();
+        // A toast for the last write may still show a Close button of its own, so the dialog's is the one nearest its title.
+        self.click_near("Close", "Recent changes");
     }
 
     /// Takes back the most recent action through the toolbar and Recent changes, leaving that dialog open for a test that waits for
@@ -127,10 +128,11 @@ impl UiApp {
         self.click("Undo change 1");
     }
 
-    /// Closes Recent changes. A toast for the last write may still show a Close button of its own, so the dialog's is the one
-    /// nearest its title.
+    /// Closes Recent changes once the undo has answered. Its toast goes first, since an error toast stays and has a Close of its own.
     pub(super) fn close_recent_changes(&mut self) {
-        self.click_near("Close", "Recent changes");
+        self.h.state_mut().toasts.clear();
+        self.settle();
+        self.click("Close");
         self.wait("Recent changes to close", |a| a.modal.is_none());
     }
 
