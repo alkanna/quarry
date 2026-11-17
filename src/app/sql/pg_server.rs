@@ -327,12 +327,6 @@ fn shown_settings<'a>(rows: &'a [Setting], filter: &str, changed_only: bool) -> 
     rows.iter().filter(|s| !changed_only || s.changed()).filter(|s| f.is_empty() || s.lower.contains(&f)).collect()
 }
 
-/// "12:04" for an age in seconds, "1:02:04" past an hour.
-fn mss(secs: f64) -> String {
-    let s = secs.max(0.0) as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
-}
-
 /// "12 min", "2 min 22 s", "40 s", "3 h 5 min".
 fn span(secs: f64) -> String {
     let s = secs.max(0.0) as u64;

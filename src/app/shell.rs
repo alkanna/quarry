@@ -511,20 +511,30 @@ impl App {
         self.req += 1;
         let req = self.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
+        // Checks point at rows of the last result, which the floating selection bar could still copy or export mid-run.
+        self.tabs[self.cur].shell_checked.clear();
         let sh = &mut self.tabs[self.cur].shell;
-        // The last result stays, dimmed, until this run answers; the console, queries and error are this run's from the start.
+        // The last result stays, dimmed, until this run answers; everything else starts fresh. Named one by one, so a field
+        // added to ShellTab later starts fresh too.
         let old = std::mem::take(sh);
         *sh = ShellTab {
+            code: old.code,
+            attached: old.attached,
+            queries_tab: old.queries_tab,
+            value: old.value,
+            docs: old.docs,
+            fields: old.fields,
+            page: old.page,
+            raw: old.raw,
+            raw_text: old.raw_text,
+            count: old.count,
+            cut: old.cut,
+            ms: old.ms,
+            query_ms: old.query_ms,
             req,
             cancel: Some(tx),
             started: Some(std::time::Instant::now()),
-            logs: Vec::new(),
-            logs_dropped: 0,
-            error: None,
-            queries: Vec::new(),
-            relays: Vec::new(),
-            help: false,
-            ..old
+            ..Default::default()
         };
         let packages = self.prefs.shell_packages.clone();
         self.tabs[self.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
@@ -588,14 +598,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let r = run_stop(ui, "⌘↵", running);
-            if let Some(at) = running {
-                // A click that lands just after Run is the second half of a double click, not a Stop.
-                stop = r.on_hover_text("End the script and interrupt its running statement").clicked() && at.elapsed() >= Duration::from_millis(300);
-                if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
-                    ui.ctx().request_repaint();
-                } else {
-                    ui.ctx().request_repaint_after(Duration::from_millis(100));
-                }
+            if running.is_some() {
+                stop = r.on_hover_text("End the script and interrupt its running statement").clicked();
             } else {
                 run = r.on_hover_text("Cmd+Enter").clicked();
             }
@@ -748,7 +752,7 @@ impl App {
         let outer = ui;
         let mut result_ui = outer.new_child(egui::UiBuilder::new().id_salt("shell-result").max_rect(outer.available_rect_before_wrap()).layout(*outer.layout()));
         if t.shell.started.is_some() {
-            result_ui.multiply_opacity(0.45);
+            // Disabled widgets are drawn at half opacity, which is the dimming.
             result_ui.disable();
         }
         let ui = &mut result_ui;
@@ -877,7 +881,10 @@ impl App {
             let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
-        outer.advance_cursor_after_rect(result_ui.min_rect());
+        // An empty result takes no room, not even the item spacing an advance adds, so the console does not shift.
+        if result_ui.min_rect().height() > 0.0 {
+            outer.advance_cursor_after_rect(result_ui.min_rect());
+        }
         let ui = outer;
         ui.add_space(8.0);
         shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name, &kinds);

@@ -501,30 +501,40 @@ fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, 
 }
 
 /// The main action of a script: Run while `started` is None, else Stop with the time since `started`, in one footprint: the width fits both and the
-/// longest clock, so the row after it never moves. The caller reads a click as Run or Stop from `started`.
+/// longest clock, so the row after it never moves. The caller reads a click as Run or Stop from `started`. Stop takes no
+/// clicks for its first 300 ms, so the second half of a double click on Run never stops the script.
 pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time::Instant>) -> egui::Response {
     let (label, hint, run_w) = run_text(ui, "Run", keys, true);
     let stop = ui.painter().layout_job(egui::text::LayoutJob::single_section("Stop".into(), ui_fmt(TXT_BODY, ALERT(), W_SEMIBOLD, 0.0)));
     let widest = ui.painter().layout_job(egui::text::LayoutJob::single_section("9:59:59".into(), mono_fmt(TXT_CAPTION, ALERT(), 400.0)));
-    let w = run_w.max(RUN_TRI + 8.0 + stop.size().x + 10.0 + widest.size().x + 28.0);
+    // Stop starts where Run's content does, centered, so the room it needs on the right counts twice: once for itself and
+    // once for the matching margin on the left.
+    let content = RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
+    let w = run_w.max(2.0 * (RUN_TRI + 8.0 + stop.size().x + 10.0 + widest.size().x + 14.0) - content);
     let Some(at) = started else { return run_face(ui, "Run", label, hint, w, egui::CornerRadius::same(R_MD), true) };
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), Sense::click());
+    let elapsed = at.elapsed();
+    let sense = if elapsed < std::time::Duration::from_millis(300) { Sense::hover() } else { Sense::click() };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), sense);
+    let (focused, time) = ui.input(|i| (i.viewport().focused.unwrap_or(true), i.time));
+    // About 30 fps keeps the sweep smooth without redrawing at the display's rate for a whole run; in the background
+    // only the clock moves.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(if focused { 33 } else { 100 }));
     let p = ui.painter();
-    let fill = [tint(ALERT(), 33), tint(ALERT(), 50), tint(ALERT(), 70)][state_of(&r)];
+    // The hover and press steps of `danger`, over a resting tint so Stop reads as a button before the pointer reaches it.
+    let fill = [tint(ALERT(), 20), tint(ALERT(), 31), tint(ALERT(), 56)][state_of(&r)];
     p.rect(rect, R_MD, fill, Stroke::new(1.0, tint(ALERT(), 140)), egui::StrokeKind::Inside);
     // Laid out as Run is, so the mark and the word sit where the triangle and "Run" were.
-    let content = RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
     let (cy, x) = (rect.center().y, rect.center().x - content / 2.0);
     p.rect_filled(egui::Rect::from_center_size(egui::pos2(x + RUN_TRI / 2.0, cy), egui::vec2(RUN_TRI, RUN_TRI)), 1.5, ALERT());
     let centered = |g: &std::sync::Arc<egui::Galley>, x: f32| egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(g));
     p.galley(centered(&stop, x + RUN_TRI + 8.0), stop, ALERT());
-    let clock = ui.painter().layout_job(egui::text::LayoutJob::single_section(run_clock(at.elapsed()), mono_fmt(TXT_CAPTION, tint(ALERT(), 205), 400.0)));
+    let clock = ui.painter().layout_job(egui::text::LayoutJob::single_section(run_clock(elapsed), mono_fmt(TXT_CAPTION, tint(ALERT(), 205), 400.0)));
     p.galley(centered(&clock, rect.right() - 14.0 - clock.size().x), clock, ALERT());
     // A segment sliding along the bottom edge says the script is alive; it holds still while the window is in the background.
     let track = egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - 4.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 2.0));
     p.rect_filled(track, 1.0, tint(ALERT(), 46));
     let seg = 36.0_f32.min(track.width());
-    let t = if ui.input(|i| i.viewport().focused.unwrap_or(true)) { (ui.input(|i| i.time) as f32 * 0.8).fract() } else { 0.0 };
+    let t = if focused { (time as f32 * 0.8).fract() } else { 0.0 };
     let x0 = track.left() + (track.width() + seg) * t - seg;
     let (a, b) = (x0.max(track.left()), (x0 + seg).min(track.right()));
     if b > a {
@@ -536,14 +546,15 @@ pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time:
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A running time that stays short: tenths of a second for the first minute, then m:ss and h:mm:ss.
+/// A running time that stays short: tenths of a second for the first minute, then `mss`.
 pub(crate) fn run_clock(d: std::time::Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        0..60 => format!("{:.1} s", (d.as_secs_f32() * 10.0).floor() / 10.0),
-        60..3600 => format!("{}:{:02}", s / 60, s % 60),
-        _ => format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60),
-    }
+    if d.as_secs() < 60 { format!("{:.1} s", (d.as_secs_f32() * 10.0).floor() / 10.0) } else { mss(d.as_secs_f64()) }
+}
+
+/// "12:04" for an age in seconds, "1:02:04" past an hour.
+pub(crate) fn mss(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
 /// A filled triangle pointing right, its left edge centered on `left`, `w` wide and `half_h` above and below its middle.
