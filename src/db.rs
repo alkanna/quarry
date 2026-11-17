@@ -909,9 +909,14 @@ pub fn value_text(b: &Bson) -> String {
 /// The ways the large editor can show the bytes of a binary. The bytes and subtype are never rewritten by the choice.
 pub const BIN_ENCODINGS: [&str; 3] = ["Base64", "Hex", "UTF-8"];
 
-/// The encoding a binary opens in: its text when it is valid UTF-8, else Base64.
+/// The bytes as text when they read as text: valid UTF-8 with no control characters other than whitespace.
+pub fn bytes_as_text(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes).ok().filter(|t| !t.chars().any(|c| c.is_control() && !c.is_whitespace()))
+}
+
+/// The encoding a binary opens in: its text when it reads as text, else Base64.
 pub fn default_encoding(bytes: &[u8]) -> &'static str {
-    if std::str::from_utf8(bytes).is_ok() { "UTF-8" } else { "Base64" }
+    if bytes_as_text(bytes).is_some() { "UTF-8" } else { "Base64" }
 }
 
 pub fn encode_bytes(bin: &mongodb::bson::Binary, enc: &str) -> Res<String> {
@@ -1205,6 +1210,7 @@ mod tests {
         for e in BIN_ENCODINGS.iter().filter(|e| **e != "UTF-8") {
             assert_eq!(decode_bytes(&encode_bytes(&bin, e).unwrap(), e), Ok(bin.bytes.clone()), "{e}");
         }
+        assert_eq!([default_encoding(b"hi (x)\n"), default_encoding(&[0, 1, 2, b'a'])], ["UTF-8", "Base64"]);
         assert!(encode_bytes(&bin, "UTF-8").is_err() && decode_bytes("zz", "Hex").is_err() && decode_bytes("+f+f", "Hex").is_err());
         assert_eq!(make_value("binary", "AP9h"), Ok(Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: bin.bytes })));
         assert!(possible_timestamp(&Bson::Int64(1_700_000_000)).is_some() && possible_timestamp(&Bson::Int32(42)).is_none());
