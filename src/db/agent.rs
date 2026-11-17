@@ -1462,7 +1462,7 @@ mod tests {
         for (i, k) in kept.iter().chain(&dropped).enumerate() {
             m.insert(*k, i as i32 + 1);
         }
-        w.rt.block_on(c.database("quarry_test").collection::<Document>("agent_fence").insert_one(doc! { "_id": "fence", "m": m })).unwrap();
+        w.rt.block_on(async { c.database("quarry_test").collection::<Document>("agent_fence").insert_one(doc! { "_id": "fence", "m": m }).await }).unwrap();
         let named = |f: &str| doc! { "$getField": { "field": { "$concat": [f, ""] }, "input": "$m" } };
         let pipeline = vec![doc! { "$match": { "_id": "fence" } }, doc! { "$project": { "_id": 0, "kv": { "$objectToArray": "$m" }, "tok": named("token"), "one": named("a") } }];
         let mut call = Call::Aggregate { ns: ns("agent_fence"), pipeline, limit: None };
