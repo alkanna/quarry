@@ -39,6 +39,7 @@ mod pg_server;
 mod rail;
 mod updates;
 mod shell_fixes;
+mod shell_run;
 mod sidebar;
 mod sidebar_resize;
 mod sql_bulk;

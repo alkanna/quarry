@@ -42,9 +42,9 @@ impl ShellTab {
             Bson::Document(d) => db::Row::from_doc(d).map(|r| vec![r]),
             _ => Err(String::new()),
         };
-        (self.docs, self.value) = match rows {
-            Ok(rows) => (rows, None),
-            Err(_) => (Vec::new(), Some(v)),
+        (self.docs, self.value, self.cut) = match rows {
+            Ok(rows) => (rows, None, false),
+            Err(_) => (Vec::new(), Some(v), false),
         };
         self.shown();
     }

@@ -321,6 +321,7 @@ impl App {
                         Err(e) => {
                             sh.value = None;
                             sh.docs.clear();
+                            (sh.fields, sh.count, sh.cut) = (Vec::new(), None, false);
                             sh.error = Some(e);
                         }
                     }

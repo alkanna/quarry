@@ -511,8 +511,30 @@ impl App {
         self.req += 1;
         let req = self.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
+        // The floating selection bar is not disabled with the result, so stale checks could still be exported.
+        self.tabs[self.cur].shell_checked.clear();
         let sh = &mut self.tabs[self.cur].shell;
-        *sh = ShellTab { code: std::mem::take(&mut sh.code), attached: std::mem::take(&mut sh.attached), req, cancel: Some(tx), started: Some(std::time::Instant::now()), queries_tab: sh.queries_tab, ..Default::default() };
+        // Only the script and the last result are kept, so a field added to ShellTab later starts fresh.
+        let old = std::mem::take(sh);
+        *sh = ShellTab {
+            code: old.code,
+            attached: old.attached,
+            queries_tab: old.queries_tab,
+            value: old.value,
+            docs: old.docs,
+            fields: old.fields,
+            page: old.page,
+            raw: old.raw,
+            raw_text: old.raw_text,
+            count: old.count,
+            cut: old.cut,
+            ms: old.ms,
+            query_ms: old.query_ms,
+            req,
+            cancel: Some(tx),
+            started: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
         let packages = self.prefs.shell_packages.clone();
         self.tabs[self.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
         self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
@@ -574,23 +596,14 @@ impl App {
         let (mut run, mut stop, mut editor) = (false, false, None);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_enabled_ui(running.is_none(), |ui| {
-                run = run_button(ui, "Run", "⌘↵").on_hover_text("Cmd+Enter").clicked();
-            });
+            let r = run_stop(ui, "⌘↵", running);
+            if running.is_some() {
+                stop = r.on_hover_text("End the script and interrupt its running statement").clicked();
+            } else {
+                run = r.on_hover_text("Cmd+Enter").clicked();
+            }
             // With the library picker open, Cmd+Enter runs the script picked there, not this one.
             run |= running.is_none() && !covered && !egui::Popup::is_any_open(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
-            stop = quiet_enabled(ui, running.is_some(), "Stop").on_hover_text("End the script and interrupt its running statement").clicked();
-            // A slot as wide as the longest readout, kept while idle, so neither the ticking digits nor a run starting or ending moves what follows.
-            // ponytail: past 9999 s the readout is clipped, widen the sample if multi-hour scripts matter.
-            let slot_w = ui.spacing().interact_size.y + ui.spacing().item_spacing.x + crate::ui::theme::text_w(ui, "Running 9999.9 s", FontId::proportional(TXT_BODY));
-            let (slot, _) = ui.allocate_exact_size(egui::vec2(slot_w, ui.spacing().interact_size.y), Sense::hover());
-            if let Some(at) = running {
-                let mut row = ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                row.set_clip_rect(slot.intersect(ui.clip_rect()));
-                spin(&mut row);
-                row.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED()));
-                ui.ctx().request_repaint_after(Duration::from_millis(100));
-            }
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             ui.label(RichText::new("Connections").color(MUTED()));
@@ -733,6 +746,14 @@ impl App {
             });
             ui.add_space(8.0);
         }
+        // A child Ui, not a scope: the closure would need both the tab and self.
+        let outer = ui;
+        let mut result_ui = outer.new_child(egui::UiBuilder::new().id_salt("shell-result").max_rect(outer.available_rect_before_wrap()).layout(*outer.layout()));
+        if t.shell.started.is_some() {
+            // disable() also halves the opacity.
+            result_ui.disable();
+        }
+        let ui = &mut result_ui;
         let has_table = !t.shell.docs.is_empty() && !t.shell.raw;
         let (mut export, mut page_to, mut too_big) = (false, None, None);
         if t.shell.value.is_some() || !t.shell.docs.is_empty() {
@@ -858,6 +879,11 @@ impl App {
             let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
+        // An advance adds item spacing even for an empty rect, which would shift the console.
+        if result_ui.min_rect().height() > 0.0 {
+            outer.advance_cursor_after_rect(result_ui.min_rect());
+        }
+        let ui = outer;
         ui.add_space(8.0);
         shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name, &kinds);
         if let Some(code) = use_example {
