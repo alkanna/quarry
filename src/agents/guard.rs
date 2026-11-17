@@ -586,14 +586,21 @@ fn fenceable<'b>(op: &str, arg: &'b Bson) -> Option<&'b str> {
 
 /// Rewrites what `fenceable` matches in an aggregate or explain pipeline so that keys a name rule could match never
 /// become values: `$objectToArray` loses those entries, and a computed `$getField` reads nothing when its name is one.
-/// The guard lets these through only on calls this runs on.
+/// The guard lets these through on the promise that every agent job runs this first (`Worker::agent_run`). Where no
+/// rule applies to the namespace or anything it joins, nothing is rewritten, so no key goes missing there.
 pub fn fence(call: &mut Call, rules: &Rules) {
-    let p = match call {
-        Call::Aggregate { pipeline, .. } | Call::Explain { pipeline: Some(pipeline), .. } => pipeline,
+    let (ns, p) = match call {
+        Call::Aggregate { ns, pipeline, .. } | Call::Explain { ns, pipeline: Some(pipeline), .. } => (ns, pipeline),
         _ => return,
     };
+    let mut joined = Vec::new();
+    pipeline_targets(&ns.db, &p[..], &mut joined);
+    let ruled = |db: &str, coll: &str| rules.for_ns(db, coll).field_rules();
+    if !ruled(&ns.db, &ns.coll) && !joined.iter().any(|t| ruled(&t.db, t.coll.as_deref().unwrap_or(""))) {
+        return;
+    }
     let Some(re) = rules.fence() else { return };
-    p.iter_mut().for_each(|d| fence_doc(d, &re));
+    p.iter_mut().for_each(|d| fence_doc(d, re));
 }
 
 fn fence_bson(v: &mut Bson, re: &str) {
@@ -605,7 +612,7 @@ fn fence_bson(v: &mut Bson, re: &str) {
 }
 
 fn fence_doc(d: &mut Document, re: &str) {
-    if d.contains_key("$literal") {
+    if d.len() == 1 && d.contains_key("$literal") {
         return;
     }
     d.iter_mut().for_each(|(_, v)| fence_bson(v, re));
@@ -797,7 +804,7 @@ mod tests {
         fence(&mut c, &r);
         let Call::Aggregate { pipeline, .. } = &c else { panic!() };
         let re = r.fence().unwrap();
-        let hit = |i: &str| doc! { "$regexMatch": { "input": i, "regex": re.as_str() } };
+        let hit = |i: &str| doc! { "$regexMatch": { "input": i, "regex": re } };
         let p = pipeline[0].get_document("$project").unwrap();
         assert_eq!(p.get_document("kv").unwrap(), &doc! { "$filter": { "input": { "$objectToArray": "$profile" }, "as": "qkv", "cond": { "$not": [hit("$$qkv.k")] } } });
         assert_eq!(p.get_document("v").unwrap(), &doc! { "$getField": { "field": { "$let": { "vars": { "qf": { "$concat": ["p", "in"] } }, "in": { "$cond": [hit("$$qf"), "\u{1}refused", "$$qf"] } } }, "input": "$profile" } });
@@ -807,6 +814,18 @@ mod tests {
         let before = f.clone();
         fence(&mut f, &r);
         assert_eq!(f, before, "only aggregate and explain pipelines are rewritten");
+        // A `$literal` key beside others does not hide them, as in the guard.
+        let mut c = call("aggregate", "users", json!({ "pipeline": [{ "$project": { "x": { "a": { "$objectToArray": "$profile" }, "$literal": 1 } } }] }));
+        fence(&mut c, &r);
+        assert!(format!("{c:?}").contains("qkv"), "{c:?}");
+        // No rule on the namespace nor what it joins: nothing goes missing.
+        let mut o = call("aggregate", "orders", json!({ "pipeline": [{ "$project": { "kv": { "$objectToArray": "$m" } } }] }));
+        let before = o.clone();
+        fence(&mut o, &r);
+        assert_eq!(o, before);
+        let mut j = call("aggregate", "orders", json!({ "pipeline": [{ "$lookup": { "from": "users", "pipeline": [{ "$project": { "kv": { "$objectToArray": "$profile" } } }], "as": "u" } }] }));
+        fence(&mut j, &r);
+        assert!(format!("{j:?}").contains("qkv"), "a join into a namespace with rules is fenced");
     }
 
     #[test]

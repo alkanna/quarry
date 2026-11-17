@@ -113,8 +113,8 @@ fn lit(db: &Db, v: &Value) -> String {
     }
 }
 
-/// The WHERE text of `select_rows`: groups joined with AND, the tests of a group with OR, each test on a quoted
-/// column with values written by `lit`.
+/// The WHERE text of `select_rows`, and of the rows `sql_update_rows` and `sql_delete_rows` count, snapshot and change:
+/// groups joined with AND, the tests of a group with OR, each test on a quoted column with values written by `lit`.
 pub(in crate::db) fn where_sql(db: &Db, wher: &[Vec<Cond>]) -> String {
     let groups: Vec<String> = wher
         .iter()
@@ -773,7 +773,8 @@ mod tests {
         undo(rt, db, a.undo.expect("an undo")).unwrap();
         assert_eq!(one(&q("SELECT COUNT(*) FROM $T WHERE age = 99")), "0", "{var}");
         assert_eq!(one(&q("SELECT age FROM $T WHERE id = 1")), "31", "{var}");
-        let del = Call::SqlDeleteRows { ns: tns(schema, "users"), wher: vec![cond("id", CondOp::In, json!([4, 5]))] };
+        // An OR group decides the snapshot, the undo and the delete alike.
+        let del = Call::SqlDeleteRows { ns: tns(schema, "users"), wher: vec![[cond("id", CondOp::Eq, json!(4)), cond("id", CondOp::Eq, json!(5))].concat()] };
         let snap = rt.block_on(prepare(db, &del, &Limits::default())).unwrap();
         let a = rt.block_on(write(db, &job(db, del, snap, true))).unwrap();
         assert_eq!(a.value["deleted"], json!(2), "{var}");

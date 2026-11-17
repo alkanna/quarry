@@ -359,7 +359,9 @@ async fn session(s: link::Stream, id: u64, mut token: watch::Receiver<Option<Tok
 impl Worker {
     /// Runs an allowed call on the runtime. The answer goes to the agent through `reply`, then `AgentEvent::Done` tells
     /// the App how it ended. A cancelled call sends neither: the App already marked it.
-    pub fn agent_run(&self, job: AgentJob, reply: Reply) -> AgentRun {
+    pub fn agent_run(&self, mut job: AgentJob, reply: Reply) -> AgentRun {
+        // The guard let fenceable expressions through on the promise that this runs before the server sees them.
+        crate::agents::guard::fence(&mut job.call, &job.rules);
         let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
         let h = sql::RunHandle::default();
         let sql = match &job.target {
@@ -1456,8 +1458,8 @@ mod tests {
     #[test]
     fn live_mongo_fence_drops_rule_keys_turned_into_values() {
         let Some((w, rx, c)) = live("agent_fence") else { return };
-        let kept = ["a", "companyID", "aacc0000-4acc-11ee-8ccc-0242ac120002", "e35924f1-5c00-45d1-aa52-10dd51d7e2b2"];
-        let dropped = ["token", "userPassword", "api-Key", "accessKey", "sessionId", "cdsKey", "SSN", "zip"];
+        let kept = ["a", "companyID", "aacc0000-4acc-11ee-8ccc-0242ac120002", "e35924f1-5c00-45d1-aa52-10dd51d7e2b2", "LATEST", "LONG", "monkey", "TOKENS"];
+        let dropped = ["token", "userPassword", "api-Key", "accessKey", "sessionId", "cdsKey", "SSN", "zip", "api\u{212A}ey", "APIKey", "user_TOKEN"];
         let mut m = Document::new();
         for (i, k) in kept.iter().chain(&dropped).enumerate() {
             m.insert(*k, i as i32 + 1);
@@ -1465,9 +1467,8 @@ mod tests {
         w.rt.block_on(async { c.database("quarry_test").collection::<Document>("agent_fence").insert_one(doc! { "_id": "fence", "m": m }).await }).unwrap();
         let named = |f: &str| doc! { "$getField": { "field": { "$concat": [f, ""] }, "input": "$m" } };
         let pipeline = vec![doc! { "$match": { "_id": "fence" } }, doc! { "$project": { "_id": 0, "kv": { "$objectToArray": "$m" }, "tok": named("token"), "one": named("a") } }];
-        let mut call = Call::Aggregate { ns: ns("agent_fence"), pipeline, limit: None };
+        let call = Call::Aggregate { ns: ns("agent_fence"), pipeline, limit: None };
         crate::agents::guard::check(&call, &rules()).unwrap();
-        crate::agents::guard::fence(&mut call, &rules());
         let v = run(&w, &rx, &c, call, Limits::default()).0.unwrap();
         let d = &v["documents"][0];
         let keys: Vec<&str> = d["kv"].as_array().unwrap().iter().map(|e| e["k"].as_str().unwrap()).collect();
