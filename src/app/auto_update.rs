@@ -129,7 +129,7 @@ impl App {
             Ok(Some(info)) => Upd::Available(info),
             Ok(None) if manual => Upd::UpToDate(std::time::Instant::now()),
             Ok(None) => Upd::Idle,
-            Err(e) if manual => Upd::Failed { info: None, msg: e.to_string() },
+            Err(msg) if manual => Upd::Failed { info: None, msg },
             // Offline or rate-limited checks stay quiet; the reason shows in Settings.
             Err(e) => {
                 self.update_note = format!("Last check failed: {e}");
@@ -145,8 +145,8 @@ impl App {
         let Upd::Downloading { info, .. } = std::mem::replace(&mut self.upd, Upd::Idle) else { return };
         self.upd = match res {
             Ok(_) => Upd::Ready(info),
-            Err(e) if e.to_string() == crate::update::CANCELLED => Upd::Available(info),
-            Err(e) => Upd::Failed { info: Some(info), msg: e.to_string() },
+            Err(e) if e == crate::update::CANCELLED => Upd::Available(info),
+            Err(msg) => Upd::Failed { info: Some(info), msg },
         };
     }
 }

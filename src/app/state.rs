@@ -1775,11 +1775,7 @@ impl App {
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
-    pub(super) fn busy(&self) -> bool {
-        self.modal.is_some() || self.busy_work()
-    }
-
-    /// Work a restart would lose, without counting the dialog the check runs from.
+    /// Work a restart would lose. An open dialog does not count: Settings is one, and Restart sits in it.
     pub(super) fn busy_work(&self) -> bool {
         !self.drafts.is_empty()
             || !self.saving.is_empty()

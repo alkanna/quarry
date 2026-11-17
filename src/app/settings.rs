@@ -387,7 +387,8 @@ impl App {
                             self.upd = Upd::Downloading { info, prog, started };
                             self.cancel_download();
                         }
-                        _ => self.check_update(true),
+                        _ if self.can_update() => self.check_update(true),
+                        other => self.upd = other,
                     }
                 }
                 if notes {
