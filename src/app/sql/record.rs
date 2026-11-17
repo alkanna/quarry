@@ -65,7 +65,7 @@ impl App {
         let rid = ui.scope_id().with(("sql-record", i));
         let key = docs.id(i);
         // The Vim cursor's line, scrolled into view after a Vim key moved it.
-        let cur = self.prefs.vim.then(|| self.t().map_or(0, |t| t.vcol).min(names.len().saturating_sub(1)));
+        let cur = self.prefs.vim.then(|| self.t().map_or(0, |t| t.vline).min(names.len().saturating_sub(1)));
         let scroll = cur.is_some() && std::mem::take(&mut self.vnav.scroll);
         self.vnav.lines = names.len();
         for (li, (c, col)) in names.iter().zip(&cols).enumerate() {
@@ -104,7 +104,7 @@ impl App {
             let p = ui.painter();
             p.rect_filled(line, R_SM, hover_fill(state_of(&r)));
             if here {
-                crate::app::table::paint_cursor(ui, line);
+                crate::app::table::paint_cursor(ui, line, PRIMARY());
             }
             focus_ring(ui, &r, val, R_SM as f32);
             let label = |text: String, f: &FontId, color: Color32| p.layout_no_wrap(text, f.clone(), color);
@@ -216,6 +216,8 @@ impl App {
         let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.record_row()) else { return };
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
             t.record = !t.record;
+            // The record's cursor starts on the field of the grid's cursor.
+            t.vline = t.vcol;
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         }
     }

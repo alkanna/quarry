@@ -792,8 +792,9 @@ impl App {
                                     clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
-                            if vim && active && !record && ci == vk {
-                                paint_cursor(ui, cell);
+                            // While the record has the keys the grid's cursor stays, faint, where Tab will bring it back.
+                            if vim && active && ci == vk {
+                                paint_cursor(ui, cell, if record { FAINT() } else { PRIMARY() });
                             }
                             let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                             // Named after the row number the grid shows, with the cell text as its value, so tests find it.
@@ -923,7 +924,7 @@ impl App {
         {
             self.vnav.act = None;
             let names = if record { record_names(&cols, fields) } else { cols.clone() };
-            let at = self.t().map_or(0, |t| t.vcol).min(names.len().saturating_sub(1));
+            let at = self.t().map_or(0, |t| if record { t.vline } else { t.vcol }).min(names.len().saturating_sub(1));
             let row = self.shown_row(docs, i, agg).or_else(|| docs.owned(i));
             if let (Some(c), Some(d)) = (names.get(at).cloned(), row) {
                 let b = if sql { d.get(&c).cloned() } else { db::get_path(&d, &c).cloned() }.unwrap_or(Bson::Null);
@@ -1122,8 +1123,8 @@ fn record_names(cols: &[String], fields: &[String]) -> Vec<String> {
 }
 
 /// The Vim cursor: an accent outline just inside a grid cell or a record line.
-pub(super) fn paint_cursor(ui: &egui::Ui, r: egui::Rect) {
-    ui.painter().rect_stroke(r.shrink(1.0), R_SM, Stroke::new(1.5, PRIMARY()), egui::StrokeKind::Inside);
+pub(super) fn paint_cursor(ui: &egui::Ui, r: egui::Rect, color: Color32) {
+    ui.painter().rect_stroke(r.shrink(1.0), R_SM, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
 pub(super) fn paint_row(ui: &egui::Ui, row: egui::Rect, active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) {

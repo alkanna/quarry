@@ -367,7 +367,7 @@ impl App {
         let at = sel.map_or(0, |s| s as i64);
         // In the record the rows stay put and the cursor walks its lines; h and l fold and unfold a JSON value.
         if record {
-            let line = self.t().map_or(0, |t| t.vcol) as i64;
+            let line = self.t().map_or(0, |t| t.vline) as i64;
             let to = match c {
                 Cmd::Move(r, 0) => line + r,
                 Cmd::Move(0, c) => {
@@ -386,7 +386,7 @@ impl App {
                 _ => return,
             };
             if let Some(t) = self.tm() {
-                t.vcol = to.clamp(0, lines as i64 - 1) as usize;
+                t.vline = to.clamp(0, lines as i64 - 1) as usize;
             }
             self.vnav.scroll = true;
             return;

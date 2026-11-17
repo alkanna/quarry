@@ -420,9 +420,10 @@ pub(super) struct Tab {
     pub(super) expanded: BTreeSet<(bool, usize)>,
     /// A SQL grid shows its selected row as a record under it, toggled by Tab.
     pub(super) record: bool,
-    /// The Vim cursor's column in the grid, or its line in the open record: an index into the columns on screen,
-    /// then the record's other columns.
+    /// The Vim cursor's column in the grid, an index into the columns on screen.
     pub(super) vcol: usize,
+    /// The Vim cursor's line in the open record, kept apart so walking the record leaves the grid's cursor where it was.
+    pub(super) vline: usize,
     pub(super) agg_txt: String,
     pub(super) agg_docs: Vec<db::Row>,
     pub(super) agg_fields: Vec<String>,
@@ -898,6 +899,7 @@ impl Tab {
             expanded: BTreeSet::new(),
             record: false,
             vcol: 0,
+            vline: 0,
             agg_txt: NEW_PIPELINE.into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),

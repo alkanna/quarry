@@ -133,6 +133,10 @@ fn sel(ui: &UiApp) -> Option<usize> {
     ui.app().t().and_then(|t| t.selected).map(|s| s.1)
 }
 
+fn vline(ui: &UiApp) -> usize {
+    ui.app().t().map_or(0, |t| t.vline)
+}
+
 fn vcol(ui: &UiApp) -> usize {
     ui.app().t().map_or(0, |t| t.vcol)
 }
@@ -172,16 +176,18 @@ fn i_edits_the_cell_under_the_cursor() {
 #[test]
 fn in_the_record_j_and_k_walk_its_lines_and_tab_goes_back_to_the_grid() {
     let Some(mut ui) = demo_ui(sql_vim) else { return };
-    ui.type_text("j");
+    // The record opens on the field of the grid's cursor.
+    ui.type_text("jl");
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| t.record), "Tab did not open the record");
+    assert_eq!(vline(&ui), 1, "the record did not open on the grid cursor's field");
     ui.type_text("3j");
-    assert_eq!((sel(&ui), vcol(&ui)), (Some(0), 3), "j in the record moved the row instead of its line");
+    assert_eq!((sel(&ui), vline(&ui)), (Some(0), 4), "j in the record moved the row instead of its line");
     ui.type_text("k");
-    assert_eq!(vcol(&ui), 2);
+    assert_eq!(vline(&ui), 3);
     ui.type_text("G");
-    assert_eq!((sel(&ui), vcol(&ui)), (Some(0), 6));
+    assert_eq!((sel(&ui), vline(&ui), vcol(&ui)), (Some(0), 6, 1), "walking the record moved the grid's cursor");
     // i edits the record's line, drawn in the record.
     ui.type_text("ki");
     ui.wait("the cell editor on note", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
@@ -190,9 +196,9 @@ fn in_the_record_j_and_k_walk_its_lines_and_tab_goes_back_to_the_grid() {
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| !t.record), "Tab did not close the record");
-    // Back in the grid the cursor stays on that column.
+    // Back in the grid the cursor is where it was before the record.
     ui.type_text("j");
-    assert_eq!((sel(&ui), vcol(&ui)), (Some(1), 5));
+    assert_eq!((sel(&ui), vcol(&ui)), (Some(1), 1));
 }
 
 #[test]
