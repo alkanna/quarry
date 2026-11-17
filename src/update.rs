@@ -142,8 +142,16 @@ pub struct Progress {
     pub cancel: std::sync::atomic::AtomicBool,
 }
 
+impl Progress {
+    /// How far the download is, when its size is known; full once it is being checked.
+    pub fn percent(&self, size: u64) -> Option<u8> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.verifying.load(Relaxed) { Some(100) } else { percent(self.bytes.load(Relaxed), size) }
+    }
+}
+
 /// The error of a download stopped through `Progress::cancel`.
-pub const CANCELLED: &str = "The download was cancelled.";
+const CANCELLED: &str = "The download was cancelled.";
 
 /// How far a download of `size` bytes is, when the size is known.
 pub fn percent(bytes: u64, size: u64) -> Option<u8> {

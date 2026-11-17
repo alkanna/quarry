@@ -9,11 +9,6 @@ fn fold_id(gid: u64) -> egui::Id {
     egui::Id::unique(("rail-fold", gid))
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum RailIcon {
-    Search,
-}
-
 impl App {
     /// Returns the rail's top-right corner, where the page's rounded corner goes.
     pub(super) fn rail(&mut self, ui: &mut egui::Ui) -> egui::Pos2 {
@@ -1123,23 +1118,10 @@ fn conn_tip(ui: &mut egui::Ui, c: &Conn, tabs: usize) {
     ui.label(RichText::new(format!("{state} \u{b7} {tabs} tab{}", if tabs == 1 { "" } else { "s" })).color(FAINT()));
 }
 
-/// Line icons drawn in a 16 px box, so they need no icon font.
-pub(super) fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: Stroke) {
-    p.extend(icon_shapes(c, icon, s));
-}
-
-/// The shapes of a rail icon centered on `c`.
-fn icon_shapes(c: egui::Pos2, icon: RailIcon, s: Stroke) -> Vec<egui::Shape> {
-    use egui::Shape;
-    let v = egui::vec2;
-    let mut out = Vec::new();
-    match icon {
-        RailIcon::Search => {
-            out.push(Shape::circle_stroke(c + v(-1.5, -1.5), 5.0, s));
-            out.push(Shape::line_segment([c + v(2.2, 2.2), c + v(6.0, 6.0)], s));
-        }
-    }
-    out
+/// A magnifier in a 16 px box, painted so it needs no icon font.
+pub(super) fn search_icon(p: &egui::Painter, c: egui::Pos2, s: Stroke) {
+    p.circle_stroke(c + egui::vec2(-1.5, -1.5), 5.0, s);
+    p.line_segment([c + egui::vec2(2.2, 2.2), c + egui::vec2(6.0, 6.0)], s);
 }
 
 #[cfg(test)]

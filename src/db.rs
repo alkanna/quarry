@@ -378,8 +378,8 @@ pub enum Msg {
     /// A line printed by mongodump or mongorestore.
     ToolLog(String),
     ToolDone(Res<String>),
-    /// Update check, and whether the user asked for it: Some when a newer release can be installed.
-    UpdateChecked(Res<Option<crate::update::Available>>, bool),
+    /// Update check: Some when a newer release can be installed.
+    UpdateChecked(Res<Option<crate::update::Available>>),
     /// The update's version once installed, or why it was not.
     UpdateInstalled(Res<String>),
     /// The MongoDB Database Tools were installed or updated to this version; None when already current.

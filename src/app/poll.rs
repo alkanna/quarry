@@ -228,7 +228,7 @@ impl App {
                         }
                     }
                 }
-                Msg::UpdateChecked(res, manual) => self.on_update_checked(res, manual),
+                Msg::UpdateChecked(res) => self.on_update_checked(res),
                 Msg::UpdateInstalled(res) => self.on_update_installed(res),
                 Msg::ToolsInstalled(res) => {
                     // Only a click shows failures; a background update that fails stays quiet, like the app's own.

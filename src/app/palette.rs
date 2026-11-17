@@ -2,7 +2,7 @@
 //! and the app's commands after ">". Matching and ranking are in `sidebar::jumps`.
 
 use super::*;
-use super::rail::{RailIcon, engine_mark, logo, mark_color, paint_icon};
+use super::rail::{engine_mark, logo, mark_color, search_icon};
 
 const PAL_W: f32 = 640.0;
 const LIST_MAX_H: f32 = 440.0;
@@ -542,7 +542,7 @@ impl App {
             }
             let flat: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().copied()).collect();
             let p = ui.painter();
-            paint_icon(p, egui::pos2(head.left() + 16.0, cy), RailIcon::Search, Stroke::new(1.5, FAINT()));
+            search_icon(p, egui::pos2(head.left() + 16.0, cy), Stroke::new(1.5, FAINT()));
             if !tok.is_empty() {
                 p.text(egui::pos2(head.right() - 8.0, cy), egui::Align2::RIGHT_CENTER, format!("{} of {n}", flat.len()), FontId::monospace(TXT_CAPTION), FAINT());
             }
@@ -727,7 +727,7 @@ fn palette_header(ui: &mut egui::Ui, query: &mut String, sel: &mut usize, cmds: 
     let (rect, _) = ui.allocate_exact_size(egui::vec2(PAL_W, PALETTE_HEAD_H), Sense::hover());
     let p = ui.painter().clone();
     let cy = rect.center().y;
-    paint_icon(&p, egui::pos2(rect.left() + 26.5, cy), RailIcon::Search, Stroke::new(1.5, FAINT()));
+    search_icon(&p, egui::pos2(rect.left() + 26.5, cy), Stroke::new(1.5, FAINT()));
     let mut x = rect.left() + 44.0;
     if *cmds {
         let g = p.layout_job(LayoutJob::single_section("Commands".into(), ui_fmt(TXT_SMALL, PRIMARY(), W_MEDIUM, 0.0)));

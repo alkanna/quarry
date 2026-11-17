@@ -7,9 +7,8 @@ use crate::update::{Available, Kind, Release};
 /// The look of the pill, one per state worth showing.
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
-    /// Downloading, with its percent when the size is known.
+    /// The percent done; None turns a quarter arc, for a check, a download of unknown size or the checksum.
     Ring(Option<u8>),
-    Spin,
     Ready,
     Failed,
     UpToDate,
@@ -30,15 +29,15 @@ impl App {
     fn pill_state(&self) -> Option<(String, Look)> {
         Some(match &self.upd {
             Upd::Idle | Upd::Checking { manual: false } => return None,
-            Upd::Checking { manual: true } => ("Checking for updates".into(), Look::Spin),
+            Upd::Checking { manual: true } => ("Checking for updates".into(), Look::Ring(None)),
             Upd::UpToDate(_) => ("Up to date".into(), Look::UpToDate),
             Upd::Available(a) => (format!("Update to {}", a.version), Look::Offer),
             Upd::Downloading { info, prog, .. } => {
                 use std::sync::atomic::Ordering::Relaxed;
                 if prog.verifying.load(Relaxed) {
-                    (format!("Verifying {}", info.version), Look::Spin)
+                    (format!("Verifying {}", info.version), Look::Ring(None))
                 } else {
-                    (format!("Downloading {}", info.version), Look::Ring(crate::update::percent(prog.bytes.load(Relaxed), info.size)))
+                    (format!("Downloading {}", info.version), Look::Ring(prog.percent(info.size)))
                 }
             }
             Upd::Ready(a) => (format!("Restart for {}", a.version), Look::Ready),
@@ -56,7 +55,7 @@ impl App {
             Look::Failed => (tint(WARNING(), 30), tint(WARNING(), 90), WARNING()),
             Look::Offer => (tint(PRIMARY(), 30), tint(PRIMARY(), 90), PRIMARY()),
             Look::UpToDate => (Color32::TRANSPARENT, Color32::TRANSPARENT, MUTED()),
-            Look::Ring(_) | Look::Spin => (RAISED(), BORDER(), TEXT()),
+            Look::Ring(_) => (RAISED(), BORDER(), TEXT()),
         };
         let p = ui.painter().clone();
         let weight = if look == Look::Ready { W_SEMIBOLD } else { W_MEDIUM };
@@ -70,27 +69,25 @@ impl App {
         let fill = if look == Look::UpToDate { hover_fill(state_of(&r)) } else { shade_fill(fill, state_of(&r)) };
         p.rect(rect, 13.0, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
         let ic = egui::pos2(rect.left() + 8.0 + 6.5, rect.center().y);
-        let icon = if look == Look::Ready { ON_PRIMARY() } else { ink };
         match look {
             Look::Ring(n) => {
                 p.circle_stroke(ic, 5.5, Stroke::new(2.0, RAISED_LINE()));
-                // Unknown size: a quarter arc that turns, like the spinner.
                 let (start, sweep) = match n {
                     Some(n) => (-std::f32::consts::FRAC_PI_2, n as f32 / 100.0 * std::f32::consts::TAU),
-                    None => (ui.input(|i| i.time) as f32 * 4.0, std::f32::consts::FRAC_PI_2),
+                    None => {
+                        // About 20 fps keeps the turn smooth; like `spin`, it rests while the window is in the background.
+                        if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                        }
+                        (ui.input(|i| i.time) as f32 * 4.0, std::f32::consts::FRAC_PI_2)
+                    }
                 };
                 arc(&p, ic, 5.5, start, sweep, Stroke::new(2.0, PRIMARY()));
             }
-            Look::Spin => {
-                p.circle_stroke(ic, 5.5, Stroke::new(2.0, RAISED_LINE()));
-                arc(&p, ic, 5.5, ui.input(|i| i.time) as f32 * 4.0, std::f32::consts::FRAC_PI_2, Stroke::new(2.0, PRIMARY()));
-                // About 20 fps keeps the turn smooth without redrawing every view at the display's rate.
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-            }
-            Look::Ready => glyphs::undo(&p, ic, icon),
-            Look::Failed => glyphs::warn(&p, ic, icon),
+            Look::Ready => glyphs::undo(&p, ic, ink),
+            Look::Failed => glyphs::warn(&p, ic, ink),
             Look::UpToDate => glyphs::check(&p, ic, SUCCESS()),
-            Look::Offer => glyphs::download(&p, ic, icon),
+            Look::Offer => glyphs::download(&p, ic, ink),
         }
         let tx = rect.left() + 8.0 + 13.0 + 7.0;
         let dy = optical_dy(&g);
@@ -135,9 +132,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            let (t, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
-            ui.painter().rect(t, 7.0, tint(tone, 36), Stroke::new(1.0, tint(tone, 84)), egui::StrokeKind::Inside);
-            glyph(ui.painter(), t.center(), tone);
+            head_tile(ui, glyph, tone);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.label(semibold(RichText::new(title).size(TXT_TITLE).color(BRIGHT())));
@@ -145,28 +140,19 @@ impl App {
             });
         });
         ui.add_space(8.0);
-        let pad = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
-            egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 }).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                add(ui);
-            });
-        };
-        let wrap = |ui: &mut egui::Ui, s: &str, c: Color32| {
-            ui.add(egui::Label::new(RichText::new(s).size(TXT_SMALL).color(c)).wrap());
-        };
         match &self.upd {
-            Upd::Idle | Upd::Checking { .. } => pad(ui, &mut |ui| {
+            Upd::Idle | Upd::Checking { .. } => pad(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(12.0).color(MUTED()));
+                    spin(ui);
                     ui.label(RichText::new("Asking GitHub for the latest release…").size(TXT_SMALL).color(MUTED()));
                 });
             }),
-            Upd::Downloading { info, prog, started } => pad(ui, &mut |ui| {
+            Upd::Downloading { info, prog, started } => pad(ui, |ui| {
                 use std::sync::atomic::Ordering::Relaxed;
                 let (bytes, verifying) = (prog.bytes.load(Relaxed), prog.verifying.load(Relaxed));
+                let pct = prog.percent(info.size);
                 let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), Sense::hover());
                 ui.painter().rect_filled(bar, 2.0, TRACK());
-                let pct = if verifying { Some(100) } else { crate::update::percent(bytes, info.size) };
                 if let Some(n) = pct {
                     let done = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * n as f32 / 100.0, bar.height()));
                     ui.painter().rect_filled(done, 2.0, PRIMARY());
@@ -190,33 +176,30 @@ impl App {
                     }
                 });
             }),
-            Upd::Ready(_) if self.busy_work() => pad(ui, &mut |ui| {
-                banner(ui, Notice::Warn, "Your work is still open.", "Save or discard your edits and wait for running scripts first.", None);
+            Upd::Ready(_) if self.busy_work() => pad(ui, |ui| {
+                banner(ui, Notice::Warn, "Your work is still open.", HELD, None);
             }),
-            Upd::Ready(_) => pad(ui, &mut |ui| wrap(ui, "Open connections reconnect after the restart. The new version also starts the next time you open Quarry.", MUTED())),
-            Upd::Failed { msg, .. } => pad(ui, &mut |ui| wrap(ui, msg, TEXT())),
+            Upd::Ready(_) => pad(ui, |ui| wrap(ui, "Open connections reconnect after the restart. The new version also starts the next time you open Quarry.", MUTED())),
+            Upd::Failed { msg, .. } => pad(ui, |ui| wrap(ui, msg, TEXT())),
             Upd::UpToDate(_) | Upd::Available(_) => {}
         }
-        let info = match &self.upd {
-            Upd::Available(a) | Upd::Ready(a) | Upd::Downloading { info: a, .. } | Upd::Failed { info: Some(a), .. } => Some(a),
-            _ => None,
-        };
-        let notes: Vec<(Kind, &str)> = info.map(|a| a.notes.iter().flat_map(|s| s.entries.iter().map(move |e| (s.kind, e.text.as_str()))).collect()).unwrap_or_default();
-        if !notes.is_empty() {
+        let info = self.upd.info();
+        let total = info.map_or(0, |a| a.notes.iter().map(|s| s.entries.len()).sum::<usize>());
+        if let Some(a) = info.filter(|_| total > 0) {
             ui.separator();
-            pad(ui, &mut |ui| {
+            pad(ui, |ui| {
                 ui.add_space(6.0);
                 ui.label(caption_text("HIGHLIGHTS"));
                 ui.add_space(4.0);
-                for (k, text) in notes.iter().take(3) {
+                for (k, text) in a.notes.iter().flat_map(|s| s.entries.iter().map(move |e| (s.kind, e.text.as_str()))).take(3) {
                     ui.horizontal_top(|ui| {
                         let (d, _) = ui.allocate_exact_size(egui::vec2(6.0, 16.0), Sense::hover());
-                        ui.painter().circle_filled(d.center(), 2.5, if *k == Kind::Fixed { SUCCESS() } else { PRIMARY() });
-                        ui.add(egui::Label::new(RichText::new(*text).size(TXT_SMALL).color(TEXT())).wrap());
+                        ui.painter().circle_filled(d.center(), 2.5, if k == Kind::Fixed { SUCCESS() } else { PRIMARY() });
+                        ui.add(egui::Label::new(RichText::new(text).size(TXT_SMALL).color(TEXT())).wrap());
                     });
                 }
-                if notes.len() > 3 {
-                    ui.label(RichText::new(format!("and {} more", notes.len() - 3)).size(TXT_SMALL).color(FAINT()));
+                if total > 3 {
+                    ui.label(RichText::new(format!("and {} more", total - 3)).size(TXT_SMALL).color(FAINT()));
                 }
             });
         }
@@ -240,9 +223,8 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0);
                 // The same button Settings shows for this state.
-                let Some(b) = self.update_status().2.filter(|b| *b != UpdBtn::Check) else { return };
-                let r = if b.primary() { ui.add_enabled(b != UpdBtn::Restart || !self.busy_work(), primary_button(ui, b.label(), PRIMARY())) } else { ui.button(b.label()) };
-                if r.clicked() {
+                let Some(b) = self.upd_btn().filter(|b| *b != UpdBtn::Check) else { return };
+                if b.show(ui, self.busy_work()).clicked() {
                     act = Some(PopAct::Btn(b));
                 }
                 if b == UpdBtn::Restart && ui.button("Later").clicked() {
@@ -253,6 +235,19 @@ impl App {
         ui.add_space(4.0);
         act
     }
+}
+
+/// A block of the popover with its side margins. Popovers lay out justified, which stretches wrapped labels, so the
+/// content goes back to a plain top-down layout.
+fn pad(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), add);
+    });
+}
+
+fn wrap(ui: &mut egui::Ui, s: &str, c: Color32) {
+    ui.add(egui::Label::new(RichText::new(s).size(TXT_SMALL).color(c)).wrap());
 }
 
 /// An arc of `sweep` radians from `start`, 0 pointing right and growing clockwise.

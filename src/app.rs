@@ -71,7 +71,7 @@ mod update_pill;
 mod watch;
 mod whats_new;
 use column_menu::*;
-use auto_update::UpdBtn;
+use auto_update::{HELD, UpdBtn};
 use whats_new::WhatsNew;
 use errors::*;
 use config::*;
@@ -680,9 +680,11 @@ impl App {
             if app.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
-                let notes = crate::update::changelog(&app.prefs.last_version, current);
-                if ui_json.is_some() && !notes.is_empty() {
-                    app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.prefs.last_version))));
+                if ui_json.is_some() {
+                    let notes = crate::update::changelog(&app.prefs.last_version, current);
+                    if !notes.is_empty() {
+                        app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.prefs.last_version))));
+                    }
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();

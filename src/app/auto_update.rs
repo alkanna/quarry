@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Why Restart waits, in the warning, Settings and the popover.
+pub(super) const HELD: &str = "Save or discard your edits and wait for running scripts first.";
+
 impl App {
     /// Checks GitHub 5 seconds after launch and then daily. An installed update waits for Restart:
     /// Quarry never restarts by itself, and the new version also starts on the next launch.
@@ -11,10 +14,11 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
         if let Upd::UpToDate(at) = self.upd {
-            if at.elapsed().as_secs() >= UP_TO_DATE_S {
+            let left = std::time::Duration::from_secs(UP_TO_DATE_S).saturating_sub(at.elapsed());
+            if left.is_zero() {
                 self.upd = Upd::Idle;
             } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                ctx.request_repaint_after(left);
             }
         }
         // Checks run with automatic updates off too: the release is then offered in the header instead of installed.
@@ -55,10 +59,11 @@ impl App {
         }
     }
 
+    /// `manual` decides whether the answer is shown when there is nothing new; it lives in the Checking state only.
     pub(super) fn check_update(&mut self, manual: bool) {
         self.update_checked = Some(std::time::Instant::now());
         self.upd = Upd::Checking { manual };
-        self.worker.blocking(move || Msg::UpdateChecked(crate::update::check(), manual));
+        self.worker.blocking(|| Msg::UpdateChecked(crate::update::check()));
         // A running dump or restore keeps its program open; Windows cannot replace it then.
         if self.tool.as_ref().is_none_or(|t| t.done.is_some()) {
             self.worker.blocking(|| Msg::ToolsInstalled(crate::update::update_db_tools(&tools_dir())));
@@ -94,16 +99,10 @@ impl App {
         self.upd = Upd::Downloading { info, prog, started: std::time::Instant::now() };
     }
 
-    pub(super) fn cancel_download(&mut self) {
-        if let Upd::Downloading { prog, .. } = &self.upd {
-            prog.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
     /// Restart now, unless something would be lost; the pill and Settings show why it waits.
-    pub(super) fn restart_now(&mut self) {
+    fn restart_now(&mut self) {
         if self.busy_work() {
-            self.warn("Save or discard your edits and wait for running scripts first.");
+            self.warn(HELD);
         } else if !self.can_update() {
             self.warn("The demo has nothing to restart into.");
         } else {
@@ -111,53 +110,66 @@ impl App {
         }
     }
 
+    /// The button Settings' status row and the popover's footer offer for the current state.
+    pub(super) fn upd_btn(&self) -> Option<UpdBtn> {
+        match &self.upd {
+            Upd::Idle | Upd::UpToDate(_) => self.can_update().then_some(UpdBtn::Check),
+            Upd::Checking { .. } => None,
+            Upd::Available(_) => Some(UpdBtn::Update),
+            // Once downloaded, the archive is being swapped in and can no longer be stopped.
+            Upd::Downloading { prog, .. } => (!prog.verifying.load(std::sync::atomic::Ordering::Relaxed)).then_some(UpdBtn::Cancel),
+            Upd::Ready(_) => Some(UpdBtn::Restart),
+            Upd::Failed { .. } => Some(UpdBtn::Retry),
+        }
+    }
+
     /// Runs a button of Settings' status row or of the popover's footer.
     pub(super) fn upd_act(&mut self, b: UpdBtn) {
-        match (b, std::mem::replace(&mut self.upd, Upd::Idle)) {
-            (UpdBtn::Update | UpdBtn::Retry, Upd::Available(a) | Upd::Failed { info: Some(a), .. }) => self.start_download(a),
-            (UpdBtn::Check | UpdBtn::Retry, other) => {
-                self.upd = other;
+        match b {
+            // Retry downloads the release again when one was found, else asks GitHub again.
+            UpdBtn::Update | UpdBtn::Retry if self.upd.info().is_some() => {
+                if let Some(a) = self.upd.info().cloned() {
+                    self.start_download(a);
+                }
+            }
+            UpdBtn::Update => {}
+            UpdBtn::Check | UpdBtn::Retry => {
                 if self.can_update() {
                     self.check_update(true);
                 }
             }
-            (UpdBtn::Cancel, other) => {
-                self.upd = other;
-                self.cancel_download();
+            UpdBtn::Cancel => {
+                if let Upd::Downloading { prog, .. } = &self.upd {
+                    prog.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
-            (UpdBtn::Restart, other) => {
-                self.upd = other;
-                self.restart_now();
-            }
-            (UpdBtn::Update, other) => self.upd = other,
+            UpdBtn::Restart => self.restart_now(),
         }
     }
 
-    /// Settings' status row: the title, the line under it and the button that fits, if any.
-    pub(super) fn update_status(&self) -> (String, String, Option<UpdBtn>) {
-        use std::sync::atomic::Ordering::Relaxed;
+    /// Settings' status row: the title and the line under it.
+    pub(super) fn update_status(&self) -> (String, String) {
         let current = env!("CARGO_PKG_VERSION");
         let checked = self.update_checked.map_or("New releases are checked at launch and once a day".to_string(), |t| format!("checked {}", ago(t.elapsed().as_secs())));
-        let check = self.can_update().then_some(UpdBtn::Check);
         match &self.upd {
-            Upd::Idle if !self.update_note.is_empty() => (format!("Quarry {current}"), self.update_note.clone(), check),
-            Upd::Idle | Upd::UpToDate(_) if self.update_checked.is_some() => (format!("Quarry {current}"), format!("Up to date  ·  {checked}"), check),
-            Upd::Idle | Upd::UpToDate(_) => (format!("Quarry {current}"), checked, check),
-            Upd::Checking { .. } => (format!("Quarry {current}"), "Checking for updates…".into(), None),
-            Upd::Available(a) => (format!("Quarry {} is available", a.version), format!("You are running {current}"), Some(UpdBtn::Update)),
-            Upd::Downloading { info, prog, .. } if prog.verifying.load(Relaxed) => (format!("Installing Quarry {}", info.version), "Checking the download against its published checksum".into(), None),
+            Upd::Idle if !self.update_note.is_empty() => (format!("Quarry {current}"), self.update_note.clone()),
+            Upd::Idle | Upd::UpToDate(_) if self.update_checked.is_some() => (format!("Quarry {current}"), format!("Up to date  ·  {checked}")),
+            Upd::Idle | Upd::UpToDate(_) => (format!("Quarry {current}"), checked),
+            Upd::Checking { .. } => (format!("Quarry {current}"), "Checking for updates…".into()),
+            Upd::Available(a) => (format!("Quarry {} is available", a.version), format!("You are running {current}")),
+            Upd::Downloading { info, prog, .. } if prog.verifying.load(std::sync::atomic::Ordering::Relaxed) => (format!("Installing Quarry {}", info.version), "Checking the download against its published checksum".into()),
             Upd::Downloading { info, prog, .. } => {
-                let pct = crate::update::percent(prog.bytes.load(Relaxed), info.size).map_or(String::new(), |n| format!("  ·  {n}%"));
-                (format!("Downloading Quarry {}", info.version), format!("You are running {current}{pct}"), Some(UpdBtn::Cancel))
+                let pct = prog.percent(info.size).map_or(String::new(), |n| format!("  ·  {n}%"));
+                (format!("Downloading Quarry {}", info.version), format!("You are running {current}{pct}"))
             }
-            Upd::Ready(a) if self.busy_work() => (format!("Quarry {} is installed", a.version), "Save or discard your edits and wait for running scripts, then restart to use it".into(), Some(UpdBtn::Restart)),
-            Upd::Ready(a) => (format!("Quarry {} is installed", a.version), format!("Restart to use it, you are running {current}"), Some(UpdBtn::Restart)),
-            Upd::Failed { msg, .. } => ("The update failed".into(), msg.clone(), Some(UpdBtn::Retry)),
+            Upd::Ready(a) if self.busy_work() => (format!("Quarry {} is installed", a.version), HELD.into()),
+            Upd::Ready(a) => (format!("Quarry {} is installed", a.version), format!("Restart to use it, you are running {current}")),
+            Upd::Failed { msg, .. } => ("The update failed".into(), msg.clone()),
         }
     }
 
-    pub(super) fn on_update_checked(&mut self, res: db::Res<Option<crate::update::Available>>, manual: bool) {
-        let manual = manual || matches!(self.upd, Upd::Checking { manual: true });
+    pub(super) fn on_update_checked(&mut self, res: db::Res<Option<crate::update::Available>>) {
+        let manual = matches!(self.upd, Upd::Checking { manual: true });
         if res.is_ok() {
             self.update_note.clear();
         }
@@ -176,10 +188,10 @@ impl App {
     }
 
     pub(super) fn on_update_installed(&mut self, res: db::Res<String>) {
-        let Upd::Downloading { info, .. } = std::mem::replace(&mut self.upd, Upd::Idle) else { return };
+        let Upd::Downloading { info, prog, .. } = std::mem::replace(&mut self.upd, Upd::Idle) else { return };
         self.upd = match res {
             Ok(_) => Upd::Ready(info),
-            Err(e) if e == crate::update::CANCELLED => Upd::Available(info),
+            Err(_) if prog.cancel.load(std::sync::atomic::Ordering::Relaxed) => Upd::Available(info),
             Err(msg) => Upd::Failed { info: Some(info), msg },
         };
     }
@@ -196,7 +208,7 @@ pub(super) enum UpdBtn {
 }
 
 impl UpdBtn {
-    pub(super) fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             UpdBtn::Check => "Check now",
             UpdBtn::Update => "Update",
@@ -206,9 +218,13 @@ impl UpdBtn {
         }
     }
 
-    /// Cancel and Check are secondary; the others move the update forward.
-    pub(super) fn primary(self) -> bool {
-        !matches!(self, UpdBtn::Check | UpdBtn::Cancel)
+    /// Check and Cancel are plain buttons; the others move the update forward. Restart is off while work is `held`.
+    pub(super) fn show(self, ui: &mut egui::Ui, held: bool) -> egui::Response {
+        if matches!(self, UpdBtn::Check | UpdBtn::Cancel) {
+            ui.button(self.label())
+        } else {
+            ui.add_enabled(self != UpdBtn::Restart || !held, primary_button(ui, self.label(), PRIMARY()))
+        }
     }
 }
 

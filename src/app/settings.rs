@@ -353,19 +353,18 @@ impl App {
             }
             SettingsCat::Updates => {
                 let current = env!("CARGO_PKG_VERSION");
-                let (title, line, button) = self.update_status();
+                let (title, line) = self.update_status();
                 let mut clicked = None;
                 let mut notes = false;
                 let held = self.busy_work();
                 settings_section(ui, "THIS VERSION", |ui| {
                     setting_row(ui, &title, &line, |ui| {
-                        if let Some(b) = button {
-                            let r = if b.primary() { ui.add_enabled(b != UpdBtn::Restart || !held, primary_button(ui, b.label(), PRIMARY())) } else { ui.button(b.label()) };
-                            if r.clicked() {
+                        if let Some(b) = self.upd_btn() {
+                            if b.show(ui, held).clicked() {
                                 clicked = Some(b);
                             }
                         } else if matches!(self.upd, Upd::Checking { .. }) {
-                            ui.add(egui::Spinner::new().size(14.0).color(MUTED()));
+                            spin(ui);
                         }
                     });
                     ui.separator();

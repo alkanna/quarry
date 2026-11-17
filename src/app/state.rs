@@ -1005,6 +1005,16 @@ pub(super) enum Upd {
     Failed { info: Option<crate::update::Available>, msg: String },
 }
 
+impl Upd {
+    /// The release this state is about, once a check found one.
+    pub(super) fn info(&self) -> Option<&crate::update::Available> {
+        match self {
+            Upd::Available(a) | Upd::Ready(a) | Upd::Downloading { info: a, .. } | Upd::Failed { info: Some(a), .. } => Some(a),
+            _ => None,
+        }
+    }
+}
+
 /// What to run once writes are allowed.
 pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
