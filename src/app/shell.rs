@@ -477,6 +477,7 @@ impl App {
         input["code"] = code.clone().into();
         input["packages"] = packages.into();
         input["timeoutMs"] = self.prefs.timeout_ms.into();
+        input["maxBytes"] = db::SHELL_MAX.into();
         input["main"] = name.into();
         let input = input.to_string();
         // The original's NodeShell.addHistory (renderer line 196411): skip scripts over 1000
@@ -733,7 +734,7 @@ impl App {
             ui.add_space(8.0);
         }
         let has_table = !t.shell.docs.is_empty() && !t.shell.raw;
-        let (mut export, mut page_to) = (false, None);
+        let (mut export, mut page_to, mut too_big) = (false, None, None);
         if t.shell.value.is_some() || !t.shell.docs.is_empty() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -744,6 +745,11 @@ impl App {
                     (n, _) => format!("{} {unit}", group(&n.to_string())),
                 };
                 ui.label(semibold(RichText::new(what).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
+                if t.shell.cut {
+                    ui.label(RichText::new(format!("cut at {} GB", db::SHELL_MAX >> 30)).font(FontId::monospace(TXT_SMALL)).color(WARNING())).on_hover_text(
+                        "The script returned more than the Shell keeps, so only the first documents are here. To read the rest, return fewer fields with a projection, page with skip and limit, or return the cursor rather than toArray() so less is read at all.",
+                    );
+                }
                 if !t.shell.queries.is_empty() {
                     let mut conns: Vec<&str> = t.shell.queries.iter().map(|q| q.conn.as_str()).collect();
                     conns.sort_unstable();
@@ -771,21 +777,30 @@ impl App {
                         quiet_look(ui);
                         ui.menu_button("Copy as", |ui| {
                             menu_look(ui);
-                            let docs: Vec<Document> = t.shell.docs.iter().map(db::Row::owned).collect();
-                            let mut text = None;
+                            // None is JSON, Some the separator of a table. Rows are decoded only for the copy, and a result
+                            // too big for the clipboard is left to Export.
+                            let mut pick = None;
                             if ui.button("JSON").on_hover_text("The whole result").clicked() {
-                                text = Some(t.shell.result().map(|v| db::to_edit_value(&v)).unwrap_or_default());
+                                pick = Some(None);
                             }
-                            if !docs.is_empty() {
+                            if !t.shell.docs.is_empty() {
                                 if ui.button("CSV").clicked() {
-                                    text = Some(db::to_table(&docs, ','));
+                                    pick = Some(Some(','));
                                 }
                                 if ui.button("TSV").clicked() {
-                                    text = Some(db::to_table(&docs, '\t'));
+                                    pick = Some(Some('\t'));
                                 }
                             }
-                            if let Some(s) = text {
-                                ui.ctx().copy_text(s);
+                            if let Some(sep) = pick {
+                                let bytes = t.shell.docs_bytes();
+                                if bytes > db::sql::export::CLIP_MAX {
+                                    too_big = Some(bytes);
+                                } else {
+                                    ui.ctx().copy_text(match sep {
+                                        None => t.shell.json_text(usize::MAX),
+                                        Some(sep) => db::to_table(&t.shell.docs.iter().map(db::Row::owned).collect::<Vec<_>>(), sep),
+                                    });
+                                }
                                 ui.close();
                             }
                         });
@@ -800,7 +815,7 @@ impl App {
                 // Very large results are cut for display; Export writes everything.
                 const RAW_MAX: usize = 300_000;
                 if t.shell.raw_text.is_none() {
-                    let mut s = t.shell.result().map(|v| db::to_edit_value(&v)).unwrap_or_default();
+                    let mut s = t.shell.json_text(RAW_MAX);
                     if s.len() > RAW_MAX {
                         let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
                         s.truncate(cut);
@@ -821,6 +836,9 @@ impl App {
             t.shell.page = p;
             // Checks are positions in the page on screen.
             t.shell_checked.clear();
+        }
+        if let Some(n) = too_big {
+            self.warn(format!("The result is {} MB, too big to copy. Use Export to save it to a file.", n >> 20));
         }
         if export {
             if self.tabs[self.cur].shell.docs.is_empty() {
@@ -935,6 +953,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The JSON view and Copy as JSON build their text a row at a time; it must be what the whole result gives.
+    #[test]
+    fn shell_json_text_matches_the_whole_result() {
+        let docs = [doc! { "_id": 1, "a": { "b": [1, 2] }, "s": "x\ny" }, doc! {}, doc! { "n": Bson::Int64(5), "d": 2.5 }];
+        let rows = || docs.iter().map(|d| db::Row::from_doc(d).unwrap()).collect::<Vec<_>>();
+        let mut sh = ShellTab::default();
+        sh.set_rows(rows(), false, true);
+        assert!(sh.cut && sh.count == Some(3));
+        assert_eq!(sh.json_text(usize::MAX), db::to_edit_value(&sh.result().unwrap()));
+        // Stopped early: the start of the same text, cut for display by its caller.
+        assert!(db::to_edit_value(&sh.result().unwrap()).starts_with(&sh.json_text(10)));
+        sh.set_rows(rows()[..1].to_vec(), true, false);
+        assert_eq!(sh.count, None);
+        assert_eq!(sh.json_text(usize::MAX), db::to_edit_value(&Bson::Document(docs[0].clone())));
+    }
 
     #[test]
     fn shell_scripts() {

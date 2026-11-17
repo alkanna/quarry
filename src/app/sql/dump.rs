@@ -387,7 +387,7 @@ impl App {
             }
         };
         self.req += 1;
-        let job = crate::app::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sql.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        let job = crate::app::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sql.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
         self.worker.sql_dump(job.req, sql, plan, PathBuf::from(f.path.trim()), job.count.clone(), job.id.clone(), job.cancel.clone());
         self.export_job = Some(job);
         self.ok(format!("Exporting {} to {}", if total > 0 { format!("about {} rows", group(&total.to_string())) } else { "the structure".to_string() }, f.path.trim()));

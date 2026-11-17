@@ -56,7 +56,12 @@ impl Worker {
             let ms = start.elapsed().as_millis();
             let (res, query_ms) = match ran {
                 // Blocking, because a 64 MB result takes a while and the runtime has only two threads.
-                Ok((out, q)) => (tokio::task::spawn_blocking(move || shell_value(&out)).await.unwrap_or_else(|e| Err(e.to_string())), q),
+                Ok((ShellOut::Value(out), q)) => (tokio::task::spawn_blocking(move || shell_value(&out).map(ShellOut::Value)).await.unwrap_or_else(|e| Err(e.to_string())), q),
+                // Every row is decoded once, as Documents pages are, so later decodes cannot fail.
+                Ok((ShellOut::Docs { rows, single, cut }, q)) => {
+                    let checked = tokio::task::spawn_blocking(move || rows.iter().try_for_each(|r| r.decode().map(drop)).map(|_| rows));
+                    (checked.await.unwrap_or_else(|e| Err(e.to_string())).map(|rows| ShellOut::Docs { rows, single, cut }), q)
+                }
                 Err(e) => (Err(e), None),
             };
             send(Msg::ShellDone { req, res, ms, query_ms });

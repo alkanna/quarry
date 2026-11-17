@@ -65,7 +65,7 @@ fn shell(uri: &str, proxy: serde_json::Value, code: &str, timeout_ms: u64) -> Op
     // The first run in a fresh folder installs the packages, so the deadline leaves room for that.
     let r = rt().block_on(async { tokio::time::timeout(Duration::from_secs(180), run_shell(1, &job, &send, cancel)).await });
     let r = r.unwrap_or_else(|_| panic!("the shell never answered on {uri}"));
-    Some((r.map(|(ejson, _)| ejson), t.elapsed()))
+    Some((r.and_then(|(out, _)| out.text()), t.elapsed()))
 }
 
 /// The app's client and then the Shell, each writing and reading back DOCS documents of PAD bytes on `uri`.

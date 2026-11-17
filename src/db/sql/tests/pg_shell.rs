@@ -33,7 +33,7 @@ fn job(input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> ShellJob {
 /// Calls run_shell itself rather than Worker::shell, whose ShellDone carries the parsed value: these tests read the runner's text.
 fn run(w: &Worker, _rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, SqlRelay)>) -> (Vec<ShellQuery>, Res<String>) {
     let (queries, res) = crate::db::shell::run_shell_blocking(w, &job(input, sql));
-    (queries, res.map(|(out, _)| out))
+    (queries, res.and_then(|(out, _)| out.text()))
 }
 
 /// A script on the one PostgreSQL connection "pg", and the value it returned.
@@ -463,7 +463,7 @@ fn stop_cancels_a_running_pg_sleep() {
         let res = loop {
             if let Msg::ShellDone { res, .. } = l.rx.recv_timeout(Duration::from_secs(30)).expect("shell answer") { break res }
         };
-        assert_eq!(res, Err("Stopped.".to_string()), "{var}");
+        assert!(matches!(&res, Err(e) if e == "Stopped."), "{var}");
         let gone = std::time::Instant::now();
         while active() != "0" {
             assert!(gone.elapsed() < Duration::from_secs(10), "{var}: pg_sleep still running after Stop");

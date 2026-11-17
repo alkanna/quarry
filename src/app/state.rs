@@ -46,11 +46,46 @@ impl ShellTab {
             Ok(rows) => (rows, None),
             Err(_) => (Vec::new(), Some(v)),
         };
+        self.shown();
+    }
+
+    /// Documents that came as BSON frames, kept as they came. An empty list never comes this way.
+    pub(super) fn set_rows(&mut self, rows: Vec<db::Row>, single: bool, cut: bool) {
+        self.count = (!single).then_some(rows.len());
+        (self.docs, self.value, self.cut) = (rows, None, cut);
+        self.shown();
+    }
+
+    /// A new result starts on its first page, as a table when it has documents.
+    fn shown(&mut self) {
         self.fields = auto_fields(&self.docs);
         self.page = 0;
         self.raw = self.docs.is_empty();
         self.raw_text = None;
         self.error = None;
+    }
+
+    /// The result as editor JSON, as `to_edit_value(result())` writes it, built a document at a time and stopped once
+    /// past `max` bytes, so a big list is never decoded or formatted whole for a view that shows its start.
+    pub(super) fn json_text(&self, max: usize) -> String {
+        if self.value.is_some() || self.docs.is_empty() || self.count.is_none() {
+            return self.result().map(|v| db::to_edit_value(&v)).unwrap_or_default();
+        }
+        let mut s = String::from("[");
+        for (i, r) in self.docs.iter().enumerate() {
+            if s.len() > max {
+                return s;
+            }
+            s.push_str(if i == 0 { "\n" } else { ",\n" });
+            s.push_str(&db::to_edit_item(&Bson::Document(r.owned())));
+        }
+        s.push_str("\n]");
+        s
+    }
+
+    /// The raw size of the documents, to refuse a copy too big for the clipboard before building it.
+    pub(super) fn docs_bytes(&self) -> usize {
+        self.docs.iter().map(|r| r.raw().as_bytes().len()).sum()
     }
 
     /// SQL rows have no `_id` unless the query selects one, so the column the Mongo layout adds first
@@ -719,6 +754,8 @@ pub(super) struct ShellTab {
     /// The part of `ms` spent on queries, when the script used MongoDB.
     pub(super) query_ms: Option<u64>,
     pub(super) count: Option<usize>,
+    /// The documents stop at `db::SHELL_MAX`; the script returned more.
+    pub(super) cut: bool,
     /// Every query a SQL script ran, in order.
     pub(super) queries: Vec<db::ShellQuery>,
     /// The bottom panel shows the Queries tab instead of the Console.

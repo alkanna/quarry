@@ -112,7 +112,8 @@ pub(super) struct ExportJob {
     pub(super) count: Arc<AtomicU64>,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) id: Arc<AtomicU64>,
-    pub(super) db: db::sql::Db,
+    /// The connection a SQL stream reads, None for Shell rows written from memory.
+    pub(super) db: Option<db::sql::Db>,
     pub(super) copy: bool,
     /// Progress of a script: the statement being run and how many there are. `of` is 0 for a single statement.
     pub(super) step: Arc<AtomicU64>,
@@ -161,10 +162,14 @@ impl App {
     pub(super) fn checked_rows(&self) -> Vec<Document> {
         let src = self.grid_src();
         let Some(t) = self.t() else { return Vec::new() };
+        // The Shell pages its rows; its checks are positions in the page on screen. Only those are decoded, since a
+        // Shell result can hold a gigabyte.
+        if src == Src::Shell {
+            let base = t.shell.page * PAGE_SIZE as usize;
+            return self.checks().iter().filter_map(|i| t.shell.docs.get(base + i)).map(db::Row::owned).collect();
+        }
         let all = self.shown_rows(src);
-        // The Shell pages its rows; its checks are positions in the page on screen.
-        let base = if src == Src::Shell { t.shell.page * PAGE_SIZE as usize } else { 0 };
-        self.checks().iter().filter_map(|i| all.get(base + i).cloned()).collect()
+        self.checks().iter().filter_map(|i| all.get(*i).cloned()).collect()
     }
 
     /// Columns, table name and key for writing `rows` of `src` as text. The table is `insert_table`'s, so Copy as and
@@ -496,6 +501,12 @@ impl App {
             let single = f.single && plan.text().is_some_and(db::sql::export::can_single);
             return self.start_script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
         }
+        // Shell rows can reach a gigabyte, so they are written a batch at a time off the UI thread, in the same bytes as
+        // the whole list. Markdown pads its table to the widest cell, which only the whole list knows, so a small one
+        // keeps that path.
+        if f.src == Src::Shell && f.scope == Scope::Shown && !(f.fmt == Format::T(Fmt::Markdown) && self.t().is_some_and(|t| t.shell.docs_bytes() <= db::sql::export::CLIP_MAX)) {
+            return self.start_shell_export(f, table, path);
+        }
         let rows = if f.scope == Scope::Selected { f.selected.clone() } else { self.shown_rows(f.src) };
         if let Some(Target::Xlsx(opts)) = target {
             let (cols, _, _) = self.export_sheet(f.src, &rows);
@@ -552,8 +563,32 @@ impl App {
             return self.warn("An export is already running.");
         }
         self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: a.db.clone(), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(a.db.clone()), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
         self.worker.sql_export(job.req, a.db.clone(), a.schema.clone(), a.stmt.clone(), plan, sink, job.count.clone(), job.id.clone(), job.cancel.clone());
+        self.export_job = Some(job);
+    }
+
+    /// Writes every Shell row to `path` on a blocking thread, tracked in the status bar like a stream.
+    fn start_shell_export(&mut self, f: &ExportForm, table: String, path: PathBuf) {
+        if self.export_job.is_some() {
+            return self.warn("An export is already running.");
+        }
+        let out = match f.fmt {
+            // Shell rows have no primary key, which UPDATE needs, as the whole-list export says too.
+            Format::T(Fmt::SqlUpdate) => return self.warn("SQL UPDATE needs a table with a primary key."),
+            Format::T(fmt) => db::RowsOut::Text { fmt, header: f.header, table, dialect: self.sql_dialect(), bs: self.sql_bs() },
+            Format::Xlsx => db::RowsOut::Xlsx(self.xlsx_opts(f)),
+            Format::MongoJs => db::RowsOut::MongoJs,
+            Format::MongoJson => db::RowsOut::MongoJson,
+            Format::MongoLines => db::RowsOut::MongoLines,
+        };
+        let Some(t) = self.t() else { return };
+        // A copy of the bytes, freed when the export ends, so the result stays on screen meanwhile.
+        let rows: Vec<mongodb::bson::RawDocumentBuf> = t.shell.docs.iter().map(|r| r.raw().to_owned()).collect();
+        self.req += 1;
+        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: None, copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        let (req, count, cancel) = (job.req, job.count.clone(), job.cancel.clone());
+        self.worker.blocking(move || Msg::SqlExport { req, res: db::export_rows(&rows, &out, &path, &count, &cancel) });
         self.export_job = Some(job);
     }
 
@@ -563,7 +598,7 @@ impl App {
             return self.warn("An export is already running.");
         }
         self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sc.db.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
+        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sc.db.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
         self.worker.sql_export_all(job.req, sc.db.clone(), sc.schema.clone(), stmts, ap, path, job.count.clone(), job.step.clone(), job.id.clone(), job.cancel.clone());
         self.export_job = Some(job);
     }
@@ -611,7 +646,10 @@ impl App {
         let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
         if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() && let Some(j) = &self.export_job {
-            self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
+            match &j.db {
+                Some(db) => self.worker.sql_kill(db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone()),
+                None => j.cancel.store(true, Ordering::Relaxed),
+            }
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true

@@ -1,15 +1,17 @@
 // Runs one Shell script for Quarry under Bun. One runner serves both engines: the script gets the
 // tab's own connection ("main") and any attached ones, each under a JS name.
 // stdin (JSON lines): the first line is
-//   { code, packages, timeoutMs, main: "<name>",
+//   { code, packages, timeoutMs, maxBytes?, main: "<name>",
 //     mongo: [{ name, uri, db, proxy, collections, readOnly }], sql: [{ name, db, tables, dialect }] }
+// maxBytes turns on document frames (see sendDocs), with that budget; without it every result is one text line.
 // and after it come SQL answers { type: "sqlres", id, ok, rows | affected, insertId | error }.
 // Mongo entries are MongoClients inside this process. SQL entries never get a driver or a password:
 // every query goes to Quarry, which runs it on that connection with its read-only rules. dialect is "postgres"
 // for a PostgreSQL entry (placeholders $1..$n, "double quoted" names, ILIKE, RETURNING); any other value is MySQL.
 // stdout (JSON lines): { type: "log", level, text }, { type: "sql", conn, id, text, params } per SQL query,
-//   { type: "query", conn, text, rows?, affected?, ms, error? } per Mongo command, then
-//   { type: "result", ok: true, ejson } or { type: "result", ok: false, error }.
+//   { type: "query", conn, text, rows?, affected?, ms, error? } per Mongo command, then either
+//   { type: "result", ok: true, ejson }, or document frames, perhaps a { type: "reset" } dropping them, and
+//   { type: "result", ok: true, docs, single, cut }; or { type: "result", ok: false, error }.
 import { createRequire } from "module";
 
 // Packages added in Quarry are installed next to this file; scripts load them with require() or import().
@@ -29,6 +31,12 @@ const tooBig = (bytes) =>
 // The driver is loaded only when an entry needs it, so a SQL-only run starts without it.
 let mongodb = null;
 
+// An invalid Date or one past what BSON and ISO parsing accept (years 0 to 9999) would make Quarry refuse the whole result.
+const okDate = (v) => {
+  const y = v.getUTCFullYear();
+  return Number.isNaN(y) || y < 0 || y > 9999 ? null : v;
+};
+
 // Rows hold bigints and bytes that JSON.stringify would refuse or spell out as an object of numbers.
 // bigint says how a BigInt, or a number at or past 2^63, is spelled: Extended JSON for results, plain for logs.
 const walk = (v, bigint) => {
@@ -37,11 +45,7 @@ const walk = (v, bigint) => {
   if (typeof v === "number" && Number.isInteger(v) && Math.abs(v) >= 2 ** 63) return bigint(v);
   if (typeof v === "string") return v.toWellFormed();
   if (v instanceof Uint8Array) return { $binary: { base64: Buffer.from(v).toString("base64"), subType: "00" } };
-  // An invalid Date or one past what BSON and ISO parsing accept (years 0 to 9999) would make Quarry refuse the whole result.
-  if (v instanceof Date) {
-    const y = v.getUTCFullYear();
-    return Number.isNaN(y) || y < 0 || y > 9999 ? null : v;
-  }
+  if (v instanceof Date) return okDate(v);
   if (Array.isArray(v)) return v.map((x) => walk(x, bigint));
   // Only plain objects are copied: BSON values, dates and class instances keep their own serialization.
   if (v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
@@ -51,6 +55,41 @@ const walk = (v, bigint) => {
     return o;
   }
   return v;
+};
+// The same value prepared for BSON.serialize, which writes bigints, bytes and Long itself. It drops what JSON drops
+// (undefined, functions, symbols) so a document reads the same as on the Extended JSON path.
+const skipped = (x) => x === undefined || typeof x === "function" || typeof x === "symbol";
+const toBson = (v, BSON) => {
+  if (typeof v === "bigint") return v >= -(2n ** 63n) && v < 2n ** 63n ? BSON.Long.fromBigInt(v) : v.toString();
+  if (typeof v === "string") return v.toWellFormed();
+  if (typeof v === "number") {
+    // js-bson sizes -0 as a double and then writes it as an int32, and fails.
+    if (Object.is(v, -0)) return new BSON.Double(-0);
+    // js-bson writes an integer past int32 as a double; the text path gave an int64, which SQL ids and timestamps need.
+    if (Number.isInteger(v) && (v < -(2 ** 31) || v >= 2 ** 31) && Math.abs(v) < 2 ** 63) return BSON.Long.fromNumber(v);
+    return v;
+  }
+  if (v instanceof Date) return okDate(v);
+  if (!v || typeof v !== "object" || v instanceof Uint8Array || v instanceof RegExp || v._bsontype) return v;
+  if (Array.isArray(v)) return v.map((x) => (skipped(x) ? null : toBson(x, BSON)));
+  // Extended JSON writes a Map's entries and refuses keys that are not strings; plain JSON writes {}.
+  if (v instanceof Map && mongodb) {
+    if ([...v.keys()].some((k) => typeof k !== "string")) throw new Error("Can only serialize maps with string keys");
+    return toBson(Object.fromEntries(v), BSON);
+  }
+  // A class with toJSON, such as a dayjs value, reads as what it gives, as JSON.stringify does.
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null && typeof v.toJSON === "function") {
+    const j = v.toJSON();
+    return skipped(j) ? null : toBson(j, BSON);
+  }
+  const o = {};
+  for (const k of Object.keys(v)) {
+    // Extended JSON, used once the driver is loaded, writes an undefined field as null; plain JSON leaves it out.
+    const x = v[k] === undefined && mongodb ? null : v[k];
+    if (!skipped(x)) Object.defineProperty(o, k.toWellFormed(), { value: toBson(x, BSON), enumerable: true, writable: true, configurable: true });
+  }
+  return o;
 };
 const asLong = (v) => (typeof v === "number" ? { $numberDouble: String(v) } : v >= -(2n ** 63n) && v < 2n ** 63n ? { $numberLong: v.toString() } : v.toString());
 const asLog = (v) => (typeof v === "number" || Number.isSafeInteger(Number(v)) ? Number(v) : v.toString());
@@ -63,6 +102,82 @@ const serialize = (v) => {
     return raw instanceof Date ? { $date: Number.isNaN(raw.getTime()) ? null : raw.toISOString() } : x;
   });
 };
+// What the Extended JSON path would turn into a document, so the app keeps it as a row either way.
+const isDoc = (x) => x !== null && typeof x === "object" && !Array.isArray(x) && !(x instanceof Date) && !(x instanceof Uint8Array) && !(x instanceof RegExp) && !x._bsontype;
+
+// SQL-only runs never load the driver, so BSON comes from its own package, which the driver brings along.
+const loadBson = async () => {
+  try {
+    return await import("bson");
+  } catch {
+    return (await import("mongodb")).BSON;
+  }
+};
+
+// Documents cross as frames: a {"type":"doc"} line, then the document's BSON, which starts with its own length.
+// A text line would be Extended JSON escaped twice, several times the BSON, built whole before the first byte goes out.
+// Stops before input.maxBytes and says so. A returned cursor is read batch by batch, so Bun never holds all of it, and is
+// closed at the budget, so the server stops sending. Null when nothing was sent, for the text path to take over.
+const DOC_HEAD = '{"type":"doc"}\n';
+// js-bson serializes into an internal buffer of 17 MB and copies out; a bigger document is cut short without an error.
+let bsonRoom = 17 << 20;
+// `src` is a returned cursor, a list of documents or one document.
+const sendDocs = async (src) => {
+  const isCursor = typeof src.toArray === "function";
+  const single = !isCursor && !Array.isArray(src);
+  if (single) src = [src];
+  const BSON = mongodb ? mongodb.BSON : await loadBson();
+  let bytes = 0;
+  let n = 0;
+  // The size of the first document that did not fit, once one did not.
+  let cut = 0;
+  for await (const d of src) {
+    let frame;
+    try {
+      const w = toBson(d, BSON);
+      const size = BSON.calculateObjectSize(w);
+      if (bytes + size > input.maxBytes) {
+        cut = size;
+        break;
+      }
+      if (size > bsonRoom) BSON.setInternalBufferSize((bsonRoom = size));
+      const buf = Buffer.allocUnsafe(DOC_HEAD.length + size);
+      buf.write(DOC_HEAD);
+      BSON.serializeWithBufferAndIndex(w, buf, { index: DOC_HEAD.length });
+      // calculateObjectSize can count more than serialize writes (a Binary of subtype 4 does), so send what was written.
+      const len = buf.readInt32LE(DOC_HEAD.length);
+      frame = buf.subarray(0, DOC_HEAD.length + len);
+      bytes += len;
+    } catch (e) {
+      if (isCursor) throw e;
+      // A key BSON cannot hold, such as one with a NUL: the app drops what it got and the result goes as text, as before.
+      if (n) await write({ type: "reset" });
+      return null;
+    }
+    await new Promise((r) => process.stdout.write(frame, r));
+    n++;
+  }
+  if (isCursor && cut) await src.close().catch(() => {});
+  // Nothing fit: an error says so, where an empty list would read as no result.
+  if (cut && !n) throw new Error(`The first document is about ${Math.ceil(cut / (1 << 20))} MB, more than the ${input.maxBytes >> 20} MB the Shell keeps.`);
+  return n ? { docs: n, single, cut: !!cut } : null;
+};
+
+// Anything else goes as one Extended JSON line, refused past LINE_MAX.
+const sendText = async (result, queryMs) => {
+  // Extended JSON is never smaller than BSON, so a result already too big as BSON is refused before it is turned into text.
+  let size = 0;
+  try {
+    if (mongodb) size = mongodb.BSON.calculateObjectSize({ v: result });
+  } catch {}
+  if (size >= LINE_MAX) throw tooBig(size);
+  // The line is measured, not the Extended JSON alone: quoting it inside the line escapes every quote again.
+  const line = JSON.stringify({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
+  const bytes = Buffer.byteLength(line);
+  if (bytes >= LINE_MAX) throw tooBig(bytes);
+  await new Promise((r) => process.stdout.write(line + "\n", r));
+};
+
 const fmt = (m) => {
   if (typeof m === "string") return m;
   // An Error's message and stack are not enumerable, so stringify would print {}. Driver errors keep their details,
@@ -588,6 +703,7 @@ try {
   let result = await fn();
   if (result === null) throw new Error("No results");
   if (result === undefined) throw new Error('No results. Did you forget to "return" something in the function?');
+  let cursor = null;
   if (result && typeof result.toArray === "function") {
     // limit() would replace a find cursor's own limit. findOptions is driver state, not public API.
     // On an aggregation it appends a $limit stage, which may not follow $out or $merge.
@@ -595,20 +711,17 @@ try {
     const writes = last && typeof last === "object" && ("$out" in last || "$merge" in last);
     // listCollections and listIndexes cursors have no limit and are read whole.
     if (typeof result.limit === "function" && !result.findOptions?.limit && !writes) result.limit(100);
-    result = await result.toArray();
+    if (input.maxBytes) cursor = result;
+    else result = await result.toArray();
   }
-  const queryMs = firstOut === undefined ? undefined : Math.round(performance.now() - firstOut);
-  // Extended JSON is never smaller than BSON, so a result already too big as BSON is refused before it is turned into text.
-  let size = 0;
-  try {
-    if (mongodb) size = mongodb.BSON.calculateObjectSize({ v: result });
-  } catch {}
-  if (size >= LINE_MAX) throw tooBig(size);
-  // The line is measured, not the Extended JSON alone: quoting it inside the line escapes every quote again.
-  const line = JSON.stringify({ type: "result", ok: true, ejson: serialize({ v: result }), queryMs });
-  const bytes = Buffer.byteLength(line);
-  if (bytes >= LINE_MAX) throw tooBig(bytes);
-  await new Promise((r) => process.stdout.write(line + "\n", r));
+  const queryMs = () => (firstOut === undefined ? undefined : Math.round(performance.now() - firstOut));
+  const docs = input.maxBytes && (cursor || (Array.isArray(result) && result.length && result.every(isDoc)) || isDoc(result));
+  // A list the script already holds was read; sending it is not query time. A cursor is read while it is sent.
+  const readMs = cursor ? undefined : queryMs();
+  const sent = docs ? await sendDocs(cursor ?? result) : null;
+  if (sent) await write({ type: "result", ok: true, ...sent, queryMs: readMs ?? queryMs() });
+  // A cursor that found nothing is an empty list, shown as one.
+  else await sendText(cursor ? [] : result, queryMs());
 } catch (e) {
   await write({ type: "result", ok: false, error: String(e && e.message ? e.message : e) });
 } finally {

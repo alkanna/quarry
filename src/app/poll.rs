@@ -316,8 +316,11 @@ impl App {
                     sh.started = None;
                     (sh.ms, sh.query_ms) = (Some(ms), query_ms);
                     match res {
-                        Ok(v) => {
-                            sh.set_value(v);
+                        Ok(out) => {
+                            match out {
+                                db::ShellOut::Value(v) => sh.set_value(v),
+                                db::ShellOut::Docs { rows, single, cut } => sh.set_rows(rows, single, cut),
+                            }
                             if sql {
                                 sh.hide_absent_id();
                             }
