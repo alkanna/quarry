@@ -97,6 +97,8 @@ pub struct Rules {
     value_set: RegexSet,
     value_items: Vec<ValueItem>,
     gates: Vec<GateItem>,
+    /// `fence`, built once.
+    fence: Option<String>,
     key: [u8; 32],
     /// Binary values leave as their size only; on by default in `AgentsConfig`.
     pub binary_as_size: bool,
@@ -195,7 +197,87 @@ pub(crate) fn levels(path: &str) -> Vec<&str> {
     path.split('.').filter(|s| !s.is_empty() && !s.starts_with('$')).collect()
 }
 
+/// Where `norm_key` puts a `_` in a raw key, as PCRE lookarounds for MongoDB so `cc` does not match inside `4acc` nor
+/// `lat` inside `LATEST`: the start or end, separators, or a camel case split (a capital after a lowercase letter or
+/// digit, or a capital starting a word).
+const START: &str = "(?:^|(?<=[^A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z])|(?=[A-Z][a-z]))";
+const END: &str = "(?:(?=$|[^A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z])|(?=[A-Z][a-z]))";
+const SEP: &str = "(?:[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?=[A-Z][a-z]))";
+
+/// A letter in either case, with the non-ASCII letters that Unicode case folding (Rust's `(?i)`) or `to_lowercase`
+/// (`norm_key`) turn into it: the Kelvin sign and the long s.
+fn either_case(c: char) -> String {
+    let extra = match c.to_ascii_lowercase() {
+        'k' => "\u{212A}",
+        's' => "\u{17F}",
+        _ => "",
+    };
+    format!("[{}{}{extra}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+}
+
+/// A preset key pattern, which runs on `norm_key` output, rewritten to run case-sensitively on the raw key and match
+/// at least every key whose normalized form it matches. None for a construct it does not know.
+fn loose_key(p: &str) -> Option<String> {
+    let opt_sep = format!("{SEP}?");
+    let words = [("(^|_)", START), ("(_|$)", END), ("[a-z_]*", ".*"), ("_?", opt_sep.as_str())];
+    let (mut out, mut rest) = (String::new(), p);
+    while let Some(c) = rest.chars().next() {
+        if let Some((w, to)) = words.iter().find(|(w, _)| rest.starts_with(w)) {
+            out.push_str(to);
+            rest = &rest[w.len()..];
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '_' => out.push_str(SEP),
+            '^' | '$' | '|' | '(' | ')' => out.push(c),
+            '[' => {
+                let (class, after) = rest.split_once(']')?;
+                if class.is_empty() || !class.chars().all(|c| c.is_ascii_lowercase()) {
+                    return None;
+                }
+                out.push_str(&format!("({})", class.chars().map(either_case).collect::<Vec<_>>().join("|")));
+                rest = after;
+            }
+            c if c.is_ascii_lowercase() => out.push_str(&either_case(c)),
+            c if c.is_ascii_digit() => out.push(c),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A custom field name rule as PCRE, when it uses only what Rust's regex and PCRE read the same way.
+fn loose_name(s: &str) -> Option<String> {
+    let (ci, body) = s.strip_prefix("(?i)").map_or((false, s), |b| (true, b));
+    if body.contains("(?") || !body.chars().all(|c| c.is_ascii_alphanumeric() || "_|()^$?-".contains(c)) {
+        return None;
+    }
+    Some(body.chars().map(|c| if ci && c.is_ascii_alphabetic() { either_case(c) } else { c.to_string() }).collect())
+}
+
+/// `Rules::fence`, built once by `compile`.
+fn fence_of(custom: &[Rule], key_set: &RegexSet, gates: &[GateItem]) -> Option<String> {
+    let presets = key_set.patterns().iter().map(String::as_str).chain(gates.iter().map(|g| g.key.as_str()));
+    let mut alts = presets.map(loose_key).collect::<Option<Vec<_>>>()?;
+    for r in custom {
+        if let Kind::Name(re) = &r.kind {
+            alts.push(loose_name(re.as_str())?);
+        }
+    }
+    // No key rule: a pattern that never matches.
+    Some(if alts.is_empty() { "(?!)".into() } else { alts.iter().map(|a| format!("(?:{a})")).collect::<Vec<_>>().join("|") })
+}
+
 impl Rules {
+    /// A case-sensitive PCRE for MongoDB's `$regexMatch` that matches every key a preset or name rule could hide or
+    /// mask, whatever its scope or mode, or None when a custom rule can't be written that way. `guard::fence` drops
+    /// matching keys where `$objectToArray` or a computed `$getField` turns keys into values, out of reach of the
+    /// key rules.
+    pub fn fence(&self) -> Option<&str> {
+        self.fence.as_deref()
+    }
+
     /// `over` is the connection's preset override; `global` and `conn` are the user's own rules.
     pub fn compile(presets: &Presets, over: &PresetOverride, global: &[RuleSpec], conn: &[RuleSpec], hash_key: &[u8; 32]) -> Result<Rules, RuleErr> {
         let mut custom = Vec::new();
@@ -246,7 +328,9 @@ impl Rules {
                 }
             }
         }
-        Ok(Rules { custom, key_set: set(&keys)?, key_items, value_set: set(&hints)?, value_items, gates, key: *hash_key, binary_as_size: true })
+        let key_set = set(&keys)?;
+        let fence = fence_of(&custom, &key_set, &gates);
+        Ok(Rules { custom, key_set, key_items, value_set: set(&hints)?, value_items, gates, fence, key: *hash_key, binary_as_size: true })
     }
 
     /// The rules for one connection, or for none (the connection's own rules and override left out).
@@ -308,7 +392,8 @@ impl NsRules<'_> {
     }
 
     /// Whether any field rule applies here, in either mode. Whole-document constructs ($$ROOT, $objectToArray) are
-    /// refused then, since their output carries every field under keys no rule knows.
+    /// refused then, since their output carries every field under keys no rule knows; only aggregate and explain
+    /// pipelines may turn a plain path's keys into values, behind `guard::fence`.
     pub fn field_rules(&self) -> bool {
         self.path_rules().next().is_some() || !self.rules.key_items.is_empty()
     }
@@ -721,6 +806,24 @@ mod tests {
     fn scrubbed(rules: &Rules, mut d: Document) -> Document {
         rules.for_ns("shop", "users").scrub_doc(&mut d);
         d
+    }
+
+    /// The match itself runs in MongoDB's PCRE; `db::agent`'s live tests check which keys it drops.
+    #[test]
+    fn fence_regex() {
+        let l = |w: &str| w.chars().map(either_case).collect::<String>();
+        assert_eq!(l("ks"), "[kK\u{212A}][sS\u{17F}]", "the non-ASCII letters that fold to ASCII ones");
+        assert_eq!(loose_key(r"(^|_)(e_?mail|ssn[a-z_]*)(_|$)|_key$").unwrap(), format!("{START}({}{SEP}?{}|{}.*){END}|{SEP}{}$", l("e"), l("mail"), l("ssn"), l("key")));
+        assert_eq!(loose_key(r"(^|_)(driver_?licen[cs]e)(_|$)").unwrap(), format!("{START}({}{SEP}?{}({}|{}){}){END}", l("driver"), l("licen"), l("c"), l("s"), l("e")));
+        assert_eq!(loose_key(r"\d+"), None);
+        let f = defaults().fence().unwrap().to_string();
+        assert!(f.contains(&l("password")) && f.contains(&l("iban")), "presets and gates: {f}");
+        assert_eq!(one(rule(Matcher::FieldPath("a.b".into()), Action::Remove)).fence().unwrap(), "(?!)", "path rules are the guard's");
+        assert_eq!(one(rule(Matcher::FieldName("(?i)^pin$".into()), Action::Remove)).fence().unwrap(), format!("(?:^{}$)", l("pin")));
+        assert_eq!(one(rule(Matcher::FieldName("^pin_?code$".into()), Action::Remove)).fence().unwrap(), "(?:^pin_?code$)");
+        for unsure in [r"^\w+$", "(?x)pin", "p.n", "[a-z]+pin"] {
+            assert_eq!(one(rule(Matcher::FieldName(unsure.into()), Action::Remove)).fence(), None, "{unsure}");
+        }
     }
 
     #[test]

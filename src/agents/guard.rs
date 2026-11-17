@@ -8,16 +8,18 @@
 //!   fields, group keys, `$replaceRoot`, `distinct`), where the scrubber, which works by key, no longer sees it.
 //!
 //! Whole-document constructs ($$ROOT, $objectToArray, computed $getField, $function) carry every field under keys
-//! no rule knows, so they are refused wherever any field rule applies. Free SQL, scripts and the shell cannot be
-//! walked; the policy refuses them where Hide rules reach.
+//! no rule knows, so they are refused wherever any field rule applies. In aggregate and explain pipelines,
+//! $objectToArray and a computed $getField over a plain field path pass: the path is checked like any reference, and
+//! `fence` drops on the server every key a name rule could match before it becomes a value. Free SQL, scripts and
+//! the shell cannot be walked; the policy refuses them where Hide rules reach.
 
 use super::scrub::{NsRules, Rules};
-use super::tools::{Call, Target, Update, command_pipeline, each_stage, pipeline_targets, stage_target};
+use super::tools::{Call, Target, Update, command_pipeline, each_stage, pipeline_targets, stage_target, where_cols};
 #[cfg(test)]
 use crate::db::sql::Dialect;
 #[cfg(test)]
 use crate::db::sql::lex::{Tok, tokens};
-use mongodb::bson::{Bson, Document};
+use mongodb::bson::{Bson, Document, doc};
 
 type Res = Result<(), String>;
 
@@ -29,7 +31,7 @@ fn refuse<T>(msg: String) -> Result<T, String> {
 const COMPARE: [&str; 23] = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$all", "$regex", "$options", "$mod", "$bitsAllSet", "$bitsAnySet", "$bitsAllClear", "$bitsAnyClear", "$geoWithin", "$geoIntersects", "$near", "$nearSphere", "$maxDistance", "$minDistance", "$geometry"];
 
 /// Aggregation expression operators that only compute on their arguments. Anything that reads the document as a
-/// whole or runs code ($objectToArray, $function, $accumulator) is missing on purpose.
+/// whole or runs code ($objectToArray, $function, $accumulator) is missing on purpose; see `fenceable`.
 const EXPR: &[&str] = &[
     "$abs", "$add", "$ceil", "$divide", "$exp", "$floor", "$ln", "$log", "$log10", "$mod", "$multiply", "$pow", "$round", "$sqrt", "$subtract", "$trunc",
     "$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$cmp", "$and", "$or", "$not", "$cond", "$ifNull", "$switch",
@@ -77,17 +79,31 @@ struct G<'a> {
     db: String,
     /// Any field rule applies here, so operator allow-lists and the whole-document ban are on.
     any: bool,
+    /// The pipeline goes through `fence` before it runs, so `fenceable` expressions may pass.
+    fenced: bool,
 }
 
 impl<'a> G<'a> {
     fn new(rules: &'a Rules, db: &str, coll: &str) -> G<'a> {
         let r = rules.for_ns(db, coll);
         let any = r.field_rules();
-        G { r, rules, db: db.to_string(), any }
+        G { r, rules, db: db.to_string(), any, fenced: false }
     }
 
     fn other(&self, t: &Target) -> G<'a> {
-        G::new(self.rules, &t.db, t.coll.as_deref().unwrap_or(""))
+        G { fenced: self.fenced, ..G::new(self.rules, &t.db, t.coll.as_deref().unwrap_or("")) }
+    }
+
+    /// For the pipelines `fence` rewrites, when it can write a pattern for every key rule.
+    fn fencing(self) -> G<'a> {
+        G { fenced: self.rules.fence().is_some(), ..self }
+    }
+
+    /// The input path is read whole like any reference, and a computed name like any expression; `fence` handles the
+    /// keys that turn into values.
+    fn fenced_ref(&self, path: &str, name: Option<&Bson>, u: Use) -> Res {
+        name.map_or(Ok(()), |n| self.expr(n, u))?;
+        self.reference(path, u)
     }
 
     fn pred(&self, path: &str) -> Res {
@@ -244,6 +260,11 @@ impl<'a> G<'a> {
                         return refuse(format!("An expression object holds one operator, not {}", d.len()));
                     }
                     let arg = d.get(op).expect("first key");
+                    if self.fenced
+                        && let Some((p, name)) = fenceable(op, arg)
+                    {
+                        return self.fenced_ref(p, name, u);
+                    }
                     match op.as_str() {
                         "$literal" => Ok(()),
                         "$getField" | "$setField" | "$unsetField" => self.get_field(op, arg, u),
@@ -548,6 +569,68 @@ fn path_ref(v: &Bson) -> Option<&str> {
     }
 }
 
+/// The input path of an `$objectToArray` or a computed-name `$getField` that `fence` can make safe, one over a plain
+/// field path whose keys are the only ones that turn into values, with the `$getField` name. The guard and `fence`
+/// both use this, so what one lets through the other always rewrites.
+fn fenceable<'b>(op: &str, arg: &'b Bson) -> Option<(&'b str, Option<&'b Bson>)> {
+    match (op, arg) {
+        ("$objectToArray", v) => Some((path_ref(v)?, None)),
+        ("$getField", Bson::Document(d)) => {
+            let name = d.get("field")?;
+            // A literal name is a plain reference, which `get_field` checks.
+            let computed = !matches!(name, Bson::String(s) if !s.starts_with('$'));
+            if computed { Some((path_ref(d.get("input")?)?, Some(name))) } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Rewrites what `fenceable` matches in an aggregate or explain pipeline so that keys a name rule could match never
+/// become values: `$objectToArray` loses those entries, and a computed `$getField` reads nothing when its name is one.
+/// The guard lets these through on the promise that every agent job runs this first (`Worker::agent_run`). Where no
+/// rule applies to the namespace or anything it joins, nothing is rewritten, so no key goes missing there.
+pub fn fence(call: &mut Call, rules: &Rules) {
+    let (ns, p) = match call {
+        Call::Aggregate { ns, pipeline, .. } | Call::Explain { ns, pipeline: Some(pipeline), .. } => (ns, pipeline),
+        _ => return,
+    };
+    let mut joined = Vec::new();
+    pipeline_targets(&ns.db, &p[..], &mut joined);
+    let ruled = |db: &str, coll: &str| rules.for_ns(db, coll).field_rules();
+    if !ruled(&ns.db, &ns.coll) && !joined.iter().any(|t| ruled(&t.db, t.coll.as_deref().unwrap_or(""))) {
+        return;
+    }
+    let Some(re) = rules.fence() else { return };
+    p.iter_mut().for_each(|d| fence_doc(d, re));
+}
+
+fn fence_bson(v: &mut Bson, re: &str) {
+    match v {
+        Bson::Document(d) => fence_doc(d, re),
+        Bson::Array(a) => a.iter_mut().for_each(|x| fence_bson(x, re)),
+        _ => {}
+    }
+}
+
+fn fence_doc(d: &mut Document, re: &str) {
+    if d.len() == 1 && d.contains_key("$literal") {
+        return;
+    }
+    d.iter_mut().for_each(|(_, v)| fence_bson(v, re));
+    if d.len() != 1 {
+        return;
+    }
+    let (op, arg) = d.iter().next().expect("one key");
+    let Some((path, name)) = fenceable(op, arg) else { return };
+    let (path, name) = (format!("${path}"), name.cloned());
+    let hit = |input: &str| doc! { "$regexMatch": { "input": input, "regex": re } };
+    *d = match name {
+        None => doc! { "$filter": { "input": { "$objectToArray": path }, "as": "qkv", "cond": { "$not": [hit("$$qkv.k")] } } },
+        // A name no document has, so the field reads as missing.
+        Some(n) => doc! { "$getField": { "field": { "$let": { "vars": { "qf": n }, "in": { "$cond": [hit("$$qf"), "\u{1}refused", "$$qf"] } } }, "input": path } },
+    };
+}
+
 /// Checks the parts of `call` that name fields against the rules of the namespaces it touches. Scope and system
 /// namespaces are the policy's.
 pub fn check(call: &Call, rules: &Rules) -> Res {
@@ -566,9 +649,9 @@ pub fn check(call: &Call, rules: &Rules) -> Res {
         Call::Explain { filter, sort, pipeline, .. } => {
             g.filter(filter, "")?;
             sort.as_ref().map_or(Ok(()), |s| g.sort(s))?;
-            pipeline.as_ref().map_or(Ok(()), |p| g.pipeline(p, false))
+            pipeline.as_ref().map_or(Ok(()), |p| g.fencing().pipeline(p, false))
         }
-        Call::Aggregate { pipeline, .. } => g.pipeline(pipeline, false),
+        Call::Aggregate { pipeline, .. } => g.fencing().pipeline(pipeline, false),
         Call::AggregateInto { pipeline, .. } => g.into_pipeline(pipeline),
         Call::Update { filter, update, .. } => {
             g.filter(filter, "")?;
@@ -579,10 +662,10 @@ pub fn check(call: &Call, rules: &Rules) -> Res {
         }
         Call::Insert { docs, .. } => docs.iter().try_for_each(|d| g.written(d, "")),
         Call::CreateIndex { keys, .. } => keys.keys().try_for_each(|k| g.pred(k)),
-        Call::SelectRows { wher, order, .. } => wher.iter().map(|c| &c.col).chain(order.iter().map(|(c, _)| c)).try_for_each(|c| g.column(c)),
+        Call::SelectRows { wher, order, .. } => where_cols(wher).chain(order.iter().map(|(c, _)| c)).try_for_each(|c| g.column(c)),
         Call::SqlInsertRows { rows, .. } => rows.iter().flat_map(|row| row.keys()).try_for_each(|c| g.column(c)),
-        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(wher.iter().map(|c| &c.col)).try_for_each(|c| g.column(c)),
-        Call::SqlDeleteRows { wher, .. } => wher.iter().try_for_each(|c| g.column(&c.col)),
+        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(where_cols(wher)).try_for_each(|c| g.column(c)),
+        Call::SqlDeleteRows { wher, .. } => where_cols(wher).try_for_each(|c| g.column(c)),
         _ => Ok(()),
     }
 }
@@ -676,6 +759,75 @@ mod tests {
         refused(find(json!({ "$jsonSchema": { "properties": { "ssn": { "pattern": "^1" } } } })));
         refused(find(json!({ "$text": { "$search": "123" } })));
         refused(find(json!({ "name": { "$unknownOp": 1 } })));
+    }
+
+    #[test]
+    fn keys_turned_into_values_pass_fenced() {
+        // Two pipelines an agent ran on a collection where only the presets apply.
+        let by_pax_get = json!([{ "$match": { "_id": { "$in": ["e35924f1-5c00-45d1-aa52-10dd51d7e2b2"] } } }, { "$project": { "m": { "$map": { "input": "$paxs", "as": "p", "in": { "$filter": { "input": { "$getField": { "field": "$$p._id", "input": "$analytics.byPax" } }, "as": "a", "cond": { "$eq": ["$$a.useranalytic.uid", 220] } } } } } } }]);
+        let by_pax_arr = json!([{ "$match": { "paxs.companyID": 17 } }, { "$project": { "pax": { "$objectToArray": "$analytics.byPax" }, "history": { "$slice": ["$history", 1] } } }, { "$unwind": "$pax" }, { "$unwind": "$pax.v" }, { "$match": { "pax.v.useranalytic.uid": 220 } }, { "$group": { "_id": { "$ifNull": ["$pax.v.useranalytic.cdsKey", "NULL"] }, "n": { "$sum": 1 }, "sample": { "$push": { "id": "$_id", "h": "$history" } } } }, { "$project": { "n": 1, "last": { "$slice": ["$sample", -3] } } }]);
+        let p = presets();
+        allowed(check(&call("aggregate", "travels", json!({ "pipeline": by_pax_get })), &p));
+        allowed(check(&call("aggregate", "travels", json!({ "pipeline": by_pax_arr.clone() })), &p));
+        allowed(check(&call("explain", "travels", json!({ "pipeline": by_pax_arr })), &p));
+
+        // Name rules below the input are fenced; a path rule below it would stop matching, so it refuses.
+        allowed(agg("users", json!([{ "$project": { "kv": { "$objectToArray": "$profile" } } }])));
+        allowed(agg("users", json!([{ "$project": { "v": { "$getField": { "field": { "$concat": ["p", "in"] }, "input": "$profile" } } } }])));
+        refused(agg("users", json!([{ "$project": { "kv": { "$objectToArray": "$customer" } } }])));
+        refused(agg("users", json!([{ "$project": { "kv": { "$objectToArray": "$items" } } }])));
+        refused(agg("users", json!([{ "$project": { "v": { "$getField": { "field": { "$concat": ["s", "sn"] }, "input": "$customer" } } } }])));
+        refused(agg("users", json!([{ "$project": { "e": { "$objectToArray": "$customer.phone" } } }])));
+        // The name is an expression like any other.
+        refused(agg("users", json!([{ "$project": { "v": { "$getField": { "field": "$ssn", "input": "$profile" } } } }])));
+        // Only a plain path as input.
+        refused(agg("users", json!([{ "$project": { "kv": { "$objectToArray": "$$ROOT" } } }])));
+        refused(agg("users", json!([{ "$project": { "kv": { "$objectToArray": { "$mergeObjects": ["$profile"] } } } }])));
+        refused(agg("users", json!([{ "$project": { "v": { "$getField": { "field": "$name" } } } }])));
+        refused(agg("users", json!([{ "$project": { "v": { "$getField": { "field": "$name", "input": "$$ROOT" } } } }])));
+        // Only where `fence` runs.
+        refused(find(json!({ "$expr": { "$gt": [{ "$size": { "$objectToArray": "$profile" } }, 0] } })));
+        refused(check(&call("find", "users", json!({ "projection": { "kv": { "$objectToArray": "$profile" } } })), &rules()));
+        // A custom name rule `fence` can't write keeps the ban.
+        let odd = [spec(Matcher::FieldName(r"^\w*pin$".into()), &["shop.users"], PresetMode::Hide)];
+        let odd = Rules::compile(&crate::agents::scrub::tests_support::no_presets(), &PresetOverride::default(), &odd, &[], &[1; 32]).unwrap();
+        refused(check(&call("aggregate", "users", json!({ "pipeline": [{ "$project": { "kv": { "$objectToArray": "$profile" } } }] })), &odd));
+    }
+
+    #[test]
+    fn fence_rewrites_what_the_guard_lets_through() {
+        let r = rules();
+        let mut c = call("aggregate", "users", json!({ "pipeline": [{ "$project": {
+            "kv": { "$objectToArray": "$profile" },
+            "v": { "$getField": { "field": { "$concat": ["p", "in"] }, "input": "$profile" } },
+            "lit": { "$literal": { "$objectToArray": "$profile" } },
+            "named": { "$getField": { "field": "name", "input": "$profile" } },
+        } }] }));
+        fence(&mut c, &r);
+        let Call::Aggregate { pipeline, .. } = &c else { panic!() };
+        let re = r.fence().unwrap();
+        let hit = |i: &str| doc! { "$regexMatch": { "input": i, "regex": re } };
+        let p = pipeline[0].get_document("$project").unwrap();
+        assert_eq!(p.get_document("kv").unwrap(), &doc! { "$filter": { "input": { "$objectToArray": "$profile" }, "as": "qkv", "cond": { "$not": [hit("$$qkv.k")] } } });
+        assert_eq!(p.get_document("v").unwrap(), &doc! { "$getField": { "field": { "$let": { "vars": { "qf": { "$concat": ["p", "in"] } }, "in": { "$cond": [hit("$$qf"), "\u{1}refused", "$$qf"] } } }, "input": "$profile" } });
+        assert_eq!(p.get_document("lit").unwrap(), &doc! { "$literal": { "$objectToArray": "$profile" } });
+        assert_eq!(p.get_document("named").unwrap(), &doc! { "$getField": { "field": "name", "input": "$profile" } });
+        let mut f = call("find", "users", json!({ "projection": { "kv": { "$objectToArray": "$profile" } } }));
+        let before = f.clone();
+        fence(&mut f, &r);
+        assert_eq!(f, before, "only aggregate and explain pipelines are rewritten");
+        // A `$literal` key beside others does not hide them, as in the guard.
+        let mut c = call("aggregate", "users", json!({ "pipeline": [{ "$project": { "x": { "a": { "$objectToArray": "$profile" }, "$literal": 1 } } }] }));
+        fence(&mut c, &r);
+        assert!(format!("{c:?}").contains("qkv"), "{c:?}");
+        // No rule on the namespace nor what it joins: nothing goes missing.
+        let mut o = call("aggregate", "orders", json!({ "pipeline": [{ "$project": { "kv": { "$objectToArray": "$m" } } }] }));
+        let before = o.clone();
+        fence(&mut o, &r);
+        assert_eq!(o, before);
+        let mut j = call("aggregate", "orders", json!({ "pipeline": [{ "$lookup": { "from": "users", "pipeline": [{ "$project": { "kv": { "$objectToArray": "$profile" } } }], "as": "u" } }] }));
+        fence(&mut j, &r);
+        assert!(format!("{j:?}").contains("qkv"), "a join into a namespace with rules is fenced");
     }
 
     #[test]
@@ -886,6 +1038,7 @@ mod tests {
         refused(t("sql_update_rows", json!({ "set": { "ssn": "x" }, "where": [{ "column": "id", "value": 1 }] })));
         refused(t("sql_insert_rows", json!({ "rows": [{ "id": 1, "ssn": "x" }] })));
         refused(t("sql_delete_rows", json!({ "where": [{ "column": "ssn", "value": "1" }] })));
+        refused(t("select_rows", json!({ "where": [{ "any": [{ "column": "id", "value": 1 }, { "column": "ssn", "value": "1" }] }] })));
         allowed(t("select_rows", json!({ "columns": ["id", "ssn"], "where": [{ "column": "email", "op": "like", "value": "%@b.co" }], "order": [{ "column": "email" }] })));
         allowed(t("sql_update_rows", json!({ "set": { "email": "x@b.co" }, "where": [{ "column": "email", "value": "a@b.co" }] })));
     }

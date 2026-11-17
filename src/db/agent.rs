@@ -359,7 +359,7 @@ async fn session(s: link::Stream, id: u64, mut token: watch::Receiver<Option<Tok
 impl Worker {
     /// Runs an allowed call on the runtime. The answer goes to the agent through `reply`, then `AgentEvent::Done` tells
     /// the App how it ended. A cancelled call sends neither: the App already marked it.
-    pub fn agent_run(&self, job: AgentJob, reply: Reply) -> AgentRun {
+    pub fn agent_run(&self, mut job: AgentJob, reply: Reply) -> AgentRun {
         let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
         let h = sql::RunHandle::default();
         let sql = match &job.target {
@@ -375,6 +375,8 @@ impl Worker {
         let lingers = matches!(job.target, AgentTarget::Mongo(_)) && matches!(job.call, Call::CreateCollection { .. } | Call::DropCollection { .. } | Call::CreateIndex { .. } | Call::DropIndex { .. });
         let start = Instant::now();
         let work = self.rt.spawn(async move {
+            // The guard let fenceable expressions through on the promise that this runs before the server sees them.
+            crate::agents::guard::fence(&mut job.call, &job.rules);
             // The server's own limits (maxTimeMS, the statement timeout) come first; this one catches what they miss.
             match tokio::time::timeout(Duration::from_secs(secs + margin), exec(&job, &h)).await {
                 Ok(r) => r,
@@ -1449,6 +1451,30 @@ mod tests {
         assert!(dbs["databases"].as_array().unwrap().contains(&json!("quarry_test")) && !dbs.to_string().contains("\"local\""));
         let colls = run(&w, &rx, &c, Call::ListCollections { conn: ConnRef::Id(1), db: "quarry_test".into() }, Limits::default()).0.unwrap();
         assert!(colls["collections"].as_array().unwrap().contains(&json!("agent_reads")));
+    }
+
+    /// The fence's pattern runs in the server's PCRE: keys a rule could match are dropped before they become values,
+    /// others (ids, hex, `companyID`) stay.
+    #[test]
+    fn live_mongo_fence_drops_rule_keys_turned_into_values() {
+        let Some((w, rx, c)) = live("agent_fence") else { return };
+        let kept = ["a", "companyID", "aacc0000-4acc-11ee-8ccc-0242ac120002", "e35924f1-5c00-45d1-aa52-10dd51d7e2b2", "LATEST", "LONG", "monkey", "TOKENS"];
+        let dropped = ["token", "userPassword", "api-Key", "accessKey", "sessionId", "cdsKey", "SSN", "zip", "api\u{212A}ey", "APIKey", "user_TOKEN"];
+        let mut m = Document::new();
+        for (i, k) in kept.iter().chain(&dropped).enumerate() {
+            m.insert(*k, i as i32 + 1);
+        }
+        w.rt.block_on(async { c.database("quarry_test").collection::<Document>("agent_fence").insert_one(doc! { "_id": "fence", "m": m }).await }).unwrap();
+        let named = |f: &str| doc! { "$getField": { "field": { "$concat": [f, ""] }, "input": "$m" } };
+        let pipeline = vec![doc! { "$match": { "_id": "fence" } }, doc! { "$project": { "_id": 0, "kv": { "$objectToArray": "$m" }, "tok": named("token"), "one": named("a") } }];
+        let call = Call::Aggregate { ns: ns("agent_fence"), pipeline, limit: None };
+        crate::agents::guard::check(&call, &rules()).unwrap();
+        let v = run(&w, &rx, &c, call, Limits::default()).0.unwrap();
+        let d = &v["documents"][0];
+        let keys: Vec<&str> = d["kv"].as_array().unwrap().iter().map(|e| e["k"].as_str().unwrap()).collect();
+        assert_eq!(keys, kept, "{d}");
+        assert_eq!(d["one"], json!(1));
+        assert!(d.get("tok").is_none(), "{d}");
     }
 
     #[test]
