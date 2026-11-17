@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.54.0](https://github.com/alkanna/quarry/compare/v0.53.1...v0.54.0) (2026-11-17)
+
+
+### Features
+
+* **agents:** fenced $objectToArray and computed $getField in pipelines, OR groups in select_rows where ([#279](https://github.com/alkanna/quarry/issues/279)) ([8a8be5a](https://github.com/alkanna/quarry/commit/8a8be5a57f79181b1d82f3b98b572d11b6f41ddf))
+* binary fields show and edit as Base64, Hex or UTF-8 without changing their bytes or subtype ([#271](https://github.com/alkanna/quarry/issues/271)) ([9da5960](https://github.com/alkanna/quarry/commit/9da59601d0c0f6450cf37eba38d0bcb28b8a6845))
+
+
+### Bug Fixes
+
+* **deps:** bump rust_xlsxwriter to 0.102 and zip to 9.6 for the zip read advisories ([#275](https://github.com/alkanna/quarry/issues/275)) ([10425cc](https://github.com/alkanna/quarry/commit/10425cc25672d56e651a5bbd0b434eb5dc9ef45d))
+* Mongo Shell, Documents tab and connection fixes, with live UI tests ([#278](https://github.com/alkanna/quarry/issues/278)) ([27d5192](https://github.com/alkanna/quarry/commit/27d519207b2956c751452d44c3974d14e6993c11))
+* Shell results come back as BSON documents up to 1 GB instead of one Extended JSON line ([#281](https://github.com/alkanna/quarry/issues/281)) ([dbd782f](https://github.com/alkanna/quarry/commit/dbd782f9bd249a9beaec89e30506508c2867635b))
+
 ## [0.53.1](https://github.com/alkanna/quarry/compare/v0.53.0...v0.53.1) (2026-11-16)
 
 
