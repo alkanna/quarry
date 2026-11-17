@@ -1252,7 +1252,7 @@ mod tests {
         let (queries, res) = crate::db::shell::run_shell_blocking(w, &job);
         let ms = start.elapsed().as_millis();
         let query_ms = res.as_ref().ok().and_then(|r| r.1);
-        (queries, res.map(|r| r.0), (ms, query_ms))
+        (queries, res.and_then(|r| r.0.text()), (ms, query_ms))
     }
 
     fn relay(db: &Db, read_only: bool) -> crate::db::SqlRelay {
@@ -1470,6 +1470,41 @@ mod tests {
         assert_eq!(v.get_str("name").unwrap(), "Ada");
         assert!(queries.iter().any(|q| q.conn == "travels" && q.text.starts_with("users.find(") && q.text.contains("legacyId") && q.rows == Some(1)), "{}", query_names(&queries));
         assert!(queries.iter().any(|q| q.conn == "shop"));
+    }
+
+    /// The Shell tab sends documents as BSON frames; agents and older runs read one Extended JSON line. A script's
+    /// result must read the same both ways, whatever mix of SQL rows and Mongo documents it returns.
+    #[test]
+    fn live_shell_sql_rows_and_mongo_documents_read_the_same_as_bson_frames() {
+        let Some((w, _rx, db, _p)) = live("t_frames", "id INT PRIMARY KEY") else { return };
+        let Some(uri) = mongo_user(&w, "quarry_attach_frames") else { return };
+        if bun_missing() {
+            return;
+        }
+        let rows = "SELECT 1 AS i, CAST(3000000000 AS SIGNED) AS big, CAST(9007199254740993 AS SIGNED) AS huge, 1.5 AS dbl, CAST('12.34' AS DECIMAL(10,2)) AS price, X'0aff' AS bytes, DATE('2024-01-02') AS d, TIMESTAMP('2024-01-02 03:04:05') AS ts, NULL AS n, 'é😀' AS s, JSON_OBJECT('a', 1) AS j";
+        let both = |code: String, mongo: serde_json::Value| {
+            let input = |frames: bool| {
+                let mut i = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": mongo, "sql": [{ "name": "shop", "db": "quarry_test", "tables": [] }] });
+                if frames {
+                    i["maxBytes"] = crate::db::SHELL_MAX.into();
+                }
+                crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: i.to_string(), packages: Vec::new(), sql: vec![("shop".into(), relay(&db, true))] }
+            };
+            let text = crate::db::shell::run_shell_blocking(&w, &input(false)).1.expect("text run").0.text().expect("one line");
+            let out = crate::db::shell::run_shell_blocking(&w, &input(true)).1.expect("frames run").0;
+            assert!(matches!(out, crate::db::ShellOut::Docs { cut: false, .. }), "the documents came as frames");
+            let frames = match out {
+                crate::db::ShellOut::Docs { rows, single, .. } if !single => Bson::Array(rows.iter().map(|r| Bson::Document(r.owned())).collect()),
+                crate::db::ShellOut::Docs { rows, .. } => Bson::Document(rows[0].owned()),
+                crate::db::ShellOut::Value(_) => unreachable!(),
+            };
+            assert_eq!(frames, crate::db::shell::shell_value(&text).unwrap(), "{code}");
+        };
+        both(format!("async function run() {{ return await sql`{rows}`; }}"), serde_json::json!([]));
+        let mongo = serde_json::json!([{ "name": "travels", "uri": uri, "db": "quarry_attach_frames", "proxy": null, "collections": ["users"], "readOnly": false }]);
+        both(format!("async function run() {{ const found = await travels.users.find({{}}).toArray(); const r = await sql`{rows}`; return [...r, ...found, {{ oid: ObjectId('507f1f77bcf86cd799439011'), at: new Date(0), big: r[0].huge }}]; }}"), mongo.clone());
+        // One document, not a list.
+        both(format!("async function run() {{ const [r] = await sql`{rows}`; return {{ ...r, name: (await travels.users.findOne({{}}))?.name ?? null }}; }}"), mongo);
     }
 
     #[test]

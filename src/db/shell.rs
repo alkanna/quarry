@@ -138,14 +138,46 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     Ok(())
 }
 
-/// The script's result as Extended JSON, with its query time when it used MongoDB.
-pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(String, Option<u64>)> {
+/// The most a Shell result may hold as BSON documents. The runner stops before it and says the result was cut.
+pub const SHELL_MAX: usize = 1 << 30;
+
+/// What a script returned: one value (its Extended JSON text, then parsed), or documents that came as BSON frames.
+/// `single` is a script that returned one document, not a list; `cut` says `SHELL_MAX` stopped the list.
+pub enum ShellOut<T = String> {
+    Value(T),
+    Docs { rows: Vec<Row>, single: bool, cut: bool },
+}
+
+impl ShellOut {
+    /// The text of a run without document frames, which is every run whose input has no maxBytes.
+    pub fn text(self) -> Res<String> {
+        match self {
+            ShellOut::Value(s) => Ok(s),
+            ShellOut::Docs { .. } => Err("The shell sent documents where text was expected.".into()),
+        }
+    }
+}
+
+impl ShellOut<Bson> {
+    /// The result as one value, as the text path gave it: a document, or a list of them.
+    #[cfg(test)]
+    pub fn into_value(self) -> Bson {
+        match self {
+            ShellOut::Value(v) => v,
+            ShellOut::Docs { rows, single: true, .. } => rows.first().map_or(Bson::Null, |r| Bson::Document(r.owned())),
+            ShellOut::Docs { rows, .. } => Bson::Array(rows.iter().map(|r| Bson::Document(r.owned())).collect()),
+        }
+    }
+}
+
+/// The script's result, with its query time when it used MongoDB.
+pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(ShellOut, Option<u64>)> {
     run_shell_gated(req, job, None, send, cancel).await
 }
 
 /// `run_shell` for an agent's script: `gate` checks each SQL statement and cleans each row and error before the script
 /// gets them.
-pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn sql::RelayGate>, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(String, Option<u64>)> {
+pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn sql::RelayGate>, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<(ShellOut, Option<u64>)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     if let Some(n) = repeated_name(job.sql.iter().map(|(n, _)| n.as_str())) {
@@ -182,12 +214,20 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
         err
     });
     let read = async {
-        let mut result: Option<Res<(String, Option<u64>)>> = None;
+        let mut result: Option<Res<(ShellOut, Option<u64>)>> = None;
+        let (mut docs, mut doc_bytes): (Vec<Row>, usize) = (Vec::new(), 0);
         let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
         // Names whose relay was dropped after a cut result. A later query errors like it does on MySQL, where the relay
         // stays but is dead, instead of quietly opening a new session that has lost the script's transaction.
         let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(line) = next_line(&mut lines).await? {
+            // The runner writes this exact line before each document, so a list of many skips a JSON parse per row.
+            if line == r#"{"type":"doc"}"# {
+                let raw = read_frame(&mut lines, SHELL_MAX - doc_bytes).await?;
+                doc_bytes += raw.as_bytes().len();
+                docs.push(Row::from_raw(raw));
+                continue;
+            }
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
                 continue;
@@ -195,8 +235,12 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
             let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("log") => send(Msg::ShellLog { req, level: s("level"), text: s("text") }),
+                // A list the runner could not finish as BSON goes again as text.
+                Some("reset") => (docs, doc_bytes) = (Vec::new(), 0),
                 Some("result") => {
-                    result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok((s("ejson"), v.get("queryMs").and_then(|x| x.as_u64()))) } else { Err(s("error")) });
+                    let flag = |k: &str| v.get(k).and_then(|x| x.as_bool()) == Some(true);
+                    let out = if v.get("docs").is_some() { ShellOut::Docs { rows: std::mem::take(&mut docs), single: flag("single"), cut: flag("cut") } } else { ShellOut::Value(s("ejson")) };
+                    result = Some(if flag("ok") { Ok((out, v.get("queryMs").and_then(|x| x.as_u64()))) } else { Err(s("error")) });
                     // Closing the pipe lets the runner exit.
                     stdin = None;
                 }
@@ -312,6 +356,130 @@ pub(crate) async fn run_shell_gated(req: u64, job: &ShellJob, gate: Option<&dyn 
     }
 }
 
+/// One document frame after its `{"type":"doc"}` line: BSON, which starts with its own length, at most `room` bytes.
+async fn read_frame(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>, room: usize) -> Res<RawDocumentBuf> {
+    use tokio::io::AsyncReadExt;
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len).await.map_err(e)?;
+    let n = i32::from_le_bytes(len);
+    // The runner stops before the budget, so a frame past it means the stream is broken, not a big result.
+    if n < 5 || n as usize > room {
+        return Err("The shell sent a document Quarry could not read.".into());
+    }
+    let mut buf = vec![0u8; n as usize];
+    buf[..4].copy_from_slice(&len);
+    r.read_exact(&mut buf[4..]).await.map_err(e)?;
+    RawDocumentBuf::from_bytes(buf).map_err(|x| format!("The shell sent a document Quarry could not read: {x}"))
+}
+
+/// What an export of Shell rows writes, decided on the UI thread.
+pub enum RowsOut {
+    Text { fmt: copy::Fmt, header: bool, table: String, dialect: sql::Dialect, bs: bool },
+    Xlsx(xlsx::Opts),
+    MongoJs,
+    MongoJson,
+    MongoLines,
+}
+
+/// Writes Shell rows to `path` a batch at a time, decoding only that batch, through a temp file renamed at the end. The
+/// bytes are those of the export of the whole list at once, except that a Markdown table is not padded (see
+/// `copy::Writer`).
+pub fn export_rows(rows: &[RawDocumentBuf], out: &RowsOut, path: &std::path::Path, count: &std::sync::atomic::AtomicU64, cancel: &std::sync::atomic::AtomicBool) -> Res<sql::export::Done> {
+    use std::io::Write;
+    let tmp = sql::export::part_of(path);
+    let fail = |x: String| format!("Could not write {}: {x}", path.display());
+    let res = (|| {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(|x| fail(x.to_string()))?);
+        write_rows(rows, out, &mut w, count, cancel)?;
+        w.flush().map_err(|x| fail(x.to_string()))?;
+        drop(w);
+        std::fs::rename(&tmp, path).map_err(|x| fail(x.to_string()))
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res.map(|_| sql::export::Done { rows: rows.len() as u64, #[cfg(test)] peak_batch: sql::export::BATCH, path: Some(path.to_path_buf()), files: 1, text: None })
+}
+
+/// Columns as the Shell's whole-list export picks them: keys of the first 500 rows, numeric when every value is a number.
+fn shell_cols(rows: &[RawDocumentBuf]) -> Vec<copy::CopyCol> {
+    let mut names: Vec<String> = Vec::new();
+    for (k, _) in rows.iter().take(500).flat_map(|r| r.iter().flatten()) {
+        if !names.iter().any(|n| n == k) {
+            names.push(k.to_string());
+        }
+    }
+    // One pass over the rows: None until a value shows, then whether every value so far is a number.
+    let mut numeric: Vec<Option<bool>> = vec![None; names.len()];
+    for r in rows {
+        for (n, state) in names.iter().zip(numeric.iter_mut()).filter(|(_, s)| **s != Some(false)) {
+            match get_path_raw(r, n) {
+                None | Some(RawBsonRef::Null) => {}
+                Some(RawBsonRef::Int32(_) | RawBsonRef::Int64(_) | RawBsonRef::Double(_) | RawBsonRef::Decimal128(_)) => *state = Some(true),
+                Some(_) => *state = Some(false),
+            }
+        }
+    }
+    names.into_iter().zip(numeric).map(|(n, s)| copy::CopyCol { numeric: s == Some(true), src: n.clone(), name: n }).collect()
+}
+
+/// Where the rows go: a table format, a workbook, or Mongo's own forms, written an element at a time.
+enum Sink {
+    Text(copy::Writer),
+    Book(Box<xlsx::Book>),
+    Items { first: bool },
+}
+
+fn write_rows(rows: &[RawDocumentBuf], out: &RowsOut, w: &mut (dyn std::io::Write + Send), count: &std::sync::atomic::AtomicU64, cancel: &std::sync::atomic::AtomicBool) -> Res<()> {
+    use std::sync::atomic::Ordering;
+    let put = |w: &mut (dyn std::io::Write + Send), s: &str| w.write_all(s.as_bytes()).map_err(|x| x.to_string());
+    let mut sink = match out {
+        RowsOut::Text { fmt, header, table, dialect, bs } => {
+            let mut wr = copy::Writer::new(*dialect, *fmt, *header, shell_cols(rows), table, &[], *bs);
+            put(w, &wr.begin())?;
+            Sink::Text(wr)
+        }
+        RowsOut::Xlsx(o) => Sink::Book(Box::new(xlsx::Book::new(&o.sheet, shell_cols(rows).into_iter().map(|c| xlsx::XCol { name: c.name, kind: None }).collect(), o.about.clone())?)),
+        RowsOut::MongoJs | RowsOut::MongoJson => {
+            put(w, "[\n")?;
+            Sink::Items { first: true }
+        }
+        RowsOut::MongoLines => Sink::Items { first: true },
+    };
+    for chunk in rows.chunks(sql::export::BATCH) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Export cancelled".into());
+        }
+        // The worker decoded every row once when the result came, so none fails here.
+        let docs: Vec<Document> = chunk.iter().map(|r| r.to_document().unwrap_or_default()).collect();
+        match &mut sink {
+            Sink::Text(wr) => put(w, &wr.rows(&docs))?,
+            Sink::Book(b) => b.rows(&docs)?,
+            Sink::Items { first } => {
+                for d in docs {
+                    let d = Bson::Document(d);
+                    let (sep, item) = match out {
+                        RowsOut::MongoJson => (",\n", to_edit_item(&d)),
+                        RowsOut::MongoJs => (",\n", format!("  {}", pretty_shell_at(&d, 1))),
+                        _ => ("\n", to_edit_line(&d)),
+                    };
+                    if !std::mem::take(first) {
+                        put(w, sep)?;
+                    }
+                    put(w, &item)?;
+                }
+            }
+        }
+        count.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+    }
+    // Text files end with a newline, as the whole-list export writes them.
+    match sink {
+        Sink::Text(mut wr) => put(w, &format!("{}\n", wr.end())),
+        Sink::Book(b) => b.finish(None, w),
+        Sink::Items { .. } => put(w, if matches!(out, RowsOut::MongoLines) { "\n" } else { "\n]\n" }),
+    }
+}
+
 /// The value in the runner's `{"v": ...}` Extended JSON. Parsed on the worker, since a result can be 64 MB.
 pub(crate) fn shell_value(ejson: &str) -> Res<Bson> {
     let v: serde_json::Value = serde_json::from_str(ejson).map_err(|e| e.to_string())?;
@@ -422,19 +590,21 @@ fn params_summary(v: Option<&serde_json::Value>) -> String {
 /// Readable shell syntax for a stage body: short values stay on one line, longer objects and
 /// arrays get one entry per line.
 pub fn pretty_shell(b: &Bson) -> String {
-    fn at(b: &Bson, level: usize) -> String {
-        let flat = shell_text(b);
-        if flat.len() <= 60 {
-            return flat;
-        }
-        let (pad, end) = ("  ".repeat(level + 1), "  ".repeat(level));
-        match b {
-            Bson::Document(d) => format!("{{\n{}\n{end}}}", d.iter().map(|(k, v)| format!("{pad}{}: {}", shell_key(k), at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
-            Bson::Array(a) => format!("[\n{}\n{end}]", a.iter().map(|v| format!("{pad}{}", at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
-            _ => flat,
-        }
+    pretty_shell_at(b, 0)
+}
+
+/// `pretty_shell` of a value nested `level` deep, so a long list can be written one element at a time.
+fn pretty_shell_at(b: &Bson, level: usize) -> String {
+    let flat = shell_text(b);
+    if flat.len() <= 60 {
+        return flat;
     }
-    at(b, 0)
+    let (pad, end) = ("  ".repeat(level + 1), "  ".repeat(level));
+    match b {
+        Bson::Document(d) => format!("{{\n{}\n{end}}}", d.iter().map(|(k, v)| format!("{pad}{}: {}", shell_key(k), pretty_shell_at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
+        Bson::Array(a) => format!("[\n{}\n{end}]", a.iter().map(|v| format!("{pad}{}", pretty_shell_at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
+        _ => flat,
+    }
 }
 
 // ponytail: made once per Shell run, so the copy is cheap; boxing the large variant would change every match on it.
@@ -633,7 +803,7 @@ pub(crate) fn bun_missing() -> bool {
 
 /// Runs a script to its end for a live test, with the queries it sent, as the Shell tab would see them.
 #[cfg(test)]
-pub(crate) fn run_shell_blocking(w: &super::Worker, job: &ShellJob) -> (Vec<super::ShellQuery>, Res<(String, Option<u64>)>) {
+pub(crate) fn run_shell_blocking(w: &super::Worker, job: &ShellJob) -> (Vec<super::ShellQuery>, Res<(ShellOut, Option<u64>)>) {
     let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
     let queries = std::sync::Mutex::new(Vec::new());
     let send = |m: Msg| {
@@ -713,5 +883,63 @@ mod tests {
         assert_eq!(a.len(), 17);
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
         assert_ne!(a, random_id(17));
+    }
+
+    /// Rows of every common type across three export batches, with a column that is numeric only in part.
+    fn export_rows_fixture() -> Vec<RawDocumentBuf> {
+        (0..2500i64)
+            .map(|i| {
+                let mut d = doc! { "_id": i, "name": format!("row \"{i}\",\ttab\nline"), "price": i as f64 / 4.0, "n": i32::try_from(i).unwrap(), "at": mongodb::bson::DateTime::from_millis(i * 1000) };
+                if i % 7 == 0 {
+                    d.insert("mixed", "text");
+                } else {
+                    d.insert("mixed", i);
+                }
+                if i == 600 {
+                    // Past the first 500 rows: not a column, as in the whole-list export.
+                    d.insert("late", 1);
+                }
+                d.insert("nest", doc! { "a": [1, 2, { "b": "c" }], "long": "x".repeat(70) });
+                RawDocumentBuf::from_document(&d).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shell_rows_export_in_batches_writes_what_the_whole_list_gives() {
+        let rows = export_rows_fixture();
+        let docs: Vec<Document> = rows.iter().map(|r| r.to_document().unwrap()).collect();
+        let cols = shell_cols(&rows);
+        let numeric: Vec<(&str, bool)> = cols.iter().map(|c| (c.name.as_str(), c.numeric)).collect();
+        assert_eq!(numeric, [("_id", true), ("name", false), ("price", true), ("n", true), ("at", false), ("mixed", false), ("nest", false)]);
+        let dir = std::env::temp_dir().join(format!("quarry-shell-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let written = |out: RowsOut, name: &str| {
+            let path = dir.join(name);
+            let (count, cancel) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicBool::new(false));
+            let done = export_rows(&rows, &out, &path, &count, &cancel).unwrap();
+            assert_eq!((done.rows, count.into_inner()), (2500, 2500));
+            assert!(!dir.join(format!(".{name}.part")).exists());
+            std::fs::read_to_string(path).unwrap()
+        };
+        // Markdown pads to the widest cell only when built whole, and Shell rows have no key for UPDATE.
+        for fmt in [copy::Fmt::SqlInsert, copy::Fmt::Csv, copy::Fmt::Tsv, copy::Fmt::Json, copy::Fmt::JsonLines, copy::Fmt::Html, copy::Fmt::Values] {
+            for header in [true, false] {
+                let whole = copy::format(sql::Dialect::MySql, fmt, &copy::Sheet { rows: &docs, cols: &cols, table: "t", pk: &[], bs: true }, header);
+                let out = RowsOut::Text { fmt, header, table: "t".into(), dialect: sql::Dialect::MySql, bs: true };
+                assert!(written(out, "t.txt") == format!("{whole}\n"), "{fmt:?} header {header}");
+            }
+        }
+        let arr = Bson::Array(docs.iter().cloned().map(Bson::Document).collect());
+        assert!(written(RowsOut::MongoJson, "m.json") == format!("{}\n", to_edit_value(&arr)));
+        assert!(written(RowsOut::MongoJs, "m.js") == format!("{}\n", pretty_shell(&arr)));
+        let lines = docs.iter().map(|d| to_edit_line(&Bson::Document(d.clone()))).collect::<Vec<_>>().join("\n");
+        assert!(written(RowsOut::MongoLines, "m.jsonl") == format!("{lines}\n"));
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let path = dir.join("stopped.csv");
+        let out = RowsOut::Text { fmt: copy::Fmt::Csv, header: true, table: "t".into(), dialect: sql::Dialect::MySql, bs: true };
+        assert_eq!(export_rows(&rows, &out, &path, &Default::default(), &cancel).err().as_deref(), Some("Export cancelled"));
+        assert!(!path.exists() && !dir.join(".stopped.csv.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

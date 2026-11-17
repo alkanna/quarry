@@ -3,7 +3,7 @@
 //! its address from the keychain, so the parts that need the driver are here. Each test works in its own database of
 //! QUARRY_TEST_MONGO and skips when that is unset or Bun is missing. The package install test also needs the network a live run has.
 
-use super::shell::{ShellJob, bun_missing, prepare_shell_dir, runner_package};
+use super::shell::{SHELL_MAX, ShellJob, bun_missing, prepare_shell_dir, runner_package};
 use super::{Msg, Res, Worker};
 use mongodb::bson::{Bson, Document, doc};
 use std::time::Duration;
@@ -11,6 +11,8 @@ use std::time::Duration;
 struct Run {
     logs: Vec<String>,
     res: Res<Bson>,
+    /// Some when the documents came as BSON frames, with whether the budget cut them.
+    cut: Option<bool>,
 }
 
 impl Run {
@@ -33,13 +35,21 @@ impl Run {
 
 /// Runs `code` on QUARRY_TEST_MONGO with `db` as its database, writes allowed, as the Shell tab would.
 fn run(db: &str, code: &str) -> Option<Run> {
+    run_max(db, code, Some(SHELL_MAX))
+}
+
+/// `run` with another budget for documents, or None for the one Extended JSON line agents still read.
+fn run_max(db: &str, code: &str, max: Option<usize>) -> Option<Run> {
     let uri = std::env::var("QUARRY_TEST_MONGO").ok()?;
     if bun_missing() {
         return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let w = Worker::new(tx, eframe::egui::Context::default());
-    let input = serde_json::json!({ "mongo": [{ "name": "test", "uri": uri, "db": db, "proxy": null, "collections": [], "readOnly": false }], "sql": [], "code": code, "packages": [], "timeoutMs": 30000, "main": "test" });
+    let mut input = serde_json::json!({ "mongo": [{ "name": "test", "uri": uri, "db": db, "proxy": null, "collections": [], "readOnly": false }], "sql": [], "code": code, "packages": [], "timeoutMs": 30000, "main": "test" });
+    if let Some(max) = max {
+        input["maxBytes"] = max.into();
+    }
     let job = ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql: Vec::new() };
     // Kept until the answer: a dropped sender reads as Stop.
     let (_stop, cancel) = tokio::sync::oneshot::channel();
@@ -50,7 +60,13 @@ fn run(db: &str, code: &str) -> Option<Run> {
         match rx.recv_timeout(Duration::from_secs(300)).expect("the shell never answered") {
             // "info" lines are the app's notes about the package install, not the script's.
             Msg::ShellLog { level, text, .. } if level != "info" => logs.push(text),
-            Msg::ShellDone { res, .. } => return Some(Run { logs, res }),
+            Msg::ShellDone { res, .. } => {
+                let cut = match &res {
+                    Ok(super::ShellOut::Docs { cut, .. }) => Some(*cut),
+                    _ => None,
+                };
+                return Some(Run { logs, res: res.map(super::ShellOut::into_value), cut });
+            }
             _ => {}
         }
     }
@@ -164,4 +180,69 @@ fn live_shell_fix_a_failed_package_install_is_retried() {
     prepare("is-number@7.0.0").expect("back to the installed version");
     assert_eq!(marker().as_deref(), Some(good.as_str()));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The case from a user report: 20 documents of 14 MB ran forever, then were refused past 64 MB. They now come whole
+/// as BSON, and a result past the budget keeps the documents that fit and says it was cut.
+#[test]
+fn live_shell_fix_big_documents_come_whole_and_stop_at_the_budget() {
+    let db = "quarry_shell_fix_big";
+    let seed = "await db.dropDatabase(); const pad = 'x'.repeat(14 << 20); for (let i = 0; i < 20; i++) await db.collection('big').insertOne({ _id: i, pad });";
+    let Some(r) = run(db, &format!("async function run() {{ {seed} return await db.collection('big').find({{}}).sort({{ _id: 1 }}).limit(20).toArray(); }}")) else { return };
+    assert_eq!(r.cut, Some(false), "{:?}", r.logs);
+    let rows = r.rows();
+    assert_eq!(rows.len(), 20);
+    assert!(rows.iter().all(|d| d.as_document().and_then(|d| d.get_str("pad").ok()).is_some_and(|p| p.len() == 14 << 20)));
+    // A returned cursor is read batch by batch and closed at the budget: 100 MB holds 7 of these.
+    let r = run_max(db, "async function run() { return db.collection('big').find({}).sort({ _id: 1 }); }", Some(100 << 20)).unwrap();
+    assert_eq!(r.cut, Some(true), "{:?}", r.logs);
+    let ids: Vec<i32> = r.rows().iter().filter_map(|d| d.as_document().and_then(|d| d.get_i32("_id").ok())).collect();
+    assert_eq!(ids, (0..7).collect::<Vec<_>>());
+    // toArray in the script holds them all in Bun, but only what fits is sent.
+    let r = run_max(db, "async function run() { return await db.collection('big').find({}).toArray(); }", Some(100 << 20)).unwrap();
+    assert_eq!((r.cut, r.rows().len()), (Some(true), 7));
+}
+
+/// Values a script builds, not read from a server, read the same as on the Extended JSON path agents still use.
+#[test]
+fn live_shell_fix_frames_read_as_the_text_path() {
+    let code = "async function run() { return [{ i: 1, big: 3000000000, huge: 2n ** 70n, at: new Date(0), bad: new Date(NaN), u: undefined, f: () => 1, bytes: new Uint8Array([1, 2]), d: require('mongodb').Decimal128.fromString('1.5'), o: new ObjectId('507f1f77bcf86cd799439011'), nan: NaN, z: -0, s: 'x\\ud800', '$k': 1, 'a.b': [undefined, 2], when: dayjs(0), m: new Map([['a', 1]]) }, {}]; }";
+    let Some(frames) = run("quarry_shell_fix_frames", code) else { return };
+    assert_eq!(frames.cut, Some(false), "{:?}", frames.logs);
+    let text = run_max("quarry_shell_fix_frames", code, None).unwrap();
+    assert_eq!(text.cut, None);
+    let text = text.res;
+    // dayjs reads as its JSON (an ISO date) on both, where Extended JSON used to list its internals.
+    let fix = |v: Bson| {
+        let Bson::Array(mut a) = v else { panic!("{v:?}") };
+        if let Some(Bson::Document(d)) = a.first_mut() {
+            d.remove("when");
+        }
+        Bson::Array(a)
+    };
+    // Compared as text, since NaN never equals itself.
+    assert_eq!(format!("{:?}", fix(frames.res.unwrap())), format!("{:?}", fix(text.unwrap())));
+}
+
+/// Edge cases of the frames path: a document past js-bson's 17 MB buffer, a key BSON cannot hold, an empty cursor,
+/// and a first document past the budget.
+#[test]
+fn live_shell_fix_frames_edges() {
+    let db = "quarry_shell_fix_edges";
+    // js-bson used to cut a document past its 17 MB buffer short, with a header that looked right.
+    let Some(r) = run(db, "async function run() { return [{ pad: 'x'.repeat(40 << 20) }, { a: 1 }]; }") else { return };
+    assert_eq!(r.cut, Some(false), "{:?}", r.logs);
+    let rows = r.rows();
+    assert_eq!(rows[0].as_document().and_then(|d| d.get_str("pad").ok()).map(str::len), Some(40 << 20));
+    assert_eq!(rows[1], Bson::Document(doc! { "a": 1 }));
+    // A NUL in a key: the frames sent so far are dropped and the list goes as text, which keeps it as a value.
+    let r = run(db, "async function run() { return [{ a: 1 }, { ['k\\u0000']: 1 }]; }").unwrap();
+    assert_eq!(r.cut, None, "{:?}", r.logs);
+    assert_eq!(r.rows().len(), 2);
+    // An empty cursor reads as an empty list.
+    let r = run(db, "async function run() { await db.dropDatabase(); return db.collection('none').find({}); }").unwrap();
+    assert_eq!((r.cut, r.rows()), (None, Vec::new()));
+    // Nothing fits: an error, not an empty list.
+    let r = run_max(db, "async function run() { return [{ pad: 'x'.repeat(2 << 20) }]; }", Some(1 << 20)).unwrap();
+    assert!(r.res.as_ref().is_err_and(|e| e.contains("first document")), "{:?}", r.res);
 }

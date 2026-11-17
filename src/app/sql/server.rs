@@ -425,7 +425,7 @@ impl App {
                 }
             }
         }
-        if let Some(j) = self.export_job.as_ref().filter(|j| j.db.conn == conn) {
+        if let Some(j) = self.export_job.as_ref().filter(|j| j.db.as_ref().is_some_and(|d| d.conn == conn)) {
             add(j.id.load(Ordering::SeqCst), "Export");
         }
         if let Some(j) = self.sql_job.as_ref().filter(|j| j.conn == conn) {

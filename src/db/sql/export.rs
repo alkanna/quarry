@@ -386,7 +386,8 @@ impl Write for Lazy {
     }
 }
 
-fn part_of(path: &std::path::Path) -> PathBuf {
+/// The temp file a file export writes beside `path` and renames over it at the end.
+pub(crate) fn part_of(path: &std::path::Path) -> PathBuf {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     path.with_file_name(format!(".{name}.part"))
 }

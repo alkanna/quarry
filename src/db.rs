@@ -350,7 +350,7 @@ pub enum Msg {
     /// Every column of a SQL database, for the shell editor types.
     /// The Shell script finished: its return value, parsed off the UI thread.
     /// `query_ms` runs from the script's first MongoDB connection being ready, so it leaves out starting and connecting.
-    ShellDone { req: u64, res: Res<Bson>, ms: u128, query_ms: Option<u64> },
+    ShellDone { req: u64, res: Res<ShellOut<Bson>>, ms: u128, query_ms: Option<u64> },
     /// One change event from the Watch view's change stream `req`.
     WatchEvent { req: u64, doc: Document },
     /// The change stream `req` ended: stopped (Ok) or failed.
@@ -631,6 +631,12 @@ pub fn to_edit_json(d: &Document) -> String {
 /// Pretty editor text for any value, with the same long-integer rule as `to_edit_json`.
 pub fn to_edit_value(b: &Bson) -> String {
     serde_json::to_string_pretty(&edit_json(b)).unwrap_or_default()
+}
+
+/// `to_edit_value` of one element of a list, indented as the list's pretty form nests it, so a long list can be
+/// written an element at a time.
+pub fn to_edit_item(b: &Bson) -> String {
+    format!("  {}", to_edit_value(b).replace('\n', "\n  "))
 }
 
 /// One-line form of `to_edit_value`, for JSON lines.
