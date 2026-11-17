@@ -1775,9 +1775,10 @@ impl App {
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
-    /// Work a restart would lose. An open dialog does not count: Settings is one, and Restart sits in it.
+    /// Work a restart would lose. Settings does not count, since Restart sits in it; every other dialog may hold typed input.
     pub(super) fn busy_work(&self) -> bool {
-        !self.drafts.is_empty()
+        self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Settings))
+            || !self.drafts.is_empty()
             || !self.saving.is_empty()
             || self.json_edit.is_some()
             || self.insert.is_some()

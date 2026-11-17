@@ -17,10 +17,7 @@ enum Look {
 }
 
 enum PopAct {
-    Cancel,
-    Restart,
-    Update(Available),
-    Retry,
+    Btn(UpdBtn),
     Notes(Release),
 }
 
@@ -51,6 +48,8 @@ impl App {
 
     /// Drawn in the header's right-to-left row, left of the search field.
     pub(super) fn update_pill(&mut self, ui: &mut egui::Ui) {
+        // Taken even when the pill is hidden, so a stale request never opens the popover later on its own.
+        let open = std::mem::take(&mut self.upd_popup);
         let Some((label, look)) = self.pill_state() else { return };
         let (fill, edge, ink) = match look {
             Look::Ready => (SUCCESS(), Color32::TRANSPARENT, ON_PRIMARY()),
@@ -85,7 +84,8 @@ impl App {
             Look::Spin => {
                 p.circle_stroke(ic, 5.5, Stroke::new(2.0, RAISED_LINE()));
                 arc(&p, ic, 5.5, ui.input(|i| i.time) as f32 * 4.0, std::f32::consts::FRAC_PI_2, Stroke::new(2.0, PRIMARY()));
-                ui.ctx().request_repaint();
+                // About 20 fps keeps the turn smooth without redrawing every view at the display's rate.
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }
             Look::Ready => glyphs::undo(&p, ic, icon),
             Look::Failed => glyphs::warn(&p, ic, icon),
@@ -103,7 +103,7 @@ impl App {
         focus_ring(ui, &r, rect, 13.0);
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Update status"));
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
-        if std::mem::take(&mut self.upd_popup) {
+        if open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
         let mut act = None;
@@ -115,13 +115,7 @@ impl App {
             }
         });
         match act {
-            Some(PopAct::Cancel) => self.cancel_download(),
-            Some(PopAct::Restart) => self.restart_now(),
-            Some(PopAct::Update(a)) => self.start_download(a),
-            Some(PopAct::Retry) => match std::mem::replace(&mut self.upd, Upd::Idle) {
-                Upd::Failed { info: Some(a), .. } => self.start_download(a),
-                _ => self.check_now(),
-            },
+            Some(PopAct::Btn(b)) => self.upd_act(b),
             Some(PopAct::Notes(r)) => self.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(vec![r], "")))),
             None => {}
         }
@@ -245,31 +239,14 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0);
-                match &self.upd {
-                    Upd::Downloading { .. } => {
-                        if ui.button("Cancel").clicked() {
-                            act = Some(PopAct::Cancel);
-                        }
-                    }
-                    Upd::Ready(_) => {
-                        if ui.add_enabled(!self.busy_work(), primary_button(ui, "Restart now", PRIMARY())).clicked() {
-                            act = Some(PopAct::Restart);
-                        }
-                        if ui.button("Later").clicked() {
-                            ui.close();
-                        }
-                    }
-                    Upd::Available(a) => {
-                        if primary(ui, "Update", PRIMARY()).clicked() {
-                            act = Some(PopAct::Update(a.clone()));
-                        }
-                    }
-                    Upd::Failed { .. } => {
-                        if primary(ui, "Try again", PRIMARY()).clicked() {
-                            act = Some(PopAct::Retry);
-                        }
-                    }
-                    _ => {}
+                // The same button Settings shows for this state.
+                let Some(b) = self.update_status().2.filter(|b| *b != UpdBtn::Check) else { return };
+                let r = if b.primary() { ui.add_enabled(b != UpdBtn::Restart || !self.busy_work(), primary_button(ui, b.label(), PRIMARY())) } else { ui.button(b.label()) };
+                if r.clicked() {
+                    act = Some(PopAct::Btn(b));
+                }
+                if b == UpdBtn::Restart && ui.button("Later").clicked() {
+                    ui.close();
                 }
             });
         });

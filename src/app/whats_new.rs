@@ -38,10 +38,10 @@ impl WhatsNew {
                 }
                 parts.join("  ·  ")
             }
-            many => {
-                let (new, old) = (&many[0], &many[many.len() - 1]);
-                format!("{} releases  ·  {} to {}", many.len(), old.version, new.version)
-            }
+            many => match (many.first(), many.last()) {
+                (Some(new), Some(old)) => format!("{} releases  ·  {} to {}", many.len(), old.version, new.version),
+                _ => String::new(),
+            },
         }
     }
 }

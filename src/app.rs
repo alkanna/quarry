@@ -71,6 +71,7 @@ mod update_pill;
 mod watch;
 mod whats_new;
 use column_menu::*;
+use auto_update::UpdBtn;
 use whats_new::WhatsNew;
 use errors::*;
 use config::*;
