@@ -99,7 +99,6 @@ impl App {
         self.upd = Upd::Downloading { info, prog, started: std::time::Instant::now() };
     }
 
-    /// Restart now, unless something would be lost; the pill and Settings show why it waits.
     fn restart_now(&mut self) {
         if self.busy_work() {
             self.warn(HELD);
@@ -110,7 +109,6 @@ impl App {
         }
     }
 
-    /// The button Settings' status row and the popover's footer offer for the current state.
     pub(super) fn upd_btn(&self) -> Option<UpdBtn> {
         match &self.upd {
             Upd::Idle | Upd::UpToDate(_) => self.can_update().then_some(UpdBtn::Check),
@@ -123,7 +121,6 @@ impl App {
         }
     }
 
-    /// Runs a button of Settings' status row or of the popover's footer.
     pub(super) fn upd_act(&mut self, b: UpdBtn) {
         match b {
             // Retry downloads the release again when one was found, else asks GitHub again.
@@ -147,7 +144,6 @@ impl App {
         }
     }
 
-    /// Settings' status row: the title and the line under it.
     pub(super) fn update_status(&self) -> (String, String) {
         let current = env!("CARGO_PKG_VERSION");
         let checked = self.update_checked.map_or("New releases are checked at launch and once a day".to_string(), |t| format!("checked {}", ago(t.elapsed().as_secs())));

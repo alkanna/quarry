@@ -1,5 +1,4 @@
-//! The release notes shown after an update and from Settings: each release's entries grouped by
-//! kind, with the commit scope, inline code in mono and the PR number.
+//! The release notes shown after an update and from Settings.
 
 use super::*;
 use crate::update::{Entry, Kind, Release};
@@ -98,8 +97,7 @@ fn summary(rs: &[Release]) -> String {
     }
 }
 
-/// Words that read as code: operators, snake_case names and paths. The changelog has no
-/// backticks, so this is a guess from the shape of the word.
+/// The changelog has no backticks, so code is guessed from the shape of the word.
 fn looks_like_code(w: &str) -> bool {
     w.len() > 1 && (w.contains('$') || w.contains('_') || w.contains("::"))
 }
@@ -130,7 +128,6 @@ fn entry_job(scope: Option<&str>, text: &str, width: f32) -> egui::text::LayoutJ
     job
 }
 
-/// A small tinted label in front of an entry: New, Fixed or Faster.
 fn kind_tag(ui: &mut egui::Ui, k: Kind) {
     let c = kind_color(k);
     let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(kind_label(k).into(), ui_fmt(TXT_SECTION, c, W_SEMIBOLD, 0.0)));
@@ -144,7 +141,6 @@ fn scope_chip(ui: &mut egui::Ui, scope: &str) {
     });
 }
 
-/// One entry: an optional kind tag or scope chip, the wrapping text, and the PR number at the right.
 fn entry_row(ui: &mut egui::Ui, tag: Option<Kind>, e: &Entry, first: bool) {
     if !first {
         let y = ui.cursor().top();
@@ -182,7 +178,6 @@ fn entries_card<'a>(ui: &mut egui::Ui, rows: impl Iterator<Item = (Option<Kind>,
     });
 }
 
-/// A dot in the kind's color, the kind in caps and its count, over its card.
 fn kind_caption(ui: &mut egui::Ui, k: Kind, title: &str, n: usize) {
     ui.horizontal(|ui| {
         ui.add_space(2.0);
@@ -195,7 +190,6 @@ fn kind_caption(ui: &mut egui::Ui, k: Kind, title: &str, n: usize) {
     ui.add_space(6.0);
 }
 
-/// The head of an open release or the whole row of a folded one, which toggles it.
 fn release_head(ui: &mut egui::Ui, r: &Release, open: bool) -> bool {
     let id = egui::Id::unique(("whats-new-release", &r.version));
     let hovered = ui.ctx().read_response(id).is_some_and(|x| x.hovered());

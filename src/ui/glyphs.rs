@@ -127,12 +127,11 @@ pub(crate) fn shield(p: &egui::Painter, c: Pos2, col: Color32) {
     closed(p, c, col, &[(8.0, 2.0), (13.0, 4.0), (13.0, 8.0), (11.7, 11.2), (8.0, 14.0), (4.3, 11.2), (3.0, 8.0), (3.0, 4.0)]);
 }
 
-/// A four-pointed star, for release notes.
 pub(crate) fn sparkle(p: &egui::Painter, c: Pos2, col: Color32) {
     closed(p, c, col, &[(8.0, 2.0), (9.4, 6.6), (14.0, 8.0), (9.4, 9.4), (8.0, 14.0), (6.6, 9.4), (2.0, 8.0), (6.6, 6.6)]);
 }
 
-/// A gear: ring, hub and eight teeth, drawn larger than the 16 px box for the rail's Settings tile.
+/// Larger than the 16 px box, to fill the rail's 40 px Settings tile.
 pub(crate) fn gear(p: &egui::Painter, c: Pos2, col: Color32) {
     let s = Stroke::new(W, col);
     p.circle_stroke(c, 5.9, s);

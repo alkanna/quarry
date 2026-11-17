@@ -1,10 +1,8 @@
-//! The header's update pill, which says what the updater is doing, and the popover it opens with
-//! the progress, the release's highlights and the action that fits.
+//! The header's update pill and its popover.
 
 use super::*;
 use crate::update::{Available, Kind, Release};
 
-/// The look of the pill, one per state worth showing.
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
     /// The percent done; None turns a quarter arc, for a check, a download of unknown size or the checksum.
@@ -20,7 +18,6 @@ enum PopAct {
     Notes(Release),
 }
 
-/// The release's notes as a Release, for the What's new dialog.
 fn notes_of(a: &Available) -> Release {
     Release { version: a.version.clone(), date: String::new(), sections: a.notes.clone() }
 }
@@ -45,7 +42,6 @@ impl App {
         })
     }
 
-    /// Drawn in the header's right-to-left row, left of the search field.
     pub(super) fn update_pill(&mut self, ui: &mut egui::Ui) {
         // Taken even when the pill is hidden, so a stale request never opens the popover later on its own.
         let open = std::mem::take(&mut self.upd_popup);
@@ -222,7 +218,6 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0);
-                // The same button Settings shows for this state.
                 let Some(b) = self.upd_btn().filter(|b| *b != UpdBtn::Check) else { return };
                 if b.show(ui, self.busy_work()).clicked() {
                     act = Some(PopAct::Btn(b));
@@ -237,8 +232,7 @@ impl App {
     }
 }
 
-/// A block of the popover with its side margins. Popovers lay out justified, which stretches wrapped labels, so the
-/// content goes back to a plain top-down layout.
+/// Popovers lay out justified, which stretches wrapped labels, so the content goes back to plain top-down.
 fn pad(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 }).show(ui, |ui| {
         ui.set_width(ui.available_width());

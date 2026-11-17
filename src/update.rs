@@ -133,8 +133,7 @@ fn available(v: &serde_json::Value, name: &str, current: &str) -> Result<Option<
     Ok(Some(Available { version: tag.trim_start_matches('v').to_string(), name: name.to_string(), url: url.to_string(), size: a["size"].as_u64().unwrap_or(0), sum_url: sum_url.to_string(), notes: parse_body(v["body"].as_str().unwrap_or("")) }))
 }
 
-/// Shared with the UI while an update downloads: bytes on disk so far, whether the download is
-/// done and being checked, and a request to stop.
+/// Shared with the UI while an update downloads.
 #[derive(Default, Debug)]
 pub struct Progress {
     pub bytes: std::sync::atomic::AtomicU64,
@@ -153,7 +152,6 @@ impl Progress {
 /// The error of a download stopped through `Progress::cancel`.
 const CANCELLED: &str = "The download was cancelled.";
 
-/// How far a download of `size` bytes is, when the size is known.
 pub fn percent(bytes: u64, size: u64) -> Option<u8> {
     (size > 0).then(|| (bytes.saturating_mul(100) / size).min(100) as u8)
 }

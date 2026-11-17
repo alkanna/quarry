@@ -149,7 +149,6 @@ impl App {
         }
     }
 
-    /// Settings at the foot of the rail, a tile like Connect and Manage.
     fn settings_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
         let on = matches!(self.modal, Some(Modal::Settings));
