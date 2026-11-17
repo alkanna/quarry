@@ -511,11 +511,10 @@ impl App {
         self.req += 1;
         let req = self.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        // Checks point at rows of the last result, which the floating selection bar could still copy or export mid-run.
+        // The floating selection bar is not disabled with the result, so stale checks could still be exported.
         self.tabs[self.cur].shell_checked.clear();
         let sh = &mut self.tabs[self.cur].shell;
-        // The last result stays, dimmed, until this run answers; everything else starts fresh. Named one by one, so a field
-        // added to ShellTab later starts fresh too.
+        // Only the script and the last result are kept, so a field added to ShellTab later starts fresh.
         let old = std::mem::take(sh);
         *sh = ShellTab {
             code: old.code,
@@ -747,12 +746,11 @@ impl App {
             });
             ui.add_space(8.0);
         }
-        // During a rerun the last result stays where it was, dimmed and inert, so nothing jumps and a stale result
-        // cannot be copied or exported as the new one.
+        // A child Ui, not a scope: the closure would need both the tab and self.
         let outer = ui;
         let mut result_ui = outer.new_child(egui::UiBuilder::new().id_salt("shell-result").max_rect(outer.available_rect_before_wrap()).layout(*outer.layout()));
         if t.shell.started.is_some() {
-            // Disabled widgets are drawn at half opacity, which is the dimming.
+            // disable() also halves the opacity.
             result_ui.disable();
         }
         let ui = &mut result_ui;
@@ -881,7 +879,7 @@ impl App {
             let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
-        // An empty result takes no room, not even the item spacing an advance adds, so the console does not shift.
+        // An advance adds item spacing even for an empty rect, which would shift the console.
         if result_ui.min_rect().height() > 0.0 {
             outer.advance_cursor_after_rect(result_ui.min_rect());
         }

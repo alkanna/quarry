@@ -306,7 +306,7 @@ impl App {
             t.shell.ms = Some(42);
             t.shell.query_ms = Some(18);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
-            // QUARRY_TEST_SHELL=running: a rerun two minutes in, Stop with its time over the last result dimmed.
+            // QUARRY_TEST_SHELL=running: two minutes into a rerun.
             if std::env::var("QUARRY_TEST_SHELL").is_ok_and(|v| v == "running") {
                 t.shell.started = std::time::Instant::now().checked_sub(std::time::Duration::from_millis(128_400));
             }

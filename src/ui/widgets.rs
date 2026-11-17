@@ -500,15 +500,13 @@ fn run_face(ui: &mut egui::Ui, text: &str, label: std::sync::Arc<egui::Galley>, 
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The main action of a script: Run while `started` is None, else Stop with the time since `started`, in one footprint: the width fits both and the
-/// longest clock, so the row after it never moves. The caller reads a click as Run or Stop from `started`. Stop takes no
-/// clicks for its first 300 ms, so the second half of a double click on Run never stops the script.
+/// Run while `started` is None, else Stop with the time since `started`, at one width so the row after it never moves.
+/// Stop ignores clicks for 300 ms, so the second click of a double click on Run does not stop the script.
 pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time::Instant>) -> egui::Response {
     let (label, hint, run_w) = run_text(ui, "Run", keys, true);
     let stop = ui.painter().layout_job(egui::text::LayoutJob::single_section("Stop".into(), ui_fmt(TXT_BODY, ALERT(), W_SEMIBOLD, 0.0)));
     let widest = ui.painter().layout_job(egui::text::LayoutJob::single_section("9:59:59".into(), mono_fmt(TXT_CAPTION, ALERT(), 400.0)));
-    // Stop starts where Run's content does, centered, so the room it needs on the right counts twice: once for itself and
-    // once for the matching margin on the left.
+    // Stop starts where Run's centered content does, so its room counts twice: once for itself, once for the left margin.
     let content = RUN_TRI + 8.0 + label.size().x + 10.0 + hint.size().x;
     let w = run_w.max(2.0 * (RUN_TRI + 8.0 + stop.size().x + 10.0 + widest.size().x + 14.0) - content);
     let Some(at) = started else { return run_face(ui, "Run", label, hint, w, egui::CornerRadius::same(R_MD), true) };
@@ -516,11 +514,10 @@ pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time:
     let sense = if elapsed < std::time::Duration::from_millis(300) { Sense::hover() } else { Sense::click() };
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, PICK_H), sense);
     let (focused, time) = ui.input(|i| (i.viewport().focused.unwrap_or(true), i.time));
-    // About 30 fps keeps the sweep smooth without redrawing at the display's rate for a whole run; in the background
-    // only the clock moves.
+    // 30 fps is enough for the sweep; in the background only the clock moves.
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(if focused { 33 } else { 100 }));
     let p = ui.painter();
-    // The hover and press steps of `danger`, over a resting tint so Stop reads as a button before the pointer reaches it.
+    // The hover and press steps of `danger`, over a resting tint so Stop reads as a button.
     let fill = [tint(ALERT(), 20), tint(ALERT(), 31), tint(ALERT(), 56)][state_of(&r)];
     p.rect(rect, R_MD, fill, Stroke::new(1.0, tint(ALERT(), 140)), egui::StrokeKind::Inside);
     // Laid out as Run is, so the mark and the word sit where the triangle and "Run" were.
@@ -530,7 +527,7 @@ pub(crate) fn run_stop(ui: &mut egui::Ui, keys: &str, started: Option<std::time:
     p.galley(centered(&stop, x + RUN_TRI + 8.0), stop, ALERT());
     let clock = ui.painter().layout_job(egui::text::LayoutJob::single_section(run_clock(elapsed), mono_fmt(TXT_CAPTION, tint(ALERT(), 205), 400.0)));
     p.galley(centered(&clock, rect.right() - 14.0 - clock.size().x), clock, ALERT());
-    // A segment sliding along the bottom edge says the script is alive; it holds still while the window is in the background.
+    // Holds still while the window is in the background.
     let track = egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - 4.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 2.0));
     p.rect_filled(track, 1.0, tint(ALERT(), 46));
     let seg = 36.0_f32.min(track.width());

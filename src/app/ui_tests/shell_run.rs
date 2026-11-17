@@ -25,7 +25,7 @@ fn stop_takes_the_place_of_run_while_a_script_runs() {
     ui.show("Run");
     assert!(ui.h.query_all_by_label("Stop").next().is_none(), "Stop shows with nothing running");
     let run = ui.h.get_by_label("Run").rect();
-    // In the future, so the run reads as just started however slow the frames are.
+    // A future start keeps the elapsed time at zero however slow the frames are.
     running_since(&mut ui, Instant::now() + Duration::from_secs(60));
     ui.show("Stop");
     assert!(ui.h.query_all_by_label("Run").next().is_none(), "Run stays beside Stop");
