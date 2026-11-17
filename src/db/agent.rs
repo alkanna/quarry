@@ -360,8 +360,6 @@ impl Worker {
     /// Runs an allowed call on the runtime. The answer goes to the agent through `reply`, then `AgentEvent::Done` tells
     /// the App how it ended. A cancelled call sends neither: the App already marked it.
     pub fn agent_run(&self, mut job: AgentJob, reply: Reply) -> AgentRun {
-        // The guard let fenceable expressions through on the promise that this runs before the server sees them.
-        crate::agents::guard::fence(&mut job.call, &job.rules);
         let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
         let h = sql::RunHandle::default();
         let sql = match &job.target {
@@ -377,6 +375,8 @@ impl Worker {
         let lingers = matches!(job.target, AgentTarget::Mongo(_)) && matches!(job.call, Call::CreateCollection { .. } | Call::DropCollection { .. } | Call::CreateIndex { .. } | Call::DropIndex { .. });
         let start = Instant::now();
         let work = self.rt.spawn(async move {
+            // The guard let fenceable expressions through on the promise that this runs before the server sees them.
+            crate::agents::guard::fence(&mut job.call, &job.rules);
             // The server's own limits (maxTimeMS, the statement timeout) come first; this one catches what they miss.
             match tokio::time::timeout(Duration::from_secs(secs + margin), exec(&job, &h)).await {
                 Ok(r) => r,

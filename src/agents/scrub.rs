@@ -218,25 +218,26 @@ fn either_case(c: char) -> String {
 /// A preset key pattern, which runs on `norm_key` output, rewritten to run case-sensitively on the raw key and match
 /// at least every key whose normalized form it matches. None for a construct it does not know.
 fn loose_key(p: &str) -> Option<String> {
-    let p = p.replace("(^|_)", "\u{1}").replace("(_|$)", "\u{2}").replace("[a-z_]*", "\u{3}").replace("_?", "\u{4}");
-    let mut out = String::new();
-    let mut cs = p.chars();
-    while let Some(c) = cs.next() {
+    let opt_sep = format!("{SEP}?");
+    let words = [("(^|_)", START), ("(_|$)", END), ("[a-z_]*", ".*"), ("_?", opt_sep.as_str())];
+    let (mut out, mut rest) = (String::new(), p);
+    while let Some(c) = rest.chars().next() {
+        if let Some((w, to)) = words.iter().find(|(w, _)| rest.starts_with(w)) {
+            out.push_str(to);
+            rest = &rest[w.len()..];
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
         match c {
-            '\u{1}' => out.push_str(START),
-            '\u{2}' => out.push_str(END),
-            '\u{3}' => out.push_str(".*"),
-            '\u{4}' => out.push_str(&format!("{SEP}?")),
             '_' => out.push_str(SEP),
             '^' | '$' | '|' | '(' | ')' => out.push(c),
             '[' => {
-                let class: String = cs.by_ref().take_while(|&c| c != ']').collect();
+                let (class, after) = rest.split_once(']')?;
                 if class.is_empty() || !class.chars().all(|c| c.is_ascii_lowercase()) {
                     return None;
                 }
-                out.push('(');
-                out.push_str(&class.chars().map(either_case).collect::<Vec<_>>().join("|"));
-                out.push(')');
+                out.push_str(&format!("({})", class.chars().map(either_case).collect::<Vec<_>>().join("|")));
+                rest = after;
             }
             c if c.is_ascii_lowercase() => out.push_str(&either_case(c)),
             c if c.is_ascii_digit() => out.push(c),
@@ -255,6 +256,19 @@ fn loose_name(s: &str) -> Option<String> {
     Some(body.chars().map(|c| if ci && c.is_ascii_alphabetic() { either_case(c) } else { c.to_string() }).collect())
 }
 
+/// `Rules::fence`, built once by `compile`.
+fn fence_of(custom: &[Rule], key_set: &RegexSet, gates: &[GateItem]) -> Option<String> {
+    let presets = key_set.patterns().iter().map(String::as_str).chain(gates.iter().map(|g| g.key.as_str()));
+    let mut alts = presets.map(loose_key).collect::<Option<Vec<_>>>()?;
+    for r in custom {
+        if let Kind::Name(re) = &r.kind {
+            alts.push(loose_name(re.as_str())?);
+        }
+    }
+    // No key rule: a pattern that never matches.
+    Some(if alts.is_empty() { "(?!)".into() } else { alts.iter().map(|a| format!("(?:{a})")).collect::<Vec<_>>().join("|") })
+}
+
 impl Rules {
     /// A case-sensitive PCRE for MongoDB's `$regexMatch` that matches every key a preset or name rule could hide or
     /// mask, whatever its scope or mode, or None when a custom rule can't be written that way. `guard::fence` drops
@@ -262,18 +276,6 @@ impl Rules {
     /// key rules.
     pub fn fence(&self) -> Option<&str> {
         self.fence.as_deref()
-    }
-
-    fn fence_of(custom: &[Rule], key_set: &RegexSet, gates: &[GateItem]) -> Option<String> {
-        let presets = key_set.patterns().iter().map(String::as_str).chain(gates.iter().map(|g| g.key.as_str()));
-        let mut alts = presets.map(loose_key).collect::<Option<Vec<_>>>()?;
-        for r in custom {
-            if let Kind::Name(re) = &r.kind {
-                alts.push(loose_name(re.as_str())?);
-            }
-        }
-        // No key rule: a pattern that never matches.
-        Some(if alts.is_empty() { "(?!)".into() } else { alts.iter().map(|a| format!("(?:{a})")).collect::<Vec<_>>().join("|") })
     }
 
     /// `over` is the connection's preset override; `global` and `conn` are the user's own rules.
@@ -327,7 +329,7 @@ impl Rules {
             }
         }
         let key_set = set(&keys)?;
-        let fence = Rules::fence_of(&custom, &key_set, &gates);
+        let fence = fence_of(&custom, &key_set, &gates);
         Ok(Rules { custom, key_set, key_items, value_set: set(&hints)?, value_items, gates, fence, key: *hash_key, binary_as_size: true })
     }
 

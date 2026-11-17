@@ -10,7 +10,7 @@ use super::{Col, Db, Dialect};
 use crate::agents::config::{Limits, Scope};
 use crate::agents::policy::visible;
 use crate::agents::scrub::Rules;
-use crate::agents::tools::{Call, Cond, CondOp};
+use crate::agents::tools::{Call, Cond, CondOp, where_cols};
 use crate::db::agent::{failure, page_out, too_big, AgentJob, AgentUndo, Answer, Snapshot};
 use crate::db::Res;
 use mongodb::bson::{Bson, Document};
@@ -119,8 +119,8 @@ pub(in crate::db) fn where_sql(db: &Db, wher: &[Vec<Cond>]) -> String {
     let groups: Vec<String> = wher
         .iter()
         .map(|g| {
-            let tests: Vec<String> = g.iter().map(|c| test_sql(db, c)).collect();
-            if tests.len() > 1 { format!("({})", tests.join(" OR ")) } else { tests.concat() }
+            let tests = g.iter().map(|c| test_sql(db, c)).collect::<Vec<_>>().join(" OR ");
+            if g.len() > 1 { format!("({tests})") } else { tests }
         })
         .collect();
     if groups.is_empty() { String::new() } else { format!(" WHERE {}", groups.join(" AND ")) }
@@ -174,7 +174,7 @@ pub(in crate::db) async fn select_rows(db: &Db, schema: &str, table: &str, colum
         return Err(format!("No table {schema}.{table}, or this login cannot see its columns."));
     }
     let known = |c: &str| all.iter().any(|x| x.name == c);
-    if let Some(bad) = columns.iter().chain(wher.iter().flatten().map(|c| &c.col)).chain(order.iter().map(|o| &o.0)).find(|c| !known(c)) {
+    if let Some(bad) = columns.iter().chain(where_cols(wher)).chain(order.iter().map(|o| &o.0)).find(|c| !known(c)) {
         return Err(format!("{schema}.{table} has no column `{bad}`. Call describe for its columns."));
     }
     let cols: Vec<Col> = if columns.is_empty() { all } else { columns.iter().filter_map(|c| all.iter().find(|x| x.name == *c).cloned()).collect() };
@@ -348,8 +348,8 @@ pub(in crate::db) async fn prepare(db: &Db, call: &Call, l: &Limits) -> Res<Snap
     let known = |c: &str| cols.iter().any(|x| x.name == c);
     let named: Vec<&String> = match call {
         Call::SqlInsertRows { rows, .. } => rows.iter().flat_map(|r| r.keys()).collect(),
-        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(wher.iter().flatten().map(|c| &c.col)).collect(),
-        Call::SqlDeleteRows { wher, .. } => wher.iter().flatten().map(|c| &c.col).collect(),
+        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(where_cols(wher)).collect(),
+        Call::SqlDeleteRows { wher, .. } => where_cols(wher).collect(),
         _ => Vec::new(),
     };
     if let Some(bad) = named.into_iter().find(|c| !known(c)) {

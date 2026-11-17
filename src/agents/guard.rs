@@ -14,7 +14,7 @@
 //! the shell cannot be walked; the policy refuses them where Hide rules reach.
 
 use super::scrub::{NsRules, Rules};
-use super::tools::{Call, Target, Update, command_pipeline, each_stage, pipeline_targets, stage_target};
+use super::tools::{Call, Target, Update, command_pipeline, each_stage, pipeline_targets, stage_target, where_cols};
 #[cfg(test)]
 use crate::db::sql::Dialect;
 #[cfg(test)]
@@ -101,12 +101,8 @@ impl<'a> G<'a> {
 
     /// The input path is read whole like any reference, and a computed name like any expression; `fence` handles the
     /// keys that turn into values.
-    fn fenced_ref(&self, path: &str, arg: &Bson, u: Use) -> Res {
-        if let Bson::Document(d) = arg
-            && let Some(f) = d.get("field")
-        {
-            self.expr(f, u)?;
-        }
+    fn fenced_ref(&self, path: &str, name: Option<&Bson>, u: Use) -> Res {
+        name.map_or(Ok(()), |n| self.expr(n, u))?;
         self.reference(path, u)
     }
 
@@ -265,9 +261,9 @@ impl<'a> G<'a> {
                     }
                     let arg = d.get(op).expect("first key");
                     if self.fenced
-                        && let Some(p) = fenceable(op, arg)
+                        && let Some((p, name)) = fenceable(op, arg)
                     {
-                        return self.fenced_ref(p, arg, u);
+                        return self.fenced_ref(p, name, u);
                     }
                     match op.as_str() {
                         "$literal" => Ok(()),
@@ -573,13 +569,18 @@ fn path_ref(v: &Bson) -> Option<&str> {
     }
 }
 
-/// The input path of an `$objectToArray` or a computed-name `$getField` that `fence` can make safe: one over a plain
-/// field path, whose keys are the only ones that turn into values. The guard and `fence` both use this, so what one
-/// lets through the other always rewrites.
-fn fenceable<'b>(op: &str, arg: &'b Bson) -> Option<&'b str> {
+/// The input path of an `$objectToArray` or a computed-name `$getField` that `fence` can make safe, one over a plain
+/// field path whose keys are the only ones that turn into values, with the `$getField` name. The guard and `fence`
+/// both use this, so what one lets through the other always rewrites.
+fn fenceable<'b>(op: &str, arg: &'b Bson) -> Option<(&'b str, Option<&'b Bson>)> {
     match (op, arg) {
-        ("$objectToArray", v) => path_ref(v),
-        ("$getField", Bson::Document(d)) if d.get("field").is_some_and(|f| !matches!(f, Bson::String(s) if !s.starts_with('$'))) => d.get("input").and_then(path_ref),
+        ("$objectToArray", v) => Some((path_ref(v)?, None)),
+        ("$getField", Bson::Document(d)) => {
+            let name = d.get("field")?;
+            // A literal name is a plain reference, which `get_field` checks.
+            let computed = !matches!(name, Bson::String(s) if !s.starts_with('$'));
+            if computed { Some((path_ref(d.get("input")?)?, Some(name))) } else { None }
+        }
         _ => None,
     }
 }
@@ -616,17 +617,18 @@ fn fence_doc(d: &mut Document, re: &str) {
         return;
     }
     d.iter_mut().for_each(|(_, v)| fence_bson(v, re));
-    let Some((op, arg)) = d.iter().next().filter(|_| d.len() == 1) else { return };
-    let Some(path) = fenceable(op, arg) else { return };
-    let path = format!("${path}");
-    let hit = |input: &str| doc! { "$regexMatch": { "input": input, "regex": re } };
-    if op == "$objectToArray" {
-        *d = doc! { "$filter": { "input": { "$objectToArray": path }, "as": "qkv", "cond": { "$not": [hit("$$qkv.k")] } } };
-    } else {
-        let field = arg.as_document().and_then(|a| a.get("field")).cloned().unwrap_or(Bson::Null);
-        let name = doc! { "$let": { "vars": { "qf": field }, "in": { "$cond": [hit("$$qf"), "\u{1}refused", "$$qf"] } } };
-        *d = doc! { "$getField": { "field": name, "input": path } };
+    if d.len() != 1 {
+        return;
     }
+    let (op, arg) = d.iter().next().expect("one key");
+    let Some((path, name)) = fenceable(op, arg) else { return };
+    let (path, name) = (format!("${path}"), name.cloned());
+    let hit = |input: &str| doc! { "$regexMatch": { "input": input, "regex": re } };
+    *d = match name {
+        None => doc! { "$filter": { "input": { "$objectToArray": path }, "as": "qkv", "cond": { "$not": [hit("$$qkv.k")] } } },
+        // A name no document has, so the field reads as missing.
+        Some(n) => doc! { "$getField": { "field": { "$let": { "vars": { "qf": n }, "in": { "$cond": [hit("$$qf"), "\u{1}refused", "$$qf"] } } }, "input": path } },
+    };
 }
 
 /// Checks the parts of `call` that name fields against the rules of the namespaces it touches. Scope and system
@@ -660,10 +662,10 @@ pub fn check(call: &Call, rules: &Rules) -> Res {
         }
         Call::Insert { docs, .. } => docs.iter().try_for_each(|d| g.written(d, "")),
         Call::CreateIndex { keys, .. } => keys.keys().try_for_each(|k| g.pred(k)),
-        Call::SelectRows { wher, order, .. } => wher.iter().flatten().map(|c| &c.col).chain(order.iter().map(|(c, _)| c)).try_for_each(|c| g.column(c)),
+        Call::SelectRows { wher, order, .. } => where_cols(wher).chain(order.iter().map(|(c, _)| c)).try_for_each(|c| g.column(c)),
         Call::SqlInsertRows { rows, .. } => rows.iter().flat_map(|row| row.keys()).try_for_each(|c| g.column(c)),
-        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(wher.iter().flatten().map(|c| &c.col)).try_for_each(|c| g.column(c)),
-        Call::SqlDeleteRows { wher, .. } => wher.iter().flatten().try_for_each(|c| g.column(&c.col)),
+        Call::SqlUpdateRows { set, wher, .. } => set.keys().chain(where_cols(wher)).try_for_each(|c| g.column(c)),
+        Call::SqlDeleteRows { wher, .. } => where_cols(wher).try_for_each(|c| g.column(c)),
         _ => Ok(()),
     }
 }

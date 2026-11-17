@@ -363,7 +363,7 @@ impl Args<'_> {
 
     fn wher(&self) -> Result<Vec<Vec<Cond>>, ArgErr> {
         let Some(v) = self.m.get("where").filter(|v| !v.is_null()) else { return Ok(Vec::new()) };
-        let Value::Array(a) = v else { return bad("`where` must be an array of {column, op, value}") };
+        let Value::Array(a) = v else { return bad("`where` must be an array of {column, op, value} or {any: [...]}") };
         a.iter().map(|c| match c {
             Value::Object(m) if m.len() == 1 && m.contains_key("any") => match &m["any"] {
                 Value::Array(any) if !any.is_empty() => any.iter().map(where_item).collect(),
@@ -372,6 +372,11 @@ impl Args<'_> {
             c => Ok(vec![where_item(c)?]),
         }).collect()
     }
+}
+
+/// Every column a `where` tests, in any group.
+pub fn where_cols(w: &[Vec<Cond>]) -> impl Iterator<Item = &String> {
+    w.iter().flatten().map(|c| &c.col)
 }
 
 /// One `{column, op, value}` item of a `where`.
