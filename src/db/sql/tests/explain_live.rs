@@ -29,9 +29,9 @@ fn candidate(p: &Plan) -> Option<String> {
     p.findings.iter().find_map(|f| f.fix.as_ref().filter(|x| x.kind == FixKind::Index).map(|x| x.sql.clone()))
 }
 
-/// Every reason a full scan gave for no index, for the assertion messages.
+/// Every finding with the reason it gave for no index, for the assertion messages.
 fn reasons(p: &Plan) -> Vec<String> {
-    p.findings.iter().filter_map(|f| f.no_fix.clone()).collect()
+    p.findings.iter().map(|f| format!("{}: {}", f.title, f.no_fix.clone().unwrap_or_default())).collect()
 }
 
 /// ANALYZE until the statistics count no write since it. Write counts reach the statistics a little after the statement
@@ -86,7 +86,8 @@ fn live_postgres_reads_the_table_the_statement_means_beside_a_public_one_of_the_
         // A mixed-case name, which only resolves when it is quoted.
         let t = format!("Twin_{}", unique_name("t"));
         let qt = schema_ident(&t);
-        let fx = PgFixture::new(l, &s, &format!("CREATE TABLE {qt} (id int PRIMARY KEY, status text NOT NULL); INSERT INTO {qt} SELECT g, 's' || (g % 50) FROM generate_series(1, 50000) g;"));
+        // Wide enough rows that the scan costs more than a full scan finding needs, whatever the estimate of the filter.
+        let fx = PgFixture::new(l, &s, &format!("CREATE TABLE {qt} (id int PRIMARY KEY, status text NOT NULL, note text); INSERT INTO {qt} SELECT g, 's' || (g % 50), repeat('x', 40) FROM generate_series(1, 50000) g;"));
         let public = format!("public.{qt}");
         l.qsql(&fx.pool, &format!("DROP TABLE IF EXISTS {public}; CREATE TABLE {public} (id int PRIMARY KEY, status text NOT NULL); INSERT INTO {public} SELECT g, 's' || (g % 50) FROM generate_series(1, 100) g;"));
         settle_pg(&fx, &format!("{}.{qt}", schema_ident(&s)));
