@@ -602,3 +602,35 @@ mod tests {
         assert!(KEYWORDS.iter().all(|k| k.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')));
     }
 }
+
+/// Words MySQL and MariaDB reserve: a name spelled like one must be quoted.
+pub const RESERVED_MY: &[&str] = &[
+    "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "BETWEEN", "BY", "CASE", "CHANGE", "CHECK", "COLLATE", "COLUMN", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+    "DATABASE", "DEFAULT", "DELETE", "DESC", "DESCRIBE", "DISTINCT", "DROP", "ELSE", "EXISTS", "EXPLAIN", "FALSE", "FOR", "FOREIGN", "FROM", "GRANT", "GROUP", "HAVING", "IF", "IGNORE", "IN", "INDEX", "INNER", "INSERT",
+    "INTERVAL", "INTO", "IS", "JOIN", "KEY", "KEYS", "KILL", "LEFT", "LIKE", "LIMIT", "LOCK", "MATCH", "NOT", "NULL", "ON", "OPTION", "OR", "ORDER", "OUTER", "PRIMARY", "RANGE", "RANK", "READ", "REFERENCES", "REGEXP",
+    "RENAME", "REPLACE", "RIGHT", "ROW", "ROWS", "SCHEMA", "SELECT", "SET", "SHOW", "SYSTEM", "TABLE", "THEN", "TO", "TRIGGER", "TRUE", "UNION", "UNIQUE", "UPDATE", "USE", "USING", "VALUES", "WHEN", "WHERE", "WITH",
+];
+
+/// Words PostgreSQL reserves, some of them read as functions (current_date): a name spelled like one must be quoted.
+pub const RESERVED_PG: &[&str] = &[
+    "ALL", "ANALYSE", "ANALYZE", "AND", "ANY", "ARRAY", "AS", "ASC", "ASYMMETRIC", "AUTHORIZATION", "BINARY", "BOTH", "CASE", "CAST", "CHECK", "COLLATE", "COLLATION", "COLUMN", "CONCURRENTLY", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_CATALOG",
+    "CURRENT_DATE", "CURRENT_ROLE", "CURRENT_SCHEMA", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DEFAULT", "DEFERRABLE", "DESC", "DISTINCT", "DO", "ELSE", "END", "EXCEPT", "FALSE", "FETCH", "FOR", "FOREIGN", "FREEZE", "FROM", "FULL", "GRANT",
+    "GROUP", "HAVING", "ILIKE", "IN", "INITIALLY", "INNER", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "LATERAL", "LEADING", "LEFT", "LIKE", "LIMIT", "LOCALTIME", "LOCALTIMESTAMP", "NATURAL", "NOT", "NOTNULL", "NULL", "OFFSET", "ON", "ONLY", "OR", "ORDER",
+    "OUTER", "OVERLAPS", "PLACING", "PRIMARY", "REFERENCES", "RETURNING", "RIGHT", "SELECT", "SESSION_USER", "SIMILAR", "SOME", "SYMMETRIC", "SYSTEM_USER", "TABLE", "TABLESAMPLE", "THEN", "TO", "TRAILING", "TRUE", "UNION", "UNIQUE", "USER", "USING", "VARIADIC",
+    "VERBOSE", "WHEN", "WHERE", "WINDOW", "WITH",
+];
+
+impl Dialect {
+    /// Whether `name` must be quoted to mean that name: PostgreSQL folds a bare name to lower case, and a reserved word
+    /// reads as the keyword or function. Shared by completion and the plan rewrites so both quote alike.
+    pub fn needs_quote(self, name: &str) -> bool {
+        let reserved = if self == Dialect::Postgres { RESERVED_PG } else { RESERVED_MY };
+        !self.plain_spelling(name) || reserved.contains(&name.to_ascii_uppercase().as_str())
+    }
+
+    /// Whether `name` keeps its spelling bare. After a dot a reserved word reads as a name, so only this matters there.
+    pub fn plain_spelling(self, name: &str) -> bool {
+        let ok = |c: char| if self == Dialect::Postgres { c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' } else { c.is_ascii_alphanumeric() || c == '_' || c == '$' };
+        !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(ok)
+    }
+}

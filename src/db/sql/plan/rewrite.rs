@@ -126,15 +126,13 @@ fn name_for(d: Dialect, t: &TableEv, parts: &[String], also: &[String]) -> Strin
 
 /// A name as SQL: bare when it reads as a plain identifier, else quoted.
 fn ident_text(s: &str, d: Dialect) -> String {
-    let plain = s.chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic()) && s.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) && (d != Dialect::Postgres || !s.chars().any(|c| c.is_ascii_uppercase()));
-    // A column named like a keyword (order, user, key) breaks the statement unless quoted; quoting any of them is always valid.
-    let keyword = super::super::dialect::KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(s));
-    if plain && !keyword { s.to_string() } else { d.quote_ident(s) }
+    if d.needs_quote(s) { d.quote_ident(s) } else { s.to_string() }
 }
 
+/// After a dot a reserved word is read as a name, so the column there is quoted only to keep its spelling.
 fn col_text(c: &ColRef, d: Dialect) -> String {
     match &c.qual {
-        Some(q) => format!("{}.{}", ident_text(q, d), ident_text(&c.name, d)),
+        Some(q) => format!("{}.{}", ident_text(q, d), if d.plain_spelling(&c.name) { c.name.clone() } else { d.quote_ident(&c.name) }),
         None => ident_text(&c.name, d),
     }
 }
@@ -781,8 +779,13 @@ mod tests {
     fn a_column_named_like_a_keyword_is_quoted_in_a_rewrite() {
         assert_eq!(ident_text("created_at", Dialect::Postgres), "created_at");
         assert_eq!(ident_text("order", Dialect::Postgres), "\"order\"");
-        assert_eq!(ident_text("user", Dialect::MySql), "`user`");
-        assert_eq!(col_text(&ColRef { qual: Some("o".into()), name: "key".into() }, Dialect::MySql), "o.`key`");
+        assert_eq!(ident_text("current_date", Dialect::Postgres), "\"current_date\"");
+        assert_eq!(ident_text("returning", Dialect::Postgres), "\"returning\"");
+        assert_eq!(ident_text("rank", Dialect::MySql), "`rank`");
+        // Common names that are not reserved stay bare, and a reserved word after a dot is read as a name.
+        assert_eq!(ident_text("status", Dialect::MySql), "status");
+        assert_eq!(col_text(&ColRef { qual: Some("o".into()), name: "key".into() }, Dialect::MySql), "o.key");
+        assert_eq!(col_text(&ColRef { qual: Some("rank".into()), name: "created_at".into() }, Dialect::MySql), "`rank`.created_at");
     }
 
     fn fixture(name: &str) -> &'static str {
