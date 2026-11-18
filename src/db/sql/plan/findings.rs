@@ -111,7 +111,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
             }
-        } else if n.label == "index" && n.access == Access::Other && big && weighty {
+        } else if ((n.label == "index" && n.access == Access::Other) || super::evidence::full_index_scan(&n.label)) && big && weighty {
             push(Kind::FullIndexScan, Severity::Warn, format!("Full index scan of {name}"), weight.clone(), vec![format!("Reads every entry of {}, about {} of them, instead of searching it.", if n.index.is_empty() { "the index" } else { &n.index }, count(read.unwrap_or(0.0)))], None);
         } else if let (Some(r), Some(k)) = (n.removed, n.kept_rows()) {
             if r >= BIG_SCAN && r >= 10.0 * k && weighty {

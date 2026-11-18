@@ -129,9 +129,14 @@ fn demo_type(name: &str, d: Dialect) -> &'static str {
 }
 
 /// A node that reads every row of its table: a full scan, or MySQL's full index scan, which a filter on an indexed
-/// column it cannot search also leaves reading everything.
+/// column it cannot search also leaves reading everything. EXPLAIN ANALYZE's tree names the latter in its label.
 pub fn reads_all(n: &PlanNode) -> bool {
-    n.access == Access::Scan || (n.access == Access::Other && n.label == "index" && !n.alias.is_empty())
+    n.access == Access::Scan || (n.access == Access::Other && n.label == "index" && !n.alias.is_empty()) || full_index_scan(&n.label)
+}
+
+/// MySQL's tree text for a read of a whole index: "Covering index scan on o using idx", "Index scan on o using idx".
+pub fn full_index_scan(label: &str) -> bool {
+    label.starts_with("Covering index scan on ") || label.starts_with("Index scan on ")
 }
 
 impl TableEv {

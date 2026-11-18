@@ -3,7 +3,8 @@
 //! expression the filter tests, a trigram index for a pattern that starts with a wildcard, an index for each side of an
 //! OR. Each needs the catalog to show a valid B-tree index leading with the column the filter defeats, so a table
 //! without one gets nothing here. Also the column a MySQL or MariaDB join buffer matches on, when no index leads with it.
-//! Precision over recall: a rewrite is offered only when it returns the same rows, and an index only past PR2's gates.
+//! Precision over recall: a rewrite is offered only when it returns the same rows, and an index only when the table is
+//! big, its statistics fresh and the filter measured or estimated to keep few rows, as for any candidate index.
 
 use super::super::lex::{self, Tok};
 use super::cond::{self, ColRef, Expr, SargKind, Term};
@@ -98,7 +99,7 @@ fn base_lines(p: &Plan, i: usize, d: Dialect, t: &TableEv) -> Vec<String> {
     lines
 }
 
-/// PR2's gates for creating an index: fresh statistics and a filter measured or estimated to keep few rows. The lines
+/// The gates of any candidate index: fresh statistics and a filter measured or estimated to keep few rows. The lines
 /// are the evidence either way; the reason is why no index is offered, when one is not.
 fn gates(p: &Plan, i: usize, d: Dialect, t: &TableEv) -> (Vec<String>, Option<String>) {
     let mut lines = base_lines(p, i, d, t);
@@ -582,7 +583,7 @@ fn join_buffers(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, out: &mut [Fi
             continue;
         }
         let mut lines = base_lines(p, ti, d, t);
-        lines.push(format!("The tables before it give at most {} rows to look up.", count(outer)));
+        lines.push(if p.analyzed { format!("The tables before it gave {} rows to look up.", count(outer)) } else { format!("The tables before it give at most about {} rows to look up, by the server's estimate.", count(outer)) });
         if let Some(nd) = index::distinct(t, &col, rows) {
             lines.push(format!("Distinct values: {col} {}.", count(nd)));
         }
@@ -837,6 +838,10 @@ mod tests {
             "mariadb-orall-analyze" => include_str!("fixtures/mariadb-orall-analyze.json"),
             "mariadb-castint-analyze" => include_str!("fixtures/mariadb-castint-analyze.json"),
             "mariadb-bufjoin" => include_str!("fixtures/mariadb-bufjoin.json"),
+            "mysql-datewrap-analyze" => include_str!("fixtures/mysql-datewrap-analyze.txt"),
+            "mysql-lower-analyze" => include_str!("fixtures/mysql-lower-analyze.txt"),
+            "mysql-upperall-analyze" => include_str!("fixtures/mysql-upperall-analyze.txt"),
+            "mariadb-upperall-analyze" => include_str!("fixtures/mariadb-upperall-analyze.json"),
             _ => panic!("no fixture {name}"),
         }
     }
@@ -918,8 +923,8 @@ mod tests {
             let p = pg(name, vec![ix("bookings_pkey", &["id"])]);
             assert!(unused(&p).is_none(), "{name}: {:?}", unused(&p));
         }
-        // MySQL's plan, a full scan or a full scan of the index itself, and its EXPLAIN ANALYZE tree.
-        for name in ["mysql-datewrapall", "mysql-datewrap", "mysql-datewrapall-analyze"] {
+        // MySQL's plan, a full scan or a full scan of the index itself, and their EXPLAIN ANALYZE trees.
+        for name in ["mysql-datewrapall", "mysql-datewrap", "mysql-datewrapall-analyze", "mysql-datewrap-analyze"] {
             let p = my(Dialect::MySql, name, "orders", captured(Dialect::MySql));
             assert_eq!(rewrite(&p).as_deref(), Some("orders.created_at >= '2026-03-01'\nAND orders.created_at < '2026-03-02'"), "{name}: {:?}", p.findings);
             assert!(rewrite(&my(Dialect::MySql, name, "orders", vec![ix("PRIMARY", &["id"])])).is_none(), "{name}");
@@ -935,6 +940,7 @@ mod tests {
         let p = my(Dialect::MySql, "mysql-yearall", "orders", captured(Dialect::MySql));
         assert_eq!(rewrite(&p).as_deref(), Some("orders.created_at >= '2026-01-01'\nAND orders.created_at < '2027-01-01'"));
         assert!(unused(&p).unwrap().body[0].contains("takes its year first"));
+        assert!(rewrite(&my(Dialect::MySql, "mysql-yearall", "orders", vec![ix("PRIMARY", &["id"])])).is_none());
         // MariaDB turns YEAR() into a range itself, so its plan has no wrap and keeps the generic possible keys sentence.
         let p = my(Dialect::MariaDb, "mariadb-yearall", "orders", captured(Dialect::MariaDb));
         assert!(rewrite(&p).is_none());
@@ -991,6 +997,10 @@ mod tests {
         // MySQL and MariaDB print the cast with its character set.
         assert_eq!(rewrite(&my(Dialect::MySql, "mysql-castint", "orders", captured(Dialect::MySql))).as_deref(), Some("orders.id = 4242"));
         assert_eq!(rewrite(&my(Dialect::MariaDb, "mariadb-castint-analyze", "orders", captured(Dialect::MariaDb))).as_deref(), Some("orders.id = 4242"));
+        // Without an index on the column, nothing.
+        assert!(unused(&pg("pg18-cast", vec![ix("bookings_email_idx", &["email"])])).is_none());
+        assert!(unused(&my(Dialect::MySql, "mysql-castint", "orders", vec![ix("idx_orders_email", &["email"])])).is_none());
+        assert!(unused(&my(Dialect::MariaDb, "mariadb-castint-analyze", "orders", vec![ix("idx_orders_email", &["email"])])).is_none());
         // A literal the integer never prints as matches no row as text, so it is no rewrite, only the explanation.
         for lit in ["04242", "4242 ", "+4242", "42.0"] {
             let json = fixture("pg18-cast").replace("'4242'", &format!("'{lit}'"));
@@ -1037,6 +1047,16 @@ mod tests {
         // MySQL measured by ANALYZE: 5 rows of 200,000.
         let p = my(Dialect::MySql, "mysql-lowerall-analyze", "orders", captured(Dialect::MySql));
         assert_eq!(index_fix(&p).as_deref(), Some("-- Blocks writes to orders while it builds: MySQL adds an index on an expression under a shared lock.\nALTER TABLE `shop`.`orders` ADD INDEX `orders_lower_email_idx` ((lower(`email`))), ALGORITHM=INPLACE, LOCK=SHARED;"));
+        // The same through a full scan of the index on email, as EXPLAIN ANALYZE's tree prints it.
+        assert!(index_fix(&my(Dialect::MySql, "mysql-lower-analyze", "orders", captured(Dialect::MySql))).is_some_and(|s| s.contains("((lower(`email`)))")));
+        // upper is the same.
+        assert!(index_fix(&my(Dialect::MySql, "mysql-upperall-analyze", "orders", captured(Dialect::MySql))).is_some_and(|s| s.contains("`orders_upper_email_idx` ((upper(`email`)))")));
+        let f = my(Dialect::MariaDb, "mariadb-upperall-analyze", "orders", captured(Dialect::MariaDb));
+        assert!(unused(&f).is_some_and(|f| f.fix.is_none() && f.body[0].contains("wraps it in upper()")), "{:?}", f.findings);
+        // No index on email, nothing.
+        for (d, name) in [(Dialect::MySql, "mysql-lowerall-analyze"), (Dialect::MariaDb, "mariadb-lowerall-analyze")] {
+            assert!(unused(&my(d, name, "orders", vec![ix("PRIMARY", &["id"])])).is_none(), "{name}");
+        }
         // Its estimate alone is a guess: the finding, no index.
         let p = my(Dialect::MySql, "mysql-lowerall", "orders", captured(Dialect::MySql));
         assert_eq!(index_fix(&p), None);
@@ -1064,6 +1084,9 @@ mod tests {
         e.trgm = true;
         let p = found(Dialect::Postgres, "pg18-like", &e);
         assert_eq!(index_fix(&p).as_deref(), Some(r#"CREATE INDEX CONCURRENTLY "bookings_email_trgm_idx" ON "public"."bookings" USING gin ("email" gin_trgm_ops);"#));
+        let mut bare = ev(Dialect::Postgres, table(Dialect::Postgres, &[("bookings", "bookings")], vec![ix("bookings_pkey", &["id"])]));
+        bare.trgm = true;
+        assert!(unused(&found(Dialect::Postgres, "pg18-like", &bare)).is_none());
         // Two letters between wildcards give a trigram index nothing to search for.
         let mut p = parse(Dialect::Postgres, &fixture("pg18-like").replace("%42@example.com", "%42%")).unwrap();
         p.refind(Dialect::Postgres, Some(&e), false);
@@ -1113,7 +1136,7 @@ mod tests {
         let p = found(Dialect::MySql, "mysql-hashjoin", &ev(Dialect::MySql, t.clone()));
         let f = p.findings.iter().find(|f| f.kind == Kind::JoinBuffer).unwrap();
         assert_eq!(f.fix.as_ref().map(|x| x.sql.as_str()), Some("ALTER TABLE `shop`.`orders` ADD INDEX `orders_customer_id_idx` (`customer_id`), ALGORITHM=INPLACE, LOCK=NONE;"));
-        assert!(f.evidence.iter().any(|l| l == "The tables before it give at most 39 rows to look up."), "{:?}", f.evidence);
+        assert!(f.evidence.iter().any(|l| l == "The tables before it give at most about 39 rows to look up, by the server's estimate."), "{:?}", f.evidence);
         // An index on the column already: nothing.
         let mut with = t.clone();
         with.indexes.as_mut().unwrap().push(ix("idx_cust", &["customer_id"]));
