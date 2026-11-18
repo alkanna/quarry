@@ -1112,13 +1112,15 @@ mod tests {
         assert!(of(&parse(Dialect::Postgres, &half).unwrap(), Kind::SlowRows).is_some());
     }
 
-    /// The user's join of bookings b and service_inductors si as PostgreSQL 18 ran it, with every page in memory: b
-    /// read 13,530 rows of about 1 kB in 2,273 pages and kept 4,911, si read all 13,895 rows of about 2 kB in 3,316.
+    /// The user's join of bookings b and service_inductors si as PostgreSQL 18 ran it, in the captured shape and costs
+    /// of `user_plan` without its subquery: b is 4.5% of the cost and si 5.8%. Every page was in memory: b read 13,530
+    /// rows of about 1 kB in 2,273 pages and kept 4,911, si read all 13,895 rows of about 2 kB in 3,316.
     fn user_runs(b_ms: f64, si_ms: f64, total_ms: f64) -> Plan {
-        let b = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"bookings","Alias":"b","Startup Cost":0,"Total Cost":2442.6,"Plan Rows":4900,"Plan Width":40,"Actual Startup Time":0.02,"Actual Total Time":{b_ms},"Actual Rows":4911,"Actual Loops":1,"Filter":"(status = 'DONE'::text)","Rows Removed by Filter":8619,"Shared Hit Blocks":2273,"Shared Read Blocks":0}}"#);
-        let si = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"service_inductors","Alias":"si","Startup Cost":0,"Total Cost":3454.9,"Plan Rows":13895,"Plan Width":60,"Actual Startup Time":0.01,"Actual Total Time":{si_ms},"Actual Rows":13895,"Actual Loops":1,"Shared Hit Blocks":3316,"Shared Read Blocks":0}}"#);
-        let hash = format!(r#"{{"Node Type":"Hash","Parent Relationship":"Inner","Startup Cost":3454.9,"Total Cost":3454.9,"Plan Rows":13895,"Actual Startup Time":{h},"Actual Total Time":{h},"Actual Rows":13895,"Actual Loops":1,"Plans":[{si}]}}"#, h = si_ms + 1.0);
-        let plan = format!(r#"[{{"Plan":{{"Node Type":"Hash Join","Join Type":"Inner","Startup Cost":3628,"Total Cost":6100,"Plan Rows":4900,"Actual Startup Time":{h},"Actual Total Time":{total_ms},"Actual Rows":4911,"Actual Loops":1,"Hash Cond":"(b.service_id = si.service_id)","Plans":[{b},{hash}]}},"Planning Time":0.4,"Execution Time":{e}}}]"#, h = si_ms + 1.2, e = total_ms + 0.2);
+        let b = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"bookings","Alias":"b","Startup Cost":0,"Total Cost":2670,"Plan Rows":5009,"Plan Width":40,"Actual Startup Time":0.02,"Actual Total Time":{b_ms},"Actual Rows":4911,"Actual Loops":1,"Filter":"((created_at >= '2026-10-13 00:00:00+02'::timestamp with time zone) AND (provider = ANY ('{{ZEUS_TAXI,ZEUS_VLOC,ZEUS_TRAIN}}'::provider[])))","Rows Removed by Filter":8619,"Shared Hit Blocks":2273,"Shared Read Blocks":0}}"#);
+        let si = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"service_inductors","Alias":"si","Startup Cost":0,"Total Cost":3442,"Plan Rows":12622,"Plan Width":60,"Actual Startup Time":0.01,"Actual Total Time":{si_ms},"Actual Rows":13895,"Actual Loops":1,"Shared Hit Blocks":3316,"Shared Read Blocks":0}}"#);
+        let hash = format!(r#"{{"Node Type":"Hash","Parent Relationship":"Inner","Startup Cost":2670,"Total Cost":2670,"Plan Rows":5009,"Actual Startup Time":{h},"Actual Total Time":{h},"Actual Rows":4911,"Actual Loops":1,"Plans":[{b}]}}"#, h = b_ms + 0.5);
+        let join = format!(r#"{{"Node Type":"Hash Join","Join Type":"Inner","Parent Relationship":"Outer","Startup Cost":2700,"Total Cost":59357,"Plan Rows":5009,"Actual Startup Time":{h},"Actual Total Time":{j},"Actual Rows":4911,"Actual Loops":1,"Hash Cond":"(si.service_id = b.service_id)","Plans":[{si},{hash}]}}"#, h = b_ms + 0.6, j = total_ms - 1.0);
+        let plan = format!(r#"[{{"Plan":{{"Node Type":"Sort","Startup Cost":59600,"Total Cost":59677,"Plan Rows":5009,"Actual Startup Time":{total_ms},"Actual Total Time":{total_ms},"Actual Rows":4911,"Actual Loops":1,"Sort Key":["b.created_at"],"Plans":[{join}]}},"Planning Time":0.4,"Execution Time":{e}}}]"#, e = total_ms + 0.2);
         parse(Dialect::Postgres, &plan).unwrap()
     }
 
@@ -1130,12 +1132,14 @@ mod tests {
             s
         };
         let (b, si) = ("bookings b".to_string(), "service_inductors si".to_string());
-        // Four runs the user made, then one where b took only 18% of the time: its cost share keeps its finding.
-        for (b_ms, si_ms, total) in [(8.7, 11.0, 40.5), (13.7, 14.5, 60.7), (9.2, 11.6, 42.0), (15.9, 11.9, 50.8), (9.0, 11.9, 50.0)] {
+        // Four runs the user made, then one where b took only 15% of the time: still well over the time bound, while its
+        // cost alone, under 5%, would never make it worth a finding.
+        for (b_ms, si_ms, total) in [(8.7, 11.0, 40.5), (13.7, 14.5, 60.7), (9.2, 11.6, 42.0), (15.9, 11.9, 50.8), (7.5, 11.9, 50.0)] {
             let mut p = user_runs(b_ms, si_ms, total);
-            if b_ms == 9.0 {
-                let i = p.nodes.iter().position(|n| n.alias == "b").unwrap();
-                assert!(p.nodes[i].share.unwrap() < findings::SHARE_MIN, "{:?}", p.nodes[i].share);
+            let i = p.nodes.iter().position(|n| n.alias == "b").unwrap();
+            assert!(p.nodes[i].self_cost.unwrap() / p.nodes.iter().filter_map(|n| n.self_cost).sum::<f64>() < 0.05, "{:?}", p.nodes[i].self_cost);
+            if b_ms == 7.5 {
+                assert!((p.nodes[i].share.unwrap() - 0.15).abs() < 0.001, "{:?}", p.nodes[i].share);
             }
             assert_eq!(set(&p), [(b.clone(), Kind::FullScan, Severity::Warn), (si.clone(), Kind::ScanIsRight, Severity::Note)], "{b_ms} ms: {:?}", p.findings);
             assert!(p.findings.iter().all(|f| f.evidence.is_empty()));
@@ -1304,5 +1308,16 @@ mod tests {
         assert!(p.findings.iter().any(|f| f.kind == Kind::ScanIsRight && f.node.is_some_and(|i| p.nodes[i].rel == "bookings")), "{:?}", p.findings);
         // MySQL leaves the dependent subquery out of its costs, so c is all of them while it took almost none of the time.
         assert!(!has(&parse(Dialect::MySql, fixture("mysql-dep-analyze")).unwrap(), "c", Kind::FullScan));
+    }
+
+    #[test]
+    fn a_scan_that_took_a_tenth_of_the_time_is_worth_a_finding() {
+        let has = |p: &Plan, alias: &str, kind: Kind| p.findings.iter().any(|f| f.kind == kind && f.node.is_some_and(|i| p.nodes[i].alias == alias));
+        // 400,000 rows filtered to 53% in 10% of the time, beside the sort that spilled.
+        assert!(has(&parse(Dialect::Postgres, fixture("pg18-spill-analyze")).unwrap(), "bookings", Kind::FullScan));
+        // 400,000 rows filtered to 10% in 11% of the time, while JIT takes most of it.
+        assert!(has(&parse(Dialect::Postgres, fixture("pg18-subjoin-analyze")).unwrap(), "c", Kind::FullScan));
+        // All 100,439 rows go into the join buffer in 15% of the time.
+        assert!(has(&parse(Dialect::MariaDb, fixture("mariadb-joinbuf-analyze")).unwrap(), "i", Kind::ScanIsRight));
     }
 }

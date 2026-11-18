@@ -6,8 +6,11 @@ use super::evidence::Evidence;
 use super::index::{self, Advice};
 use super::{count, Access, Dialect, Op, Plan, PlanNode, BIG_SCAN};
 
-/// A node below this share of the plan's cost or time is not worth a finding about its scan.
+/// A node below this share of the plan's cost is not worth a finding about its scan, unless its time says otherwise.
 pub(super) const SHARE_MIN: f64 = 0.20;
+/// A node that took this share of the time is worth a finding about its scan whatever its cost. Half SHARE_MIN, so a
+/// scan the user's runs put at 21 to 31% of the time stays well clear of it when the noise between runs moves it.
+pub(super) const TIME_MIN: f64 = 0.10;
 /// An estimate this many times off is worth a finding.
 pub const OFF_WARN: f64 = 5.0;
 /// A sort or temporary table over fewer rows than this costs too little to mention.
@@ -134,7 +137,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
     for (i, n) in p.nodes.iter().enumerate() {
         let share = n.share.unwrap_or(0.0);
         // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
-        let weighty = weight_share(p, i).is_none_or(|s| s >= SHARE_MIN);
+        let weighty = weighs(p, i);
         let weight = weight_of(n, by_time);
         let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix, evidence: Vec::new(), no_fix: None });
         let name = n.name();
@@ -362,17 +365,22 @@ fn jit(p: &Plan, out: &mut Vec<Finding>) -> Option<usize> {
     Some(i)
 }
 
-/// The share that decides whether a node weighs enough for a finding: the larger of its share of the time and of the
-/// planner's cost. The cost is the same on every run of a plan, so a finding it justifies never comes and goes with
-/// timing noise; the time only adds findings for nodes that really took it. A node that took under TIME_FLOOR of the
-/// time is judged by its time alone: the cost was wrong about it, as MySQL's is when it leaves a dependent subquery out.
-pub(super) fn weight_share(p: &Plan, i: usize) -> Option<f64> {
-    let total: f64 = p.nodes.iter().filter_map(|n| n.self_cost).sum();
+/// Whether node `i` weighs enough for a finding about its scan: SHARE_MIN of the planner's cost, or TIME_MIN of the
+/// time when the plan ran. The cost is the same on every run of a plan, and the time bound sits far below a scan worth
+/// a finding, so neither comes and goes with timing noise. A node that took under TIME_FLOOR of the time is judged by
+/// its time alone: the cost was wrong about it, as MySQL's is when it leaves a dependent subquery out. With no share at
+/// all, as in MariaDB before 11, it weighs.
+pub(super) fn weighs(p: &Plan, i: usize) -> bool {
     let n = &p.nodes[i];
+    let total: f64 = p.nodes.iter().filter_map(|n| n.self_cost).sum();
     let cost = n.self_cost.filter(|_| total > 0.0).map(|c| c / total);
-    match (n.share, cost) {
-        (Some(t), Some(c)) if t >= TIME_FLOOR => Some(t.max(c)),
-        (t, c) => t.or(c),
+    let total_ms: f64 = p.nodes.iter().filter_map(|n| n.self_ms).sum();
+    let time = n.self_ms.filter(|_| p.analyzed && total_ms > 0.0).map(|m| m / total_ms);
+    match (time, cost) {
+        (Some(t), Some(c)) => t >= TIME_MIN || (t >= TIME_FLOOR && c >= SHARE_MIN),
+        (Some(t), None) => t >= TIME_MIN,
+        (None, Some(c)) => c >= SHARE_MIN,
+        (None, None) => true,
     }
 }
 

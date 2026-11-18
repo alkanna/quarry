@@ -5,7 +5,7 @@
 
 use super::cond::{self, ColRef, SargKind, Sargs, Val};
 use super::evidence::{IndexEv, TableEv};
-use super::findings::{and_list, pct_text, size, weight_share, Fix, FixKind, SHARE_MIN};
+use super::findings::{and_list, pct_text, size, weighs, Fix, FixKind};
 use super::tree::is_inner;
 use super::{count, Dialect, Op, Plan};
 
@@ -83,7 +83,7 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
         return Advice::No { why: format!("the filter keeps {} of the rows, too many for an index to read less than the scan", pct_text(kept * 100.0)), lines, kept: Some(kept) };
     }
     let repeated = repeated(p, i);
-    if let Some(s) = weight_share(p, i).filter(|&s| s < SHARE_MIN && !repeated) {
+    if let Some(s) = n.share.filter(|_| !weighs(p, i) && !repeated) {
         return no(format!("this scan is only {} of the plan", pct_text(s * 100.0)), lines);
     }
     let own = |c: &ColRef| c.qual.as_deref().is_none_or(|q| same(q, &n.alias, d) || same(q, &n.rel, d) || same(q, &t.table, d));
