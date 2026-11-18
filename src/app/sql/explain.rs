@@ -21,14 +21,14 @@ pub(in crate::app) struct SqlExplain {
     pub(super) dialect: Dialect,
     db: Db,
     schema: String,
-    pub(super) plan: Option<Plan>,
+    pub(in crate::app) plan: Option<Plan>,
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
     raw: String,
     /// The head tab: the tree or the raw text.
     raw_tab: bool,
     /// The node the panel shows, and one the tree should scroll to.
-    pub(super) sel: Option<usize>,
+    pub(in crate::app) sel: Option<usize>,
     pub(super) scroll_to: Option<usize>,
     /// The findings strip shows all of them, not the first two.
     pub(super) more: bool,

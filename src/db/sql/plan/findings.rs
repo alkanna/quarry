@@ -36,10 +36,8 @@ pub enum Severity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FixKind {
-    Index,
-    Analyze,
+    /// A session setting run before the statement, so the draft holds both.
     Setting,
-    Rewrite,
 }
 
 #[derive(Clone, Debug, PartialEq)]

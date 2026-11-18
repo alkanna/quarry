@@ -132,7 +132,8 @@ fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
         return Some(format!("Index Cond: {}", c.join(", ")));
     }
     if !n.join_cond.is_empty() {
-        let short: String = n.join_cond.trim_start_matches('(').trim_end_matches(')').chars().take(60).collect();
+        let line = cond::parse(&n.join_cond, d).map(|e| cond::one_line(&e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+        let short: String = line.chars().take(60).collect();
         return Some(if n.label.contains("Join") || n.label == "Hash" { short } else { format!("Lookup: {short}") });
     }
     n.detail.iter().find(|d| d.starts_with("Sort Key") || d.starts_with("Group Key")).cloned()
