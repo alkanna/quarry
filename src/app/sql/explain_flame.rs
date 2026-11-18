@@ -51,7 +51,7 @@ pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, act
             let rect = egui::Rect::from_min_size(egui::pos2(left, area.top() + b.row as f32 * (BAR_H + GAP)), egui::vec2(width, BAR_H));
             let n = &p.nodes[b.node];
             let name = format!("{} {}", n.label, n.name()).trim().to_string();
-            let r = ui.interact(rect, ui.id().with(("flame", b.node)), Sense::click());
+            let r = ui.interact(rect, ui.scope_id().with(("flame", b.node)), Sense::click());
             r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, x.sel == Some(b.node), &name));
             let (value, share) = (all[b.node], if total > 0.0 { all[b.node] / total } else { 0.0 });
             paint_bar(ui, rect, n, value, share, x.flame_time, state_of(&r), x.sel == Some(b.node));

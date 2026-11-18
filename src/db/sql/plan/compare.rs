@@ -58,6 +58,7 @@ impl History {
         self.kept.retain(|(k, ..)| k.conn != conn);
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.kept.len()
     }
