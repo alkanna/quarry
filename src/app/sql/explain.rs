@@ -272,7 +272,8 @@ fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
                 ui.label(job);
                 // A margin rather than leading spaces, so a long filter keeps its indent on every wrapped line.
                 let mut at = ui.available_rect_before_wrap();
-                at.min.x += text_w(ui, &"    ".repeat(n.depth + 1), egui::FontId::monospace(TXT_BODY));
+                // Deep plans stop indenting short of the cell's end, so their filters always keep room to wrap.
+                at.min.x = (at.min.x + text_w(ui, &"    ".repeat(n.depth + 1), egui::FontId::monospace(TXT_BODY))).min(at.max.x - 200.0);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
                     for d in &n.detail {
                         ui.label(RichText::new(d.as_str()).monospace().size(TXT_SMALL).color(MUTED()));
