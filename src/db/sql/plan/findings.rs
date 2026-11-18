@@ -4,7 +4,7 @@
 
 use super::evidence::Evidence;
 use super::index::{self, Advice};
-use super::{count, Access, Dialect, Plan, PlanNode, BIG_SCAN};
+use super::{count, Access, Dialect, Op, Plan, PlanNode, BIG_SCAN};
 
 /// A node below this share of the plan's cost or time is not worth a finding about its scan.
 pub const SHARE_MIN: f64 = 0.20;
@@ -154,7 +154,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
             }
-        } else if ((n.label == "index" && n.access == Access::Other) || super::evidence::full_index_scan(&n.label)) && big && weighty {
+        } else if n.op == Op::FullIndexScan && big && weighty {
             push(Kind::FullIndexScan, Severity::Warn, format!("Full index scan of {name}"), weight.clone(), vec![format!("Reads every entry of {}, about {} of them, instead of searching it.", if n.index.is_empty() { "the index" } else { &n.index }, count(read.unwrap_or(0.0)))], None);
         } else if let (Some(r), Some(k)) = (n.removed, n.kept_rows()) {
             if r >= BIG_SCAN && r >= 10.0 * k && weighty {
@@ -303,7 +303,7 @@ fn jit(p: &Plan, out: &mut Vec<Finding>) -> Option<usize> {
     let (j, exec) = (p.jit.as_ref()?, p.exec_ms?);
     // Each parallel worker compiles its own copy and the plan prints the sum, so side by side it took about the sum
     // over the processes.
-    let procs = p.nodes.iter().filter(|n| n.label.starts_with("Gather")).filter_map(|n| n.workers).fold(0.0, f64::max) + 1.0;
+    let procs = p.nodes.iter().filter(|n| n.op == Op::Gather).filter_map(|n| n.workers).fold(0.0, f64::max) + 1.0;
     let took = j.total_ms / procs;
     if took < SLOW_MIN_MS || took < 0.2 * exec {
         return None;
@@ -418,17 +418,13 @@ fn dominant(p: &Plan, by_time: bool, out: &mut Vec<Finding>) {
         let most = if share >= SHARE_MOST { "does most of the work" } else { "takes the largest part" };
         let kids: Vec<usize> = n.kids.iter().copied().filter(|&k| super::tree::sub_run(p, k).is_none()).collect();
         let fed = kids.iter().filter_map(|&k| rows_out(p, k)).sum::<f64>();
-        let key = |k: &str| n.detail.iter().find_map(|d| d.strip_prefix(k)).map(str::trim).map(str::to_string);
-        let (severity, title, mut body) = if n.label.contains("Join") || super::tree::is_nested_loop(&n.label) {
+        let (severity, title, mut body) = if n.op.is_join() || n.op == Op::NestedLoop {
             (Severity::Warn, format!("{what} {most}"), join_body(p, i))
-        } else if what.contains("Sort") {
-            let by = key("Sort Key:").map(|k| format!(" by {k}")).unwrap_or_default();
+        } else if n.op == Op::Sort {
+            let by = if n.sort_key.is_empty() { String::new() } else { format!(" by {}", n.sort_key.trim()) };
             (Severity::Warn, format!("{what} {most}"), vec![format!("Sorts {} rows{by}.", count(fed))])
-        } else if what.contains("Aggregate") || what == "Group" || what == "WindowAgg" {
-            let line = match key("Group Key:") {
-                Some(k) => format!("Groups {} rows by {k}.", count(fed)),
-                None => format!("Aggregates {} rows.", count(fed)),
-            };
+        } else if matches!(n.op, Op::Aggregate | Op::Window) {
+            let line = if n.group_key.is_empty() { format!("Aggregates {} rows.", count(fed)) } else { format!("Groups {} rows by {}.", count(fed), n.group_key.trim()) };
             (Severity::Warn, format!("{what} {most}"), vec![line])
         } else if n.access == Access::Scan && n.filter.is_empty() {
             let rows = rows_out(p, i).unwrap_or(0.0);
@@ -457,7 +453,7 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
     let sides: Vec<usize> = n.kids.iter().copied().filter(|&k| super::tree::sub_run(p, k).is_none()).collect();
     let side = |k: usize| {
         // A Hash Join's inner side is the Hash built from the node below it.
-        let k = if p.nodes[k].label == "Hash" { p.nodes[k].kids.first().copied().unwrap_or(k) } else { k };
+        let k = if p.nodes[k].op == Op::Hash { p.nodes[k].kids.first().copied().unwrap_or(k) } else { k };
         (rows_out(p, k).unwrap_or(0.0), below_name(p, k).unwrap_or_else(|| kind_of(&p.nodes[k].label).to_string()))
     };
     let cond = n.join_cond_expr.as_ref().map(|e| super::cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());

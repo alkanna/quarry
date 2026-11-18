@@ -5,7 +5,7 @@
 use super::explain::{SqlExplain, XAct};
 use super::explain_panel::{access_color, figure, share_color, HEAD_H, TAG_H};
 use crate::app::*;
-use crate::db::sql::plan::{cond, findings, Plan, PlanNode, Severity};
+use crate::db::sql::plan::{cond, findings, Op, Plan, PlanNode, Severity};
 
 const ROW: f32 = 32.0;
 const ROW_SUB: f32 = 46.0;
@@ -133,9 +133,12 @@ fn node_sub(n: &PlanNode) -> Option<String> {
     if !n.join_cond.is_empty() {
         let line = n.join_cond_expr.as_ref().map(|e| cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
         let short: String = line.chars().take(60).collect();
-        return Some(if n.label.contains("Join") || n.label == "Hash" { short } else { format!("Lookup: {short}") });
+        return Some(if n.op.is_join() || n.op == Op::Hash { short } else { format!("Lookup: {short}") });
     }
-    n.detail.iter().find(|d| d.starts_with("Sort Key") || d.starts_with("Group Key")).cloned()
+    if !n.sort_key.is_empty() {
+        return Some(format!("Sort Key: {}", n.sort_key));
+    }
+    (!n.group_key.is_empty()).then(|| format!("Group Key: {}", n.group_key))
 }
 
 fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str>, mark: Option<Severity>, cols: &[Col]) {

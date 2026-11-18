@@ -30,6 +30,36 @@ pub enum Access {
     Other,
 }
 
+/// What a node does, decided once by the parser from the engine's own names, so the findings and the dialog never match
+/// label text. Only the kinds something reads are told apart. MySQL's tree text is recognized for its nested loops,
+/// sorts, groups, hashes and full index scans; its hash joins and limits stay `Other`, as they always read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Op {
+    /// MySQL's read of a whole index: the JSON's "index" access, the tree's "Index scan on" and "Covering index scan on".
+    FullIndexScan,
+    NestedLoop,
+    HashJoin,
+    MergeJoin,
+    /// MySQL and MariaDB's block nested loop, matched in a join buffer.
+    JoinBuffer,
+    /// The hash table a Hash Join builds from its inner side.
+    Hash,
+    Gather,
+    Sort,
+    Aggregate,
+    Window,
+    Limit,
+    #[default]
+    Other,
+}
+
+impl Op {
+    /// A join that pairs rows on a condition of its own: PostgreSQL's Hash and Merge Join, MySQL's join buffer.
+    pub fn is_join(self) -> bool {
+        matches!(self, Op::HashJoin | Op::MergeJoin | Op::JoinBuffer)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PlanNode {
     pub depth: usize,
@@ -38,6 +68,7 @@ pub struct PlanNode {
     pub target: String,
     pub index: String,
     pub access: Access,
+    pub op: Op,
     /// The node above this one and those below it, by index into `Plan::nodes`.
     pub parent: Option<usize>,
     pub kids: Vec<usize>,
@@ -104,6 +135,9 @@ pub struct PlanNode {
     pub share: Option<f64>,
     /// ANALYZE never reached this node.
     pub never_ran: bool,
+    /// PostgreSQL's Sort Key and Group Key, each as one line.
+    pub sort_key: String,
+    pub group_key: String,
     /// Filters, conditions and keys, one line each.
     pub detail: Vec<String>,
 }
@@ -247,7 +281,8 @@ pub fn plan_text(sets: &[ResultSet]) -> Result<String, String> {
 /// The plan in `text`, as the engine `d` writes it.
 pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     let t = text.trim();
-    let mut plan = if t.starts_with('{') || t.starts_with('[') {
+    let json = t.starts_with('{') || t.starts_with('[');
+    let mut plan = if json {
         let v: Value = serde_json::from_str(t).map_err(|e| format!("The plan is not valid JSON: {e}"))?;
         if d == Dialect::Postgres { parse_pg(&v)? } else { parse_my(&v)? }
     } else if d != Dialect::Postgres && t.contains("-> ") {
@@ -256,6 +291,9 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
         return Err("The plan is in a form this window cannot read. See the raw text.".into());
     };
     tree::link(&mut plan);
+    if !json {
+        tree_filters(&mut plan);
+    }
     tree::derive(&mut plan, d);
     for n in &mut plan.nodes {
         let read = |t: &str| if t.is_empty() { None } else { cond::parse(t, d) };
@@ -386,6 +424,18 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     };
     node.index = text(n, "Index Name").to_string();
     node.access = if ty == "Seq Scan" { Access::Scan } else if ty.contains("Index") { Access::Index } else { Access::Other };
+    node.op = match ty {
+        "Nested Loop" => Op::NestedLoop,
+        "Hash Join" => Op::HashJoin,
+        "Merge Join" => Op::MergeJoin,
+        "Hash" => Op::Hash,
+        "Gather" | "Gather Merge" => Op::Gather,
+        "Sort" | "Incremental Sort" => Op::Sort,
+        "Aggregate" | "Group" => Op::Aggregate,
+        "WindowAgg" => Op::Window,
+        "Limit" => Op::Limit,
+        _ => Op::Other,
+    };
     node.rows = num(n, "Plan Rows");
     node.cost = num(n, "Total Cost");
     node.startup_cost = num(n, "Startup Cost");
@@ -407,8 +457,8 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             node.detail.push(format!("{key}: {t}"));
         }
     }
-    for key in ["Sort Key", "Group Key"] {
-        let t = joined(n, key);
+    (node.sort_key, node.group_key) = (joined(n, "Sort Key"), joined(n, "Group Key"));
+    for (key, t) in [("Sort Key", &node.sort_key), ("Group Key", &node.group_key)] {
         if !t.is_empty() {
             node.detail.push(format!("{key}: {t}"));
         }
@@ -465,21 +515,21 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             "table" => my_table(v, depth, out),
             // Tables joined in a row hang under one node, so the join reads as one step with its tables below it.
             "nested_loop" if v.as_array().is_some_and(|a| a.len() > 1) => {
-                out.push(PlanNode { depth, label: "Nested loop".into(), ..Default::default() });
+                out.push(PlanNode { depth, label: "Nested loop".into(), op: Op::NestedLoop, ..Default::default() });
                 my_walk(v, depth + 1, out);
             }
             "nested_loop" | "query_block" | "materialized_from_subquery" | "materialized" | "read_sorted_file" => my_walk(v, depth, out),
-            "ordering_operation" => my_op("Sort", "", v, depth, out, |_| {}),
-            "grouping_operation" => my_op("Group", "", v, depth, out, |_| {}),
+            "ordering_operation" => my_op("Sort", "", v, depth, out, |n| n.op = Op::Sort),
+            "grouping_operation" => my_op("Group", "", v, depth, out, |n| n.op = Op::Aggregate),
             "duplicates_removal" => my_op("Distinct", "", v, depth, out, |_| {}),
             "buffer_result" => my_op("Buffer result", "", v, depth, out, |_| {}),
             "windowing" | "window_functions_computation" => my_op("Window functions", "", v, depth, out, |_| {}),
             "union_result" => my_op("Union", text(v, "table_name"), v, depth, out, |_| {}),
             // MariaDB names the operation and always means it.
-            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, |n| n.filesort = true),
+            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, |n| (n.filesort, n.op) = (true, Op::Sort)),
             "temporary_table" => my_op("Temporary table", "", v, depth, out, |n| n.temp_table = true),
             // The join's own condition sits here, apart from the filter of the table below.
-            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| (n.join_buffer, n.join_cond) = (true, text(v, "attached_condition").to_string())),
+            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| (n.join_buffer, n.op, n.join_cond) = (true, Op::JoinBuffer, text(v, "attached_condition").to_string())),
             "query_specifications" => v.as_array().into_iter().flatten().for_each(|s| my_walk(s, depth, out)),
             "attached_subqueries" | "optimized_away_subqueries" | "subqueries" => {
                 for s in v.as_array().into_iter().flatten() {
@@ -514,6 +564,9 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         _ if key.is_empty() => Access::Other,
         _ => Access::Index,
     };
+    if access == "index" {
+        node.op = Op::FullIndexScan;
+    }
     node.rows = num(t, "rows_examined_per_scan").or_else(|| num(t, "rows"));
     let ci = t.get("cost_info");
     // MySQL gives the running total of the join and this table's read and eval cost; MariaDB gives this table's cost.
@@ -597,6 +650,19 @@ fn parse_tree(text: &str) -> Plan {
         }
         let l = node.label.clone();
         node.access = if l.starts_with("Table scan") { Access::Scan } else if l.contains("index") || l.starts_with("Index") { Access::Index } else { Access::Other };
+        node.op = if l.to_ascii_lowercase().starts_with("nested loop") {
+            Op::NestedLoop
+        } else if l.starts_with("Sort") {
+            Op::Sort
+        } else if l.starts_with("Aggregate") || l.starts_with("Group") {
+            Op::Aggregate
+        } else if l == "Hash" {
+            Op::Hash
+        } else if l.starts_with("Covering index scan on ") || l.starts_with("Index scan on ") {
+            Op::FullIndexScan
+        } else {
+            Op::Other
+        };
         // "Table scan on o", "Index lookup on c using PRIMARY (id=o.cid)", "Index range scan on o using idx over (..)".
         if let Some(rest) = l.split_once(" on ").map(|(_, r)| r).filter(|_| l.starts_with("Table scan") || l.contains("ndex ")) {
             let mut words = rest.split_whitespace();
@@ -618,6 +684,22 @@ fn parse_tree(text: &str) -> Plan {
         plan.nodes.push(node);
     }
     plan
+}
+
+/// The tree prints "Filter: (cond)" as a node over the "Table scan on o" or full index scan it filters; the scan is what
+/// the filter slows down, so it takes the filter and the rows it removed. Runs once the nodes are linked.
+fn tree_filters(p: &mut Plan) {
+    for i in 0..p.nodes.len() {
+        let Some(j) = p.nodes[i].parent else { continue };
+        let n = &p.nodes[i];
+        if (n.label.starts_with("Table scan") || n.op == Op::FullIndexScan) && n.filter.is_empty() && !p.nodes[j].filter.is_empty() && p.nodes[j].kids.len() == 1 {
+            p.nodes[i].filter = p.nodes[j].filter.clone();
+            if let (Some(read), Some(kept)) = (p.nodes[i].actual_rows, p.nodes[j].actual_rows) {
+                p.nodes[i].removed = Some((read - kept).max(0.0));
+                p.nodes[i].kept = Some(kept);
+            }
+        }
+    }
 }
 
 /// The number after `key` in `s`, in plain or exponent form (662e-6). Stops at ".." so a range like 0.03..0.04 reads as 0.03.

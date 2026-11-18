@@ -5,7 +5,7 @@
 use super::explain::{SqlExplain, XAct};
 use crate::app::*;
 use crate::db::sql::plan::findings::{self, Fix};
-use crate::db::sql::plan::{cond, rewrite, Access, Finding, FixKind, PlanNode, Severity};
+use crate::db::sql::plan::{cond, rewrite, Access, Finding, FixKind, Op, PlanNode, Severity};
 use crate::db::sql::Dialect;
 
 /// The findings shown before "N more".
@@ -456,26 +456,22 @@ fn context_line(p: &crate::db::sql::plan::Plan, i: usize) -> String {
     }
     if let Some(j) = n.parent {
         let parent = &p.nodes[j];
-        let pl = parent.label.as_str();
         let first = parent.kids.first() == Some(&i);
         let what = if n.role.starts_with("SubPlan") || n.role.starts_with("InitPlan") || n.role.starts_with("CTE") {
-            format!("{}, runs for {pl}", n.role)
-        } else if pl == "Hash" {
-            "builds the join's hash table".to_string()
-        } else if pl.to_ascii_lowercase().starts_with("nested loop") {
-            if first { "drives the nested loop".into() } else { "runs once per row of the side above".into() }
-        } else if pl.contains("Join") {
-            if first { "the join's outer side".into() } else { "the join's inner side".into() }
-        } else if pl.starts_with("Gather") {
-            "run by parallel workers".into()
-        } else if pl == "Limit" {
-            "read until the limit is reached".into()
-        } else if pl.starts_with("Sort") || pl == "Filesort" {
-            "feeds the sort".into()
-        } else if pl.starts_with("Aggregate") || pl == "Group" || pl.starts_with("Group") {
-            "feeds the aggregate".into()
+            format!("{}, runs for {}", n.role, parent.label)
         } else {
-            format!("under {pl}")
+            match parent.op {
+                Op::Hash => "builds the join's hash table".to_string(),
+                Op::NestedLoop if first => "drives the nested loop".into(),
+                Op::NestedLoop => "runs once per row of the side above".into(),
+                o if o.is_join() && first => "the join's outer side".into(),
+                o if o.is_join() => "the join's inner side".into(),
+                Op::Gather => "run by parallel workers".into(),
+                Op::Limit => "read until the limit is reached".into(),
+                Op::Sort => "feeds the sort".into(),
+                Op::Aggregate => "feeds the aggregate".into(),
+                _ => format!("under {}", parent.label),
+            }
         };
         parts.push(what);
     }

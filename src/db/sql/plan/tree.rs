@@ -2,9 +2,9 @@
 //! engines print totals that include the nodes below (PostgreSQL, MySQL's tree text) or a running total of the join
 //! (MySQL's JSON), so a node's own share has to be taken apart here.
 
-use super::{Dialect, Plan};
+use super::{Dialect, Op, Plan};
 
-/// Sets `parent` and `kids` from the depths, and gives a MySQL tree-text scan the filter its parent applies to it.
+/// Sets `parent` and `kids` from the depths.
 pub(super) fn link(p: &mut Plan) {
     let mut stack: Vec<usize> = Vec::new();
     for i in 0..p.nodes.len() {
@@ -17,19 +17,6 @@ pub(super) fn link(p: &mut Plan) {
             p.nodes[j].kids.push(i);
         }
         stack.push(i);
-    }
-    // MySQL's tree prints "Filter: (cond)" over the "Table scan on o" or full index scan it filters; the scan is what the
-    // filter slows down.
-    for i in 0..p.nodes.len() {
-        let Some(j) = p.nodes[i].parent else { continue };
-        let l = &p.nodes[i].label;
-        if (l.starts_with("Table scan") || super::evidence::full_index_scan(l)) && p.nodes[i].filter.is_empty() && !p.nodes[j].filter.is_empty() && p.nodes[j].kids.len() == 1 {
-            p.nodes[i].filter = p.nodes[j].filter.clone();
-            if let (Some(read), Some(kept)) = (p.nodes[i].actual_rows, p.nodes[j].actual_rows) {
-                p.nodes[i].removed = Some((read - kept).max(0.0));
-                p.nodes[i].kept = Some(kept);
-            }
-        }
     }
 }
 
@@ -92,18 +79,13 @@ fn est_loops(p: &Plan) -> Vec<f64> {
         let Some(j) = p.nodes[i].parent else { continue };
         let parent = &p.nodes[j];
         let mut l = loops[j];
-        if is_nested_loop(&parent.label) && is_inner(p, j, i) {
+        if parent.op == Op::NestedLoop && is_inner(p, j, i) {
             let outer = parent.kids.iter().find(|&&k| !is_inner(p, j, k)).and_then(|&k| p.nodes[k].rows).unwrap_or(1.0);
             l *= outer.max(1.0);
         }
         loops[i] = l;
     }
     loops
-}
-
-/// PostgreSQL's "Nested Loop" and MySQL's "Nested loop inner join".
-pub(super) fn is_nested_loop(label: &str) -> bool {
-    label.to_ascii_lowercase().starts_with("nested loop")
 }
 
 /// Whether `k` is the inner side of the join `j`: PostgreSQL names it, MySQL's tree puts the outer side first.
@@ -256,7 +238,7 @@ fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
     let mut j = p.nodes[i].parent?;
     loop {
         let x = &p.nodes[j];
-        if x.label.starts_with("Gather") {
+        if x.op == Op::Gather {
             return Some(x.workers.unwrap_or(0.0) + 1.0);
         }
         j = x.parent?;

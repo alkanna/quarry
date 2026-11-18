@@ -6,8 +6,8 @@
 use super::cond::{self, ColRef, SargKind, Sargs, Val};
 use super::evidence::{IndexEv, TableEv};
 use super::findings::{and_list, pct_text, size, Fix, FixKind, SHARE_MIN};
-use super::tree::{is_inner, is_nested_loop};
-use super::{count, Dialect, Plan};
+use super::tree::is_inner;
+use super::{count, Dialect, Op, Plan};
 
 /// A table smaller than this reads whole about as fast as through an index.
 pub const MIN_ROWS: f64 = 10_000.0;
@@ -277,12 +277,12 @@ pub(super) fn same(a: &str, b: &str, d: Dialect) -> bool {
 /// Whether node `i` runs many times as the inner side of a nested loop.
 pub fn repeated(p: &Plan, i: usize) -> bool {
     let n = &p.nodes[i];
-    if n.loops.is_some_and(|l| l >= REPEAT_LOOPS) && n.parent.is_some_and(|j| is_nested_loop(&p.nodes[j].label)) {
+    if n.loops.is_some_and(|l| l >= REPEAT_LOOPS) && n.parent.is_some_and(|j| p.nodes[j].op == Op::NestedLoop) {
         return true;
     }
     let Some(j) = n.parent else { return false };
     let parent = &p.nodes[j];
-    if !is_nested_loop(&parent.label) || !is_inner(p, j, i) {
+    if parent.op != Op::NestedLoop || !is_inner(p, j, i) {
         return false;
     }
     parent.kids.iter().find(|&&k| !is_inner(p, j, k)).and_then(|&k| p.nodes[k].rows).is_some_and(|r| r >= REPEAT_LOOPS)
@@ -329,7 +329,7 @@ fn divisor(p: &Plan, i: usize) -> f64 {
     }
     let mut j = p.nodes[i].parent;
     while let Some(k) = j {
-        if p.nodes[k].label.starts_with("Gather") {
+        if p.nodes[k].op == Op::Gather {
             let w = p.nodes[k].workers.unwrap_or(0.0);
             let leader = 1.0 - 0.3 * w;
             return (w + leader.max(0.0)).max(1.0);
