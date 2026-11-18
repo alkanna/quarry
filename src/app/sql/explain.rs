@@ -3,14 +3,15 @@
 //! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
 use super::explain_compare::{compare_view, Prev};
-use super::explain_flame::flame_view;
+use super::explain_flame::{flame_view, FlameCache};
 use super::explain_hypo::HypoRun;
 use super::explain_panel::{findings_strip, inspector};
-use super::explain_tree::plan_tree;
+use super::explain_tree::{plan_tree, TreeRow};
 use super::query::{run_db, run_target};
 use crate::app::*;
 use crate::db::sql::plan::{self, compare, Analyze, Plan};
 use crate::db::sql::{Db, Dialect};
+use std::sync::Arc;
 
 /// The state of one open SQL explain dialog.
 pub(in crate::app) struct SqlExplain {
@@ -18,6 +19,8 @@ pub(in crate::app) struct SqlExplain {
     req: u64,
     busy: bool,
     pub(super) stmt: String,
+    /// The statement as the session's plan history knows it, normalized once.
+    key_stmt: String,
     conn: u64,
     /// The tab's database, for the Query tab the classic rows open in.
     tab_db: String,
@@ -26,7 +29,11 @@ pub(in crate::app) struct SqlExplain {
     pub(super) dialect: Dialect,
     pub(super) db: Db,
     pub(in crate::app) schema: String,
-    pub(in crate::app) plan: Option<Plan>,
+    /// Shared with the session's plan history, which keeps it for the next Compare.
+    pub(in crate::app) plan: Option<Arc<Plan>>,
+    /// What each tree row shows and the flame chart's bars, worked out once per plan and its findings.
+    pub(super) tree_rows: Option<Vec<TreeRow>>,
+    pub(super) flame: Option<FlameCache>,
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
     raw: String,
@@ -60,6 +67,9 @@ pub(in crate::app) struct SqlExplain {
     pub(super) demo: bool,
     /// The connection is locked, as of the last frame drawn.
     pub(super) locked: bool,
+    /// Why the statement cannot be tried with HypoPG, for the lock state it was checked under. Lexing it every frame
+    /// would cost more than the dialog.
+    pub(super) hypo_refused: Option<(bool, Option<String>)>,
     /// The HypoPG trial of a candidate index: the request in flight and the candidate it tries, its answer, and whether
     /// Compare shows the trial's plan instead of the last one. Apart from `req`, like `ev_req`.
     pub(super) hypo_wait: Option<(u64, String)>,
@@ -102,7 +112,13 @@ pub(super) enum XAct {
 impl SqlExplain {
     #[allow(clippy::too_many_arguments)]
     fn new(stmt: String, conn: u64, tab_db: String, database: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, database, dialect, db, schema, plan: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
+        let key_stmt = compare::normalize(&stmt, dialect);
+        SqlExplain { req: 0, busy: false, stmt, key_stmt, conn, tab_db, database, dialect, db, schema, plan: None, tree_rows: None, flame: None, hypo_refused: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
+    }
+
+    /// Drops what was worked out from the plan or its findings, so the next frame works it out again.
+    fn plan_changed(&mut self) {
+        (self.tree_rows, self.flame) = (None, None);
     }
 
     /// Compare has nothing to show once neither a last plan nor a trial is set against this one.
@@ -235,6 +251,7 @@ impl App {
                 x.scroll_to = x.sel;
                 // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
                 let now = crate::library::now_secs();
+                let p = Arc::new(p);
                 x.prev = self.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
                 x.leave_empty_compare();
                 (x.plan, x.unread) = (Some(p), None);
@@ -242,6 +259,7 @@ impl App {
             // The raw text is still worth reading.
             Err(e) => (x.plan, x.unread, x.pane) = (None, Some(e), Pane::Raw),
         }
+        x.plan_changed();
     }
 
     /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
@@ -254,20 +272,21 @@ impl App {
         let pooler = x.db.pooler();
         let key = history_key(x, x.plan.as_ref().is_some_and(|p| p.analyzed));
         if let Some(p) = &mut x.plan {
-            p.refind(x.dialect, Some(&ev), pooler);
-            // Each plan is compared with the findings it showed: the copy kept for the next Compare and this Compare's
+            Arc::make_mut(p).refind(x.dialect, Some(&ev), pooler);
+            // Each plan is compared with the findings it showed: the plan kept for the next Compare and this Compare's
             // new side follow the strip. `differs` reads no findings, so the Compare tab stays as it was.
-            self.explain_prev.update(&key, p);
+            self.explain_prev.update(&key, p.clone());
             if let Some(prev) = &mut x.prev {
-                prev.diff = compare::diff(&prev.plan, p);
+                prev.diff.refind(&prev.plan, p);
             }
             // A trial that ran while the catalog was read again is found with the same evidence as the plan it is set against.
             if let Some(h) = &mut x.hypo {
                 h.plan.refind(x.dialect, Some(&ev), pooler);
-                h.diff = compare::diff(p, &h.plan);
+                h.diff.refind(p, &h.plan);
             }
         }
         x.ev = Some(ev);
+        x.plan_changed();
     }
 
     /// The catalog's answer as if the server had sent it, for the open dialog.
@@ -285,6 +304,9 @@ impl App {
         let screen = ctx.content_rect();
         ui.set_width(fit_width(&ctx, (screen.width() * 0.85).clamp(760.0, 1160.0)));
         x.locked = !self.conn_writable(x.conn);
+        if x.dialect == Dialect::Postgres && x.hypo_refused.as_ref().is_none_or(|(locked, _)| *locked != x.locked) {
+            x.hypo_refused = Some((x.locked, crate::db::sql::pg::hypo::refused(&x.stmt, x.locked)));
+        }
         let mut panes = vec![Pane::Tree];
         if x.prev.is_some() || x.hypo_cmp {
             panes.push(Pane::Compare);
@@ -447,7 +469,7 @@ impl App {
 
 /// Where this session keeps the last plan of the dialog's statement: two databases of one connection are two places.
 fn history_key(x: &SqlExplain, analyzed: bool) -> compare::Key {
-    compare::Key { conn: x.conn, db: x.database.clone(), schema: x.schema.clone(), stmt: compare::normalize(&x.stmt, x.dialect), analyzed }
+    compare::Key { conn: x.conn, db: x.database.clone(), schema: x.schema.clone(), stmt: x.key_stmt.clone(), analyzed }
 }
 
 /// The line under the title: the engine, then the size of the plan or what the run took.

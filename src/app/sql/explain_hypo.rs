@@ -35,7 +35,11 @@ fn blocked(x: &SqlExplain, fix: &Fix) -> Option<String> {
     if hypo::create_sql(fix).is_none() {
         return Some("This candidate is not a CREATE INDEX HypoPG can take.".into());
     }
-    hypo::refused(&x.stmt, x.locked)
+    // Checked once per lock state as the dialog draws; the worker checks the statement again before the trial runs.
+    match &x.hypo_refused {
+        Some((locked, why)) if *locked == x.locked => why.clone(),
+        _ => hypo::refused(&x.stmt, x.locked),
+    }
 }
 
 /// Why the catalog's answer does not show HypoPG as installed. A failed read says nothing either way, unless it still saw
@@ -77,7 +81,7 @@ pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut 
         } else {
             mark_box(ui, Mark::Info, MUTED());
         }
-        ui.label(RichText::new(result_line(h, x.plan.as_ref())).size(TXT_SMALL).color(if h.used { TEXT() } else { MUTED() }));
+        ui.label(RichText::new(result_line(h, x.plan.as_deref())).size(TXT_SMALL).color(if h.used { TEXT() } else { MUTED() }));
         if quiet(ui, "Show in Compare").on_hover_text("Compare this plan with the one the server would choose with the index").clicked() {
             acts.push(XAct::HypoCompare);
         }

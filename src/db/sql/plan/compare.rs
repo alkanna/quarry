@@ -4,6 +4,7 @@
 
 use super::findings::Kind;
 use super::{count, lex, Access, Dialect, Plan};
+use std::sync::Arc;
 
 /// A change under this share is "same": plans of an unchanged statement still move a little with the statistics.
 const SAME: f64 = 0.01;
@@ -31,7 +32,7 @@ pub fn normalize(stmt: &str, d: Dialect) -> String {
 /// it ran under ANALYZE (an estimate compared with a run would mostly show the difference between the two).
 #[derive(Default)]
 pub struct History {
-    kept: Vec<(Key, Plan, u64)>,
+    kept: Vec<(Key, Arc<Plan>, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,9 +47,9 @@ pub struct Key {
 
 impl History {
     /// Keeps `plan`, made at `at` (Unix seconds), as the last of `key`, and returns the one it replaces.
-    pub fn swap(&mut self, key: Key, plan: Plan, at: u64) -> Option<(Plan, u64)> {
+    pub fn swap(&mut self, key: Key, plan: impl Into<Arc<Plan>>, at: u64) -> Option<(Arc<Plan>, u64)> {
         let old = self.kept.iter().position(|(k, ..)| *k == key).map(|i| self.kept.remove(i));
-        self.kept.push((key, plan, at));
+        self.kept.push((key, plan.into(), at));
         if self.kept.len() > KEEP {
             self.kept.remove(0);
         }
@@ -57,9 +58,9 @@ impl History {
 
     /// Puts `plan` in place of the one kept for `key`, keeping when it was made: the same plan, found again once the
     /// catalog answered.
-    pub fn update(&mut self, key: &Key, plan: &Plan) {
+    pub fn update(&mut self, key: &Key, plan: impl Into<Arc<Plan>>) {
         if let Some((_, p, _)) = self.kept.iter_mut().find(|(k, ..)| k == key) {
-            *p = plan.clone();
+            *p = plan.into();
         }
     }
 
@@ -154,6 +155,13 @@ pub struct Diff {
 }
 
 impl Diff {
+    /// The findings again, once either plan was found again with the catalog. The rows and the verdict stay: they read
+    /// no findings.
+    pub fn refind(&mut self, before: &Plan, after: &Plan) {
+        let (cb, ca) = (super::tree::inclusive(before, false), super::tree::inclusive(after, false));
+        self.findings = finding_changes(before, after, &self.rows, &cb, &ca);
+    }
+
     /// Whether the new plan is cheaper (or faster, when both ran), dearer, or about the same.
     pub fn better(&self) -> Option<bool> {
         let d = self.time.filter(|t| t.change().is_some()).unwrap_or(self.cost);
@@ -463,7 +471,7 @@ mod tests {
         // A plan found again keeps its place and time.
         let mut found = pg(BEFORE);
         found.findings.clear();
-        h.update(&key(1, "A"), &found);
+        h.update(&key(1, "A"), found);
         assert!(h.swap(key(1, "A"), pg(AFTER), 50).is_some_and(|(p, at)| p.findings.is_empty() && at == 30));
         for i in 0..KEEP as u64 + 5 {
             h.swap(key(2, &format!("S{i}")), pg(BEFORE), i);

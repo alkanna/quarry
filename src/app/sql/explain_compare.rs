@@ -34,7 +34,7 @@ impl App {
 
 /// The plan this one is compared with and when it was made.
 pub(in crate::app) struct Prev {
-    pub(in crate::app) plan: Plan,
+    pub(in crate::app) plan: std::sync::Arc<Plan>,
     /// Unix seconds.
     pub(in crate::app) at: u64,
     pub(in crate::app) diff: Diff,
@@ -44,8 +44,8 @@ pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32,
     // A HypoPG trial compares the dialog's plan, as before, with the trial's, as after; else the last plan is before.
     let hypo = x.hypo.as_ref().filter(|_| x.hypo_cmp);
     let (after, before, d) = match (hypo, &x.plan, &x.prev) {
-        (Some(h), Some(p), _) => (&h.plan, p, &h.diff),
-        (None, Some(p), Some(prev)) => (p, &prev.plan, &prev.diff),
+        (Some(h), Some(p), _) => (&h.plan, &**p, &h.diff),
+        (None, Some(p), Some(prev)) => (&**p, &*prev.plan, &prev.diff),
         _ => return,
     };
     let timed = d.time.is_some();

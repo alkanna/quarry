@@ -72,14 +72,34 @@ fn columns(p: &Plan, w: f32) -> Vec<Col> {
     cols
 }
 
+/// What a row shows beside its numbers: the name screen readers and tests find it by, its second line and the mark of
+/// its most severe finding.
+pub(super) struct TreeRow {
+    name: String,
+    sub: Option<String>,
+    mark: Option<Severity>,
+}
+
+fn tree_rows(p: &Plan) -> Vec<TreeRow> {
+    let mut marks: Vec<Option<Severity>> = vec![None; p.nodes.len()];
+    for f in &p.findings {
+        if let Some(m) = f.node.and_then(|i| marks.get_mut(i)) {
+            *m = Some(m.map_or(f.severity, |s| s.min(f.severity)));
+        }
+    }
+    p.nodes.iter().zip(marks).map(|(n, mark)| TreeRow { name: format!("{} {}", n.label, n.name()).trim().to_string(), sub: node_sub(n), mark }).collect()
+}
+
 pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
-    let Some(p) = &x.plan else { return };
+    if x.tree_rows.is_none() {
+        x.tree_rows = x.plan.as_deref().map(tree_rows);
+    }
+    let (Some(p), Some(rows)) = (&x.plan, &x.tree_rows) else { return };
     if p.nodes.is_empty() {
         ui.label(RichText::new("The server returned no plan nodes. See Raw.").color(MUTED()));
         return;
     }
     let cols = columns(p, ui.available_width());
-    let marks: Vec<Option<Severity>> = (0..p.nodes.len()).map(|i| p.findings.iter().filter(|f| f.node == Some(i)).map(|f| f.severity).min()).collect();
     // Header.
     let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEAD_H), Sense::hover());
     // Labels rather than painted text, so screen readers and tests find the columns.
@@ -103,10 +123,9 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     let scroll_to = x.scroll_to.take();
     egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - HEAD_H).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        for (i, n) in p.nodes.iter().enumerate() {
-            let sub = node_sub(n);
-            let name = format!("{} {}", n.label, n.name()).trim().to_string();
-            let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &name, |pt, rect| paint_row(pt, rect, n, sub.as_deref(), marks[i], &cols));
+        for (i, (n, row)) in p.nodes.iter().zip(rows).enumerate() {
+            let sub = row.sub.as_deref();
+            let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &row.name, |pt, rect| paint_row(pt, rect, n, sub, row.mark, &cols));
             if scroll_to == Some(i) {
                 r.scroll_to_me(Some(egui::Align::Center));
             }

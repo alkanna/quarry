@@ -21,6 +21,14 @@ const MIN_GAP: f32 = 6.0;
 /// The color square of a legend entry.
 const SWATCH: f32 = 10.0;
 
+/// The bars laid out for one weight and width, with the bar of each node, kept until the plan or either changes.
+pub(super) struct FlameCache {
+    time: bool,
+    w: f32,
+    layout: flame::Layout,
+    bar_of: Vec<Option<usize>>,
+}
+
 pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
     let Some(p) = &x.plan else { return };
     let timed = flame::timed(p);
@@ -37,19 +45,28 @@ pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, act
         }
     });
     ui.add_space(12.0);
-    let flame::Layout { bars, weights: all, total } = flame::layout(p, x.flame_time, (MIN_BAR / ui.available_width().max(1.0)) as f64);
+    let w0 = ui.available_width();
+    if !x.flame.as_ref().is_some_and(|c| c.time == x.flame_time && c.w == w0) {
+        let layout = flame::layout(p, x.flame_time, (MIN_BAR / w0.max(1.0)) as f64);
+        let mut bar_of = vec![None; p.nodes.len()];
+        for (k, b) in layout.bars.iter().enumerate() {
+            bar_of[b.node] = Some(k);
+        }
+        x.flame = Some(FlameCache { time: x.flame_time, w: w0, layout, bar_of });
+    }
+    let Some(FlameCache { layout: flame::Layout { bars, weights: all, total }, bar_of, .. }) = &x.flame else { return };
+    let total = *total;
     if bars.is_empty() {
         ui.label(RichText::new("The plan gives no cost to draw. See Tree.").color(MUTED()));
         return;
     }
-    // The figure on each bar is the weight its width comes from.
-    let rows = bars.iter().map(|b| b.row).max().unwrap_or(0) + 1;
     let scroll_to = x.scroll_to.take();
+    let rows = bars.iter().map(|b| b.row).max().unwrap_or(0) + 1;
     let mut picked = None;
     egui::ScrollArea::vertical().id_salt("sql-explain-flame").max_height((body_h - 80.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
         let w = ui.available_width();
         let (area, _) = ui.allocate_exact_size(egui::vec2(w, rows as f32 * (BAR_H + GAP)), Sense::hover());
-        for b in &bars {
+        for b in bars {
             let left = left_of(area, w, b.x);
             let width = ((b.w * w as f64) as f32 - SPLIT).max(1.0);
             let rect = egui::Rect::from_min_size(egui::pos2(left, area.top() + b.row as f32 * (BAR_H + GAP)), egui::vec2(width, BAR_H));
@@ -57,6 +74,7 @@ pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, act
             let name = format!("{} {}", n.label, n.name()).trim().to_string();
             let r = ui.interact(rect, ui.scope_id().with(("flame", b.node)), Sense::click());
             r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, x.sel == Some(b.node), &name));
+            // The figure on each bar is the weight its width comes from.
             let (value, share) = (all[b.node], if total > 0.0 { all[b.node] / total } else { 0.0 });
             paint_bar(ui, rect, n, value, share, x.flame_time, state_of(&r), x.sel == Some(b.node));
             focus_ring(ui, &r, rect, R_SM as f32);
@@ -70,7 +88,7 @@ pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, act
             }
             // What the children leave empty under a bar is the node's own work: a quiet fill makes it read as part of
             // the node, so a join that is its own cost does not look like an empty chart.
-            let kids: Vec<&flame::Bar> = bars.iter().filter(|k| p.nodes[k.node].parent == Some(b.node)).collect();
+            let kids: Vec<&flame::Bar> = n.kids.iter().filter_map(|&k| bar_of[k]).map(|k| &bars[k]).collect();
             if !kids.is_empty() {
                 let end = kids.iter().map(|k| left_of(area, w, k.x + k.w)).fold(rect.left(), f32::max);
                 let gap = egui::Rect::from_min_max(egui::pos2(end, rect.bottom() + GAP), egui::pos2(rect.right(), rect.bottom() + GAP + BAR_H));
