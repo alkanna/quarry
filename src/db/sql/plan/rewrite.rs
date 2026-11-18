@@ -485,13 +485,17 @@ fn either(p: &Plan, i: usize, d: Dialect, t: &TableEv, x: &Expr, own: &dyn Fn(&C
         None => {
             let mut made: Vec<String> = Vec::new();
             let mut sql = Vec::new();
+            let mut trials = Vec::new();
             for c in &names {
                 let name = name_for(d, t, std::slice::from_ref(c), &made);
-                sql.push(index::create(d, t, &name, &d.quote_ident(c), How::Plain, pooler).0);
+                let (s, trial) = index::create(d, t, &name, &d.quote_ident(c), How::Plain, pooler);
+                sql.push(s);
+                trials.push(trial);
                 made.push(name);
             }
-            // A trial takes one index at a time, so the indexes of an OR have none.
-            spot.fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: sql.join("\n"), note: format!("One index for each side of the OR, so the {who} can search them all and combine the rows. {NOTE}"), trial: None });
+            // A trial takes one index at a time, so only an OR missing a single index has one.
+            let trial = if trials.len() == 1 { trials.pop().flatten() } else { None };
+            spot.fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: sql.join("\n"), note: format!("One index for each side of the OR, so the {who} can search them all and combine the rows. {NOTE}"), trial });
         }
     }
     Some(spot)
@@ -862,6 +866,11 @@ mod tests {
         unused(p).and_then(|f| f.fix.as_ref()).filter(|x| x.kind == FixKind::Rewrite).map(|x| x.sql.clone())
     }
 
+    /// The statement a HypoPG trial of the plan's candidate index takes.
+    fn trial_of(p: &Plan) -> Option<String> {
+        p.findings.iter().find_map(|f| f.fix.as_ref().filter(|x| x.kind == FixKind::Index)).and_then(|x| x.trial.clone())
+    }
+
     fn index_fix(p: &Plan) -> Option<String> {
         p.findings.iter().find_map(|f| f.fix.as_ref().filter(|x| x.kind == FixKind::Index).map(|x| x.sql.clone()))
     }
@@ -1050,6 +1059,7 @@ mod tests {
         e.trgm = true;
         let p = found(Dialect::Postgres, "pg18-like", &e);
         assert_eq!(index_fix(&p).as_deref(), Some(r#"CREATE INDEX CONCURRENTLY "bookings_email_trgm_idx" ON "public"."bookings" USING gin ("email" gin_trgm_ops);"#));
+        assert_eq!(trial_of(&p), None, "HypoPG is offered a GIN index");
         let mut bare = ev(Dialect::Postgres, table(Dialect::Postgres, &[("bookings", "bookings")], vec![ix("bookings_pkey", &["id"])]));
         bare.trgm = true;
         assert!(unused(&found(Dialect::Postgres, "pg18-like", &bare)).is_none());
@@ -1073,6 +1083,7 @@ mod tests {
         let f = unused(&p).unwrap();
         assert!(f.body[0].contains("bookings_email_idx serves email, but ref has no index"), "{:?}", f.body);
         assert_eq!(index_fix(&p).as_deref(), Some(r#"CREATE INDEX CONCURRENTLY "bookings_ref_idx" ON "public"."bookings" ("ref");"#));
+        assert_eq!(trial_of(&p).as_deref(), Some(r#"CREATE INDEX "bookings_ref_idx" ON "public"."bookings" ("ref")"#));
         // Without an index on either side, nothing; with both, no index to add.
         assert!(unused(&pg("pg18-or", vec![ix("bookings_pkey", &["id"])])).is_none());
         let mut both = captured(Dialect::Postgres);
@@ -1115,8 +1126,16 @@ mod tests {
         let orders = table(Dialect::MariaDb, &[("", "o")], captured(Dialect::MariaDb));
         assert_eq!(index_fix(&found(Dialect::MariaDb, "mariadb-bufjoin", &ev(Dialect::MariaDb, orders.clone()))), None);
         let mut p = parse(Dialect::MariaDb, &fixture("mariadb-bufjoin").replace("\"rows\": 100415", "\"rows\": 900")).unwrap();
+        p.refind(Dialect::MariaDb, Some(&ev(Dialect::MariaDb, orders.clone())), false);
+        assert_eq!(index_fix(&p).as_deref(), Some("ALTER TABLE `shop`.`orders` ADD INDEX `orders_ref_idx` (`ref`), ALGORITHM=INPLACE, LOCK=NONE;"));
+        assert_eq!(trial_of(&p), None, "MySQL and MariaDB have no HypoPG");
+        // The buffered table with no filter of its own, as `wants` now asks the catalog for it: the join's candidate,
+        // and no word about a filter it does not have.
+        let bare = fixture("mariadb-bufjoin").replace("\"rows\": 100415", "\"rows\": 900").replace(r#""o.`status` = 'paid' and o.total > 899""#, r#""""#);
+        let mut p = parse(Dialect::MariaDb, &bare).unwrap();
         p.refind(Dialect::MariaDb, Some(&ev(Dialect::MariaDb, orders)), false);
         assert_eq!(index_fix(&p).as_deref(), Some("ALTER TABLE `shop`.`orders` ADD INDEX `orders_ref_idx` (`ref`), ALGORITHM=INPLACE, LOCK=NONE;"));
+        assert!(p.findings.iter().all(|f| !f.no_fix.as_deref().unwrap_or_default().contains("filter could not be read")), "{:?}", p.findings);
     }
 
     fn rewritten(stmt: &str, d: Dialect, name: &str, alias: &str) -> Option<String> {

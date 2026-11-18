@@ -250,6 +250,11 @@ impl App {
             if let Some(prev) = &mut x.prev {
                 prev.diff = compare::diff(&prev.plan, p);
             }
+            // A trial that ran while the catalog was read again is found with the same evidence as the plan it is set against.
+            if let Some(h) = &mut x.hypo {
+                h.plan.refind(x.dialect, Some(&ev), pooler);
+                h.diff = compare::diff(p, &h.plan);
+            }
         }
         x.ev = Some(ev);
     }
