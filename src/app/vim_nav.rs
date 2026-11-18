@@ -399,9 +399,9 @@ impl App {
                     t.vcol = (t.vcol.min(cols - 1) as i64 + c).clamp(0, cols as i64 - 1) as usize;
                 }
                 self.vnav.scroll = true;
-                // The first move only picks the first row.
+                // With no row picked the cursor stands just above the first one, so j picks it and a count still counts.
                 match sel {
-                    None => 0,
+                    None => row(r - 1),
                     Some(_) if r == 0 => return,
                     Some(_) => row(at + r),
                 }
