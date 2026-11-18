@@ -133,8 +133,9 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
     let n = &p.nodes[i];
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        // What the node is.
+        // What the node is. The panes zero the row spacing, so each row sets its own gap.
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             let col = access_color(n.access);
             let label = RichText::new(&n.label).font(egui::FontId::monospace(TXT_BODY));
             if col == TEXT() {
@@ -182,7 +183,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                 }
             }
         }
-        for (title, text, expr) in [("INDEX CONDITION", &n.index_cond, &n.index_cond_expr), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond, &n.join_cond_expr)] {
+        for (title, text, expr) in [("INDEX CONDITION", &n.index_cond, &n.index_cond_expr), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond, &n.join_cond_expr), ("JOIN FILTER", &n.join_filter, &n.join_filter_expr)] {
             if text.is_empty() {
                 continue;
             }
@@ -193,6 +194,13 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                     ui.label(crate::ui::editor::sql_job_in(text, TXT_SMALL, x.dialect));
                 }
             }
+        }
+        // How many pairs the join's condition matched and its filter threw away, after ANALYZE.
+        if let (Some(kept), Some(removed)) = (n.actual_rows, n.removed_join) {
+            let loops = n.loops.unwrap_or(1.0);
+            let (kept, removed) = (kept * loops, removed * loops);
+            let pct = if kept + removed > 0.0 { kept / (kept + removed) * 100.0 } else { 0.0 };
+            ui.label(RichText::new(format!("{} pairs matched  ·  {} kept ({})  ·  {} removed by the join filter", figure(kept + removed), figure(kept), findings::pct_text(pct), figure(removed))).size(TXT_SMALL).color(TEXT()));
         }
         let rest: Vec<&String> = n.detail.iter().filter(|d| !SHOWN_ELSEWHERE.iter().any(|k| d.starts_with(k))).collect();
         if !rest.is_empty() {
@@ -205,6 +213,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
         for f in p.findings.iter().filter(|f| f.node == Some(i)) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
                 match f.severity {
                     Severity::Warn => glyphs::warn(ui.painter(), r.center(), WARNING()),
@@ -290,7 +299,7 @@ fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts:
 }
 
 /// Detail lines the panel already shows in a better form.
-const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Rows removed by filter:", "Buffers:", "Index condition:", "Lookup:"];
+const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Join Filter:", "Rows removed by filter:", "Rows removed by join filter:", "Buffers:", "Index condition:", "Lookup:"];
 
 fn section(ui: &mut egui::Ui, title: &str, copy: Option<&String>, acts: &mut Vec<XAct>) {
     ui.add_space(10.0);
@@ -356,20 +365,52 @@ fn tiles(ui: &mut egui::Ui, p: &crate::db::sql::plan::Plan, n: &PlanNode) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (label, value, note, color) in items {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, TILE_H), Sense::hover());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, TILE_H), Sense::hover());
             let pt = ui.painter();
             pt.rect(rect, R_BAR, PANEL(), Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
-            let g = pt.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.6)));
-            galley_at(pt, rect.left() + 12.0, rect.top() + 16.0, g, FAINT());
-            let g = pt.layout_job(egui::text::LayoutJob::single_section(value, mono_fmt(TXT_SUBHEAD, color, 600.0)));
-            let vw = g.size().x;
-            galley_at(pt, rect.left() + 12.0, rect.top() + 37.0, g, color);
-            if !note.is_empty() {
-                let g = pt.layout_job(egui::text::LayoutJob::single_section(note, ui_fmt(TXT_SMALL, MUTED(), 400.0, 0.0)));
-                galley_at(pt, rect.left() + 18.0 + vw, rect.top() + 38.0, g, MUTED());
+            let lg = pt.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.6)));
+            let vg = pt.layout_job(egui::text::LayoutJob::single_section(value, mono_fmt(TXT_SUBHEAD, color, 600.0)));
+            let ng = (!note.is_empty()).then(|| pt.layout_job(egui::text::LayoutJob::single_section(note.clone(), ui_fmt(TXT_SMALL, MUTED(), 400.0, 0.0))));
+            let place = note_place(w, lg.size().x, vg.size().x, ng.as_ref().map_or(0.0, |g| g.size().x));
+            let vw = vg.size().x;
+            galley_at(pt, rect.left() + TILE_PAD, rect.top() + 16.0, lg, FAINT());
+            galley_at(pt, rect.left() + TILE_PAD, rect.top() + 37.0, vg, color);
+            match (ng, place) {
+                (Some(g), NotePlace::Beside) => galley_at(pt, rect.left() + TILE_PAD + vw + NOTE_GAP, rect.top() + 38.0, g, MUTED()),
+                (Some(g), NotePlace::OnLabel) => galley_at(pt, rect.right() - TILE_PAD - g.size().x, rect.top() + 16.0, g, MUTED()),
+                (Some(_), NotePlace::Hover) => {
+                    resp.on_hover_text(note);
+                }
+                _ => {}
             }
         }
     });
+}
+
+/// A tile's text starts this far from its sides, and a note sits this far after the value.
+const TILE_PAD: f32 = 12.0;
+const NOTE_GAP: f32 = 6.0;
+
+/// Where a tile's note goes so it never runs past the tile's edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotePlace {
+    /// After the value, as in the design.
+    Beside,
+    /// At the right of the label line, when the value leaves no room beside it.
+    OnLabel,
+    /// In the tile's hover text, when neither line has room.
+    Hover,
+}
+
+fn note_place(tile_w: f32, label_w: f32, value_w: f32, note_w: f32) -> NotePlace {
+    let room = tile_w - 2.0 * TILE_PAD;
+    if value_w + NOTE_GAP + note_w <= room {
+        NotePlace::Beside
+    } else if label_w + NOTE_GAP + note_w <= room {
+        NotePlace::OnLabel
+    } else {
+        NotePlace::Hover
+    }
 }
 
 /// "public.bookings  ·  under Hash, builds the join's hash table": where the node sits and what it is for.
@@ -405,4 +446,26 @@ fn context_line(p: &crate::db::sql::plan::Plan, i: usize) -> String {
         parts.push(what);
     }
     parts.join("  ·  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tile_note_never_runs_past_the_tile() {
+        // A narrow panel: "13,885" and "est. 12,622" do not fit side by side, so the note moves up beside ROWS.
+        assert_eq!(note_place(120.0, 30.0, 58.0, 58.0), NotePlace::OnLabel);
+        assert_eq!(note_place(160.0, 30.0, 58.0, 58.0), NotePlace::Beside);
+        // A long label leaves no room on either line, so the note goes to the hover text.
+        assert_eq!(note_place(100.0, 60.0, 70.0, 58.0), NotePlace::Hover);
+        let (label, value, note) = (30.0, 58.0, 58.0);
+        for w in [80.0_f32, 116.0, 140.0, 200.0] {
+            match note_place(w, label, value, note) {
+                NotePlace::Beside => assert!(TILE_PAD + value + NOTE_GAP + note <= w - TILE_PAD, "{w}"),
+                NotePlace::OnLabel => assert!(TILE_PAD + label + NOTE_GAP <= w - TILE_PAD - note, "{w}"),
+                NotePlace::Hover => {}
+            }
+        }
+    }
 }

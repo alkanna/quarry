@@ -49,6 +49,8 @@ pub struct PlanNode {
     pub rows: Option<f64>,
     /// Estimated cost. PostgreSQL's and MySQL's tree text include the nodes below; MySQL's JSON is the running total of the join.
     pub cost: Option<f64>,
+    /// PostgreSQL's cost before the first row, which a subquery pays again on every call.
+    pub startup_cost: Option<f64>,
     /// The node's own cost, when the engine gives it: MySQL's read and eval cost, MariaDB's cost.
     pub own_cost: Option<f64>,
     /// Estimated bytes per row.
@@ -63,12 +65,17 @@ pub struct PlanNode {
     pub filter: String,
     pub index_cond: String,
     pub join_cond: String,
+    /// PostgreSQL's Join Filter: what each pair the join condition matched is checked against again.
+    pub join_filter: String,
     /// The conditions read, when they read; parsed once so drawing a frame never lexes them.
     pub filter_expr: Option<cond::Expr>,
     pub index_cond_expr: Option<cond::Expr>,
     pub join_cond_expr: Option<cond::Expr>,
+    pub join_filter_expr: Option<cond::Expr>,
     /// Rows the filter removed, per loop.
     pub removed: Option<f64>,
+    /// Pairs the join matched and its Join Filter then removed, per loop.
+    pub removed_join: Option<f64>,
     /// Rows the filter kept, per loop, when that is not `actual_rows`: MySQL's tree prints the filter as a node of its
     /// own above the scan, so the scan's actual rows are the rows it read.
     pub kept: Option<f64>,
@@ -138,6 +145,18 @@ pub struct Plan {
     pub exec_ms: Option<f64>,
     /// The statement ran, so nodes carry actual rows and times.
     pub analyzed: bool,
+    /// PostgreSQL's JIT compilation, when the statement ran with it.
+    pub jit: Option<Jit>,
+}
+
+/// What PostgreSQL's JIT did for a run: the functions it compiled and the time that took. The time is counted inside the
+/// nodes that first ran compiled code, not beside them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Jit {
+    pub functions: f64,
+    pub total_ms: f64,
+    pub inlining: bool,
+    pub optimization: bool,
 }
 
 /// How an ANALYZE run is made safe.
@@ -239,7 +258,7 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     tree::derive(&mut plan, d);
     for n in &mut plan.nodes {
         let read = |t: &str| if t.is_empty() { None } else { cond::parse(t, d) };
-        (n.filter_expr, n.index_cond_expr, n.join_cond_expr) = (read(&n.filter), read(&n.index_cond), read(&n.join_cond));
+        (n.filter_expr, n.index_cond_expr, n.join_cond_expr, n.join_filter_expr) = (read(&n.filter), read(&n.index_cond), read(&n.join_cond), read(&n.join_filter));
     }
     plan.refind(d, None, false);
     Ok(plan)
@@ -325,8 +344,22 @@ fn parse_pg(v: &Value) -> Result<Plan, String> {
     let root = top.get("Plan").ok_or("The plan has no Plan node.")?;
     let mut plan = Plan { cost: num(root, "Total Cost"), planning_ms: num(top, "Planning Time"), exec_ms: num(top, "Execution Time"), ..Default::default() };
     plan.analyzed = plan.exec_ms.is_some();
+    plan.jit = top.get("JIT").and_then(pg_jit);
     pg_node(root, 0, &mut plan.nodes);
     Ok(plan)
+}
+
+/// The JIT block of an analyzed plan. PostgreSQL 17 split Generation into Deform and Total, so a timing is a number or
+/// an object with a Total.
+fn pg_jit(j: &Value) -> Option<Jit> {
+    let timing = j.get("Timing")?;
+    let total = match timing.get("Total")? {
+        Value::Object(_) => num(timing.get("Total")?, "Total"),
+        _ => num(timing, "Total"),
+    }?;
+    let opts = j.get("Options");
+    let on = |k: &str| opts.is_some_and(|o| flag(o, k));
+    Some(Jit { functions: num(j, "Functions").unwrap_or(0.0), total_ms: total, inlining: on("Inlining"), optimization: on("Optimization") })
 }
 
 fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
@@ -354,6 +387,7 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     node.access = if ty == "Seq Scan" { Access::Scan } else if ty.contains("Index") { Access::Index } else { Access::Other };
     node.rows = num(n, "Plan Rows");
     node.cost = num(n, "Total Cost");
+    node.startup_cost = num(n, "Startup Cost");
     node.width = num(n, "Plan Width");
     node.actual_rows = num(n, "Actual Rows");
     node.actual_ms = num(n, "Actual Total Time");
@@ -363,6 +397,7 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     node.index_cond = [text(n, "Index Cond"), text(n, "Recheck Cond")].into_iter().find(|s| !s.is_empty()).unwrap_or_default().to_string();
     // A Join Filter stays a detail line of its own, so a join with both shows both.
     node.join_cond = ["Hash Cond", "Merge Cond"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    node.join_filter = text(n, "Join Filter").to_string();
     node.parallel = flag(n, "Parallel Aware");
     node.workers = num(n, "Workers Launched").or_else(|| num(n, "Workers Planned"));
     for key in ["Index Cond", "Recheck Cond", "Filter", "Join Filter", "Hash Cond", "Merge Cond", "One-Time Filter"] {
@@ -380,6 +415,10 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     node.removed = num(n, "Rows Removed by Filter");
     if let Some(r) = node.removed {
         node.detail.push(format!("Rows removed by filter: {}", count(r)));
+    }
+    node.removed_join = num(n, "Rows Removed by Join Filter");
+    if let Some(r) = node.removed_join {
+        node.detail.push(format!("Rows removed by join filter: {}", count(r)));
     }
     let hit = num(n, "Shared Hit Blocks");
     let read = num(n, "Shared Read Blocks");
@@ -602,9 +641,22 @@ fn after(s: &str, key: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
+/// A plan a user brought from PostgreSQL 18.6, rebuilt from the numbers the dialog showed: a Sort over a Hash Join of
+/// service_inductors and bookings whose join filter tests a subquery on bookings again. Only the estimate was known.
+#[cfg(test)]
+pub(crate) fn user_plan(join_filter: &str) -> String {
+    let scan = |rel: &str, alias: &str, cost: f64, rows: f64, extra: &str| format!(r#"{{"Node Type":"Seq Scan","Relation Name":"{rel}","Alias":"{alias}","Startup Cost":0,"Total Cost":{cost},"Plan Rows":{rows}{extra}}}"#);
+    let si = scan("service_inductors", "si", 3442.0, 12622.0, r#","Parent Relationship":"Outer""#);
+    let b = scan("bookings", "b", 2670.0, 5009.0, r#","Parent Relationship":"Outer","Filter":"((created_at >= '2026-10-13 00:00:00+02'::timestamp with time zone) AND (provider = ANY ('{ZEUS_TAXI,ZEUS_VLOC,ZEUS_TRAIN}'::provider[])))""#);
+    let c = scan("bookings", "c", 2418.0, 1500.0, r#","Parent Relationship":"SubPlan","Subplan Name":"SubPlan 1","Filter":"(status = 'CONFIRMED'::booking_status)""#);
+    let hash = format!(r#"{{"Node Type":"Hash","Parent Relationship":"Inner","Startup Cost":2670,"Total Cost":2670,"Plan Rows":5009,"Plans":[{b}]}}"#);
+    let join = format!(r#"{{"Node Type":"Hash Join","Join Type":"Inner","Parent Relationship":"Outer","Startup Cost":2700,"Total Cost":59357,"Plan Rows":5009,"Hash Cond":"(si.service_id = b.service_id)","Join Filter":"{join_filter}","Plans":[{si},{hash},{c}]}}"#);
+    format!(r#"[{{"Plan":{{"Node Type":"Sort","Startup Cost":59600,"Total Cost":59677,"Plan Rows":5009,"Sort Key":["b.created_at"],"Plans":[{join}]}}}}]"#)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::findings::Kind;
+    use super::findings::{below, Kind};
     use super::*;
 
     const PG: &str = r#"[{"Plan":{"Node Type":"Hash Join","Join Type":"Inner","Startup Cost":10.5,"Total Cost":2500.25,"Plan Rows":50000,"Plan Width":40,"Hash Cond":"(o.customer_id = c.id)","Plans":[
@@ -803,6 +855,21 @@ mod tests {
             "mysql-lower" => include_str!("plan/fixtures/mysql-lower.json"),
             "mariadb-joinbuf-analyze" => include_str!("plan/fixtures/mariadb-joinbuf-analyze.json"),
             "mariadb-scan" => include_str!("plan/fixtures/mariadb-scan.json"),
+            "pg18-subjoin" => include_str!("plan/fixtures/pg18-subjoin.json"),
+            "pg18-subjoin-analyze" => include_str!("plan/fixtures/pg18-subjoin-analyze.json"),
+            "pg18-subhash" => include_str!("plan/fixtures/pg18-subhash.json"),
+            "pg18-subhash-analyze" => include_str!("plan/fixtures/pg18-subhash-analyze.json"),
+            "pg18-subscalar" => include_str!("plan/fixtures/pg18-subscalar.json"),
+            "pg18-subscalar-analyze" => include_str!("plan/fixtures/pg18-subscalar-analyze.json"),
+            "pg18-subexists" => include_str!("plan/fixtures/pg18-subexists.json"),
+            "pg18-submat" => include_str!("plan/fixtures/pg18-submat.json"),
+            "pg18-jitscan-analyze" => include_str!("plan/fixtures/pg18-jitscan-analyze.json"),
+            "pg18-slowrow-analyze" => include_str!("plan/fixtures/pg18-slowrow-analyze.json"),
+            "pg18-pairs" => include_str!("plan/fixtures/pg18-pairs.json"),
+            "pg18-pairs-analyze" => include_str!("plan/fixtures/pg18-pairs-analyze.json"),
+            "pg13-subalt" => include_str!("plan/fixtures/pg13-subalt.json"),
+            "pg13-submat" => include_str!("plan/fixtures/pg13-submat.json"),
+            "pg18-jitpar-analyze" => include_str!("plan/fixtures/pg18-jitpar-analyze.json"),
             _ => panic!("no fixture {name}"),
         }
     }
@@ -817,7 +884,7 @@ mod tests {
 
     #[test]
     fn real_postgres_plans_add_up_and_link() {
-        for name in ["pg18-join-analyze", "pg18-scan-analyze", "pg18-scan", "pg18-parallel-analyze", "pg18-spill-analyze", "pg18-limit-analyze", "pg18-cte-analyze", "pg18-subplan-analyze", "pg13-join-analyze"] {
+        for name in ["pg18-join-analyze", "pg18-scan-analyze", "pg18-scan", "pg18-parallel-analyze", "pg18-spill-analyze", "pg18-limit-analyze", "pg18-cte-analyze", "pg18-subplan-analyze", "pg13-join-analyze", "pg18-subjoin", "pg18-subjoin-analyze", "pg18-subhash", "pg18-subhash-analyze", "pg18-subscalar", "pg18-subscalar-analyze", "pg18-subexists", "pg18-submat", "pg18-jitscan-analyze", "pg18-slowrow-analyze", "pg18-pairs", "pg18-pairs-analyze", "pg13-subalt", "pg13-submat", "pg18-jitpar-analyze"] {
             let p = parse(Dialect::Postgres, fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             sum_close(&p);
             for (i, n) in p.nodes.iter().enumerate() {
@@ -894,5 +961,173 @@ mod tests {
         assert_eq!(p.nodes[0].join_cond, "(o.cid = c.id)");
         assert!(p.nodes[0].detail.contains(&"Join Filter: (o.total > c.cap)".to_string()));
         assert!(p.nodes[0].join_cond_expr.is_some());
+        assert_eq!(p.nodes[0].join_filter, "(o.total > c.cap)");
+        assert!(p.nodes[0].join_filter_expr.is_some());
+    }
+
+    fn of(p: &Plan, kind: Kind) -> Option<&Finding> {
+        p.findings.iter().find(|f| f.kind == kind)
+    }
+
+    #[test]
+    fn a_join_that_is_most_of_the_plan_is_explained() {
+        // The shape of the user's plan: a Hash Join whose filter tests a hashed SubPlan on a third table. PostgreSQL priced
+        // the join with the per-row form of the subquery it then dropped, so the join is nearly all of the cost.
+        let p = parse(Dialect::Postgres, fixture("pg18-subjoin")).unwrap();
+        let join = p.nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
+        assert!(p.nodes[join].share.unwrap() > 0.9, "{:?}", p.nodes[join].share);
+        assert!(p.nodes[join].join_filter.contains("hashed SubPlan 2") && p.nodes[join].join_filter_expr.is_some());
+        let f = of(&p, Kind::Dominant).expect("the join is not explained");
+        assert_eq!((f.title.as_str(), f.severity, f.node), ("Hash Join does most of the work", Severity::Warn, Some(join)));
+        assert_eq!(f.body[0], "Matches 4,846 rows of bookings b against 12,622 rows of service_inductors si on b.service_id = si.service_id.");
+        assert_eq!(f.body[1], "Each match is then checked again against the join filter, which runs SubPlan 2.");
+        assert!(f.body.iter().any(|b| b.contains("then chose the hashed SubPlan 2")), "{:?}", f.body);
+        assert!(f.fix.is_none());
+        // The hashed SubPlan runs once, so it costs its total once and gets no per-row finding.
+        let sub = p.nodes.iter().find(|n| n.role == "SubPlan 2").unwrap();
+        assert!((sub.self_cost.unwrap() - 10334.0).abs() < 1.0, "{:?}", sub.self_cost);
+        assert!(of(&p, Kind::SubPlanPerRow).is_none());
+    }
+
+    #[test]
+    fn a_jit_compile_that_is_most_of_the_run_is_a_finding_with_a_setting() {
+        let p = parse(Dialect::Postgres, fixture("pg18-subjoin-analyze")).unwrap();
+        let jit = p.jit.as_ref().unwrap();
+        assert_eq!((jit.functions, jit.total_ms, jit.inlining, jit.optimization), (33.0, 148.646, true, true));
+        let join = p.nodes.iter().find(|n| n.label == "Hash Join (Inner)").unwrap();
+        assert_eq!(join.removed_join, Some(4946.0));
+        assert!(join.detail.contains(&"Rows removed by join filter: 4,946".to_string()));
+        let f = of(&p, Kind::Jit).expect("no JIT finding");
+        assert_eq!(f.title, "JIT compilation took 149 ms of 190");
+        // PostgreSQL counted the compile inside the scan of bookings b, the first node to run compiled code.
+        assert_eq!(p.nodes[f.node.unwrap()].alias, "b");
+        assert_eq!(f.fix.as_ref().unwrap().sql, "SET jit = off;");
+        assert!(f.body.iter().any(|b| b.starts_with("The rest of the run took 41.4 ms")), "{:?}", f.body);
+        // The scan holding the compile is explained by it, not called slow or most of the plan.
+        assert!(!p.findings.iter().any(|g| g.node == f.node && matches!(g.kind, Kind::SlowRows | Kind::Dominant)));
+        // A short scan that compiled: JIT again, and no note that the full scan is right.
+        let p = parse(Dialect::Postgres, fixture("pg18-jitscan-analyze")).unwrap();
+        assert!(of(&p, Kind::Jit).is_some());
+        assert!(of(&p, Kind::ScanIsRight).is_none() && of(&p, Kind::SlowRows).is_none());
+    }
+
+    #[test]
+    fn a_scan_slow_per_row_is_a_finding_and_not_called_right() {
+        // md5 over a long string for every row: 37 ms for 12,622 rows in memory.
+        let p = parse(Dialect::Postgres, fixture("pg18-slowrow-analyze")).unwrap();
+        let f = of(&p, Kind::SlowRows).expect("no slow scan finding");
+        assert_eq!(f.title, "Reading service_inductors si is slow per row");
+        assert!(f.body[0].contains("2.9 µs a row"), "{:?}", f.body);
+        assert!(f.body[1].starts_with("Something runs for every row"), "{:?}", f.body);
+        assert!(f.fix.is_none());
+        assert!(of(&p, Kind::ScanIsRight).is_none() && of(&p, Kind::Dominant).is_none());
+        // Plain scans in the captured plans stay well under the threshold.
+        for name in ["pg18-scan-analyze", "pg18-join-analyze", "pg18-subhash-analyze", "pg18-parallel-analyze", "pg13-join-analyze"] {
+            assert!(of(&parse(Dialect::Postgres, fixture(name)).unwrap(), Kind::SlowRows).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_subplan_run_per_row_is_charged_per_call_and_is_a_finding() {
+        // A correlated scalar subquery in the join filter: an Aggregate over bookings c for every pair.
+        let p = parse(Dialect::Postgres, fixture("pg18-subscalar")).unwrap();
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
+        assert_eq!(tree::sub_run(&p, sub), Some(tree::SubRun::Expr));
+        // 125.73 a call, at least once for each of the 1,615 rows the join returns.
+        let charged = p.nodes[sub].self_cost.unwrap() + below(&p, sub).filter_map(|k| p.nodes[k].self_cost).sum::<f64>();
+        assert!((charged - 125.73 * 1615.0).abs() < 50.0, "{charged}");
+        let f = of(&p, Kind::SubPlanPerRow).expect("no per-row finding");
+        assert_eq!(f.node, Some(sub));
+        assert_eq!(f.body[0], "SubPlan 1 (Aggregate on bookings c) runs again for every row Hash Join tests, at least 1,615 times, once for each row it returns.");
+        // After ANALYZE the count is what ran.
+        let p = parse(Dialect::Postgres, fixture("pg18-subscalar-analyze")).unwrap();
+        let f = of(&p, Kind::SubPlanPerRow).unwrap();
+        assert!(f.body[0].starts_with("SubPlan 1 (Aggregate on bookings c) ran 6,252 times"), "{:?}", f.body);
+        // EXISTS stops at its first row, and a plain NOT IN under a Materialize reads half on average.
+        let p = parse(Dialect::Postgres, fixture("pg18-subexists")).unwrap();
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
+        assert_eq!(tree::sub_run(&p, sub), Some(tree::SubRun::Exists));
+        assert!(of(&p, Kind::SubPlanPerRow).is_some());
+        let p = parse(Dialect::Postgres, fixture("pg18-submat")).unwrap();
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
+        assert_eq!(tree::sub_run(&p, sub), Some(tree::SubRun::Any));
+        assert!(p.nodes[sub].self_cost.unwrap() + below(&p, sub).filter_map(|k| p.nodes[k].self_cost).sum::<f64>() > 10_000.0 * 100.0);
+        // A hashed NOT IN runs once.
+        let p = parse(Dialect::Postgres, fixture("pg18-subhash")).unwrap();
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
+        assert_eq!(tree::sub_run(&p, sub), Some(tree::SubRun::Once));
+        assert!(of(&p, Kind::SubPlanPerRow).is_none());
+    }
+
+    #[test]
+    fn the_users_plan_explains_its_join_whichever_way_the_subquery_ran() {
+        // Hashed, the subquery runs once and the join keeps about 51,000 of 59,677.
+        let p = parse(Dialect::Postgres, &user_plan("(NOT (ANY ((si.id = (hashed SubPlan 1).col1) AND (b.id = (hashed SubPlan 1).col2))))")).unwrap();
+        sum_close(&p);
+        let join = p.nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
+        assert!((p.nodes[join].share.unwrap() - 0.85).abs() < 0.01, "{:?}", p.nodes[join].share);
+        let f = of(&p, Kind::Dominant).expect("the join is not explained");
+        assert_eq!((f.title.as_str(), f.node), ("Hash Join does most of the work", Some(join)));
+        assert_eq!(f.body[0], "Matches 12,622 rows of service_inductors si against 5,009 rows of bookings b on si.service_id = b.service_id.");
+        assert_eq!(f.body[2], "The planner charges 50,827 for the join itself, 6x the cost of the nodes below it (8,530).");
+        assert!(f.body[3].starts_with("It expects each row to match many on the other side"), "{:?}", f.body);
+        // Per row, EXISTS stops at its first row: 2,418 over 1,500 rows a call, at least once for each of the 5,009 rows.
+        let p = parse(Dialect::Postgres, &user_plan("((b.total > '890'::numeric) OR (NOT EXISTS(SubPlan 1)))")).unwrap();
+        sum_close(&p);
+        let sub = p.nodes.iter().position(|n| n.alias == "c").unwrap();
+        assert!((p.nodes[sub].self_cost.unwrap() - 2418.0 / 1500.0 * 5009.0).abs() < 1.0, "{:?}", p.nodes[sub].self_cost);
+        assert!(p.nodes[join].share.unwrap() > 0.7);
+        assert_eq!(of(&p, Kind::Dominant).unwrap().node, Some(join));
+        assert_eq!(of(&p, Kind::SubPlanPerRow).unwrap().node, Some(sub));
+    }
+
+    #[test]
+    fn a_join_on_a_column_with_few_values_says_so() {
+        // Six service ids on both sides: 4,632 bookings meet 12,622 inductors in 4.9 million pairs.
+        let p = parse(Dialect::Postgres, fixture("pg18-pairs")).unwrap();
+        let f = of(&p, Kind::Dominant).expect("the join is not explained");
+        assert_eq!(f.title, "Hash Join does most of the work");
+        assert!(f.body.iter().any(|b| b == "It expects 4,872,097 rows out of it. Each row pairs with many on the other side; check that b.service_id = si.service_id is the join condition you meant."), "{:?}", f.body);
+        assert!(!f.body.iter().any(|b| b.starts_with("It expects each row")), "{:?}", f.body);
+        let p = parse(Dialect::Postgres, fixture("pg18-pairs-analyze")).unwrap();
+        let f = of(&p, Kind::Dominant).expect("the join is not explained after ANALYZE");
+        assert!(f.body.contains(&"It built 13,151,707 pairs and kept 13,151,707 (100%).".to_string()), "{:?}", f.body);
+        assert!(f.body.iter().any(|b| b.starts_with("Each row pairs with many on the other side")), "{:?}", f.body);
+        assert!(f.weight.ends_with(" ms"), "{}", f.weight);
+    }
+
+    #[test]
+    fn parallel_jit_is_summed_over_the_processes_and_old_servers_print_subplans_their_way() {
+        // Three processes each compiled: 462 ms in total, about 154 side by side, of a 204 ms run.
+        let p = parse(Dialect::Postgres, fixture("pg18-jitpar-analyze")).unwrap();
+        let f = of(&p, Kind::Jit).expect("no JIT finding");
+        assert_eq!(f.title, "JIT compilation took about 154 ms of 204");
+        assert!(f.weight == "76% of the run" && f.body.iter().any(|b| b.starts_with("Its 462 ms are summed over the 3 processes")), "{} {:?}", f.weight, f.body);
+        // PostgreSQL 13 keeps both forms of a subquery and picks one as it runs: each counts once, and nothing claims
+        // which one ran.
+        let p = parse(Dialect::Postgres, fixture("pg13-subalt")).unwrap();
+        for k in p.nodes.iter().enumerate().filter(|(_, n)| n.role.starts_with("SubPlan")).map(|(k, _)| k) {
+            assert_eq!(tree::sub_run(&p, k), Some(tree::SubRun::Once));
+        }
+        assert!(!p.findings.iter().any(|f| f.body.iter().any(|b| b.contains("both per row and hashed"))));
+        // Its plain NOT IN prints as "(NOT (SubPlan 1))" and still runs per row.
+        let p = parse(Dialect::Postgres, fixture("pg13-submat")).unwrap();
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
+        assert!(matches!(tree::sub_run(&p, sub), Some(tree::SubRun::Expr | tree::SubRun::Exists)));
+        assert!(of(&p, Kind::SubPlanPerRow).is_some());
+    }
+
+    #[test]
+    fn a_plan_with_a_node_that_is_most_of_it_never_has_no_findings() {
+        for name in ["pg18-subjoin", "pg18-subjoin-analyze", "pg18-subhash", "pg18-subhash-analyze", "pg18-subscalar", "pg18-subscalar-analyze", "pg18-subexists", "pg18-submat", "pg18-jitscan-analyze", "pg18-slowrow-analyze", "pg18-join-analyze", "pg18-cte-analyze"] {
+            let p = parse(Dialect::Postgres, fixture(name)).unwrap();
+            // A fast plan may be one node without anything wrong.
+            let slow = if p.analyzed { p.exec_ms.unwrap() >= 100.0 } else { p.cost.unwrap() >= 10_000.0 };
+            for (i, n) in p.nodes.iter().enumerate() {
+                if slow && n.share.is_some_and(|s| s >= findings::SHARE_MOST) {
+                    assert!(p.findings.iter().any(|f| f.node == Some(i)), "{name}: {} is {:?} of the plan and has no finding", n.label, n.share);
+                }
+            }
+        }
     }
 }

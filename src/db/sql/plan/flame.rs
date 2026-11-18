@@ -23,7 +23,15 @@ pub fn weights(p: &Plan, time: bool) -> Vec<f64> {
 }
 
 /// The bars of `p`, weighed by time when `time` and by cost otherwise. Nodes that weigh nothing get no bar.
+#[cfg(test)]
 pub fn layout(p: &Plan, time: bool) -> Vec<Bar> {
+    layout_min(p, time, 0.0)
+}
+
+/// `layout` with every bar that weighs something at least `min` wide, as a fraction of the full width, so a node too
+/// small to see still has a bar to point at and click. A bar never grows past the room its parent has left, so it can
+/// still come out narrower at the end of a crowded row.
+pub fn layout_min(p: &Plan, time: bool, min: f64) -> Vec<Bar> {
     let weight = super::tree::inclusive(p, time);
     let roots: Vec<usize> = (0..p.nodes.len()).filter(|&i| p.nodes[i].parent.is_none()).collect();
     let total: f64 = roots.iter().map(|&i| weight[i]).sum();
@@ -33,23 +41,23 @@ pub fn layout(p: &Plan, time: bool) -> Vec<Bar> {
     }
     let mut x = 0.0;
     for &r in &roots {
-        x += place(p, &weight, total, r, 0, x, 1.0 - x, &mut out);
+        x += place(p, &weight, total, min, r, 0, x, 1.0 - x, &mut out);
     }
     out
 }
 
 /// Places node `i` at `x` in at most `room`, then its children under it; returns the width it took.
 #[allow(clippy::too_many_arguments)]
-fn place(p: &Plan, weight: &[f64], total: f64, i: usize, row: usize, x: f64, room: f64, out: &mut Vec<Bar>) -> f64 {
+fn place(p: &Plan, weight: &[f64], total: f64, min: f64, i: usize, row: usize, x: f64, room: f64, out: &mut Vec<Bar>) -> f64 {
     // A child is never wider than the room its parent left, whatever rounding or clamping did to the sums.
-    let w = (weight[i] / total).min(room).max(0.0);
+    let w = if weight[i] > 0.0 { (weight[i] / total).max(min) } else { 0.0 }.min(room).max(0.0);
     if w <= 0.0 {
         return 0.0;
     }
     out.push(Bar { node: i, row, x, w });
     let mut cx = x;
     for &k in &p.nodes[i].kids {
-        cx += place(p, weight, total, k, row + 1, cx, x + w - cx, out);
+        cx += place(p, weight, total, min, k, row + 1, cx, x + w - cx, out);
     }
     w
 }

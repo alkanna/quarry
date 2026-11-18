@@ -373,3 +373,30 @@ fn a_trial_the_planner_ignores_says_so() {
     ui.show("CANDIDATE INDEX");
     assert!(ui.shows("The planner would not use this index."), "an unused index is not reported");
 }
+
+const PG_SUBJOIN: &str = include_str!("../../db/sql/plan/fixtures/pg18-subjoin.json");
+
+#[test]
+fn a_join_that_is_most_of_the_plan_is_explained_with_its_join_filter() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_SUBJOIN) else { return };
+    ui.show("Hash Join does most of the work");
+    assert!(!ui.shows("Nothing in this plan stands out."), "a plan that is nearly all one join says nothing stands out");
+    // The panel opens on the join, the top finding's node, and shows the filter each match is checked against.
+    let join = explain_state(&ui).plan.as_ref().unwrap().nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
+    assert_eq!(explain_state(&ui).sel, Some(join));
+    ui.show("JOIN FILTER");
+    assert!(ui.shows("JOIN CONDITION"), "the hash condition is not shown beside the join filter");
+}
+
+#[test]
+fn the_tree_captions_end_on_their_columns_right_edge() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_JOIN) else { return };
+    ui.h.set_size(egui::vec2(1400.0, 900.0));
+    ui.settle();
+    // The values end 8 px inside the row, as side_row pads it; OFF is the last column and 60 px wide.
+    let right = ui.h.get_by_label("Seq Scan service_inductors si").rect().right() - 8.0;
+    let off = ui.h.get_by_label("OFF").rect().right();
+    let est = ui.h.get_by_label("EST. > ACTUAL").rect().right();
+    assert!((off - right).abs() <= 2.0, "OFF ends at {off}, its column at {right}");
+    assert!((est - (right - 60.0)).abs() <= 2.0, "EST. > ACTUAL ends at {est}, its column at {}", right - 60.0);
+}
