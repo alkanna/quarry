@@ -65,7 +65,8 @@ fn the_sql_and_postgres_screenshot_views_draw() {
     ui.settle();
     ui.show("Full scan of o");
     for (which, shows) in [("explain", "Full scan of bookings"), ("explain-analyze", "Sort spilled to disk")] {
-        let Some(mut ui) = demo_ui(|a| a.pg_demo(which)) else { return };
+        let Some(mut ui) = demo_ui(|_| {}) else { return };
+        ui.h.state_mut().pg_demo(which);
         ui.settle();
         ui.show(shows);
     }
