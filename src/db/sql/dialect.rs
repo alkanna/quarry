@@ -634,3 +634,17 @@ impl Dialect {
         !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(ok)
     }
 }
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_words_are_upper_case_and_quote_names() {
+        for w in RESERVED_MY.iter().chain(RESERVED_PG) {
+            assert!(w.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'), "{w}");
+        }
+        assert!(Dialect::Postgres.needs_quote("current_date") && Dialect::Postgres.needs_quote("Users") && !Dialect::Postgres.needs_quote("status"));
+        assert!(Dialect::MySql.needs_quote("rank") && !Dialect::MySql.needs_quote("Users"));
+    }
+}

@@ -3,7 +3,7 @@
 //! server. The popup itself is the one the Mongo inputs use.
 
 use super::complete::{ac_input_with, fuzzy, Ac, Fields, SqlInfo, Sug};
-use super::sql_words_pg::{FUNCTIONS_PG, KEYWORDS_PG, RESERVED_PG, TYPES_PG};
+use super::sql_words_pg::{FUNCTIONS_PG, KEYWORDS_PG, TYPES_PG};
 use super::theme::*;
 use crate::db::sql::{
     lex::{self, Tok},

@@ -50,7 +50,7 @@ pub mod facts;
 pub mod schema;
 pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
-pub use dialect::{Dialect, Feature, Maint, FUNCTIONS, KEYWORDS, RESERVED_MY, RESERVED_PG};
+pub use dialect::{Dialect, Feature, Maint, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
 pub use pg::read::PgSchema;
 pub use relay::{Answer, Arg, Relay, RelayGate};

@@ -18,7 +18,6 @@ pub(crate) const KEYWORDS_PG: &[&str] = &[
 ];
 
 /// Words PostgreSQL will not take as a bare name: the "reserved" and "reserved (can be function or type)" columns of the SQL Key Words appendix. A table or column called this gets double quotes.
-pub(crate) use crate::db::sql::RESERVED_PG;
 
 /// Built-in functions as (name, signature), in the same shape as `db::sql::FUNCTIONS`. A signature with no parenthesis is a keyword form that is written without a call. Nothing the read-only check refuses is listed.
 pub(crate) const FUNCTIONS_PG: &[(&str, &str)] = &[
@@ -79,6 +78,5 @@ mod tests {
         assert!(FUNCTIONS_PG.iter().all(|(n, _)| seen.insert(*n)));
         let mut seen = std::collections::HashSet::new();
         assert!(KEYWORDS_PG.iter().all(|k| seen.insert(*k)), "duplicate keyword");
-        assert!(RESERVED_PG.iter().all(|w| w.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')));
     }
 }
