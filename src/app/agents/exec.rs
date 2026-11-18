@@ -12,6 +12,7 @@ use crate::agents::policy::{self, AskWhy, Decision, Grants, LiveState};
 use crate::agents::scrub::Rules;
 use crate::agents::tools::{self, Call, ConnRef};
 use db::sql::Dialect;
+use crate::db::dates::local_hms as clock;
 use std::time::{Duration, Instant};
 
 type Reply = tokio::sync::oneshot::Sender<Result<Value, ToolErr>>;
@@ -112,12 +113,6 @@ pub(in crate::app) fn hash_key_from(k: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// Local wall-clock time of a Unix time, "22:41:07".
-fn clock(secs: u64) -> String {
-    let s = secs as i64;
-    let off = db::sql::advanced::local_offset_at(s).unwrap_or(0) as i64;
-    crate::db::dates::hms((s + off).rem_euclid(86_400))
-}
 
 /// "db.coll", "schema.table", a database, or empty.
 fn ns_label(call: &Call) -> String {

@@ -2,7 +2,7 @@
 //! selected node on the right, the raw plan, and an optional ANALYZE run that shows what the server actually did. The
 //! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
-use super::explain_compare::{clock, compare_view, Prev};
+use super::explain_compare::{compare_view, Prev};
 use super::explain_flame::flame_view;
 use super::explain_hypo::HypoRun;
 use super::explain_panel::{findings_strip, inspector};
@@ -386,7 +386,7 @@ impl App {
             let note = match (&x.prev, x.pane) {
                 _ if x.plan.is_none() => None,
                 (_, Pane::Compare) if x.hypo_cmp => Some("Compared with the plan the server would choose with the hypothetical index. Nothing was created.".to_string()),
-                (Some(prev), Pane::Compare) => Some(format!("Compared with the plan from {}.", clock(prev.at))),
+                (Some(prev), Pane::Compare) => Some(format!("Compared with the plan from {}.", &crate::db::dates::local_hms(prev.at)[..5])),
                 (_, Pane::Flame) => Some("Each bar is as wide as its share of the plan. Click one to see it.".to_string()),
                 _ => None,
             };

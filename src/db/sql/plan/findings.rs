@@ -362,7 +362,12 @@ fn ran_rows(n: &PlanNode) -> Option<f64> {
 }
 
 fn us_text(us: f64) -> String {
-    if us >= 10.0 { format!("{us:.0}") } else { format!("{us:.1}").trim_end_matches(".0").to_string() }
+    if us >= 10.0 { format!("{us:.0}") } else { trim_zeros(&format!("{us:.1}")).to_string() }
+}
+
+/// "12.50" as "12.5" and "12.00" as "12". Only a number with a decimal point loses zeros, so "100" stays whole.
+pub fn trim_zeros(s: &str) -> &str {
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
 }
 
 /// "Hash Join" out of "Hash Join (Inner)".
@@ -568,7 +573,7 @@ pub(super) fn and_list(xs: &[String]) -> String {
 
 /// 8.5x, 12x, 1,200x.
 pub fn factor(f: f64) -> String {
-    if f < 10.0 { format!("{:.1}x", f).replace(".0x", "x") } else { format!("{}x", count(f)) }
+    if f < 10.0 { format!("{}x", trim_zeros(&format!("{f:.1}"))) } else { format!("{}x", count(f)) }
 }
 
 pub fn pct_text(p: f64) -> String {
@@ -579,7 +584,7 @@ pub fn ms_text(ms: f64) -> String {
     if ms >= 100.0 {
         count(ms)
     } else if ms >= 1.0 {
-        format!("{ms:.1}").trim_end_matches(".0").to_string()
+        trim_zeros(&format!("{ms:.1}")).to_string()
     } else {
         format!("{ms:.2}")
     }

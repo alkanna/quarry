@@ -3,7 +3,7 @@
 //! Nothing is created and nothing runs until the button is clicked. The trial itself is `db::sql::pg::hypo`.
 
 use super::explain::{Pane, SqlExplain, XAct};
-use super::explain_panel::GLYPH_BOX;
+use super::explain_panel::{mark_box, Mark};
 use crate::app::*;
 use crate::db::sql::pg::hypo;
 use crate::db::sql::plan::findings::Fix;
@@ -72,11 +72,10 @@ pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut 
     let Some(h) = x.hypo.as_ref().filter(|h| h.fix == fix.sql && !busy) else { return };
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
         if h.used {
-            glyphs::check(ui.painter(), r.center(), SUCCESS());
+            mark_box(ui, Mark::Check, SUCCESS());
         } else {
-            glyphs::info(ui.painter(), r.center(), MUTED());
+            mark_box(ui, Mark::Info, MUTED());
         }
         ui.label(RichText::new(result_line(h, x.plan.as_ref())).size(TXT_SMALL).color(if h.used { TEXT() } else { MUTED() }));
         if quiet(ui, "Show in Compare").on_hover_text("Compare this plan with the one the server would choose with the index").clicked() {

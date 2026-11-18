@@ -3,9 +3,9 @@
 //! full scan red, an index green) and a click selects the node for the panel beside it. The layout is `plan::flame`.
 
 use super::explain::{SqlExplain, XAct};
-use super::explain_panel::figure;
+use super::explain_panel::amount;
 use crate::app::*;
-use crate::db::sql::plan::{findings, flame, Access, PlanNode};
+use crate::db::sql::plan::{flame, Access, PlanNode};
 
 /// A bar holds two lines, the node and its weight, as in the design.
 const BAR_H: f32 = 36.0;
@@ -100,10 +100,6 @@ fn base(a: Access) -> (Color32, u8) {
 
 fn left_of(area: egui::Rect, w: f32, x: f64) -> f32 {
     area.left() + (x * w as f64) as f32
-}
-
-fn amount(value: f64, time: bool) -> String {
-    if time { format!("{} ms", findings::ms_text(value)) } else { figure(value) }
 }
 
 /// Which of a bar's texts fit inside it. A text that does not fit whole is left out rather than cut, and the tooltip

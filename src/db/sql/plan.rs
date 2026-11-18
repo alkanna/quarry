@@ -369,17 +369,9 @@ fn joined(v: &Value, key: &str) -> String {
     }
 }
 
-/// `1234567.0` as "1,234,567" and small estimates with a decimal, for warnings.
+/// `1234567.0` as "1,234,567", for findings.
 fn count(n: f64) -> String {
-    let s = format!("{:.0}", n.max(0.0));
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+    crate::db::group(&format!("{:.0}", n.max(0.0)))
 }
 
 // PostgreSQL

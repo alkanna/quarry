@@ -11,10 +11,10 @@ use crate::db::sql::Dialect;
 /// The findings shown before "N more".
 const SHOWN: usize = 2;
 /// A glyph's box beside a title, and a stat tile's height.
-pub(super) const GLYPH_BOX: f32 = 16.0;
+const GLYPH_BOX: f32 = 16.0;
 const TILE_H: f32 = 54.0;
 /// The tags painted in the plan's rows: a node's type, a change, how far an estimate was off.
-pub(super) const TAG_H: f32 = 20.0;
+const TAG_H: f32 = 20.0;
 /// The column captions above the tree and the Compare table.
 pub(super) const HEAD_H: f32 = 24.0;
 /// The bar of the rows a node read and kept.
@@ -22,7 +22,58 @@ const READ_BAR_H: f32 = 10.0;
 
 /// A count or time for a cell: whole numbers grouped, small ones with two decimals.
 pub(super) fn figure(n: f64) -> String {
-    if n >= 100.0 { group(&format!("{n:.0}")) } else { format!("{n:.2}").trim_end_matches('0').trim_end_matches('.').to_string() }
+    if n >= 100.0 { group(&format!("{n:.0}")) } else { findings::trim_zeros(&format!("{n:.2}")).to_string() }
+}
+
+/// A node's weight as a cell shows it: milliseconds when `time`, else a cost.
+pub(super) fn amount(v: f64, time: bool) -> String {
+    if time { format!("{} ms", findings::ms_text(v)) } else { figure(v) }
+}
+
+/// A tag tinted in `col` with its left edge at `x`, centered on `cy`: a node's type, a change, an estimate's error.
+pub(super) fn tag_chip(p: &egui::Painter, x: f32, cy: f32, g: std::sync::Arc<egui::Galley>, col: Color32) -> egui::Rect {
+    let r = egui::Rect::from_min_size(egui::pos2(x, cy - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
+    paint_badge(p, r, g, col, 36);
+    r
+}
+
+/// A bar filled to `frac` of its track, at least `min` wide so a sliver still shows; only the track when there is no share.
+pub(super) fn meter(p: &egui::Painter, track: egui::Rect, frac: Option<f64>, min: f32, color: Color32) {
+    p.rect_filled(track, R_SM, TRACK());
+    if let Some(f) = frac {
+        p.rect_filled(egui::Rect::from_min_size(track.min, egui::vec2((track.width() * f as f32).max(min), track.height())), R_SM, color);
+    }
+}
+
+/// The glyph of a severity or an outcome.
+#[derive(Clone, Copy)]
+pub(super) enum Mark {
+    Check,
+    Warn,
+    Info,
+}
+
+impl From<Severity> for Mark {
+    fn from(s: Severity) -> Mark {
+        match s {
+            Severity::Warn => Mark::Warn,
+            Severity::Note => Mark::Info,
+        }
+    }
+}
+
+pub(super) fn paint_mark(p: &egui::Painter, c: egui::Pos2, m: Mark, color: Color32) {
+    match m {
+        Mark::Check => glyphs::check(p, c, color),
+        Mark::Warn => glyphs::warn(p, c, color),
+        Mark::Info => glyphs::info(p, c, color),
+    }
+}
+
+/// A mark in a glyph's box, beside a title or a line.
+pub(super) fn mark_box(ui: &mut egui::Ui, m: Mark, color: Color32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
+    paint_mark(ui.painter(), r.center(), m, color);
 }
 
 pub(super) fn access_color(a: Access) -> Color32 {
@@ -44,7 +95,7 @@ pub(super) fn share_color(s: f64) -> Color32 {
     }
 }
 
-fn severity_color(s: Severity) -> Color32 {
+pub(super) fn severity_color(s: Severity) -> Color32 {
     match s {
         Severity::Warn => WARNING(),
         Severity::Note => MUTED(),
@@ -55,8 +106,7 @@ pub(super) fn findings_strip(ui: &mut egui::Ui, x: &mut SqlExplain, acts: &mut V
     let Some(p) = &x.plan else { return };
     if p.findings.is_empty() {
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
-            glyphs::check(ui.painter(), r.center(), SUCCESS());
+            mark_box(ui, Mark::Check, SUCCESS());
             ui.label(RichText::new("Nothing in this plan stands out.").color(MUTED()));
         });
         return;
@@ -96,11 +146,7 @@ fn finding_card(ui: &mut egui::Ui, f: &Finding, selected: bool, acts: &mut Vec<X
     let out = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, color)).corner_radius(R_LG).inner_margin(egui::Margin { left: 14, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
-            match f.severity {
-                Severity::Warn => glyphs::warn(ui.painter(), r.center(), color),
-                Severity::Note => glyphs::info(ui.painter(), r.center(), color),
-            }
+            mark_box(ui, f.severity.into(), color);
             ui.label(semibold(RichText::new(&f.title).color(BRIGHT())));
             if !f.weight.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -169,11 +215,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             ui.add_space(10.0);
             ui.label(caption_text("ROWS READ"));
             let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), READ_BAR_H), Sense::hover());
-            ui.painter().rect_filled(r, R_SM, TRACK());
-            if read > 0.0 {
-                let w = (r.width() * (kept / read) as f32).max(4.0);
-                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(w, r.height())), R_SM, SUCCESS());
-            }
+            meter(ui.painter(), r, (read > 0.0).then(|| kept / read), 4.0, SUCCESS());
             let pct = if read > 0.0 { kept / read * 100.0 } else { 0.0 };
             ui.label(RichText::new(format!("{} read  ·  {} kept ({})  ·  {} removed by the filter", figure(read), figure(kept), findings::pct_text(pct), figure(removed))).size(TXT_SMALL).color(TEXT()));
         }
@@ -212,11 +254,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
-                match f.severity {
-                    Severity::Warn => glyphs::warn(ui.painter(), r.center(), WARNING()),
-                    Severity::Note => glyphs::info(ui.painter(), r.center(), MUTED()),
-                }
+                mark_box(ui, f.severity.into(), severity_color(f.severity));
                 ui.label(semibold(RichText::new(&f.title).color(BRIGHT())));
             });
             for b in &f.body {

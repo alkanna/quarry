@@ -79,6 +79,11 @@ impl Dialect {
         }
     }
 
+    /// The longest identifier the server takes: PostgreSQL keeps 63 bytes, MySQL and MariaDB 64 characters.
+    pub fn max_ident(self) -> usize {
+        if self == Dialect::Postgres { 63 } else { 64 }
+    }
+
     pub fn qualified(self, db: &str, table: &str) -> String {
         format!("{}.{}", self.quote_ident(db), self.quote_ident(table))
     }

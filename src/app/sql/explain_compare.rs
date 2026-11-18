@@ -3,14 +3,12 @@
 //! went away and which are new. The matching is in `plan::compare`.
 
 use super::explain::{Pane, SqlExplain, XAct};
-use super::explain_panel::{access_color, figure, GLYPH_BOX, HEAD_H, TAG_H};
+use super::explain_panel::{amount, mark_box, tag_chip, Mark, HEAD_H};
+use super::explain_tree::{paint_node, ROW, ROW_SUB};
 use crate::app::*;
 use crate::db::sql::plan::compare::{Delta, Diff, State};
-use crate::db::sql::plan::{findings, Plan, PlanNode};
+use crate::db::sql::plan::{Plan, PlanNode};
 
-const ROW: f32 = 32.0;
-const ROW_SUB: f32 = 46.0;
-const STEP: f32 = 18.0;
 const NUM_W: f32 = 120.0;
 const CHANGE_W: f32 = 90.0;
 
@@ -40,13 +38,6 @@ pub(in crate::app) struct Prev {
     /// Unix seconds.
     pub(in crate::app) at: u64,
     pub(in crate::app) diff: Diff,
-}
-
-/// "16:42", local time.
-pub(super) fn clock(secs: u64) -> String {
-    let s = secs as i64;
-    let off = db::sql::advanced::local_offset_at(s).unwrap_or(0) as i64;
-    crate::db::dates::hms((s + off).rem_euclid(86_400))[..5].to_string()
 }
 
 pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32, acts: &mut Vec<XAct>) {
@@ -136,12 +127,11 @@ fn summary_band(ui: &mut egui::Ui, d: &Diff, analyzed: bool, hypothetical: bool)
     egui::Frame::new().fill(tint(color, 26)).stroke(Stroke::new(1.0, tint(color, 90))).corner_radius(R_BAR).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
-            match better {
-                Some(true) => glyphs::check(ui.painter(), r.center(), color),
-                Some(false) => glyphs::warn(ui.painter(), r.center(), color),
-                None => glyphs::info(ui.painter(), r.center(), color),
-            }
+            mark_box(ui, match better {
+                Some(true) => Mark::Check,
+                Some(false) => Mark::Warn,
+                None => Mark::Info,
+            }, color);
             ui.vertical(|ui| {
                 ui.label(medium(RichText::new(&d.summary).color(BRIGHT())));
                 if hypothetical {
@@ -173,32 +163,8 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, depth: usize, su
     let cols_w = NUM_W * 2.0 + CHANGE_W;
     let node_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - cols_w - 8.0, rect.bottom()));
     let np = p.with_clip_rect(node_area.intersect(p.clip_rect()));
-    for l in 0..depth {
-        np.vline(rect.left() + l as f32 * STEP + 5.5, rect.y_range(), Stroke::new(1.0, LINE()));
-    }
-    let mut x = rect.left() + depth as f32 * STEP;
-    let col = if gone { FAINT() } else { access_color(n.access) };
-    let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
-    if col != TEXT() && !gone {
-        let chip = egui::Rect::from_min_size(egui::pos2(x, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
-        np.rect_filled(chip, R_SM, tint(col, 36));
-        galley_at(&np, x + 6.0, top, g.clone(), col);
-        x = chip.right() + 8.0;
-    } else {
-        let w = g.size().x;
-        galley_at(&np, x, top, g, col);
-        x += w + 8.0;
-    }
-    let name = n.name();
-    if !name.is_empty() {
-        let g = np.layout_job(egui::text::LayoutJob::single_section(name, mono_fmt(TXT_BODY, if gone { FAINT() } else { TEXT() }, 400.0)));
-        galley_at(&np, x, top, g, TEXT());
-    }
-    if let Some(s) = sub {
-        let g = np.layout_job(egui::text::LayoutJob::single_section(s.to_string(), mono_fmt(TXT_SMALL, FAINT(), 400.0)));
-        galley_at(&np, rect.left() + depth as f32 * STEP + 2.0, rect.top() + 34.0, g, FAINT());
-    }
-    let amount = |v: Option<f64>| v.map(|v| if timed { format!("{} ms", findings::ms_text(v)) } else { figure(v) }).unwrap_or_default();
+    paint_node(&np, rect, top, depth, n, sub, gone);
+    let amount = |v: Option<f64>| v.map(|v| amount(v, timed)).unwrap_or_default();
     let right = rect.right();
     let at = |text: String, color: Color32, edge: f32| {
         let g = p.layout_job(egui::text::LayoutJob::single_section(text, mono_fmt(TXT_BODY, color, 400.0)));
@@ -216,9 +182,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, depth: usize, su
             None => MUTED(),
         };
         let g = p.layout_job(egui::text::LayoutJob::single_section(text, mono_fmt(TXT_SMALL, color, 500.0)));
-        let chip = egui::Rect::from_min_size(egui::pos2(right - g.size().x - 12.0, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
-        p.rect_filled(chip, R_SM, tint(color, 36));
-        galley_at(p, chip.left() + 6.0, top, g, color);
+        tag_chip(p, right - g.size().x - 12.0, top, g, color);
     }
 }
 
@@ -232,12 +196,11 @@ fn finding_card(ui: &mut egui::Ui, state: State, title: &str, body: &str) {
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(egui::Margin { left: 14, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
-            match state {
-                State::Resolved => glyphs::check(ui.painter(), r.center(), color),
-                State::New => glyphs::warn(ui.painter(), r.center(), color),
-                State::Same => glyphs::info(ui.painter(), r.center(), color),
-            }
+            mark_box(ui, match state {
+                State::Resolved => Mark::Check,
+                State::New => Mark::Warn,
+                State::Same => Mark::Info,
+            }, color);
             let t = semibold(RichText::new(title));
             ui.label(if state == State::Resolved { t.strikethrough().color(MUTED()) } else { t.color(BRIGHT()) });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

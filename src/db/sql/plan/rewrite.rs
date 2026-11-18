@@ -121,7 +121,7 @@ fn gates(p: &Plan, i: usize, d: Dialect, t: &TableEv) -> (Vec<String>, Option<St
 fn name_for(d: Dialect, t: &TableEv, parts: &[String], also: &[String]) -> String {
     let mut taken: Vec<&str> = t.indexes.iter().flatten().map(|ix| ix.name.as_str()).collect();
     taken.extend(also.iter().map(String::as_str));
-    index::index_name(&t.table, parts, &taken, if d == Dialect::Postgres { 63 } else { 64 }, d)
+    index::index_name(&t.table, parts, &taken, d.max_ident(), d)
 }
 
 /// A name as SQL: bare when it reads as a plain identifier, else quoted.
@@ -205,7 +205,7 @@ fn literal(t: &Term, form: Form) -> Option<String> {
         Form::Date if ty.is_none_or(|t| t == "date") => day(s).map(|_| s.clone()),
         Form::Year if ty.is_none() => year(s).map(|_| s.clone()),
         // Text compared with a number is no comparison of two texts.
-        Form::Text if ty.is_none_or(|t| matches!(t, "text" | "character varying" | "varchar")) && !matches!(t, Term::Num(_)) && !matches!(t, Term::Cast { inner, .. } if matches!(inner.as_ref(), Term::Num(_))) => Some(s.clone()),
+        Form::Text if ty.is_none_or(cond::text_type) && !matches!(t, Term::Num(_)) && !matches!(t, Term::Cast { inner, .. } if matches!(inner.as_ref(), Term::Num(_))) => Some(s.clone()),
         _ => None,
     }
 }
@@ -315,7 +315,7 @@ fn fold_of<'a>(x: &'a Expr, own: &dyn Fn(&ColRef) -> bool) -> Option<(&'a ColRef
         }
         let c = match &args[0] {
             Term::Col(c) => c,
-            Term::Cast { inner, ty } if matches!(ty.as_str(), "text" | "character varying" | "varchar") => match inner.as_ref() {
+            Term::Cast { inner, ty } if cond::text_type(ty) => match inner.as_ref() {
                 Term::Col(c) => c,
                 _ => return None,
             },
@@ -394,7 +394,7 @@ fn wild(p: &Plan, i: usize, d: Dialect, ev: &Evidence, t: &TableEv, x: &Expr, ow
     let Expr::Like { t: term, pat, not: false, .. } = x else { return None };
     let c = match term {
         Term::Col(c) => c,
-        Term::Cast { inner, ty } if matches!(ty.as_str(), "text" | "character varying" | "varchar") => match inner.as_ref() {
+        Term::Cast { inner, ty } if cond::text_type(ty) => match inner.as_ref() {
             Term::Col(c) => c,
             _ => return None,
         },
@@ -746,7 +746,7 @@ impl Matcher<'_> {
     fn value(&self, j: usize) -> Option<usize> {
         let lit = self.s.lit.as_deref()?;
         let str_at = |k: usize| match self.toks.get(k) {
-            Some((Tok::Str, r)) if self.stmt[r.clone()].starts_with('\'') => Some(cond_unquote(&self.stmt[r.clone()])),
+            Some((Tok::Str, r)) if self.stmt[r.clone()].starts_with('\'') => Some(cond::unquote_str(&self.stmt[r.clone()])),
             _ => None,
         };
         let (k, v) = match self.s.form {
@@ -767,12 +767,6 @@ impl Matcher<'_> {
         }
         Some(k)
     }
-}
-
-/// A '...' string's text.
-fn cond_unquote(s: &str) -> String {
-    let inner = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')).unwrap_or(s);
-    inner.replace("''", "'")
 }
 
 #[cfg(test)]

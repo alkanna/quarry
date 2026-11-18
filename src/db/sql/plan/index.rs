@@ -140,7 +140,7 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
         lines.push(format!("Distinct values: {}.", nd.join(", ")));
     }
     let taken: Vec<&str> = indexes.iter().map(|ix| ix.name.as_str()).collect();
-    let ix = index_name(&t.table, &pick.cols, &taken, if d == Dialect::Postgres { 63 } else { 64 }, d);
+    let ix = index_name(&t.table, &pick.cols, &taken, d.max_ident(), d);
     Advice::Create { fix: create_fix(d, t, &ix, &pick.cols, pooler), lines }
 }
 

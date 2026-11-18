@@ -596,7 +596,7 @@ impl P<'_> {
             if !matches!(k, K::Word | K::Quoted) {
                 return None;
             }
-            parts.push(unquote_ident(t));
+            parts.push(lex::unquote_ident(t));
             self.i += 1;
             if !(self.is(".") && self.peek_at(1).is_some_and(|(k, _)| matches!(k, K::Word | K::Quoted))) {
                 break;
@@ -621,19 +621,16 @@ fn flat(xs: Vec<Expr>, or: bool) -> Vec<Expr> {
     out
 }
 
-fn unquote_str(s: &str) -> String {
+/// A quoted string's text, the doubled quote inside undone.
+pub(super) fn unquote_str(s: &str) -> String {
     let q = s.chars().next().unwrap_or('\'');
     let inner = s.strip_prefix(q).and_then(|s| s.strip_suffix(q)).unwrap_or(s);
     inner.replace(&format!("{q}{q}"), &q.to_string())
 }
 
-fn unquote_ident(s: &str) -> String {
-    for q in ['`', '"'] {
-        if let Some(inner) = s.strip_prefix(q).and_then(|s| s.strip_suffix(q)) {
-            return inner.replace(&format!("{q}{q}"), &q.to_string());
-        }
-    }
-    s.to_string()
+/// PostgreSQL's names for text, which a varchar column is relabeled to without a real cast.
+pub(super) fn text_type(ty: &str) -> bool {
+    matches!(ty, "text" | "character varying" | "varchar")
 }
 
 /// The values of an array term: PostgreSQL's `'{A,B}'::type[]` or `ARRAY[..]`.
@@ -918,7 +915,7 @@ impl Cx<'_> {
     /// PostgreSQL's `(col)::text` on a varchar column: a relabel the index on the column still serves. char to text strips
     /// the padding and citext to text changes the comparison, so those are real casts an index on the column cannot serve.
     fn relabel(&self, c: &ColRef, ty: &str) -> bool {
-        if self.d != Dialect::Postgres || !matches!(ty, "text" | "character varying" | "varchar") {
+        if self.d != Dialect::Postgres || !text_type(ty) {
             return false;
         }
         (self.ty)(&c.name).is_some_and(|t| {

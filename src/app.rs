@@ -924,16 +924,7 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-pub(crate) fn group(n: &str) -> String {
-    let mut out = String::new();
-    for (i, ch) in n.chars().enumerate() {
-        if i > 0 && (n.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
+pub(crate) use crate::db::group;
 
 #[cfg(test)]
 mod tests {

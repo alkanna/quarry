@@ -9,6 +9,18 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 mod agent;
+
+/// "1234567" as "1,234,567".
+pub(crate) fn group(n: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in n.chars().enumerate() {
+        if i > 0 && (n.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 mod analysis;
 mod code;
 pub(crate) mod dates;
