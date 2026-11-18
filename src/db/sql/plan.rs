@@ -1362,10 +1362,13 @@ mod tests {
             assert_eq!(tree::sub_run(&p, k), Some(tree::SubRun::Once));
         }
         assert!(!p.findings.iter().any(|f| f.body.iter().any(|b| b.contains("hashed as"))));
-        // Its plain NOT IN prints as "(NOT (SubPlan 1))" and still runs per row.
+        // Its plain NOT IN prints as "(NOT (SubPlan 1))" over a Materialize, searched again for every row: half of its
+        // 10,728 a call, about 5,414, for each of the 970 rows the join returns. Read as a scalar it would be 0.27 a call.
         let p = parse(Dialect::Postgres, fixture("pg13-submat")).unwrap();
         let sub = p.nodes.iter().position(|n| n.role == "SubPlan 1").unwrap();
-        assert!(matches!(tree::sub_run(&p, sub), Some(tree::SubRun::Expr | tree::SubRun::Exists)));
+        assert_eq!(tree::sub_run(&p, sub), Some(tree::SubRun::Any));
+        let charged = p.nodes[sub].self_cost.unwrap() + below(&p, sub).filter_map(|k| p.nodes[k].self_cost).sum::<f64>();
+        assert!((charged - 5413.8 * 970.0).abs() < 1000.0, "{charged}");
         assert!(of(&p, Kind::SubPlanPerRow).is_some());
     }
 
@@ -1422,6 +1425,40 @@ mod tests {
         for name in ["pg18-subhash-analyze", "pg18-jitpar-analyze"] {
             assert!(of(&parse(Dialect::Postgres, fixture(name)).unwrap(), Kind::SubPlanPerRow).is_none(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_hashed_subplan_rebuilt_on_each_rescan_is_not_per_row() {
+        // The inner index scan tests a hashed NOT IN: its 5,000 loops are one hash table built per rescan, not a call per row.
+        let text = r#"[{"Plan":{"Node Type":"Nested Loop","Join Type":"Inner","Startup Cost":0,"Total Cost":40100,"Plan Rows":5000,"Actual Startup Time":0.1,"Actual Total Time":300,"Actual Rows":5000,"Actual Loops":1,"Plans":[
+            {"Node Type":"Seq Scan","Parent Relationship":"Outer","Relation Name":"orders","Alias":"o","Startup Cost":0,"Total Cost":100,"Plan Rows":5000,"Actual Startup Time":0.01,"Actual Total Time":2,"Actual Rows":5000,"Actual Loops":1},
+            {"Node Type":"Index Scan","Parent Relationship":"Inner","Index Name":"customers_pkey","Relation Name":"customers","Alias":"c","Startup Cost":0.3,"Total Cost":8,"Plan Rows":1,"Actual Startup Time":0.01,"Actual Total Time":0.05,"Actual Rows":1,"Actual Loops":5000,"Index Cond":"(id = o.customer_id)","Filter":"(NOT (hashed SubPlan 1))","Plans":[
+                {"Node Type":"Seq Scan","Parent Relationship":"SubPlan","Subplan Name":"SubPlan 1","Relation Name":"bans","Alias":"x","Startup Cost":0,"Total Cost":4,"Plan Rows":10,"Actual Startup Time":0.01,"Actual Total Time":0.02,"Actual Rows":10,"Actual Loops":5000}]}]},"Planning Time":0.1,"Execution Time":301}]"#;
+        let p = parse(Dialect::Postgres, text).unwrap();
+        assert!(of(&p, Kind::SubPlanPerRow).is_none(), "{:?}", p.findings);
+    }
+
+    #[test]
+    fn a_subquery_the_leader_runs_alone_under_a_gather_keeps_its_whole_time() {
+        // A hashed SubPlan that only the leader built, under a parallel scan: its Nested Loop ran once, its inner side
+        // 30,000 times, and neither shares its time with the workers.
+        let text = r#"[{"Plan":{"Node Type":"Gather","Startup Cost":1000,"Total Cost":20000,"Plan Rows":30000,"Workers Planned":2,"Workers Launched":2,"Actual Startup Time":1,"Actual Total Time":40,"Actual Rows":30000,"Actual Loops":1,"Plans":[
+            {"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":true,"Relation Name":"events","Alias":"e","Startup Cost":0,"Total Cost":19000,"Plan Rows":10000,"Actual Startup Time":0.01,"Actual Total Time":31.7,"Actual Rows":10000,"Actual Loops":3,"Filter":"(NOT (hashed SubPlan 1))","Plans":[
+                {"Node Type":"Nested Loop","Parent Relationship":"SubPlan","Subplan Name":"SubPlan 1","Join Type":"Inner","Startup Cost":0,"Total Cost":9000,"Plan Rows":30000,"Actual Startup Time":0.01,"Actual Total Time":80,"Actual Rows":30000,"Actual Loops":1,"Plans":[
+                    {"Node Type":"Seq Scan","Parent Relationship":"Outer","Relation Name":"logs","Alias":"l","Startup Cost":0,"Total Cost":3000,"Plan Rows":30000,"Plan Width":40,"Actual Startup Time":0.01,"Actual Total Time":60,"Actual Rows":30000,"Actual Loops":1,"Shared Hit Blocks":600,"Shared Read Blocks":0},
+                    {"Node Type":"Index Scan","Parent Relationship":"Inner","Index Name":"users_pkey","Relation Name":"users","Alias":"u","Startup Cost":0.2,"Total Cost":0.2,"Plan Rows":1,"Actual Startup Time":0.0004,"Actual Total Time":0.0005,"Actual Rows":1,"Actual Loops":30000,"Index Cond":"(id = l.user_id)"}]}]}]},"Planning Time":0.1,"Execution Time":41}]"#;
+        let p = parse(Dialect::Postgres, text).unwrap();
+        let ms = |alias: &str| p.nodes.iter().find(|n| n.alias == alias).and_then(|n| n.self_ms).unwrap();
+        assert!((ms("l") - 60.0).abs() < 0.01 && (ms("u") - 15.0).abs() < 0.01, "{} {}", ms("l"), ms("u"));
+        let f = of(&p, Kind::SlowRows).expect("no slow scan finding");
+        assert!(f.body[0].starts_with("It took 60 ms for 30,000 rows"), "{:?}", f.body);
+        // A per-row SubPlan in the Gather's own output list runs in the leader too, however many times it ran.
+        let text = r#"[{"Plan":{"Node Type":"Gather","Startup Cost":1000,"Total Cost":20000,"Plan Rows":30000,"Workers Planned":2,"Workers Launched":2,"Actual Startup Time":1,"Actual Total Time":70,"Actual Rows":30000,"Actual Loops":1,"Plans":[
+            {"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":true,"Relation Name":"events","Alias":"e","Startup Cost":0,"Total Cost":19000,"Plan Rows":10000,"Actual Startup Time":0.01,"Actual Total Time":5,"Actual Rows":10000,"Actual Loops":3},
+            {"Node Type":"Index Scan","Parent Relationship":"SubPlan","Subplan Name":"SubPlan 1","Index Name":"users_pkey","Relation Name":"users","Alias":"u","Startup Cost":0.2,"Total Cost":0.3,"Plan Rows":1,"Actual Startup Time":0.001,"Actual Total Time":0.002,"Actual Rows":1,"Actual Loops":30000,"Index Cond":"(id = e.user_id)"}]},"Planning Time":0.1,"Execution Time":71}]"#;
+        let p = parse(Dialect::Postgres, text).unwrap();
+        let u = p.nodes.iter().find(|n| n.alias == "u").unwrap();
+        assert!((u.self_ms.unwrap() - 60.0).abs() < 0.01, "{:?}", u.self_ms);
     }
 
     #[test]
