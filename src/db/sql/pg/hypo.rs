@@ -36,6 +36,10 @@ pub fn create_sql(fix: &str) -> Option<String> {
     let s = s.trim().trim_end_matches(';').trim_end();
     let rest = s.strip_prefix("CREATE INDEX CONCURRENTLY ").or_else(|| s.strip_prefix("CREATE INDEX "))?;
     let out = format!("CREATE INDEX {rest}");
+    // HypoPG simulates B-tree, BRIN, hash and bloom indexes; the trigram fix is a GIN index it cannot try.
+    if out.to_ascii_lowercase().contains(" using gin") {
+        return None;
+    }
     (lex::split_statements(&out, Dialect::Postgres).len() == 1).then_some(out)
 }
 
@@ -156,7 +160,7 @@ mod tests {
         assert_eq!(create_sql(fix).as_deref(), Some(r#"CREATE INDEX "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status")"#));
         let pooled = "-- Blocks writes to bookings while it builds: CONCURRENTLY cannot run through the connection pooler.\nCREATE INDEX \"b_idx\" ON \"public\".\"bookings\" (\"provider\");";
         assert_eq!(create_sql(pooled).as_deref(), Some(r#"CREATE INDEX "b_idx" ON "public"."bookings" ("provider")"#));
-        for bad in ["ANALYZE \"public\".\"bookings\";", "ALTER TABLE t ADD INDEX i (a)", "CREATE INDEX i ON t (a); DROP TABLE t", ""] {
+        for bad in ["ANALYZE \"public\".\"bookings\";", "ALTER TABLE t ADD INDEX i (a)", "CREATE INDEX i ON t (a); DROP TABLE t", "", "CREATE INDEX CONCURRENTLY i ON t USING gin (email gin_trgm_ops);", "CREATE INDEX a_idx ON t (a);\nCREATE INDEX b_idx ON t (b);"] {
             assert_eq!(create_sql(bad), None, "{bad}");
         }
     }
