@@ -789,14 +789,6 @@ enum Reach<'a> {
     Wrapped(&'a ColRef, &'a str),
 }
 
-impl Reach<'_> {
-    fn col(&self) -> &ColRef {
-        match self {
-            Reach::Plain(c) | Reach::Cast(c, _) | Reach::Wrapped(c, _) => c,
-        }
-    }
-}
-
 struct Cx<'a> {
     d: Dialect,
     own: &'a dyn Fn(&ColRef) -> bool,

@@ -438,8 +438,8 @@ mod tests {
 
     #[test]
     fn statement_names_with_schemas_and_aliases() {
-        let r = refs("SELECT b.id FROM app.bookings b JOIN \"Svc\" AS s ON s.id = b.service_id, Events WHERE x = 1", Dialect::Postgres);
-        assert_eq!(r, [Ref { schema: Some("app".into()), table: "bookings".into(), alias: Some("b".into()) }, Ref { schema: None, table: "Svc".into(), alias: Some("s".into()) }, Ref { schema: None, table: "events".into(), alias: None }]);
+        let r = refs("SELECT b.id FROM app.bookings b, Events JOIN \"Svc\" AS s ON s.id = b.service_id WHERE x = 1", Dialect::Postgres);
+        assert_eq!(r, [Ref { schema: Some("app".into()), table: "bookings".into(), alias: Some("b".into()) }, Ref { schema: None, table: "events".into(), alias: None }, Ref { schema: None, table: "Svc".into(), alias: Some("s".into()) }]);
         let r = refs("SELECT o.id FROM `shop`.`orders` o LEFT JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid'", Dialect::MySql);
         assert_eq!(r[0], Ref { schema: Some("shop".into()), table: "orders".into(), alias: Some("o".into()) });
         assert_eq!(r[1].alias.as_deref(), Some("c"));
