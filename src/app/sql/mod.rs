@@ -10,6 +10,8 @@ pub(super) mod create_pg;
 pub(super) mod dump;
 pub(super) mod edit;
 pub(super) mod explain;
+mod explain_panel;
+mod explain_tree;
 pub(super) mod filter_cells;
 pub(super) mod filter_line;
 pub(super) mod filter_panel;

@@ -1,0 +1,241 @@
+//! The plan tree of the explain dialog: one painted row per node with indent guides, the node's type colored by how it
+//! reads (red for a full scan, green through an index), what it reads, a mark when a finding is about it, and columns
+//! for its own share, rows and cost. After ANALYZE the columns turn to time and the estimate against what ran.
+
+use super::explain::{SqlExplain, XAct};
+use super::explain_panel::{access_color, figure, share_color};
+use crate::app::*;
+use crate::db::sql::plan::{cond, findings, Plan, PlanNode, Severity};
+use crate::db::sql::Dialect;
+
+const ROW: f32 = 32.0;
+const ROW_SUB: f32 = 46.0;
+const STEP: f32 = 18.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Col {
+    SelfCost,
+    Rows,
+    Kept,
+    Cost,
+    Time,
+    EstActual,
+    Off,
+}
+
+impl Col {
+    fn head(self) -> &'static str {
+        match self {
+            Col::SelfCost => "SELF COST",
+            Col::Rows => "ROWS",
+            Col::Kept => "KEPT",
+            Col::Cost => "COST",
+            Col::Time => "TIME",
+            Col::EstActual => "EST. > ACTUAL",
+            Col::Off => "OFF",
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Col::SelfCost | Col::Time => 130.0,
+            Col::EstActual => 150.0,
+            Col::Kept | Col::Off => 60.0,
+            Col::Rows | Col::Cost => 84.0,
+        }
+    }
+
+    fn tip(self) -> Option<&'static str> {
+        match self {
+            Col::SelfCost => Some("The node's own cost, without the nodes below it, as a share of the plan. Approximate for subplans and nodes that stop early."),
+            Col::Time => Some("The node's own time over all its loops, without the nodes below it."),
+            Col::Kept => Some("The server's guess at the share of rows its filter keeps."),
+            Col::Off => Some("How many times the estimate was off from the rows that came back."),
+            _ => None,
+        }
+    }
+}
+
+/// The columns that fit `w`, the least useful going first when the dialog is narrow.
+fn columns(p: &Plan, w: f32) -> Vec<Col> {
+    let timed = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
+    let mut cols = if timed { vec![Col::Time, Col::EstActual, Col::Off] } else { vec![Col::SelfCost, Col::Rows, Col::Kept, Col::Cost] };
+    if !p.nodes.iter().any(|n| n.filtered_pct.is_some()) {
+        cols.retain(|c| *c != Col::Kept);
+    }
+    if w < 520.0 {
+        cols.retain(|c| !matches!(c, Col::Rows | Col::Kept | Col::EstActual));
+    }
+    if w < 440.0 {
+        cols.retain(|c| !matches!(c, Col::Cost | Col::Off));
+    }
+    cols
+}
+
+pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
+    let Some(p) = &x.plan else { return };
+    if p.nodes.is_empty() {
+        ui.label(RichText::new("The server returned no plan nodes. See Raw.").color(MUTED()));
+        return;
+    }
+    let cols = columns(p, ui.available_width());
+    let marks: Vec<Option<Severity>> = (0..p.nodes.len()).map(|i| p.findings.iter().filter(|f| f.node == Some(i)).map(|f| f.severity).min()).collect();
+    // Header.
+    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+    // Labels rather than painted text, so screen readers and tests find the columns.
+    let head = |ui: &mut egui::Ui, text: &str, r: egui::Rect, right: bool| {
+        let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_align(if right { egui::Align::Max } else { egui::Align::Min });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| ui.label(RichText::new(text).size(TXT_SECTION).color(FAINT()).extra_letter_spacing(0.6))).inner
+    };
+    head(ui, "NODE", egui::Rect::from_min_max(hr.min + egui::vec2(8.0, 0.0), egui::pos2(hr.center().x, hr.bottom())), false);
+    let mut cx = hr.right() - 8.0;
+    for c in cols.iter().rev() {
+        let right = !matches!(c, Col::SelfCost | Col::Time);
+        let r = egui::Rect::from_min_max(egui::pos2(cx - c.width() + 4.0, hr.top()), egui::pos2(cx, hr.bottom()));
+        let l = head(ui, c.head(), r, right);
+        if let Some(tip) = c.tip() {
+            l.on_hover_text(tip);
+        }
+        cx -= c.width();
+    }
+    ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, LINE()));
+    let scroll_to = x.scroll_to.take();
+    egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - 24.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (i, n) in p.nodes.iter().enumerate() {
+            let sub = node_sub(n, x.dialect);
+            let name = format!("{} {}", n.label, n.name()).trim().to_string();
+            let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &name, |pt, rect| paint_row(pt, rect, n, sub.as_deref(), marks[i], &cols));
+            if scroll_to == Some(i) {
+                r.scroll_to_me(Some(egui::Align::Center));
+            }
+            if r.clicked() {
+                acts.push(XAct::Select(i));
+            }
+        }
+    });
+}
+
+/// The second line of a row: the columns its filter tests, or the condition it searches or joins on.
+fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
+    let cols = |text: &str| cond::parse(text, d).map(|e| cond::columns(&e)).filter(|c| !c.is_empty());
+    if let Some(e) = &n.filter_expr {
+        let c = cond::columns(e);
+        if !c.is_empty() {
+            return Some(format!("Filter: {}", c.join(", ")));
+        }
+    }
+    if !n.filter.is_empty() {
+        return Some("Filter".into());
+    }
+    if let Some(c) = cols(&n.index_cond) {
+        return Some(format!("Index Cond: {}", c.join(", ")));
+    }
+    if !n.join_cond.is_empty() {
+        let line = cond::parse(&n.join_cond, d).map(|e| cond::one_line(&e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+        let short: String = line.chars().take(60).collect();
+        return Some(if n.label.contains("Join") || n.label == "Hash" { short } else { format!("Lookup: {short}") });
+    }
+    n.detail.iter().find(|d| d.starts_with("Sort Key") || d.starts_with("Group Key")).cloned()
+}
+
+fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str>, mark: Option<Severity>, cols: &[Col]) {
+    let top = if sub.is_some() { rect.top() + 16.0 } else { rect.center().y };
+    let cols_w: f32 = cols.iter().map(|c| c.width()).sum();
+    let node_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - cols_w - 8.0, rect.bottom()));
+    let np = p.with_clip_rect(node_area.intersect(p.clip_rect()));
+    // Indent guides, one per level above the node.
+    for l in 0..n.depth {
+        let gx = rect.left() + l as f32 * STEP + 5.5;
+        np.vline(gx, rect.y_range(), Stroke::new(1.0, LINE()));
+    }
+    let mut x = rect.left() + n.depth as f32 * STEP;
+    let col = access_color(n.access);
+    let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
+    if col != TEXT() {
+        let chip = egui::Rect::from_min_size(egui::pos2(x, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+        np.rect_filled(chip, R_SM, tint(col, 36));
+        galley_at(&np, x + 6.0, top, g.clone(), col);
+        x = chip.right() + 8.0;
+    } else {
+        let w = g.size().x;
+        galley_at(&np, x, top, g, BRIGHT());
+        x += w + 8.0;
+    }
+    let target = n.name();
+    if !target.is_empty() {
+        let g = np.layout_job(egui::text::LayoutJob::single_section(target, mono_fmt(TXT_BODY, TEXT(), 400.0)));
+        let w = g.size().x;
+        galley_at(&np, x, top, g, TEXT());
+        x += w + 8.0;
+    }
+    if let Some(sev) = mark {
+        let c = egui::pos2(x + 6.0, top);
+        match sev {
+            Severity::Warn => glyphs::warn(&np, c, WARNING()),
+            Severity::Note => glyphs::info(&np, c, MUTED()),
+        }
+    }
+    if let Some(s) = sub {
+        let g = np.layout_job(egui::text::LayoutJob::single_section(s.to_string(), mono_fmt(TXT_SMALL, FAINT(), 400.0)));
+        galley_at(&np, rect.left() + n.depth as f32 * STEP + 2.0, rect.top() + 34.0, g, FAINT());
+    }
+    // Columns, right to left.
+    let mut cx = rect.right();
+    for c in cols.iter().rev() {
+        let left = cx - c.width();
+        let right_text = |text: String, color: Color32| {
+            let g = p.layout_job(egui::text::LayoutJob::single_section(text, mono_fmt(TXT_BODY, color, 400.0)));
+            galley_at(p, cx - g.size().x, top, g, color);
+        };
+        match c {
+            Col::SelfCost | Col::Time => {
+                let (share, text) = match c {
+                    Col::Time => (n.share, n.self_ms.map(|m| format!("{} ms", findings::ms_text(m)))),
+                    _ => (n.share, n.share.map(|s| format!("{}%", (s * 100.0).round()))),
+                };
+                if let (Some(s), Some(t)) = (share, text) {
+                    let color = share_color(s);
+                    let g = p.layout_job(egui::text::LayoutJob::single_section(t, mono_fmt(TXT_SMALL, if s >= 0.2 { color } else { MUTED() }, 500.0)));
+                    let tw = g.size().x;
+                    galley_at(p, cx - tw, top, g, color);
+                    let track = egui::Rect::from_min_max(egui::pos2(left + 4.0, top - 3.0), egui::pos2(cx - tw - 10.0, top + 3.0));
+                    if track.width() > 12.0 {
+                        p.rect_filled(track, 3, TRACK());
+                        let fill = egui::Rect::from_min_size(track.min, egui::vec2((track.width() * s as f32).max(3.0), track.height()));
+                        p.rect_filled(fill, 3, color);
+                    }
+                }
+            }
+            Col::Rows => right_text(n.rows.map(figure).unwrap_or_default(), TEXT()),
+            Col::Kept => right_text(n.filtered_pct.map(|f| format!("{f:.0}%")).unwrap_or_default(), if n.filtered_pct.is_some_and(|f| f <= 20.0) { WARNING() } else { MUTED() }),
+            Col::Cost => right_text(n.own_cost.or(n.cost).map(figure).unwrap_or_default(), TEXT()),
+            Col::EstActual => {
+                if n.never_ran {
+                    right_text("never ran".into(), FAINT());
+                } else if let (Some(e), Some(a)) = (n.rows, n.actual_rows) {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(&figure(e), 0.0, mono_fmt(TXT_BODY, FAINT(), 400.0));
+                    job.append(" > ", 0.0, mono_fmt(TXT_BODY, FAINT(), 400.0));
+                    job.append(&figure(a), 0.0, mono_fmt(TXT_BODY, TEXT(), 400.0));
+                    let g = p.layout_job(job);
+                    galley_at(p, cx - g.size().x, top, g, TEXT());
+                }
+            }
+            Col::Off => {
+                if let Some(off) = n.off() {
+                    if off >= 2.0 {
+                        let color = if off >= findings::OFF_WARN { WARNING() } else { MUTED() };
+                        let g = p.layout_job(egui::text::LayoutJob::single_section(findings::factor(off), mono_fmt(TXT_SMALL, color, 500.0)));
+                        let chip = egui::Rect::from_min_size(egui::pos2(cx - g.size().x - 12.0, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+                        p.rect_filled(chip, R_SM, tint(color, 36));
+                        galley_at(p, chip.left() + 6.0, top, g, color);
+                    } else {
+                        glyphs::check(p, egui::pos2(cx - 8.0, top), SUCCESS());
+                    }
+                }
+            }
+        }
+        cx = left;
+    }
+}

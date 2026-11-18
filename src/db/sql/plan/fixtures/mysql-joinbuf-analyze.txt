@@ -1,0 +1,5 @@
+-> Nested loop inner join  (cost=45264 rows=5021) (actual time=0.662..81.1 rows=1110 loops=1)
+    -> Table scan on i  (cost=10115 rows=100427) (actual time=0.0539..8.88 rows=100000 loops=1)
+    -> Filter: ((o.`status` = 'paid') and (o.total > 850.00))  (cost=0.25 rows=0.05) (actual time=662e-6..662e-6 rows=0.0111 loops=100000)
+        -> Single-row index lookup on o using PRIMARY (id=i.order_id)  (cost=0.25 rows=1) (actual time=515e-6..534e-6 rows=1 loops=100000)
+
