@@ -34,7 +34,7 @@ impl App {
                 self.groups.place(id, Place::Into(gid, None), &all);
             }
             if state == "open" {
-                self.rail_open.insert(gid);
+                self.groups.set_rail_open(gid, true);
             }
         }
     }

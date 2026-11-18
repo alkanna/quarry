@@ -301,8 +301,6 @@ pub struct App {
     /// What the Connections panel and the Library panel remember while the app runs.
     conns_ui: conns_panel::ConnsUi,
     lib_ui: library::LibUi,
-    /// Group folders opened into a capsule in the rail.
-    rail_open: HashSet<u64>,
     /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
     restores: Vec<(u64, Restore)>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
@@ -468,7 +466,6 @@ impl App {
             library: Default::default(),
             conns_ui: Default::default(),
             lib_ui: Default::default(),
-            rail_open: HashSet::new(),
             restores: Vec::new(),
             scroll_sel: false,
             vnav: Default::default(),

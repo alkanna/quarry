@@ -50,7 +50,6 @@ impl App {
                     };
                     self.rail_order.insert(i, tile);
                 }
-                self.prune_rail_open();
                 self.save_groups();
                 self.ok("Grouping undone.");
             }

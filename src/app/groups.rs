@@ -24,6 +24,8 @@ pub(super) struct Group {
     pub(super) fold_rail: bool,
     /// Shown open in the Connections panel.
     pub(super) open: bool,
+    /// Its folder is open in the rail. Kept here rather than in ui.json so it goes with the group, whose id a new one reuses.
+    pub(super) rail_open: bool,
     pub(super) members: Vec<u64>,
 }
 
@@ -47,6 +49,17 @@ impl Groups {
 
     pub(super) fn group_mut(&mut self, id: u64) -> Option<&mut Group> {
         self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Whether the person left a group's rail folder open, which reopens it the same way at the next launch.
+    pub(super) fn rail_open(&self, id: u64) -> bool {
+        self.group(id).is_some_and(|g| g.rail_open)
+    }
+
+    pub(super) fn set_rail_open(&mut self, id: u64, open: bool) {
+        if let Some(g) = self.group_mut(id) {
+            g.rail_open = open;
+        }
     }
 
     /// The connections in no group, in the order the panel shows them: the saved `loose` order first, then the rest of
@@ -88,7 +101,7 @@ impl Groups {
     pub(super) fn new_group(&mut self, name: &str) -> u64 {
         let id = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
         let color = GROUP_COLORS.iter().map(|c| c.0).find(|c| !self.groups.iter().any(|g| g.color == *c)).unwrap_or(GROUP_COLORS[self.groups.len() % GROUP_COLORS.len()].0);
-        self.groups.push(Group { id, name: name.into(), color: color.into(), fold_rail: true, open: true, members: Vec::new() });
+        self.groups.push(Group { id, name: name.into(), color: color.into(), fold_rail: true, open: true, rail_open: false, members: Vec::new() });
         id
     }
 
@@ -209,6 +222,16 @@ mod tests {
         g.place(2, Place::Into(a, None), &all);
         g.place(3, Place::Into(b, None), &all);
         g
+    }
+
+    #[test]
+    fn an_open_rail_folder_stays_open_in_the_saved_file_and_older_files_load_closed() {
+        let mut g = two();
+        g.groups[0].rail_open = true;
+        let back: Groups = serde_json::from_slice(&serde_json::to_vec(&g).unwrap()).unwrap();
+        assert!(back.groups[0].rail_open && !back.groups[1].rail_open);
+        let old: Groups = serde_json::from_str(r#"{"groups":[{"id":1,"name":"Prod","members":[1]}]}"#).unwrap();
+        assert!(!old.groups[0].rail_open);
     }
 
     #[test]
