@@ -5,8 +5,10 @@
 use super::{lex, Dialect, ResultSet};
 use serde_json::Value;
 
+pub mod compare;
 pub mod cond;
 pub mod findings;
+pub mod flame;
 mod tree;
 
 pub use findings::{Finding, FixKind, Severity};

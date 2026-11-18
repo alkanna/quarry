@@ -150,3 +150,18 @@ fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
         j = x.parent?;
     }
 }
+
+/// Each node's cost, or time, with the nodes below it, built up from the own values `derive` worked out. For PostgreSQL
+/// and MySQL's tree text that is the loop-scaled cost `spread` gives; MySQL's JSON has only a running total, so its own
+/// costs are summed. Building up from own values keeps every parent at least as heavy as its children, which the
+/// times alone do not (parallel workers, loops).
+pub(crate) fn inclusive(p: &Plan, time: bool) -> Vec<f64> {
+    let mut w = vec![0.0; p.nodes.len()];
+    // Children follow their parent, so walking back sees every child first.
+    for i in (0..p.nodes.len()).rev() {
+        let x = &p.nodes[i];
+        let own = if time { x.self_ms } else { x.self_cost }.unwrap_or(0.0).max(0.0);
+        w[i] = own + x.kids.iter().map(|&k| w[k]).sum::<f64>();
+    }
+    w
+}
