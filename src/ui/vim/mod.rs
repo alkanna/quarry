@@ -415,7 +415,9 @@ pub(crate) fn end(ui: &mut egui::Ui, id: egui::Id, out: &mut TextEditOutput) {
     s.last_focus = pass;
     let mode = s.vim.mode;
     let moved = std::mem::take(&mut s.moved);
-    let painter = ui.painter().with_clip_rect(out.text_clip_rect);
+    // with_clip_rect replaces the clip, so the enclosing scroll area's view is intersected in by hand.
+    let visible = out.text_clip_rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(visible);
     if mode != Mode::Insert || moved {
         let g = &out.galley;
         let r0 = g.pos_from_cursor(CCursor::new(s.cur));
@@ -442,14 +444,50 @@ pub(crate) fn end(ui: &mut egui::Ui, id: egui::Id, out: &mut TextEditOutput) {
     let fg = if mode == Mode::Insert { MUTED() } else { PRIMARY() };
     let g = painter.layout_job(LayoutJob::single_section(label, mono_fmt(TXT_CAPTION, fg, W_SEMIBOLD)));
     let size = egui::vec2(g.size().x + 2.0 * VIM_BADGE_PAD, STATUS_CHIP_H);
-    let inset = egui::Vec2::splat(VIM_BADGE_PAD);
-    let clip = out.response.rect.intersect(out.text_clip_rect);
-    // A one-line box like the Mongo query has no room for it without covering the text; the block
-    // caret still tells Normal from Insert there.
-    if clip.height() >= 2.0 * (size.y + inset.y) {
-        let rect = egui::Rect::from_min_size(clip.right_bottom() - size - inset, size);
+    if let Some(rect) = badge_rect(out.response.rect, visible, size) {
         // An opaque base keeps the badge readable over the text it covers.
         painter.rect_filled(rect, R_SM, BG());
         crate::ui::widgets::paint_badge(&painter, rect, g, fg, 31);
+    }
+}
+
+/// Where the mode badge sits: the bottom right of the part of the editor that is on screen, so it
+/// stays in view when the editor is taller than the scroll area around it.
+fn badge_rect(editor: egui::Rect, visible: egui::Rect, size: egui::Vec2) -> Option<egui::Rect> {
+    let inset = egui::Vec2::splat(VIM_BADGE_PAD);
+    let clip = editor.intersect(visible);
+    // A one-line box like the Mongo query has no room for it without covering the text; the block
+    // caret still tells Normal from Insert there.
+    (clip.height() >= 2.0 * (size.y + inset.y)).then(|| egui::Rect::from_min_size(clip.right_bottom() - size - inset, size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn the_badge_stays_in_the_visible_part_of_a_tall_editor() {
+        let seen = Cell::new(None);
+        let mut text: String = (0..200).map(|i| format!("line {i} {}\n", "x".repeat(60))).collect();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(300.0, 200.0)).with_accessibility_check(false).build_ui(|ui| {
+            set_on(ui.ctx(), true);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let id = egui::Id::new("vim-badge-test");
+                let out = wrap(ui, id, &mut text, |ui, t| egui::TextEdit::multiline(t).id(id).desired_width(f32::INFINITY).show(ui));
+                seen.set(Some((out.response.rect, out.text_clip_rect, ui.clip_rect())));
+            });
+        });
+        h.run_steps(3);
+        let (editor, text_clip, visible) = seen.get().expect("drawn");
+        // The premise: the editor reaches well below what the scroll area shows.
+        assert!(editor.bottom() > visible.bottom() + 100.0 && text_clip.bottom() > visible.bottom());
+        let size = egui::vec2(60.0, STATUS_CHIP_H);
+        let badge = badge_rect(editor, text_clip.intersect(visible), size).expect("room for the badge");
+        assert!(visible.contains_rect(badge), "badge {badge:?} outside the view {visible:?}, editor {editor:?}, text clip {text_clip:?}");
+        // With no scrolling the badge keeps its place in the corner of the editor.
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 100.0));
+        let r = badge_rect(short, short, size).expect("room");
+        assert_eq!(r.right_bottom(), short.right_bottom() - egui::Vec2::splat(VIM_BADGE_PAD));
     }
 }
