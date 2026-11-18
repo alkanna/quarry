@@ -93,7 +93,7 @@ impl Evidence {
                 continue;
             }
             let ix = |name: String, cols: &[&str], unique| IndexEv { name, cols: cols.iter().map(|c| c.to_string()).collect(), unique, btree: true, ..Default::default() };
-            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { name, ty: "text".into(), null_frac: Some(0.0), ..Default::default() }).collect();
+            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { name, ty: if d == Dialect::Postgres { "text".into() } else { "varchar(64)".into() }, null_frac: Some(0.0), ..Default::default() }).collect();
             tables.push(TableEv {
                 names: vec![(n.rel.clone(), n.alias.clone())],
                 schema: if d == Dialect::Postgres { "public".into() } else { "shop".into() },

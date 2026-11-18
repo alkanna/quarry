@@ -155,8 +155,9 @@ struct Pick {
 }
 
 fn pick(s: &Sargs, t: &TableEv, rows: f64, d: Dialect) -> Pick {
-    // A column of another table, or of no table (an output name), cannot be in this table's index.
-    let known = |c: &str| t.col(c).is_some();
+    // A column of another table, or of no table (an output name), cannot be in this table's index, nor can one whose type
+    // a plain B-tree does not take.
+    let known = |c: &str| t.col(c).is_some_and(|c| indexable(&c.ty, d));
     let mut eq: Vec<(String, Option<f64>)> = Vec::new();
     let mut ins: Vec<(String, Option<f64>)> = Vec::new();
     let mut ranges: Vec<String> = Vec::new();
@@ -200,6 +201,17 @@ fn pick(s: &Sargs, t: &TableEv, rows: f64, d: Dialect) -> Pick {
     let all = s.blockers.is_empty() && s.other == 0 && s.sargs.iter().all(|g| names.iter().chain(&weak).any(|c| same(c, &g.col, d)));
     let sel = cols.iter().try_fold(1.0, |acc, (_, s)| s.map(|s| acc * s));
     Pick { cols: names, range, all, sel }
+}
+
+/// Whether a plain index can hold the column whole: MySQL needs a prefix length for TEXT and BLOB and takes no JSON or
+/// spatial column, and PostgreSQL's json and xml have no B-tree operator class.
+fn indexable(ty: &str, d: Dialect) -> bool {
+    let t = ty.to_ascii_lowercase();
+    let base = t.split(['(', ' ']).next().unwrap_or_default();
+    if d == Dialect::Postgres {
+        return !matches!(base, "json" | "xml" | "point" | "polygon" | "line" | "circle" | "box" | "path");
+    }
+    !(base.ends_with("text") || base.ends_with("blob") || matches!(base, "json" | "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring" | "multipolygon" | "geometrycollection"))
 }
 
 /// The share of rows `col` keeps for these values, from its statistics.
@@ -565,7 +577,8 @@ mod tests {
     fn mysql_filtered_alone_is_a_guess() {
         let json = r#"{"query_block":{"select_id":1,"cost_info":{"query_cost":"20177.25"},"table":{"table_name":"orders","access_type":"ALL","rows_examined_per_scan":199290,"rows_produced_per_join":6642,"filtered":"3.33","cost_info":{"read_cost":"19513.02","eval_cost":"664.23","prefix_cost":"20177.25"},"attached_condition":"((`shop`.`orders`.`status` = 'failed') and (`shop`.`orders`.`total` > 800.00))"}}}"#;
         let p = parse(Dialect::MySql, json).unwrap();
-        let t = TableEv { names: vec![(String::new(), "orders".into())], schema: "shop".into(), table: "orders".into(), rows: Some(200_000.0), indexes: Some(vec![]), cols: vec![col("status", 5.0), col("total", 900.0)], ..Default::default() };
+        let my_col = |name: &str, ty: &str, nd: f64| ColEv { ty: ty.into(), ..col(name, nd) };
+        let t = TableEv { names: vec![(String::new(), "orders".into())], schema: "shop".into(), table: "orders".into(), rows: Some(200_000.0), indexes: Some(vec![]), cols: vec![my_col("status", "varchar(16)", 5.0), my_col("total", "decimal(10,2)", 900.0)], ..Default::default() };
         let Advice::No { why, .. } = advise(&p, 0, Dialect::MySql, &t, false) else { panic!() };
         assert!(why.contains("ANALYZE"), "{why}");
         // Measured by EXPLAIN ANALYZE, the same filter gets its candidate.
@@ -574,6 +587,11 @@ mod tests {
         let t = TableEv { names: vec![(String::new(), "orders".into())], ..t };
         let Advice::Create { fix, .. } = advise(&p, i, Dialect::MySql, &t, false) else { panic!("{:?}", advise(&p, i, Dialect::MySql, &t, false)) };
         assert_eq!(fix.sql, "ALTER TABLE `shop`.`orders` ADD INDEX `orders_status_total_idx` (`status`, `total`), ALGORITHM=INPLACE, LOCK=NONE;");
+        // A TEXT column takes no index without a prefix length, so the statement would fail: the range alone is left, and
+        // how much it narrows is not known.
+        let t = TableEv { cols: vec![my_col("status", "mediumtext", 5.0), my_col("total", "decimal(10,2)", 900.0)], ..t };
+        let Advice::No { why, .. } = advise(&p, i, Dialect::MySql, &t, false) else { panic!() };
+        assert!(why.contains("only total"), "{why}");
     }
 
     #[test]

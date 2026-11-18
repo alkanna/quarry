@@ -911,14 +911,15 @@ impl Cx<'_> {
         }
     }
 
-    /// PostgreSQL's `(col)::text` on a varchar or char column: a relabel the index on the column still serves.
+    /// PostgreSQL's `(col)::text` on a varchar column: a relabel the index on the column still serves. char to text strips
+    /// the padding and citext to text changes the comparison, so those are real casts an index on the column cannot serve.
     fn relabel(&self, c: &ColRef, ty: &str) -> bool {
-        if self.d != Dialect::Postgres || !matches!(ty, "text" | "character varying" | "varchar" | "bpchar") {
+        if self.d != Dialect::Postgres || !matches!(ty, "text" | "character varying" | "varchar") {
             return false;
         }
         (self.ty)(&c.name).is_some_and(|t| {
             let t = t.to_ascii_lowercase();
-            t.starts_with("character varying") || t.starts_with("varchar") || t.starts_with("character") || t.starts_with("char") || t == "bpchar"
+            t.starts_with("character varying") || t.starts_with("varchar")
         })
     }
 
