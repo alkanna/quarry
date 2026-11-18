@@ -171,7 +171,8 @@ pub(super) struct Sub {
     pub(super) at: SubAt,
 }
 
-/// How node `k` runs, when it is a subquery.
+/// How node `k` runs, when it is a subquery. The findings read `sub` directly; the tests ask through this.
+#[cfg(test)]
 pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
     p.nodes[k].sub.map(|s| s.run)
 }
