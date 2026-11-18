@@ -252,6 +252,14 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     let Some(mut ui) = explain_twice(FIX_BEFORE, FIX_BEFORE_RUN) else { return };
     ui.show("Flame");
     assert!(ui.h.query_by_label("Compare").is_none(), "an analyzed plan is compared with an estimate");
+    // Plans of a connection that closed are forgotten.
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    let conn = ui.app().t().map(|t| t.sel.conn).unwrap();
+    ui.h.state_mut().drop_session(conn);
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
+    ui.settle();
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "a plan from before the connection closed is compared");
 }
 
 #[test]

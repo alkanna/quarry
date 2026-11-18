@@ -234,8 +234,7 @@ impl App {
                 egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 16 }).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     status_lines(ui, x);
-                    let body_h = (screen.height() - 330.0).clamp(260.0, 640.0).min(body_room(ui, 74.0));
-                    compare_view(ui, x, body_h, &mut acts);
+                    compare_view(ui, x, screen.height(), &mut acts);
                 });
             });
         } else {

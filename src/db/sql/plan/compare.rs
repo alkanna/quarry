@@ -278,12 +278,12 @@ fn finding_changes(before: &Plan, after: &Plan, rows: &[Row], cb: &[f64], ca: &[
         }
         // What became of its node, when the node is still there.
         let row = f.node.and_then(|i| rows.iter().find(|r| r.before == Some(i)));
+        let via = |a: usize| (before.nodes[f.node.unwrap_or(0)].access == Access::Scan && after.nodes[a].access != Access::Scan).then(|| index_of(after, a)).flatten();
         let body = match row.and_then(|r| r.after) {
-            Some(a) if before.nodes[f.node.unwrap_or(0)].access == Access::Scan && after.nodes[a].access != Access::Scan => {
-                let via = index_of(after, a).map(|ix| format!(" through {ix}")).unwrap_or_default();
-                format!("Now an index scan{via}, {} instead of {}.", count(ca[a]), count(cb[f.node.unwrap_or(0)]))
-            }
-            Some(_) => "Not in the new plan.".into(),
+            Some(a) => match via(a) {
+                Some(ix) => format!("Now an index scan through {ix}, {} instead of {}.", count(ca[a]), count(cb[f.node.unwrap_or(0)])),
+                None => "No longer reported.".into(),
+            },
             None => "The node is gone from the new plan.".into(),
         };
         out.push(FindingChange { state: State::Resolved, title: f.title.clone(), body, node: f.node });
@@ -415,6 +415,18 @@ mod tests {
             let m = matches(&p, &p);
             assert_eq!(m, (0..p.nodes.len()).map(Some).collect::<Vec<_>>(), "a plan does not match itself node for node");
         }
+        // Two joins with the same shape but the tables on other sides: tables pair by alias wherever they sit, and the
+        // Hash nodes, each over a different table, still pair by type.
+        let (b, a) = (pg(include_str!("fixtures/pg18-nested-analyze.json")), pg(include_str!("fixtures/pg18-exists-analyze.json")));
+        let d = diff(&b, &a);
+        for alias in ["b", "s"] {
+            let r = d.rows.iter().find(|r| r.after.is_some_and(|i| a.nodes[i].alias == alias)).unwrap_or_else(|| panic!("no row for {alias}"));
+            assert!(r.before.is_some_and(|j| b.nodes[j].alias == alias), "{alias} was not paired with itself");
+            assert_ne!(r.before, r.after, "{alias} sits at another place in each plan, so its rows differ by index");
+        }
+        let hash = a.nodes.iter().position(|n| n.label == "Hash").unwrap();
+        let r = d.rows.iter().find(|r| r.after == Some(hash)).unwrap();
+        assert!(r.before.is_some_and(|j| b.nodes[j].label == "Hash"), "the Hash nodes were not paired");
         // A plan against a different one: every node of each shows exactly once.
         let (b, a) = (pg(include_str!("fixtures/pg18-cte-analyze.json")), pg(include_str!("fixtures/pg18-scan.json")));
         let d = diff(&b, &a);

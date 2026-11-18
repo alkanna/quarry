@@ -49,12 +49,14 @@ pub(super) fn clock(secs: u64) -> String {
     crate::db::dates::hms((s + off).rem_euclid(86_400))[..5].to_string()
 }
 
-pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
+pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32, acts: &mut Vec<XAct>) {
     let (Some(after), Some(prev)) = (&x.plan, &x.prev) else { return };
     let d = &prev.diff;
     let timed = d.time.is_some();
     summary_band(ui, d, after.analyzed);
     ui.add_space(16.0);
+    // Measured after the band, as the tree is after the findings, so the table never runs past the dialog.
+    let body_h = (screen_h - 330.0).clamp(260.0, 640.0).min(body_room(ui, 74.0));
     let mut show = None;
     egui::ScrollArea::vertical().id_salt("sql-explain-compare").max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
         // Header, as labels so screen readers and tests find the columns.
