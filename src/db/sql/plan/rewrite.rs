@@ -116,15 +116,27 @@ fn gates(p: &Plan, i: usize, d: Dialect, t: &TableEv) -> (Vec<String>, Option<St
     (lines, why)
 }
 
-/// `CREATE INDEX` of `parts` (the column list as written between the parentheses) on `t`, built without blocking writes.
-fn create(d: Dialect, t: &TableEv, name: &str, parts: &str, gin: bool, pooler: bool) -> String {
+/// What kind of index `create` writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum How {
+    Plain,
+    /// PostgreSQL's GIN, for pg_trgm.
+    Gin,
+    /// An index on an expression, which MySQL adds as a hidden generated column.
+    Expr,
+}
+
+/// `CREATE INDEX` of `parts` (what goes between the parentheses) on `t`, built without blocking writes where the server can.
+fn create(d: Dialect, t: &TableEv, name: &str, parts: &str, how: How, pooler: bool) -> String {
     let target = d.qualified(&t.schema, &t.table);
     let ix = d.quote_ident(name);
-    let using = if gin { " USING gin" } else { "" };
+    let using = if how == How::Gin { " USING gin" } else { "" };
     match d {
         // A pooler runs each statement in a transaction, where CONCURRENTLY is refused.
         Dialect::Postgres if pooler => format!("-- Blocks writes to {} while it builds: CONCURRENTLY cannot run through the connection pooler.\nCREATE INDEX {ix} ON {target}{using} ({parts});", t.table),
         Dialect::Postgres => format!("CREATE INDEX CONCURRENTLY {ix} ON {target}{using} ({parts});"),
+        // MySQL refuses LOCK=NONE for the virtual column behind an index on an expression.
+        _ if how == How::Expr => format!("-- Blocks writes to {} while it builds: MySQL adds an index on an expression under a shared lock.\nALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=SHARED;", t.table),
         _ => format!("ALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=NONE;"),
     }
 }
@@ -380,7 +392,7 @@ fn folded(p: &Plan, i: usize, d: Dialect, ev: &Evidence, t: &TableEv, x: &Expr, 
                     Some(why) => spot.no_fix = Some(format!("No index suggested: {why}.")),
                     None => {
                         let name = name_for(d, t, &[f.to_string(), col.clone()], &[]);
-                        let sql = create(d, t, &name, &format!("({f}({}))", d.quote_ident(col)), false, pooler);
+                        let sql = create(d, t, &name, &format!("({f}({}))", d.quote_ident(col)), How::Expr, pooler);
                         spot.fix = Some(Fix { kind: FixKind::Index, label: "Expression index".into(), sql, note: format!("An index on the expression exactly as the filter writes it. {NOTE}") });
                     }
                 }
@@ -455,7 +467,7 @@ fn wild(p: &Plan, i: usize, d: Dialect, ev: &Evidence, t: &TableEv, x: &Expr, ow
             Some(why) => spot.no_fix = Some(format!("No index suggested: {why}.")),
             None => {
                 let name = name_for(d, t, &[col.clone(), "trgm".into()], &[]);
-                let sql = create(d, t, &name, &format!("{} gin_trgm_ops", d.quote_ident(col)), true, pooler);
+                let sql = create(d, t, &name, &format!("{} gin_trgm_ops", d.quote_ident(col)), How::Gin, pooler);
                 spot.fix = Some(Fix { kind: FixKind::Index, label: "Trigram index".into(), sql, note: format!("A GIN index of pg_trgm, which serves LIKE and ILIKE with a wildcard anywhere. It is larger than a B-tree and slower to update. {NOTE}") });
             }
         }
@@ -510,7 +522,7 @@ fn either(p: &Plan, i: usize, d: Dialect, t: &TableEv, x: &Expr, own: &dyn Fn(&C
             let mut sql = Vec::new();
             for c in &names {
                 let name = name_for(d, t, std::slice::from_ref(c), &made);
-                sql.push(create(d, t, &name, &d.quote_ident(c), false, pooler));
+                sql.push(create(d, t, &name, &d.quote_ident(c), How::Plain, pooler));
                 made.push(name);
             }
             spot.fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: sql.join("\n"), note: format!("One index for each side of the OR, so the {who} can search them all and combine the rows. {NOTE}") });
@@ -575,7 +587,7 @@ fn join_buffers(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, out: &mut [Fi
             lines.push(format!("Distinct values: {col} {}.", count(nd)));
         }
         let name = name_for(d, t, std::slice::from_ref(&col), &[]);
-        out[k].fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: create(d, t, &name, &d.quote_ident(&col), false, pooler), note: format!("An index on the join column, so each row of the tables before it looks its matches up. {NOTE}") });
+        out[k].fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: create(d, t, &name, &d.quote_ident(&col), How::Plain, pooler), note: format!("An index on the join column, so each row of the tables before it looks its matches up. {NOTE}") });
         out[k].evidence = lines;
         // The scan's own finding says its filter's share is a guess; the join's candidate does not rest on that share.
         for f in out.iter_mut().filter(|f| f.node == Some(ti) && f.kind == Kind::FullScan && f.fix.is_none()) {
@@ -713,6 +725,10 @@ impl Matcher<'_> {
 
     /// `name`, `alias.name` or `schema.table.name` for the shape's column; the token after it and its bytes.
     fn column(&self, j: usize) -> Option<(usize, Range<usize>)> {
+        // The middle of a qualified name is no name of its own.
+        if j > 0 && self.is(j - 1, ".") {
+            return None;
+        }
         let mut parts = vec![self.ident(j)?];
         let mut k = j + 1;
         while self.is(k, ".") && parts.len() < 3 {
@@ -1020,7 +1036,7 @@ mod tests {
         assert!(unused(&p).unwrap().no_fix.as_deref().unwrap().contains("bookings_lemail is on an expression"));
         // MySQL measured by ANALYZE: 5 rows of 200,000.
         let p = my(Dialect::MySql, "mysql-lowerall-analyze", "orders", captured(Dialect::MySql));
-        assert_eq!(index_fix(&p).as_deref(), Some("ALTER TABLE `shop`.`orders` ADD INDEX `orders_lower_email_idx` ((lower(`email`))), ALGORITHM=INPLACE, LOCK=NONE;"));
+        assert_eq!(index_fix(&p).as_deref(), Some("-- Blocks writes to orders while it builds: MySQL adds an index on an expression under a shared lock.\nALTER TABLE `shop`.`orders` ADD INDEX `orders_lower_email_idx` ((lower(`email`))), ALGORITHM=INPLACE, LOCK=SHARED;"));
         // Its estimate alone is a guess: the finding, no index.
         let p = my(Dialect::MySql, "mysql-lowerall", "orders", captured(Dialect::MySql));
         assert_eq!(index_fix(&p), None);
@@ -1128,6 +1144,8 @@ mod tests {
         assert_eq!(pg("SELECT id FROM bookings WHERE CAST(created_at AS date) = '2026-03-01'::date", "pg18-datewrap").as_deref(), Some("SELECT id FROM bookings WHERE created_at >= '2026-03-01' AND created_at < '2026-03-02'"));
         assert_eq!(pg("SELECT id FROM bookings WHERE ref = 'x' OR '2026-03-01' = created_at::date", "pg18-datewrap").as_deref(), Some("SELECT id FROM bookings WHERE ref = 'x' OR (created_at >= '2026-03-01' AND created_at < '2026-03-02')"));
         assert_eq!(pg("SELECT id FROM bookings WHERE id::text = '4242'", "pg18-cast").as_deref(), Some("SELECT id FROM bookings WHERE id = 4242"));
+        assert_eq!(pg("SELECT b.id FROM bookings b WHERE (b.created_at::date = '2026-03-01')", "pg18-datewrap"), None, "the plan reads the table as bookings, not b");
+        assert_eq!(pg("SELECT id FROM bookings WHERE (bookings.created_at::date = '2026-03-01')", "pg18-datewrap").as_deref(), Some("SELECT id FROM bookings WHERE (bookings.created_at >= '2026-03-01' AND bookings.created_at < '2026-03-02')"));
         let my = |s: &str, name: &str, alias: &str| rewritten(s, Dialect::MySql, name, alias);
         assert_eq!(
             my("SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'", "mysql-join", "o").as_deref(),
