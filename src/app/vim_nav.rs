@@ -61,6 +61,9 @@ pub(super) struct VimNav {
     pub(super) page: usize,
     /// Arrows put in for keys typed with no grid to take them, which `end` turns into focus moves if nothing took them.
     injected: Vec<Key>,
+    /// An Alt pane or screen key went by and its letter has not come as text yet. Kept across passes, since the text can
+    /// come a pass after the key; the next key press clears it, so a key that sends no text never eats a later letter.
+    alt_text: bool,
 }
 
 /// The sidebar row that should take the keys, asked for by Ctrl+h and given by the rows as they draw.
@@ -207,11 +210,12 @@ impl App {
         self.vnav.injected.clear();
         if !self.prefs.vim || self.window_open() {
             self.vnav.pending.clear();
+            self.vnav.alt_text = false;
             return;
         }
         let mut pane = None;
         // Where Alt stands in for Ctrl, winit still sends the letter as text right after the key, so that text goes too.
-        let mut alt_text = false;
+        let mut alt_text = self.vnav.alt_text;
         ctx.input_mut(|i| {
             i.events.retain(|e| match e {
                 Event::Key { key: k @ (Key::H | Key::J | Key::K | Key::L), pressed, modifiers, .. } if pane_mods(modifiers) => {
@@ -230,9 +234,14 @@ impl App {
                     alt_text = false;
                     false
                 }
+                Event::Key { pressed: true, .. } => {
+                    alt_text = false;
+                    true
+                }
                 _ => true,
             })
         });
+        self.vnav.alt_text = alt_text;
         if let Some(p) = pane {
             self.vnav.pending.clear();
             return self.vim_pane(ctx, p);
@@ -282,6 +291,7 @@ impl App {
             i.events = kept;
         });
         self.vnav.pending = pending;
+        self.vnav.alt_text = alt_text;
         for c in cmds {
             match grid {
                 Some(v) => self.vim_grid_cmd(v, c),
