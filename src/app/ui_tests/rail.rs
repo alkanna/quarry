@@ -26,9 +26,9 @@ fn clicking_a_folder_opens_and_closes_it() {
     ui.click("Fleet folder");
     ui.show("Switch to beta");
     ui.show("Switch to gamma");
-    assert!(ui.app().rail_open(1));
+    assert!(ui.app().groups.rail_open(1));
     ui.click("Fleet folder");
-    ui.wait("the members to fold away", |a| !a.rail_open(1));
+    ui.wait("the members to fold away", |a| !a.groups.rail_open(1));
     ui.h.run_steps(2);
     assert!(ui.h.query_all_by_label("Switch to beta").next().is_none());
 }
@@ -46,7 +46,7 @@ fn a_folder_with_one_open_member_shows_its_tile() {
     ui.click("Fleet folder");
     ui.h.run_steps(2);
     ui.show("Switch to beta");
-    assert!(!ui.app().rail_open(1));
+    assert!(!ui.app().groups.rail_open(1));
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn undoing_a_new_group_puts_the_tiles_back_and_a_later_group_is_not_open() {
     a.groups.place(6, Place::Into(gid, None), &all);
     ui.settle();
     assert_eq!(gid, 1);
-    assert!(!ui.app().rail_open(gid), "a new group showed open because an undone one had its id");
+    assert!(!ui.app().groups.rail_open(gid), "a new group showed open because an undone one had its id");
     ui.show("Later folder");
 }
 
@@ -141,7 +141,7 @@ fn a_member_reorders_inside_its_open_folder() {
     ui.show("Switch to gamma");
     ui.drag("Switch to gamma", "Switch to beta", 0.1, 1);
     ui.wait("the members to swap", |a| a.groups.groups[0].members == [7, 6]);
-    assert!(ui.app().rail_open(1), "the folder closed");
+    assert!(ui.app().groups.rail_open(1), "the folder closed");
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn a_folder_menu_opens_the_folder_and_edits_the_group() {
     let Some(mut ui) = demo_ui(with_group) else { return };
     right_click(&mut ui, "Fleet folder");
     ui.click("Open");
-    assert!(ui.app().rail_open(1));
+    assert!(ui.app().groups.rail_open(1));
     right_click(&mut ui, "Fleet folder");
     ui.click("Edit group\u{2026}");
     assert!(matches!(ui.app().modal, Some(Modal::GroupEdit(_))));

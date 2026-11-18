@@ -51,6 +51,17 @@ impl Groups {
         self.groups.iter_mut().find(|g| g.id == id)
     }
 
+    /// Whether the person left a group's rail folder open, which reopens it the same way at the next launch.
+    pub(super) fn rail_open(&self, id: u64) -> bool {
+        self.group(id).is_some_and(|g| g.rail_open)
+    }
+
+    pub(super) fn set_rail_open(&mut self, id: u64, open: bool) {
+        if let Some(g) = self.group_mut(id) {
+            g.rail_open = open;
+        }
+    }
+
     /// The connections in no group, in the order the panel shows them: the saved `loose` order first, then the rest of
     /// `all` (every connection in saved order), so a connection added since the last save still has a place.
     pub(super) fn loose_order(&self, all: &[u64]) -> Vec<u64> {

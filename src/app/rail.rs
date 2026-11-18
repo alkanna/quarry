@@ -460,19 +460,13 @@ impl App {
 
     /// Whether a folder is drawn open. One holding a single open connection shows that tile rather than a folder around it.
     fn rail_folder_open(&self, gid: u64, members: &[u64]) -> bool {
-        members.len() == 1 || self.rail_open(gid)
-    }
-
-    /// Whether the person left a folder open, saved with its group so it opens the same way at the next launch.
-    pub(super) fn rail_open(&self, gid: u64) -> bool {
-        self.groups.group(gid).is_some_and(|g| g.rail_open)
+        members.len() == 1 || self.groups.rail_open(gid)
     }
 
     /// Opens or closes a folder in the rail, with its animation.
     fn toggle_rail_folder(&mut self, ctx: &egui::Context, gid: u64) {
-        let Some(g) = self.groups.group_mut(gid) else { return };
-        g.rail_open = !g.rail_open;
-        let open = g.rail_open;
+        let open = !self.groups.rail_open(gid);
+        self.groups.set_rail_open(gid, open);
         self.save_groups();
         fold::start(ctx, fold_id(gid), open);
     }
@@ -574,9 +568,7 @@ impl App {
                 let gid = self.groups.new_group("New group");
                 self.groups.place(target, Place::Into(gid, None), &all);
                 self.groups.place(conn, Place::Into(gid, None), &all);
-                if let Some(g) = self.groups.group_mut(gid) {
-                    g.rail_open = true;
-                }
+                self.groups.set_rail_open(gid, true);
                 move_next_to(&mut self.rail_order, conn, target, true);
                 self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), undo(was, Some(gid)), Some(gid));
             }
