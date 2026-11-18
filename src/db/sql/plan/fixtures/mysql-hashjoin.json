@@ -1,0 +1,60 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "77923.33"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "c",
+          "access_type": "range",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "id"
+          ],
+          "key_length": "4",
+          "rows_examined_per_scan": 39,
+          "rows_produced_per_join": 3,
+          "filtered": "10.00",
+          "cost_info": {
+            "read_cost": "7.68",
+            "eval_cost": "0.39",
+            "prefix_cost": "8.07",
+            "data_read_per_join": "1K"
+          },
+          "used_columns": [
+            "id",
+            "name",
+            "country"
+          ],
+          "attached_condition": "((`shop`.`c`.`country` = 'FR') and (`shop`.`c`.`id` < 40))"
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ALL",
+          "rows_examined_per_scan": 199143,
+          "rows_produced_per_join": 77665,
+          "filtered": "10.00",
+          "using_join_buffer": "hash join",
+          "cost_info": {
+            "read_cost": "249.49",
+            "eval_cost": "7766.58",
+            "prefix_cost": "77923.33",
+            "data_read_per_join": "47M"
+          },
+          "used_columns": [
+            "id",
+            "customer_id"
+          ],
+          "attached_condition": "(`shop`.`o`.`customer_id` = `shop`.`c`.`id`)"
+        }
+      }
+    ]
+  }
+}

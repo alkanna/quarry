@@ -41,6 +41,8 @@ chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
 # Already in the build through russh; compresses SQL dumps saved as .gz.
 flate2 = "1"
 sqlformat = "0.5.0"
+# Already in the build; the day after a date in a filter the explain dialog rewrites as a range.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 # Already in the build through chrono; names this computer's IANA time zone for the PostgreSQL Advanced tab.
 iana-time-zone = "0.1"
 # Already in the build through russh; decrypts an encrypted PostgreSQL client key in memory, which sqlx cannot read.

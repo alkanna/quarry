@@ -23,6 +23,8 @@ pub struct Evidence {
     pub trgm: bool,
     /// Nothing could be read: the catalog refused or the read ran out of time.
     pub failed: bool,
+    /// The server's version, for suggestions only newer servers take, such as MySQL's index on an expression.
+    pub version: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,14 +88,14 @@ impl Evidence {
     /// on a table of 400,000 rows analyzed two hours ago, with a primary key and an index on created_at.
     pub fn demo(p: &Plan, d: Dialect) -> Evidence {
         let mut tables: Vec<TableEv> = Vec::new();
-        for n in p.nodes.iter().filter(|n| n.access == Access::Scan && !n.filter.is_empty()) {
+        for n in p.nodes.iter().filter(|n| reads_all(n) && !n.filter.is_empty()) {
             let table = if n.rel.is_empty() { n.alias.clone() } else { n.rel.clone() };
             if let Some(t) = tables.iter_mut().find(|t| t.table == table) {
                 t.names.push((n.rel.clone(), n.alias.clone()));
                 continue;
             }
             let ix = |name: String, cols: &[&str], unique| IndexEv { name, cols: cols.iter().map(|c| c.to_string()).collect(), unique, btree: true, ..Default::default() };
-            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { name, ty: if d == Dialect::Postgres { "text".into() } else { "varchar(64)".into() }, null_frac: Some(0.0), ..Default::default() }).collect();
+            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { ty: demo_type(&name, d).into(), name, null_frac: Some(0.0), ..Default::default() }).collect();
             tables.push(TableEv {
                 names: vec![(n.rel.clone(), n.alias.clone())],
                 schema: if d == Dialect::Postgres { "public".into() } else { "shop".into() },
@@ -107,8 +109,29 @@ impl Evidence {
                 ..Default::default()
             });
         }
-        Evidence { tables, ..Default::default() }
+        let version = if d == Dialect::Postgres { "18.6" } else if d == Dialect::MariaDb { "11.4.3-MariaDB" } else { "8.4.3" };
+        Evidence { tables, version: version.into(), ..Default::default() }
     }
+}
+
+/// A made-up column's type from its name, so the demo's dates and keys are dates and numbers to the suggestions.
+fn demo_type(name: &str, d: Dialect) -> &'static str {
+    let pg = d == Dialect::Postgres;
+    if name.ends_with("_at") || name.ends_with("date") {
+        if pg { "timestamp with time zone" } else { "datetime" }
+    } else if name == "id" || name.ends_with("_id") {
+        if pg { "bigint" } else { "int" }
+    } else if pg {
+        "text"
+    } else {
+        "varchar(64)"
+    }
+}
+
+/// A node that reads every row of its table: a full scan, or MySQL's full index scan, which a filter on an indexed
+/// column it cannot search also leaves reading everything.
+pub fn reads_all(n: &PlanNode) -> bool {
+    n.access == Access::Scan || (n.access == Access::Other && n.label == "index" && !n.alias.is_empty())
 }
 
 impl TableEv {
@@ -256,7 +279,7 @@ pub fn resolve(n: &PlanNode, refs: &[Ref], d: Dialect) -> Option<(Option<String>
 pub fn wants(p: &Plan, stmt: &str, d: Dialect) -> Vec<Want> {
     let refs = refs(stmt, d);
     let mut out: Vec<Want> = Vec::new();
-    for n in p.nodes.iter().filter(|n| n.access == Access::Scan && (!n.filter.is_empty() || !n.join_cond.is_empty())) {
+    for n in p.nodes.iter().filter(|n| reads_all(n) && (!n.filter.is_empty() || !n.join_cond.is_empty())) {
         let Some((schema, table)) = resolve(n, &refs, d) else { continue };
         let mut cols: Vec<String> = Vec::new();
         for e in [&n.filter_expr, &n.join_cond_expr].into_iter().flatten() {
@@ -302,9 +325,9 @@ pub async fn load(db: &Db, schema: &str, wants: &[Want]) -> Evidence {
         let ((hypopg, trgm), tables) = tokio::join!(ext, tables);
         // Only every read failing counts as the catalog failing; a view or a missing table just has no evidence.
         let failed = !tables.is_empty() && tables.iter().all(Result::is_err);
-        Evidence { tables: tables.into_iter().flatten().flatten().collect(), hypopg, trgm, failed }
+        Evidence { tables: tables.into_iter().flatten().flatten().collect(), hypopg, trgm, failed, version: db.version.clone() }
     };
-    tokio::time::timeout(Duration::from_millis(LOAD_MS), work).await.unwrap_or(Evidence { failed: true, ..Default::default() })
+    tokio::time::timeout(Duration::from_millis(LOAD_MS), work).await.unwrap_or(Evidence { failed: true, version: db.version.clone(), ..Default::default() })
 }
 
 fn f(r: &SqlRow, name: &str) -> Option<f64> {

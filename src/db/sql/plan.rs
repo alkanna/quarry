@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod findings;
 pub mod flame;
 pub mod index;
+pub mod rewrite;
 mod tree;
 
 pub use evidence::Evidence;
@@ -438,7 +439,8 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             // MariaDB names the operation and always means it.
             "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, |n| n.filesort = true),
             "temporary_table" => my_op("Temporary table", "", v, depth, out, |n| n.temp_table = true),
-            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| n.join_buffer = true),
+            // The join's own condition sits here, apart from the filter of the table below.
+            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| (n.join_buffer, n.join_cond) = (true, text(v, "attached_condition").to_string())),
             "query_specifications" => v.as_array().into_iter().flatten().for_each(|s| my_walk(s, depth, out)),
             "attached_subqueries" | "optimized_away_subqueries" | "subqueries" => {
                 for s in v.as_array().into_iter().flatten() {
