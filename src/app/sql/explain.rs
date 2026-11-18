@@ -1,9 +1,12 @@
-//! The explain dialog of a SQL statement: the plan as a tree of nodes with the warnings that matter, the raw plan, and
-//! an optional ANALYZE run that shows what the server actually did.
+//! The explain dialog of a SQL statement: what is worth fixing at the top, the plan as a tree on the left and the
+//! selected node on the right, the raw plan, and an optional ANALYZE run that shows what the server actually did. The
+//! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
+use super::explain_panel::{findings_strip, inspector};
+use super::explain_tree::plan_tree;
 use super::query::run_target;
 use crate::app::*;
-use crate::db::sql::plan::{self, Access, Analyze, Plan};
+use crate::db::sql::plan::{self, Analyze, Plan};
 use crate::db::sql::{Db, Dialect};
 
 /// The state of one open SQL explain dialog.
@@ -11,18 +14,24 @@ pub(in crate::app) struct SqlExplain {
     /// The id of the request in flight, so an old answer never fills a newer dialog.
     req: u64,
     busy: bool,
-    stmt: String,
+    pub(super) stmt: String,
     conn: u64,
     /// The tab's database, for the Query tab the classic rows open in.
     tab_db: String,
-    dialect: Dialect,
+    pub(super) dialect: Dialect,
     db: Db,
     schema: String,
-    plan: Option<Plan>,
+    pub(super) plan: Option<Plan>,
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
     raw: String,
-    show_raw: bool,
+    /// The head tab: the tree or the raw text.
+    raw_tab: bool,
+    /// The node the panel shows, and one the tree should scroll to.
+    pub(super) sel: Option<usize>,
+    pub(super) scroll_to: Option<usize>,
+    /// The findings strip shows all of them, not the first two.
+    pub(super) more: bool,
     analyzed: bool,
     /// The statement ran inside a transaction that was rolled back.
     rolled_back: bool,
@@ -34,6 +43,20 @@ pub(in crate::app) struct SqlExplain {
     run: db::sql::RunHandle,
     /// Stop was pressed, so the answer that follows is no error to show.
     stopped: bool,
+}
+
+/// What a click in the dialog asks for, done once the frame is drawn.
+pub(super) enum XAct {
+    Select(usize),
+    Copy(String),
+    /// A fix as an editable draft in a new Query tab. Nothing runs.
+    Draft(String),
+}
+
+impl SqlExplain {
+    fn new(stmt: String, conn: u64, tab_db: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false }
+    }
 }
 
 impl App {
@@ -60,22 +83,24 @@ impl App {
             (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
             _ => Ok(a),
         });
-        let mut x = SqlExplain { req: 0, busy: false, stmt: text, conn, tab_db, dialect: d, db, schema, plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false };
+        let mut x = SqlExplain::new(text, conn, tab_db, d, db, schema, analyze);
         self.sql_explain_send(&mut x, None);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
 
-    /// Test only: opens the dialog on `plan` as if the server had answered, over a pool that never connects, because the demo has no
-    /// server for `sql_explain` to ask.
-    #[cfg(test)]
-    pub(in crate::app) fn demo_explain(&mut self, text: &str, plan: &str) {
+    /// Opens the dialog on `plan` as if the server had answered, over a pool that never connects: the offline demo and
+    /// the tests have no server for `sql_explain` to ask.
+    pub(in crate::app) fn demo_explain(&mut self, d: Dialect, text: &str, plan: &str) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let _guard = rt.enter();
         let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
-        let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: Dialect::MySql, opts: crate::db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
+        // The pool is never used; the dialect and version are what the dialog reads.
+        let version = if d == Dialect::Postgres { "18.6" } else if d == Dialect::MariaDb { "11.4.3-MariaDB" } else { "8.4.3" };
+        let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: d, opts: crate::db::sql::exec::Opts::My(opts), version: version.into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
         let conn = self.t().map_or(0, |t| t.sel.conn);
-        let analyze = plan::analyze_mode(text, Dialect::MySql, false);
-        let x = SqlExplain { req: 1, busy: true, stmt: text.into(), conn, tab_db: "shop".into(), dialect: Dialect::MySql, db, schema: "shop".into(), plan: None, unread: None, raw: String::new(), show_raw: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false };
+        let analyze = plan::analyze_mode(text, d, false);
+        let mut x = SqlExplain::new(text.into(), conn, "shop".into(), d, db, "shop".into(), analyze);
+        (x.req, x.busy) = (1, true);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
         let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
         let set = db::sql::ResultSet { cols: vec![col], rows: db::Row::from_doc(&mongodb::bson::doc! { "EXPLAIN": plan }).into_iter().collect(), ..db::sql::ResultSet::new(text) };
@@ -125,84 +150,82 @@ impl App {
         x.analyzed = x.asked.is_some();
         x.rolled_back = x.asked == Some(Analyze::Rollback) && !crate::db::sql::lex::pageable(&x.stmt, x.dialect);
         match plan::parse(x.dialect, &text) {
-            Ok(p) => (x.plan, x.unread) = (Some(p), None),
+            Ok(p) => {
+                // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
+                x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
+                x.scroll_to = x.sel;
+                (x.plan, x.unread) = (Some(p), None);
+            }
             // The raw text is still worth reading.
-            Err(e) => (x.plan, x.unread, x.show_raw) = (None, Some(e), true),
+            Err(e) => (x.plan, x.unread, x.raw_tab) = (None, Some(e), true),
         }
     }
 
     pub(in crate::app) fn sql_explain_dialog(&mut self, ui: &mut egui::Ui, x: &mut SqlExplain, keep: &mut bool) {
-        ui.set_width(760.0);
-        let mut sub = x.db.label();
-        if let Some(p) = &x.plan {
-            sub = format!("{sub}  ·  {} nodes", p.nodes.len());
-            if let Some(c) = p.cost {
-                sub = format!("{sub}  ·  cost {}", figure(c));
-            }
-            if let Some(ms) = p.exec_ms {
-                sub = format!("{sub}  ·  {} ms to run", figure(ms));
-            }
-            if let Some(ms) = p.planning_ms {
-                sub = format!("{sub}  ·  {} ms to plan", figure(ms));
-            }
-        }
-        dialog_head(ui, &Head::new(if x.analyzed { "Explain analyze" } else { "Explain" }).sub(sub).glyph(glyphs::list));
-        let mut b = body_begin(ui);
-        let outer = ui;
-        let ui = &mut b.content_ui;
-        if x.busy {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new(if x.asked.is_some() { "Running the statement under ANALYZE" } else { "Reading the plan" }).color(MUTED()));
-            });
-        }
-        if x.rolled_back {
-            banner(ui, Notice::Info, "Rolled back.", "ANALYZE ran this statement inside a transaction and rolled it back. Nothing was kept.", None);
-        }
-        if let Some(e) = &x.unread {
-            banner(ui, Notice::Warn, "Plan not readable.", e, None);
-        }
-        if let Some(p) = &x.plan {
-            for w in &p.warnings {
-                ui.label(RichText::new(w.as_str()).color(WARNING()));
-            }
-        }
+        let ctx = ui.ctx().clone();
+        let screen = ctx.content_rect();
+        ui.set_width(fit_width(&ctx, (screen.width() * 0.85).clamp(760.0, 1160.0)));
+        let mut head = Head::new(if x.analyzed { "Explain analyze" } else { "Explain" }).sub(head_line(x)).glyph(glyphs::list);
         if x.plan.is_some() {
-            ui.horizontal(|ui| {
-                segmented(ui, &mut x.show_raw, &[(false, "Plan"), (true, "Raw")]);
+            head = head.tabs(&["Tree", "Raw"], usize::from(x.raw_tab));
+        }
+        if let Some(t) = dialog_head(ui, &head) {
+            x.raw_tab = t == 1;
+        }
+        let mut acts = Vec::new();
+        if x.raw_tab || x.plan.is_none() {
+            let mut b = body_begin(ui);
+            {
+                let ui = &mut b.content_ui;
+                status_lines(ui, x);
+                let find = Find::bar(ui, egui::Id::unique("sql-explain-raw"), &x.raw);
+                egui::ScrollArea::vertical().max_height(body_room(ui, 90.0)).auto_shrink([false, true]).show(ui, |ui| {
+                    let mut text = x.raw.as_str();
+                    let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(true)).show(ui);
+                    find.reveal(ui, &x.raw, &out);
+                });
+            }
+            b.end(ui);
+        } else {
+            dialog_flush(ui, |ui| {
+                egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 0 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    status_lines(ui, x);
+                    findings_strip(ui, x, &mut acts);
+                });
+                let body_h = (screen.height() - 330.0).clamp(260.0, 640.0).min(body_room(ui, 74.0));
+                let w = ui.available_width();
+                let panel_w = (w * 0.4).clamp(300.0, 460.0);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // Frames in a row inherit its left to right layout, so each pane lays out top down itself.
+                    egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 8, top: 12, bottom: 16 }).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(w - panel_w - 28.0 - 20.0);
+                            plan_tree(ui, x, body_h, &mut acts);
+                        });
+                    });
+                    egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 20, top: 12, bottom: 16 }).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(panel_w - 8.0);
+                            egui::ScrollArea::vertical().id_salt("sql-explain-node").max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
+                                inspector(ui, x, &mut acts);
+                            });
+                        });
+                    });
+                });
             });
         }
-        let find = if x.show_raw { Find::bar(ui, egui::Id::unique("sql-explain-raw"), &x.raw) } else { Find::default() };
-        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
-            if x.show_raw {
-                let mut text = x.raw.as_str();
-                let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(true)).show(ui);
-                find.reveal(ui, &x.raw, &out);
-            } else if let Some(p) = &x.plan {
-                plan_grid(ui, p);
-            }
-        });
-        b.end(outer);
-        let ui = outer;
         let mut rows = false;
         let mut again = None;
         let mut stop = false;
         dialog_foot(ui, |ui| {
-            if ui.button("Close").on_hover_text("Esc").clicked() {
-                *keep = false;
-            }
-            if ui.button("Copy raw").clicked() {
-                ui.ctx().copy_text(x.raw.clone());
-            }
-            rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
-            if x.busy {
-                stop = ui.button("Stop").on_hover_text("End the statement on the server").clicked();
-            }
             match &x.analyze {
                 Ok(a) => {
-                    let r = ui.add_enabled(!x.busy && !x.analyzed, egui::Button::new("Run with ANALYZE"));
+                    let label = if x.analyzed { "Run again" } else { "Run with ANALYZE" };
+                    let r = ui.add_enabled(!x.busy, primary_button(ui, label, PRIMARY()));
                     let tip = if *a == Analyze::Rollback { "Runs the statement for real inside a transaction that is rolled back" } else { "Runs the statement for real to count rows and time" };
-                    if r.on_hover_text(tip).on_disabled_hover_text("Already analyzed").clicked() {
+                    if r.on_hover_text(tip).clicked() {
                         again = Some(*a);
                     }
                 }
@@ -210,7 +233,36 @@ impl App {
                     ui.add_enabled(false, egui::Button::new("Run with ANALYZE")).on_disabled_hover_text(why.as_str());
                 }
             }
+            if x.busy {
+                stop = ui.button("Stop").on_hover_text("End the statement on the server").clicked();
+            }
+            if ui.button("Close").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
+            if ui.button("Copy raw").clicked() {
+                acts.push(XAct::Copy(x.raw.clone()));
+            }
+            rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
+            foot_note(ui, if x.analyzed { "Ran the statement. Times are each node's own, without the nodes below it." } else { "Estimated by the planner. Nothing ran." });
         });
+        for a in acts {
+            match a {
+                XAct::Select(i) => (x.sel, x.scroll_to) = (Some(i), Some(i)),
+                XAct::Copy(text) => {
+                    ctx.copy_text(text);
+                    self.toast_ok("Copied.".into(), None);
+                }
+                XAct::Draft(sql) => {
+                    *keep = false;
+                    self.sql_explain_stop(x);
+                    self.sql_new_query(x.conn, x.tab_db.clone());
+                    if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                        s.query = sql;
+                    }
+                    return;
+                }
+            }
+        }
         if stop {
             self.sql_explain_stop(x);
         }
@@ -234,62 +286,45 @@ impl App {
     }
 }
 
-/// A count or time for a column: whole numbers grouped, small ones with two decimals.
-fn figure(n: f64) -> String {
-    if n >= 100.0 { group(&format!("{n:.0}")) } else { format!("{n:.2}").trim_end_matches('0').trim_end_matches('.').to_string() }
+/// The line under the title: the engine, then the size of the plan or what the run took.
+fn head_line(x: &SqlExplain) -> String {
+    let mut sub = x.db.label();
+    let Some(p) = &x.plan else { return sub };
+    let root = p.nodes.first();
+    if p.analyzed {
+        if let Some(ms) = p.exec_ms {
+            sub = format!("{sub}  ·  ran in {} ms", plan::findings::ms_text(ms));
+        }
+        if let Some(ms) = p.planning_ms {
+            sub = format!("{sub}  ·  planned in {} ms", plan::findings::ms_text(ms));
+        }
+        if let Some(r) = root.and_then(|n| n.actual_rows) {
+            sub = format!("{sub}  ·  {} rows", group(&format!("{r:.0}")));
+        }
+    } else {
+        sub = format!("{sub}  ·  {} node{}", p.nodes.len(), if p.nodes.len() == 1 { "" } else { "s" });
+        if let Some(c) = p.cost {
+            sub = format!("{sub}  ·  cost {}", group(&format!("{c:.0}")));
+        }
+        if let Some(r) = root.and_then(|n| n.rows) {
+            sub = format!("{sub}  ·  est. {} rows", group(&format!("{r:.0}")));
+        }
+    }
+    sub
 }
 
-fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
-    if p.nodes.is_empty() {
-        ui.label(RichText::new("The server returned no plan nodes. See Raw.").color(MUTED()));
-        return;
+/// The run in flight and what a finished one left to say, above the plan.
+fn status_lines(ui: &mut egui::Ui, x: &SqlExplain) {
+    if x.busy {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new(if x.asked.is_some() { "Running the statement under ANALYZE" } else { "Reading the plan" }).color(MUTED()));
+        });
     }
-    let heads: &[&str] = if p.analyzed { &["NODE", "ROWS", "COST", "ACTUAL ROWS", "LOOPS", "MS"] } else { &["NODE", "ROWS", "COST"] };
-    // A grid cell wraps at the column's last width, which starts tiny, so the node column takes what the fixed number
-    // columns leave, less the scroll bar.
-    const NUM_W: f32 = 84.0;
-    const GAP: f32 = 16.0;
-    let nums = (heads.len() - 1) as f32;
-    let node_w = (ui.available_width() - nums * (NUM_W + GAP) - ui.spacing().scroll.bar_width).max(240.0);
-    egui::Grid::new("sql-explain-plan").num_columns(heads.len()).spacing([GAP, 6.0]).min_col_width(NUM_W).striped(true).show(ui, |ui| {
-        for h in heads {
-            caption(ui, *h);
-        }
-        ui.end_row();
-        for n in &p.nodes {
-            ui.vertical(|ui| {
-                ui.set_width(node_w);
-                let c = match n.access {
-                    Access::Scan => ALERT(),
-                    Access::Index => SUCCESS(),
-                    Access::Other => TEXT(),
-                };
-                let mut job = egui::text::LayoutJob::default();
-                job.append(&format!("{}{}", "    ".repeat(n.depth), n.label), 0.0, mono_fmt(TXT_BODY, c, 400.0));
-                for part in [n.target.as_str(), n.index.as_str()].into_iter().filter(|s| !s.is_empty()) {
-                    job.append(&format!("  {part}"), 0.0, mono_fmt(TXT_BODY, MUTED(), 400.0));
-                }
-                ui.label(job);
-                // A margin rather than leading spaces, so a long filter keeps its indent on every wrapped line.
-                let mut at = ui.available_rect_before_wrap();
-                // Deep plans stop indenting short of the cell's end, so their filters always keep room to wrap.
-                at.min.x = (at.min.x + text_w(ui, &"    ".repeat(n.depth + 1), egui::FontId::monospace(TXT_BODY))).min(at.max.x - 200.0);
-                ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
-                    for d in &n.detail {
-                        ui.label(RichText::new(d.as_str()).monospace().size(TXT_SMALL).color(MUTED()));
-                    }
-                    for w in &n.warnings {
-                        ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
-                    }
-                });
-            });
-            let cell = |v: Option<f64>| v.map(figure).unwrap_or_default();
-            let vals = [n.rows, n.cost, n.actual_rows, n.loops, n.actual_ms];
-            let shown = if p.analyzed { &vals[..] } else { &vals[..2] };
-            for v in shown {
-                ui.label(RichText::new(cell(*v)).monospace());
-            }
-            ui.end_row();
-        }
-    });
+    if x.rolled_back {
+        banner(ui, Notice::Info, "Rolled back.", "ANALYZE ran this statement inside a transaction and rolled it back. Nothing was kept.", None);
+    }
+    if let Some(e) = &x.unread {
+        banner(ui, Notice::Warn, "Plan not readable.", e, None);
+    }
 }

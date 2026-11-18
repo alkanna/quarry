@@ -1,0 +1,7 @@
+-> Filter: (c.country = 'FR')  (cost=504 rows=500) (actual time=0.0438..1.61 rows=1250 loops=1)
+    -> Table scan on c  (cost=504 rows=5000) (actual time=0.041..1.14 rows=5000 loops=1)
+-> Select #2 (subquery in projection; dependent)
+    -> Aggregate: max(o.total)  (cost=18583 rows=1) (actual time=20.7..20.7 rows=1 loops=1250)
+        -> Filter: ((o.`status` = 'paid') and (o.customer_id = c.id))  (cost=18384 rows=1993) (actual time=16.6..20.7 rows=8 loops=1250)
+            -> Table scan on o  (cost=18384 rows=199290) (actual time=0.0631..14.3 rows=200000 loops=1250)
+

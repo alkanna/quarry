@@ -1,13 +1,18 @@
 //! Readable explain plans for the SQL engines. The server's JSON (or the MySQL tree text of EXPLAIN ANALYZE) becomes a flat
-//! list of nodes with a depth, so the dialog can draw a tree without knowing which engine wrote it.
+//! list of nodes with a depth, so the dialog can draw a tree without knowing which engine wrote it. `tree` links the nodes
+//! and works out what each one costs on its own, `cond` reads their conditions and `findings` says what is worth fixing.
 
 use super::{lex, Dialect, ResultSet};
 use serde_json::Value;
 
+pub mod cond;
+pub mod findings;
+mod tree;
+
+pub use findings::{Finding, FixKind, Severity};
+
 /// A scan that reads at least this many rows is worth a warning. Below it a full scan is often the cheapest plan.
 pub const BIG_SCAN: f64 = 1000.0;
-const FILESORT_WARNING: &str = "Sorts rows outside an index (filesort). An index that matches the ORDER BY would avoid it.";
-const TEMP_TABLE_WARNING: &str = "Builds a temporary table, which costs memory and may spill to disk.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Access {
@@ -27,21 +32,91 @@ pub struct PlanNode {
     pub target: String,
     pub index: String,
     pub access: Access,
-    /// Estimated rows.
+    /// The node above this one and those below it, by index into `Plan::nodes`.
+    pub parent: Option<usize>,
+    pub kids: Vec<usize>,
+    /// The table it reads, as the plan names it, and the alias the statement gave it. MySQL plans give only the alias.
+    pub rel: String,
+    pub alias: String,
+    /// What the node is to its parent: PostgreSQL's Outer, Inner, InitPlan or SubPlan.
+    pub role: String,
+    /// Estimated rows, per loop.
     pub rows: Option<f64>,
+    /// Estimated cost. PostgreSQL's and MySQL's tree text include the nodes below; MySQL's JSON is the running total of the join.
     pub cost: Option<f64>,
+    /// The node's own cost, when the engine gives it: MySQL's read and eval cost, MariaDB's cost.
+    pub own_cost: Option<f64>,
+    /// Estimated bytes per row.
+    pub width: Option<f64>,
     pub actual_rows: Option<f64>,
+    /// Time to the last row, per loop, including the nodes below.
     pub actual_ms: Option<f64>,
     pub loops: Option<f64>,
+    /// MariaDB's time in this table over every loop.
+    pub table_ms: Option<f64>,
+    /// The filter applied to the rows read, as the server wrote it, and the condition used to search an index or join.
+    pub filter: String,
+    pub index_cond: String,
+    pub join_cond: String,
+    /// `filter` read into a condition, when it reads.
+    pub filter_expr: Option<cond::Expr>,
+    /// Rows the filter removed, per loop.
+    pub removed: Option<f64>,
+    /// Shared buffers found in memory and read from disk.
+    pub buffers: Option<(f64, f64)>,
+    /// A sort that spilled, in kB on disk.
+    pub sort_spill_kb: Option<f64>,
+    /// A hash in several batches: how many it planned and how many it took, and its memory in kB.
+    pub hash_batches: Option<(f64, f64)>,
+    pub peak_kb: Option<f64>,
+    /// Workers a Gather launched, and whether this node runs in them.
+    pub workers: Option<f64>,
+    pub parallel: bool,
+    /// MySQL's guess at the share of rows the filter keeps, in percent.
+    pub filtered_pct: Option<f64>,
+    pub possible_keys: Vec<String>,
+    /// MySQL and MariaDB flags the findings read.
+    pub filesort: bool,
+    pub temp_table: bool,
+    pub join_buffer: bool,
+    pub dependent: bool,
+    /// The node's own cost and time, without the nodes below, and its share of the plan's (time when it ran, else cost).
+    pub self_cost: Option<f64>,
+    pub self_ms: Option<f64>,
+    pub share: Option<f64>,
+    /// ANALYZE never reached this node.
+    pub never_ran: bool,
     /// Filters, conditions and keys, one line each.
     pub detail: Vec<String>,
-    pub warnings: Vec<String>,
+}
+
+impl PlanNode {
+    /// "bookings b", "orders" or "o": what the node reads, for findings and the inspector.
+    pub fn name(&self) -> String {
+        match (self.rel.as_str(), self.alias.as_str()) {
+            ("", "") => self.target.clone(),
+            (r, a) if a.is_empty() || a == r => r.to_string(),
+            ("", a) => a.to_string(),
+            (r, a) => format!("{r} {a}"),
+        }
+    }
+
+    /// How far the estimate was from what ran, as a factor of one or more, when both are known.
+    pub fn off(&self) -> Option<f64> {
+        if self.never_ran {
+            return None;
+        }
+        let (est, act) = (self.rows?, self.actual_rows?);
+        Some(est.max(act) / est.min(act).max(1.0))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
     pub nodes: Vec<PlanNode>,
-    /// Every warning of every node, once each, for the top of the dialog.
+    /// What is worth fixing, most important first.
+    pub findings: Vec<Finding>,
+    /// Every finding as one line, for the agent.
     pub warnings: Vec<String>,
     pub cost: Option<f64>,
     pub planning_ms: Option<f64>,
@@ -145,15 +220,15 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     } else {
         return Err("The plan is in a form this window cannot read. See the raw text.".into());
     };
-    let mut seen = Vec::new();
-    for n in &plan.nodes {
-        for w in &n.warnings {
-            if !seen.contains(w) {
-                seen.push(w.clone());
-            }
+    tree::link(&mut plan);
+    tree::derive(&mut plan, d);
+    for n in &mut plan.nodes {
+        if !n.filter.is_empty() {
+            n.filter_expr = cond::parse(&n.filter, d);
         }
     }
-    plan.warnings = seen;
+    plan.findings = findings::find(&plan, d);
+    plan.warnings = plan.findings.iter().map(Finding::line).collect();
     Ok(plan)
 }
 
@@ -237,23 +312,37 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     let ty = text(n, "Node Type");
     let join = text(n, "Join Type");
     let mut node = PlanNode { depth, label: if join.is_empty() { ty.to_string() } else { format!("{ty} ({join})") }, ..Default::default() };
-    let rel = text(n, "Relation Name");
-    let alias = text(n, "Alias");
-    node.target = match (text(n, "Schema"), rel) {
+    node.rel = text(n, "Relation Name").to_string();
+    node.alias = text(n, "Alias").to_string();
+    // Schema is only in VERBOSE plans.
+    node.target = match (text(n, "Schema"), node.rel.as_str()) {
         (_, "") => text(n, "CTE Name").to_string(),
         ("", r) => r.to_string(),
         (s, r) => format!("{s}.{r}"),
     };
-    if !rel.is_empty() && !alias.is_empty() && alias != rel {
-        node.target = format!("{} as {alias}", node.target);
+    if node.rel.is_empty() {
+        node.alias.clear();
+    } else if !node.alias.is_empty() && node.alias != node.rel {
+        node.target = format!("{} as {}", node.target, node.alias);
     }
+    node.role = match text(n, "Subplan Name") {
+        "" => text(n, "Parent Relationship").to_string(),
+        s => s.to_string(),
+    };
     node.index = text(n, "Index Name").to_string();
     node.access = if ty == "Seq Scan" { Access::Scan } else if ty.contains("Index") { Access::Index } else { Access::Other };
     node.rows = num(n, "Plan Rows");
     node.cost = num(n, "Total Cost");
+    node.width = num(n, "Plan Width");
     node.actual_rows = num(n, "Actual Rows");
     node.actual_ms = num(n, "Actual Total Time");
     node.loops = num(n, "Actual Loops");
+    node.never_ran = node.loops == Some(0.0);
+    node.filter = text(n, "Filter").to_string();
+    node.index_cond = [text(n, "Index Cond"), text(n, "Recheck Cond")].into_iter().find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    node.join_cond = ["Hash Cond", "Merge Cond", "Join Filter"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    node.parallel = flag(n, "Parallel Aware");
+    node.workers = num(n, "Workers Launched").or_else(|| num(n, "Workers Planned"));
     for key in ["Index Cond", "Recheck Cond", "Filter", "Join Filter", "Hash Cond", "Merge Cond", "One-Time Filter"] {
         let t = text(n, key);
         if !t.is_empty() {
@@ -266,35 +355,22 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             node.detail.push(format!("{key}: {t}"));
         }
     }
-    let removed = num(n, "Rows Removed by Filter");
-    if let Some(r) = removed {
+    node.removed = num(n, "Rows Removed by Filter");
+    if let Some(r) = node.removed {
         node.detail.push(format!("Rows removed by filter: {}", count(r)));
     }
     let hit = num(n, "Shared Hit Blocks");
     let read = num(n, "Shared Read Blocks");
     if hit.is_some() || read.is_some() {
+        node.buffers = Some((hit.unwrap_or(0.0), read.unwrap_or(0.0)));
         node.detail.push(format!("Buffers: {} hit, {} read", count(hit.unwrap_or(0.0)), count(read.unwrap_or(0.0))));
     }
-    let what = if node.target.is_empty() { ty.to_string() } else { format!("{ty} on {}", node.target) };
-    // PostgreSQL does not say how many rows a sequential scan reads, only what it returns, so its cost stands in for the size.
-    let filtered = n.get("Filter").is_some();
-    let removed_many = removed.is_some_and(|r| r >= BIG_SCAN && r >= 10.0 * node.actual_rows.unwrap_or(0.0));
-    if ty == "Seq Scan" && filtered && (node.cost.unwrap_or(0.0) >= BIG_SCAN || removed.unwrap_or(0.0) >= BIG_SCAN || node.rows.unwrap_or(0.0) >= BIG_SCAN) {
-        node.warnings.push(format!("{what} reads every row and filters afterwards. An index on the filtered columns could avoid the scan."));
-    } else if removed_many {
-        node.warnings.push(format!("{what} discards {} rows to keep {}.", count(removed.unwrap_or(0.0)), count(node.actual_rows.unwrap_or(0.0))));
-    }
     if text(n, "Sort Method").starts_with("external") {
-        node.warnings.push(format!("The sort spilled to disk ({} kB). More work_mem would keep it in memory.", count(num(n, "Sort Space Used").unwrap_or(0.0))));
+        node.sort_spill_kb = num(n, "Sort Space Used");
     }
-    if num(n, "Hash Batches").is_some_and(|b| b > 1.0) {
-        node.warnings.push("The hash spilled to disk in several batches. More work_mem would keep it in memory.".into());
-    }
-    if let (Some(est), Some(act)) = (node.rows, node.actual_rows) {
-        let (lo, hi) = (est.min(act).max(1.0), est.max(act));
-        if hi >= BIG_SCAN && hi / lo >= 10.0 {
-            node.warnings.push(format!("{what} was estimated at {} rows and returned {}. The table statistics may be stale.", count(est), count(act)));
-        }
+    if let Some(b) = num(n, "Hash Batches") {
+        node.hash_batches = Some((num(n, "Original Hash Batches").unwrap_or(b), b));
+        node.peak_kb = num(n, "Peak Memory Usage");
     }
     out.push(node);
     if let Some(kids) = n.get("Plans").and_then(Value::as_array) {
@@ -325,25 +401,26 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     for (k, v) in obj {
         match k.as_str() {
             "table" => my_table(v, depth, out),
+            // Tables joined in a row hang under one node, so the join reads as one step with its tables below it.
+            "nested_loop" if v.as_array().is_some_and(|a| a.len() > 1) => {
+                out.push(PlanNode { depth, label: "Nested loop".into(), ..Default::default() });
+                my_walk(v, depth + 1, out);
+            }
             "nested_loop" | "query_block" | "materialized_from_subquery" | "materialized" | "read_sorted_file" => my_walk(v, depth, out),
-            "ordering_operation" => my_op("Sort", "", v, depth, out, &[]),
-            "grouping_operation" => my_op("Group", "", v, depth, out, &[]),
-            "duplicates_removal" => my_op("Distinct", "", v, depth, out, &[]),
-            "buffer_result" => my_op("Buffer result", "", v, depth, out, &[]),
-            "windowing" | "window_functions_computation" => my_op("Window functions", "", v, depth, out, &[]),
-            "union_result" => my_op("Union", text(v, "table_name"), v, depth, out, &[]),
+            "ordering_operation" => my_op("Sort", "", v, depth, out, |_| {}),
+            "grouping_operation" => my_op("Group", "", v, depth, out, |_| {}),
+            "duplicates_removal" => my_op("Distinct", "", v, depth, out, |_| {}),
+            "buffer_result" => my_op("Buffer result", "", v, depth, out, |_| {}),
+            "windowing" | "window_functions_computation" => my_op("Window functions", "", v, depth, out, |_| {}),
+            "union_result" => my_op("Union", text(v, "table_name"), v, depth, out, |_| {}),
             // MariaDB names the operation and always means it.
-            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, &[FILESORT_WARNING]),
-            "temporary_table" => my_op("Temporary table", "", v, depth, out, &[TEMP_TABLE_WARNING]),
-            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, &["Joins through a join buffer because no index serves the join condition."]),
+            "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, |n| n.filesort = true),
+            "temporary_table" => my_op("Temporary table", "", v, depth, out, |n| n.temp_table = true),
+            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| n.join_buffer = true),
             "query_specifications" => v.as_array().into_iter().flatten().for_each(|s| my_walk(s, depth, out)),
             "attached_subqueries" | "optimized_away_subqueries" | "subqueries" => {
                 for s in v.as_array().into_iter().flatten() {
-                    let mut node = PlanNode { depth, label: "Subquery".into(), ..Default::default() };
-                    if flag(s, "dependent") {
-                        node.warnings.push("A dependent subquery runs once for every row of the outer query.".into());
-                    }
-                    out.push(node);
+                    out.push(PlanNode { depth, label: "Subquery".into(), dependent: flag(s, "dependent"), ..Default::default() });
                     my_walk(s, depth + 1, out);
                 }
             }
@@ -353,15 +430,11 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
 }
 
 /// A sort, group, union or buffer step: a node of its own, flagged when the server says it used a filesort or a temporary table.
-fn my_op(label: &str, target: &str, v: &Value, depth: usize, out: &mut Vec<PlanNode>, always: &[&str]) {
+fn my_op(label: &str, target: &str, v: &Value, depth: usize, out: &mut Vec<PlanNode>, mark: impl FnOnce(&mut PlanNode)) {
     let mut node = PlanNode { depth, label: label.into(), target: target.into(), ..Default::default() };
-    node.warnings.extend(always.iter().map(|w| w.to_string()));
-    if flag(v, "using_filesort") {
-        node.warnings.push(FILESORT_WARNING.into());
-    }
-    if flag(v, "using_temporary_table") {
-        node.warnings.push(TEMP_TABLE_WARNING.into());
-    }
+    mark(&mut node);
+    node.filesort |= flag(v, "using_filesort");
+    node.temp_table |= flag(v, "using_temporary_table");
     out.push(node);
     my_walk(v, depth + 1, out);
 }
@@ -370,7 +443,7 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     let name = text(t, "table_name");
     let access = text(t, "access_type");
     let key = text(t, "key");
-    let mut node = PlanNode { depth, label: if access.is_empty() { "table".into() } else { access.into() }, target: name.into(), index: key.into(), ..Default::default() };
+    let mut node = PlanNode { depth, label: if access.is_empty() { "table".into() } else { access.into() }, target: name.into(), index: key.into(), alias: name.into(), ..Default::default() };
     node.access = match access {
         "ALL" => Access::Scan,
         // A full index scan reads every entry, but of a narrower structure; it keeps the neutral color.
@@ -379,10 +452,30 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         _ => Access::Index,
     };
     node.rows = num(t, "rows_examined_per_scan").or_else(|| num(t, "rows"));
-    node.cost = t.get("cost_info").and_then(|c| num(c, "prefix_cost"));
+    let ci = t.get("cost_info");
+    // MySQL gives the running total of the join and this table's read and eval cost; MariaDB gives this table's cost.
+    node.cost = ci.and_then(|c| num(c, "prefix_cost")).or_else(|| num(t, "cost"));
+    node.own_cost = match ci.map(|c| (num(c, "read_cost"), num(c, "eval_cost"))) {
+        Some((Some(r), Some(e))) => Some(r + e),
+        _ => num(t, "cost"),
+    };
     node.actual_rows = num(t, "r_rows");
-    node.actual_ms = num(t, "r_total_time_ms").or_else(|| num(t, "r_table_time_ms"));
     node.loops = num(t, "r_loops");
+    node.never_ran = node.loops == Some(0.0);
+    node.table_ms = match (num(t, "r_table_time_ms"), num(t, "r_other_time_ms")) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    };
+    node.actual_ms = num(t, "r_total_time_ms").or(node.table_ms);
+    node.filter = text(t, "attached_condition").to_string();
+    node.index_cond = text(t, "index_condition").to_string();
+    node.join_cond = joined(t, "ref");
+    node.filtered_pct = num(t, "filtered");
+    node.possible_keys = match t.get("possible_keys") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    node.join_buffer = t.get("using_join_buffer").is_some();
     let mut line = |label: &str, v: String| {
         if !v.is_empty() {
             node.detail.push(format!("{label}: {v}"));
@@ -406,16 +499,6 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     if let Some(j) = t.get("using_join_buffer").and_then(Value::as_str) {
         line("Join buffer", j.to_string());
     }
-    let big = node.rows.is_some_and(|r| r >= BIG_SCAN);
-    let rows = count(node.rows.unwrap_or(0.0));
-    if access == "ALL" && big {
-        node.warnings.push(format!("Full table scan on {name}: about {rows} rows are read."));
-    } else if access == "index" && big {
-        node.warnings.push(format!("Full index scan on {name}: about {rows} index entries are read."));
-    }
-    if access == "ALL" && key.is_empty() && !joined(t, "possible_keys").is_empty() {
-        node.warnings.push(format!("{name} has usable indexes ({}) but the server chose none.", joined(t, "possible_keys")));
-    }
     out.push(node);
     // A derived table or a subquery attached to the table.
     my_walk(t, depth + 1, out);
@@ -428,7 +511,7 @@ fn parse_tree(text: &str) -> Plan {
         let trimmed = line.trim_start();
         let Some(body) = trimmed.strip_prefix("-> ") else { continue };
         let depth = (line.len() - trimmed.len()) / 4;
-        let (est_part, act_part) = match body.find("(actual") {
+        let (est_part, act_part) = match body.find("(actual").or_else(|| body.find("(never executed)")) {
             Some(i) => (&body[..i], Some(&body[i..])),
             None => (body, None),
         };
@@ -439,21 +522,28 @@ fn parse_tree(text: &str) -> Plan {
         node.rows = after(est_part, "rows=");
         if let Some(a) = act_part {
             plan.analyzed = true;
+            node.never_ran = a.starts_with("(never executed)");
             node.actual_rows = after(a, "rows=");
             node.loops = after(a, "loops=");
             node.actual_ms = a.find("time=").and_then(|i| a[i..].find("..").map(|j| &a[i + j + 2..])).and_then(|s| after(s, ""));
         }
-        let l = node.label.as_str();
+        let l = node.label.clone();
         node.access = if l.starts_with("Table scan") { Access::Scan } else if l.contains("index") || l.starts_with("Index") { Access::Index } else { Access::Other };
-        if node.access == Access::Scan && node.rows.is_some_and(|r| r >= BIG_SCAN) {
-            node.warnings.push(format!("{}: about {} rows are read.", node.label, count(node.rows.unwrap_or(0.0))));
+        // "Table scan on o", "Index lookup on c using PRIMARY (id=o.cid)", "Index range scan on o using idx over (..)".
+        if let Some(rest) = l.split_once(" on ").map(|(_, r)| r).filter(|_| l.starts_with("Table scan") || l.contains("ndex ")) {
+            let mut words = rest.split_whitespace();
+            node.alias = words.next().unwrap_or_default().to_string();
+            node.target = node.alias.clone();
+            if words.next() == Some("using") {
+                node.index = words.next().unwrap_or_default().to_string();
+            }
         }
-        if l.starts_with("Sort") {
-            node.warnings.push(FILESORT_WARNING.into());
+        if let Some(c) = l.strip_prefix("Filter: ") {
+            node.filter = c.to_string();
         }
-        if l.contains("temporary table") || l.contains("Temporary table") {
-            node.warnings.push(TEMP_TABLE_WARNING.into());
-        }
+        node.filesort = l.starts_with("Sort");
+        node.temp_table = l.contains("temporary table") || l.contains("Temporary table");
+        node.dependent = l.contains("dependent)");
         if plan.cost.is_none() {
             plan.cost = node.cost;
         }
@@ -462,7 +552,7 @@ fn parse_tree(text: &str) -> Plan {
     plan
 }
 
-/// The number after `key` in `s`. Stops at ".." so a range like 0.03..0.04 reads as 0.03.
+/// The number after `key` in `s`, in plain or exponent form (662e-6). Stops at ".." so a range like 0.03..0.04 reads as 0.03.
 fn after(s: &str, key: &str) -> Option<f64> {
     let rest = &s[s.find(key)? + key.len()..];
     let b = rest.as_bytes();
@@ -470,11 +560,24 @@ fn after(s: &str, key: &str) -> Option<f64> {
     while end < b.len() && (b[end].is_ascii_digit() || (b[end] == b'.' && b.get(end + 1).is_some_and(u8::is_ascii_digit)) || (end == 0 && b[end] == b'-')) {
         end += 1;
     }
+    if end > 0 && matches!(b.get(end), Some(b'e' | b'E')) {
+        let mut e = end + 1;
+        if matches!(b.get(e), Some(b'-' | b'+')) {
+            e += 1;
+        }
+        if b.get(e).is_some_and(u8::is_ascii_digit) {
+            while b.get(e).is_some_and(u8::is_ascii_digit) {
+                e += 1;
+            }
+            end = e;
+        }
+    }
     rest[..end].parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::findings::Kind;
     use super::*;
 
     const PG: &str = r#"[{"Plan":{"Node Type":"Hash Join","Join Type":"Inner","Startup Cost":10.5,"Total Cost":2500.25,"Plan Rows":50000,"Plan Width":40,"Hash Cond":"(o.customer_id = c.id)","Plans":[
@@ -492,10 +595,14 @@ mod tests {
         let seq = &p.nodes[1];
         assert_eq!((seq.target.as_str(), seq.access, seq.rows), ("orders as o", Access::Scan, Some(50000.0)));
         assert!(seq.detail.contains(&"Filter: (total > 100)".to_string()));
-        assert_eq!(p.warnings.len(), 1);
-        assert!(p.warnings[0].starts_with("Seq Scan on orders as o reads every row"));
+        assert_eq!((seq.parent, p.nodes[0].kids.clone(), seq.name()), (Some(0), vec![1, 2], "orders o".to_string()));
+        assert_eq!(p.findings.len(), 1);
+        assert_eq!((p.findings[0].kind, p.findings[0].node, p.findings[0].title.as_str()), (Kind::FullScan, Some(1), "Full scan of orders o"));
+        assert_eq!(p.warnings, ["Full scan of orders o. Reads every row, then keeps those matching total."]);
         let ix = &p.nodes[3];
         assert_eq!((ix.target.as_str(), ix.index.as_str(), ix.access), ("public.customers as c", "customers_pkey", Access::Index));
+        // Own costs add up to the plan's: the join's 2,500 less the 2,100 and 5 below it.
+        assert_eq!(p.nodes.iter().map(|n| n.self_cost.unwrap()).collect::<Vec<_>>(), [395.25, 2100.0, 0.8, 4.2]);
     }
 
     #[test]
@@ -508,17 +615,25 @@ mod tests {
         let sort = &p.nodes[0];
         assert_eq!((sort.actual_rows, sort.actual_ms, sort.loops), (Some(5000.0), Some(12.5), Some(1.0)));
         assert!(sort.detail.contains(&"Sort Key: a, b".to_string()));
-        assert!(p.warnings.iter().any(|w| w.contains("spilled to disk (4,096 kB)")));
-        assert!(p.warnings.iter().any(|w| w.contains("estimated at 10 rows and returned 5,000")));
+        assert_eq!((sort.self_ms, p.nodes[1].self_ms), (Some(9.5), Some(3.0)));
+        let kinds = p.findings.iter().map(|f| (f.kind, f.node)).collect::<Vec<_>>();
+        assert!(kinds.contains(&(Kind::SortSpill, Some(0))));
+        let spill = p.findings.iter().find(|f| f.kind == Kind::SortSpill).unwrap();
+        assert_eq!((spill.weight.as_str(), spill.fix.as_ref().unwrap().sql.as_str()), ("4.0 MB", "SET work_mem = '8MB';"));
+        // The scan is where the estimate goes wrong; the sort above only inherits it.
+        assert!(kinds.contains(&(Kind::Misestimate, Some(1))) && !kinds.contains(&(Kind::Misestimate, Some(0))));
+        assert!(kinds.contains(&(Kind::FullScan, Some(1))));
+        let scan = p.findings.iter().find(|f| f.kind == Kind::FullScan).unwrap();
+        assert_eq!(scan.body, ["Read 50,000 rows to keep 20 (under 1%)."]);
         let seq = &p.nodes[1];
         assert!(seq.detail.contains(&"Buffers: 10 hit, 2 read".to_string()));
-        assert!(seq.warnings.iter().any(|w| w.contains("reads every row")));
+        assert_eq!(seq.buffers, Some((10.0, 2.0)));
     }
 
     #[test]
     fn postgres_small_seq_scan_is_not_flagged() {
         let json = r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"tiny","Alias":"tiny","Total Cost":1.05,"Plan Rows":5,"Filter":"(a = 1)"}}]"#;
-        assert!(parse(Dialect::Postgres, json).unwrap().warnings.is_empty());
+        assert!(parse(Dialect::Postgres, json).unwrap().findings.is_empty());
     }
 
     const MYSQL: &str = r#"{"query_block":{"select_id":1,"cost_info":{"query_cost":"1250.40"},"ordering_operation":{"using_filesort":true,"nested_loop":[
@@ -540,15 +655,16 @@ mod tests {
     #[test]
     fn mysql_json_plan() {
         let p = parse(Dialect::MySql, MYSQL).unwrap();
-        assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str(), n.target.as_str())).collect::<Vec<_>>(), [(0, "Sort", ""), (1, "ALL", "o"), (1, "eq_ref", "c")]);
+        assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str(), n.target.as_str())).collect::<Vec<_>>(), [(0, "Sort", ""), (1, "Nested loop", ""), (2, "ALL", "o"), (2, "eq_ref", "c")]);
         assert_eq!(p.cost, Some(1250.4));
-        assert_eq!(p.nodes[1].access, Access::Scan);
-        assert_eq!(p.nodes[1].cost, Some(990.0));
-        assert_eq!((p.nodes[2].access, p.nodes[2].index.as_str()), (Access::Index, "PRIMARY"));
-        assert!(p.nodes[2].detail.contains(&"Lookup: shop.o.customer_id".to_string()));
-        assert!(p.warnings.iter().any(|w| w.starts_with("Full table scan on o: about 9,000 rows")));
-        assert!(p.warnings.iter().any(|w| w.contains("filesort")));
-        assert!(p.warnings.iter().any(|w| w.contains("usable indexes (idx_cust)")));
+        let o = &p.nodes[2];
+        assert_eq!((o.access, o.cost, o.own_cost, o.self_cost), (Access::Scan, Some(990.0), Some(990.0), Some(990.0)));
+        assert_eq!((p.nodes[3].access, p.nodes[3].index.as_str()), (Access::Index, "PRIMARY"));
+        assert!(p.nodes[3].detail.contains(&"Lookup: shop.o.customer_id".to_string()));
+        let kinds = p.findings.iter().map(|f| f.kind).collect::<Vec<_>>();
+        assert!(kinds.contains(&Kind::FullScan) && kinds.contains(&Kind::UnusedIndex));
+        // 9,000 rows sort quickly enough.
+        assert!(!kinds.contains(&Kind::Filesort));
     }
 
     #[test]
@@ -558,11 +674,11 @@ mod tests {
             {"dependent":true,"cacheable":false,"query_block":{"select_id":2,"table":{"table_name":"b","access_type":"const","key":"PRIMARY","rows_examined_per_scan":1}}}]}}}"#;
         let p = parse(Dialect::MySql, json).unwrap();
         assert_eq!(p.nodes.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(), ["Union", "ref", "const"]);
-        assert!(p.warnings.iter().any(|w| w.contains("temporary table")));
+        assert!(p.nodes[0].temp_table);
         let sub = r#"{"query_block":{"select_id":1,"table":{"table_name":"t","access_type":"ALL","rows_examined_per_scan":5,"attached_subqueries":[{"dependent":true,"cacheable":false,"query_block":{"select_id":2,"table":{"table_name":"u","access_type":"ref","key":"k","rows_examined_per_scan":1}}}]}}}"#;
         let p = parse(Dialect::MySql, sub).unwrap();
         assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str())).collect::<Vec<_>>(), [(0, "ALL"), (1, "Subquery"), (2, "ref")]);
-        assert!(p.warnings.iter().any(|w| w.contains("dependent subquery")));
+        assert!(p.findings.iter().any(|f| f.kind == Kind::DependentSubquery && f.node == Some(1)));
     }
 
     #[test]
@@ -575,15 +691,15 @@ mod tests {
         assert_eq!(p.nodes[0].target, "t.created");
         let t = &p.nodes[2];
         assert_eq!((t.rows, t.actual_rows, t.actual_ms, t.loops), (Some(20000.0), Some(20000.0), Some(3.1), Some(1.0)));
-        assert!(p.warnings.iter().any(|w| w.starts_with("Full table scan on t: about 20,000 rows")));
+        assert!(p.findings.iter().any(|f| f.kind == Kind::Filesort));
     }
 
     #[test]
     fn mariadb_nested_loop_with_join_buffer() {
         let json = r#"{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"a","access_type":"range","key":"k","rows":10}},{"block-nl-join":{"table":{"table_name":"b","access_type":"ALL","rows":50},"buffer_type":"flat","join_type":"BNL"}}]}}"#;
         let p = parse(Dialect::MariaDb, json).unwrap();
-        assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str())).collect::<Vec<_>>(), [(0, "range"), (0, "Join buffer"), (1, "ALL")]);
-        assert!(p.warnings.iter().any(|w| w.contains("join buffer")));
+        assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str())).collect::<Vec<_>>(), [(0, "Nested loop"), (1, "range"), (1, "Join buffer"), (2, "ALL")]);
+        assert!(p.nodes[2].join_buffer);
     }
 
     #[test]
@@ -594,10 +710,9 @@ mod tests {
         assert_eq!(p.nodes.iter().map(|n| (n.depth, n.label.as_str())).collect::<Vec<_>>(), [(0, "Sort: o.total DESC"), (1, "Table scan on o"), (2, "Index lookup on c using PRIMARY (id=o.cid)")]);
         let scan = &p.nodes[1];
         assert_eq!((scan.cost, scan.rows, scan.actual_rows, scan.actual_ms, scan.loops), (Some(1.25), Some(5000.0), Some(5000.0), Some(0.4), Some(1.0)));
-        assert_eq!(scan.access, Access::Scan);
-        assert_eq!(p.nodes[2].access, Access::Index);
-        assert!(p.warnings.iter().any(|w| w.starts_with("Table scan on o: about 5,000 rows")));
-        assert!(p.warnings.iter().any(|w| w.contains("filesort")));
+        assert_eq!((scan.access, scan.alias.as_str()), (Access::Scan, "o"));
+        assert_eq!((p.nodes[2].access, p.nodes[2].alias.as_str(), p.nodes[2].index.as_str(), p.nodes[2].never_ran), (Access::Index, "c", "PRIMARY", true));
+        assert!(p.nodes[0].filesort);
     }
 
     #[test]
@@ -640,5 +755,96 @@ mod tests {
         assert!(analyze_needs(Dialect::MySql, "8.4.3").is_none());
         assert!(analyze_needs(Dialect::MariaDb, "10.11.6-MariaDB").is_none());
         assert!(analyze_needs(Dialect::Postgres, "16.2").is_none());
+    }
+
+    fn fixture(name: &str) -> &'static str {
+        match name {
+            "pg18-join-analyze" => include_str!("plan/fixtures/pg18-join-analyze.json"),
+            "pg18-scan-analyze" => include_str!("plan/fixtures/pg18-scan-analyze.json"),
+            "pg18-scan" => include_str!("plan/fixtures/pg18-scan.json"),
+            "pg18-parallel-analyze" => include_str!("plan/fixtures/pg18-parallel-analyze.json"),
+            "pg18-spill-analyze" => include_str!("plan/fixtures/pg18-spill-analyze.json"),
+            "pg18-stale-analyze" => include_str!("plan/fixtures/pg18-stale-analyze.json"),
+            "pg18-limit-analyze" => include_str!("plan/fixtures/pg18-limit-analyze.json"),
+            "pg18-cte-analyze" => include_str!("plan/fixtures/pg18-cte-analyze.json"),
+            "pg18-subplan-analyze" => include_str!("plan/fixtures/pg18-subplan-analyze.json"),
+            "pg13-join-analyze" => include_str!("plan/fixtures/pg13-join-analyze.json"),
+            "mysql-join" => include_str!("plan/fixtures/mysql-join.json"),
+            "mysql-join-analyze" => include_str!("plan/fixtures/mysql-join-analyze.txt"),
+            "mysql-joinbuf-analyze" => include_str!("plan/fixtures/mysql-joinbuf-analyze.txt"),
+            "mysql-dep-analyze" => include_str!("plan/fixtures/mysql-dep-analyze.txt"),
+            "mysql-lower" => include_str!("plan/fixtures/mysql-lower.json"),
+            "mariadb-joinbuf-analyze" => include_str!("plan/fixtures/mariadb-joinbuf-analyze.json"),
+            "mariadb-scan" => include_str!("plan/fixtures/mariadb-scan.json"),
+            _ => panic!("no fixture {name}"),
+        }
+    }
+
+    fn sum_close(p: &Plan) {
+        let total: f64 = p.nodes.iter().filter_map(|n| n.self_cost).sum();
+        assert!(p.nodes.iter().all(|n| n.self_cost.unwrap_or(0.0) >= 0.0 && n.self_ms.unwrap_or(0.0) >= 0.0));
+        if let Some(c) = p.cost {
+            assert!((total - c).abs() <= c * 0.01 + 0.01, "own costs add to {total}, the plan costs {c}");
+        }
+    }
+
+    #[test]
+    fn real_postgres_plans_add_up_and_link() {
+        for name in ["pg18-join-analyze", "pg18-scan-analyze", "pg18-scan", "pg18-parallel-analyze", "pg18-spill-analyze", "pg18-limit-analyze", "pg18-cte-analyze", "pg18-subplan-analyze", "pg13-join-analyze"] {
+            let p = parse(Dialect::Postgres, fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            sum_close(&p);
+            for (i, n) in p.nodes.iter().enumerate() {
+                assert!(n.kids.iter().all(|&k| p.nodes[k].parent == Some(i)), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_parallel_scan_counts_its_time_once() {
+        let p = parse(Dialect::Postgres, fixture("pg18-parallel-analyze")).unwrap();
+        let scan = p.nodes.iter().find(|n| n.label == "Seq Scan").unwrap();
+        assert!(scan.parallel);
+        // Three processes each report about 8.7 ms; side by side that is 8.7 ms, not 26.
+        assert!((scan.self_ms.unwrap() - 8.686).abs() < 0.01, "{:?}", scan.self_ms);
+        let total: f64 = p.nodes.iter().filter_map(|n| n.self_ms).sum();
+        assert!((total - 13.021).abs() < 0.05, "{total}");
+    }
+
+    #[test]
+    fn real_plans_give_the_findings_that_matter() {
+        let kinds = |p: &Plan| p.findings.iter().map(|f| f.kind).collect::<Vec<_>>();
+        let p = parse(Dialect::Postgres, fixture("pg18-scan-analyze")).unwrap();
+        let f = &p.findings[0];
+        assert_eq!((f.kind, f.title.as_str()), (Kind::FullScan, "Full scan of bookings"));
+        assert!(f.body[0].starts_with("Read 133,333 rows to keep"), "{:?}", f.body);
+        let p = parse(Dialect::Postgres, fixture("pg18-stale-analyze")).unwrap();
+        let f = p.findings.iter().find(|f| f.kind == Kind::Misestimate).unwrap();
+        assert_eq!((f.title.as_str(), f.weight.as_str()), ("Estimate off 199,000x on events", "1 vs 199,000"));
+        let p = parse(Dialect::Postgres, fixture("pg18-spill-analyze")).unwrap();
+        assert!(kinds(&p).contains(&Kind::SortSpill));
+        // The join reads bookings through an index on created_at; nothing there is a full scan worth fixing.
+        assert!(!kinds(&parse(Dialect::Postgres, fixture("pg18-join-analyze")).unwrap()).contains(&Kind::FullScan));
+        let p = parse(Dialect::MySql, fixture("mysql-join")).unwrap();
+        assert_eq!(p.findings[0].kind, Kind::FullScan);
+        assert_eq!(p.findings[0].title, "Full scan of o");
+        assert!(kinds(&parse(Dialect::MySql, fixture("mysql-lower")).unwrap()).contains(&Kind::FullIndexScan));
+        assert!(kinds(&parse(Dialect::MariaDb, fixture("mariadb-scan")).unwrap()).contains(&Kind::FullScan));
+    }
+
+    #[test]
+    fn mysql_tree_text_links_filters_and_reads_tiny_times() {
+        let p = parse(Dialect::MySql, fixture("mysql-join-analyze")).unwrap();
+        let scan = p.nodes.iter().find(|n| n.label == "Table scan on o").unwrap();
+        assert_eq!((scan.alias.as_str(), scan.removed), ("o", Some(200000.0)));
+        assert!(scan.filter_expr.is_some());
+        let p = parse(Dialect::MySql, fixture("mysql-joinbuf-analyze")).unwrap();
+        let f = p.nodes.iter().find(|n| n.label.starts_with("Filter")).unwrap();
+        // "actual time=662e-6..662e-6" is under a millisecond, not 662.
+        assert!(f.actual_ms.unwrap() < 0.001, "{:?}", f.actual_ms);
+        let p = parse(Dialect::MySql, fixture("mysql-dep-analyze")).unwrap();
+        assert!(p.findings.iter().any(|f| f.kind == Kind::DependentSubquery));
+        let p = parse(Dialect::MariaDb, fixture("mariadb-joinbuf-analyze")).unwrap();
+        let o = p.nodes.iter().find(|n| n.alias == "o").unwrap();
+        assert!((o.self_ms.unwrap() - 43.22).abs() < 0.01 && o.self_cost.is_some());
     }
 }

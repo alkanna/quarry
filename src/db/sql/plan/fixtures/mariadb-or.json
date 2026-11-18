@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":33.3191254,"nested_loop":[{"table":{"table_name":"orders","access_type":"ALL","possible_keys":["idx_orders_email"],"loops":1,"rows":199143,"cost":33.3191254,"filtered":100,"attached_condition":"orders.email = 'user42@example.com' or orders.ref = 'R4242'"}}]}}

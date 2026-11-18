@@ -1,0 +1,1 @@
+{"query_block":{"select_id":1,"cost":35.96401847,"nested_loop":[{"table":{"table_name":"orders","access_type":"index","key":"idx_orders_email","key_length":"483","used_key_parts":["email"],"loops":1,"rows":199143,"cost":35.96401847,"filtered":100,"attached_condition":"lcase(orders.email) = 'user42@example.com'","using_index":true}}]}}

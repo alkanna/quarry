@@ -229,11 +229,17 @@ pub(in crate::db) async fn explain_sql(db: &Db, schema: &str, sql: &str, rules: 
                 super::plan::Access::Index => "index",
                 super::plan::Access::Other => "other",
             };
-            json!({ "depth": n.depth, "node": n.label, "table": n.target, "index": n.index, "access": access, "rows": n.rows, "cost": n.cost, "detail": scrub(&n.detail) })
+            json!({ "depth": n.depth, "node": n.label, "table": n.target, "index": n.index, "access": access, "rows": n.rows, "cost": n.cost, "self_cost": n.self_cost, "share": n.share.map(|s| (s * 1000.0).round() / 1000.0), "detail": scrub(&n.detail) })
         })
         .collect();
     let summary = format!("Plan of {} node{}", nodes.len(), if nodes.len() == 1 { "" } else { "s" });
-    capped(Answer::new(json!({ "nodes": nodes, "warnings": scrub(&plan.warnings), "cost": plan.cost }), summary), limits)
+    // Findings quote the statement's values in their text and fixes, so they go through the value rules like the details.
+    let findings: Vec<Value> = plan
+        .findings
+        .iter()
+        .map(|f| json!({ "node": f.node, "title": nsr.scrub_text(&f.title), "detail": scrub(&f.body), "fix": f.fix.as_ref().map(|x| nsr.scrub_text(&x.sql)) }))
+        .collect();
+    capped(Answer::new(json!({ "nodes": nodes, "findings": findings, "warnings": scrub(&plan.warnings), "cost": plan.cost }), summary), limits)
 }
 
 /// An explain answer is one piece that cannot be paged, so one past the byte limit is refused whole.
