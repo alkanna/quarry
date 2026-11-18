@@ -84,6 +84,9 @@ pub struct Index {
     pub comment: String,
     /// INVISIBLE on MySQL, IGNORED on MariaDB: kept up to date but not used by the optimizer.
     pub invisible: bool,
+    /// PostgreSQL: not valid, as a CREATE INDEX CONCURRENTLY that failed leaves it; the planner never uses it. Named for the
+    /// odd case so a MySQL row and `Default` read as valid.
+    pub invalid: bool,
     /// PostgreSQL's `pg_get_indexdef`, the CREATE INDEX statement. Empty on MySQL.
     pub def: String,
     /// PostgreSQL: a primary key, unique or exclusion constraint owns the index, so it is written as that constraint.
@@ -518,7 +521,7 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
             last.complex |= r.int("complex") == Some(1);
         } else {
             let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment"), predicate: s(r, "pred"), include: text(r, "incl").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), scans: None, last_scan: None });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, invalid: r.int("valid") == Some(0), def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment"), predicate: s(r, "pred"), include: text(r, "incl").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), scans: None, last_scan: None });
         }
     }
     out

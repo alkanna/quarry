@@ -280,3 +280,45 @@ fn a_flame_bar_selects_its_node_and_time_waits_for_analyze() {
     ui.click("Time");
     assert!(explain_state(&ui).flame_time, "Time did not switch the widths");
 }
+
+const PG_SCAN: &str = include_str!("../../db/sql/plan/fixtures/pg18-scan.json");
+
+#[test]
+fn a_filtered_full_scan_shows_its_candidate_index_and_the_evidence() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
+    ui.show("CANDIDATE INDEX");
+    assert!(ui.shows("From the filter: equal columns first, then the range. Check it against the table's other queries before creating it."), "the candidate has no note");
+    assert!(ui.shows("Then Explain again to compare."), "the candidate does not say what to do after");
+    assert!(ui.shows("public.bookings: about 400,000 rows"), "the evidence is not shown");
+    assert!(ui.shows("Fix: Candidate index"), "the finding card does not name its fix");
+}
+
+#[test]
+fn the_candidate_index_opens_as_a_draft_and_nothing_runs() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
+    ui.h.state_mut().status = "idle".into();
+    ui.show("CANDIDATE INDEX");
+    let before = ui.app().tabs.len();
+    ui.click("Open in Query tab");
+    assert!(ui.app().modal.is_none(), "the dialog stayed open");
+    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
+    assert_eq!(s.query, r#"CREATE INDEX CONCURRENTLY "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status");"#);
+    assert!(!reached_server_call(&ui), "opening the draft ran it");
+}
+
+#[test]
+fn copying_the_candidate_index_says_so() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
+    ui.show("CANDIDATE INDEX");
+    ui.click_last("Copy");
+    assert!(ui.shows("Copied."), "copying said nothing");
+}
+
+#[test]
+fn a_mysql_estimate_alone_suggests_no_index_and_says_why() {
+    let Some(mut ui) = explain_open(PLAN) else { return };
+    ui.show("Full scan of orders");
+    assert!(ui.shows("No index suggested: the 10% of rows the server says the filter keeps is its guess. Run with ANALYZE to measure it."), "the panel does not say why there is no index");
+    assert!(ui.h.query_by_label("CANDIDATE INDEX").is_none(), "a guess gave a candidate");
+}
