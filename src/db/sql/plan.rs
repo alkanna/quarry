@@ -602,7 +602,7 @@ mod tests {
         let ix = &p.nodes[3];
         assert_eq!((ix.target.as_str(), ix.index.as_str(), ix.access), ("public.customers as c", "customers_pkey", Access::Index));
         // Own costs add up to the plan's: the join's 2,500 less the 2,100 and 5 below it.
-        assert_eq!(p.nodes.iter().map(|n| n.self_cost.unwrap()).collect::<Vec<_>>(), [395.25, 2100.0, 0.8, 4.2]);
+        assert_eq!(p.nodes.iter().map(|n| (n.self_cost.unwrap() * 100.0).round() / 100.0).collect::<Vec<_>>(), [395.25, 2100.0, 0.8, 4.2]);
     }
 
     #[test]

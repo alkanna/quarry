@@ -43,7 +43,8 @@ fn the_tree_and_the_node_panel_sit_side_by_side_inside_the_window() {
         let Some(mut ui) = explain_open(PLAN) else { return };
         ui.h.set_size(size);
         ui.settle();
-        let cost = ui.h.get_by_label("COST").rect();
+        // SELF COST is the column kept at every width.
+        let cost = ui.h.get_by_label("SELF COST").rect();
         let details = ui.h.get_by_label("DETAILS").rect();
         assert!(cost.right() < details.left(), "the tree runs under the node panel at {size:?}");
         let close = ui.h.get_by_label("Close").rect();
@@ -179,7 +180,8 @@ fn analyze_columns_compare_the_estimate_with_what_ran() {
 fn a_fix_opens_as_a_draft_and_nothing_runs() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SPILL) else { return };
     ui.h.state_mut().status = "idle".into();
-    ui.click("Sort spilled to disk");
+    // The title is on the card and in the panel; the card is the first.
+    ui.click_nth("Sort spilled to disk", 0);
     let before = ui.app().tabs.len();
     ui.click("Open in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");
@@ -193,7 +195,7 @@ fn a_fix_opens_as_a_draft_and_nothing_runs() {
 #[test]
 fn copy_puts_the_fix_on_the_clipboard_with_a_note() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SPILL) else { return };
-    ui.click("Sort spilled to disk");
-    ui.click("Copy");
+    ui.click_nth("Sort spilled to disk", 0);
+    ui.click_last("Copy");
     assert!(ui.shows("Copied."), "copying said nothing");
 }
