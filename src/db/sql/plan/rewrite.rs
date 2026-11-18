@@ -127,7 +127,9 @@ fn name_for(d: Dialect, t: &TableEv, parts: &[String], also: &[String]) -> Strin
 /// A name as SQL: bare when it reads as a plain identifier, else quoted.
 fn ident_text(s: &str, d: Dialect) -> String {
     let plain = s.chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic()) && s.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) && (d != Dialect::Postgres || !s.chars().any(|c| c.is_ascii_uppercase()));
-    if plain { s.to_string() } else { d.quote_ident(s) }
+    // A column named like a keyword (order, user, key) breaks the statement unless quoted; quoting any of them is always valid.
+    let keyword = super::super::dialect::KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(s));
+    if plain && !keyword { s.to_string() } else { d.quote_ident(s) }
 }
 
 fn col_text(c: &ColRef, d: Dialect) -> String {
@@ -774,6 +776,14 @@ mod tests {
     use super::super::evidence::{ColEv, IndexEv};
     use super::super::parse;
     use super::*;
+
+    #[test]
+    fn a_column_named_like_a_keyword_is_quoted_in_a_rewrite() {
+        assert_eq!(ident_text("created_at", Dialect::Postgres), "created_at");
+        assert_eq!(ident_text("order", Dialect::Postgres), "\"order\"");
+        assert_eq!(ident_text("user", Dialect::MySql), "`user`");
+        assert_eq!(col_text(&ColRef { qual: Some("o".into()), name: "key".into() }, Dialect::MySql), "o.`key`");
+    }
 
     fn fixture(name: &str) -> &'static str {
         match name {
