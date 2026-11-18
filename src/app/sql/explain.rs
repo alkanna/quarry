@@ -173,7 +173,7 @@ impl App {
             });
         }
         let find = if x.show_raw { Find::bar(ui, egui::Id::unique("sql-explain-raw"), &x.raw) } else { Find::default() };
-        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
             if x.show_raw {
                 let mut text = x.raw.as_str();
                 let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(true)).show(ui);
@@ -245,9 +245,13 @@ fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
         return;
     }
     let heads: &[&str] = if p.analyzed { &["NODE", "ROWS", "COST", "ACTUAL ROWS", "LOOPS", "MS"] } else { &["NODE", "ROWS", "COST"] };
-    // A grid cell wraps at the column's last width, which starts tiny, so the node column takes what the number columns leave.
-    let node_w = (ui.available_width() - (heads.len() - 1) as f32 * 90.0).max(240.0);
-    egui::Grid::new("sql-explain-plan").num_columns(heads.len()).spacing([16.0, 6.0]).striped(true).show(ui, |ui| {
+    // A grid cell wraps at the column's last width, which starts tiny, so the node column takes what the fixed number
+    // columns leave, less the scroll bar.
+    const NUM_W: f32 = 84.0;
+    const GAP: f32 = 16.0;
+    let nums = (heads.len() - 1) as f32;
+    let node_w = (ui.available_width() - nums * (NUM_W + GAP) - ui.spacing().scroll.bar_width).max(240.0);
+    egui::Grid::new("sql-explain-plan").num_columns(heads.len()).spacing([GAP, 6.0]).min_col_width(NUM_W).striped(true).show(ui, |ui| {
         for h in heads {
             caption(ui, *h);
         }
@@ -266,13 +270,17 @@ fn plan_grid(ui: &mut egui::Ui, p: &Plan) {
                     job.append(&format!("  {part}"), 0.0, mono_fmt(TXT_BODY, MUTED(), 400.0));
                 }
                 ui.label(job);
-                let pad = "    ".repeat(n.depth + 1);
-                for d in &n.detail {
-                    ui.label(RichText::new(format!("{pad}{d}")).monospace().size(TXT_SMALL).color(MUTED()));
-                }
-                for w in &n.warnings {
-                    ui.label(RichText::new(format!("{pad}{w}")).size(TXT_SMALL).color(WARNING()));
-                }
+                // A margin rather than leading spaces, so a long filter keeps its indent on every wrapped line.
+                let mut at = ui.available_rect_before_wrap();
+                at.min.x += text_w(ui, &"    ".repeat(n.depth + 1), egui::FontId::monospace(TXT_BODY));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
+                    for d in &n.detail {
+                        ui.label(RichText::new(d.as_str()).monospace().size(TXT_SMALL).color(MUTED()));
+                    }
+                    for w in &n.warnings {
+                        ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
+                    }
+                });
             });
             let cell = |v: Option<f64>| v.map(figure).unwrap_or_default();
             let vals = [n.rows, n.cost, n.actual_rows, n.loops, n.actual_ms];
