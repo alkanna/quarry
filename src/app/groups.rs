@@ -24,6 +24,8 @@ pub(super) struct Group {
     pub(super) fold_rail: bool,
     /// Shown open in the Connections panel.
     pub(super) open: bool,
+    /// Its folder is open in the rail. Kept here rather than in ui.json so it goes with the group, whose id a new one reuses.
+    pub(super) rail_open: bool,
     pub(super) members: Vec<u64>,
 }
 
@@ -88,7 +90,7 @@ impl Groups {
     pub(super) fn new_group(&mut self, name: &str) -> u64 {
         let id = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
         let color = GROUP_COLORS.iter().map(|c| c.0).find(|c| !self.groups.iter().any(|g| g.color == *c)).unwrap_or(GROUP_COLORS[self.groups.len() % GROUP_COLORS.len()].0);
-        self.groups.push(Group { id, name: name.into(), color: color.into(), fold_rail: true, open: true, members: Vec::new() });
+        self.groups.push(Group { id, name: name.into(), color: color.into(), fold_rail: true, open: true, rail_open: false, members: Vec::new() });
         id
     }
 

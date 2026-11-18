@@ -142,7 +142,7 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     assert!(!ui.has("Switch to beta"));
 
     ui.click_at(folder.center());
-    assert!(ui.app().rail_open.contains(&1));
+    assert!(ui.app().rail_open(1));
     ui.h.run_steps(2);
     let alpha = ui.rect_of("Switch to alpha");
     // Open, the shelf holds two member slots of 46 px where the closed folder holds one, so it is one slot taller.
@@ -159,7 +159,7 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     let folder = ui.rect_of("Fleet folder");
     ui.click_at(folder.center());
     ui.h.run_steps(SETTLE);
-    assert!(!ui.app().rail_open.contains(&1));
+    assert!(!ui.app().rail_open(1));
     assert!(!ui.has("Switch to beta"), "a closed folder shows no member tiles");
     assert!(near(ui.rect_of("Switch to alpha").top(), alpha0.top()));
     // Where beta was, a click does not pick it.
