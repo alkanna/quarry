@@ -489,11 +489,14 @@ fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut 
         let go = |to: DropAt| if linked_file { Act::Drop(node.clone(), Plan::Out(to)) } else { Act::Move(node.clone(), to) };
         ui.menu_button(label, |ui| {
             menu_list(ui);
-            for (id, depth, name) in ops::folder_list(lib, skip) {
-                let label = format!("{}{}", "    ".repeat(depth), name);
-                menu_act(ui, acts, go(DropAt::Into(id)), |ui| lib_button(ui, &label, "", cur == Some(id)));
+            let folders = ops::folder_list(lib, skip);
+            for (id, depth, name) in &folders {
+                let label = format!("{}{}", "    ".repeat(*depth), name);
+                menu_act(ui, acts, go(DropAt::Into(*id)), |ui| lib_button(ui, &label, "", cur == Some(*id)));
             }
-            ui.separator();
+            if !folders.is_empty() {
+                ui.separator();
+            }
             if !linked_file {
                 menu_item(ui, acts, "New folder\u{2026}", "", Act::MoveToNew(node.clone()));
             }
