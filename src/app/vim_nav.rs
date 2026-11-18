@@ -2,8 +2,8 @@
 //!
 //! `begin` reads this pass's keys before anything draws. While the results grid has the keys, h j k l move a cell cursor
 //! in it, or a line cursor in the record Tab opens, and a few more keys act on the cell under it. Anywhere else that no
-//! text field has the keys, such as a focused sidebar row or the Library tree, h j k l, gg and G become the arrows, Home
-//! and End that those already take, and `end` moves egui's focus for the arrows nothing took. Ctrl+h j k l move between
+//! text field has the keys, such as a focused sidebar row or the Library tree, h j k l become the arrows those already
+//! take, and `end` moves egui's focus for the arrows nothing took. Ctrl+h j k l move between
 //! the sidebar, the query and the grid, from anywhere, editors included. Where Ctrl is the command key, Alt stands in for
 //! it in those and in Ctrl+d u f b.
 
@@ -210,10 +210,13 @@ impl App {
             return;
         }
         let mut pane = None;
+        // Where Alt stands in for Ctrl, winit still sends the letter as text right after the key, so that text goes too.
+        let mut alt_text = false;
         ctx.input_mut(|i| {
             i.events.retain(|e| match e {
                 Event::Key { key: k @ (Key::H | Key::J | Key::K | Key::L), pressed, modifiers, .. } if pane_mods(modifiers) => {
                     if *pressed {
+                        alt_text |= modifiers.alt;
                         pane = Some(match k {
                             Key::H => Pane::Left,
                             Key::J => Pane::Down,
@@ -221,6 +224,10 @@ impl App {
                             _ => Pane::Right,
                         });
                     }
+                    false
+                }
+                Event::Text(_) if alt_text => {
+                    alt_text = false;
                     false
                 }
                 _ => true,
@@ -242,6 +249,7 @@ impl App {
             let mut kept = Vec::with_capacity(i.events.len());
             for e in std::mem::take(&mut i.events) {
                 match &e {
+                    Event::Text(_) if std::mem::take(&mut alt_text) => {}
                     Event::Text(t) => {
                         let mut rest = String::new();
                         for c in t.chars() {
@@ -259,6 +267,7 @@ impl App {
                     Event::Key { key: Key::Escape, pressed: true, modifiers, .. } if modifiers.is_none() && !pending.is_empty() => pending.clear(),
                     Event::Key { key: k @ (Key::D | Key::U | Key::F | Key::B), pressed, modifiers, .. } if grid.is_some() && pane_mods(modifiers) => {
                         if *pressed {
+                            alt_text |= modifiers.alt;
                             cmds.push(match k {
                                 Key::D => Cmd::Half(true),
                                 Key::U => Cmd::Half(false),
@@ -323,20 +332,14 @@ impl App {
 
     /// A command typed where no grid has the keys: the moves become the keys the lists and egui's focus already take.
     fn vim_elsewhere(&mut self, ctx: &egui::Context, c: Cmd) {
-        let mut push = |key: Key, n: i64| {
-            let n = n.unsigned_abs().min(200);
-            ctx.input_mut(|i| {
-                for _ in 0..n {
-                    i.events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-                }
-            });
+        // egui moves the focus once per pass however many arrows come in, so a count only applies in the grid.
+        let mut push = |key: Key| {
+            ctx.input_mut(|i| i.events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }));
             self.vnav.injected.push(key);
         };
         match c {
-            Cmd::Move(r, 0) => push(arrow(if r > 0 { FocusDirection::Down } else { FocusDirection::Up }), r),
-            Cmd::Move(0, c) => push(arrow(if c > 0 { FocusDirection::Right } else { FocusDirection::Left }), c),
-            Cmd::Row(None) => push(Key::Home, 1),
-            Cmd::Last => push(Key::End, 1),
+            Cmd::Move(r, 0) => push(arrow(if r > 0 { FocusDirection::Down } else { FocusDirection::Up })),
+            Cmd::Move(0, c) => push(arrow(if c > 0 { FocusDirection::Right } else { FocusDirection::Left })),
             Cmd::Tab(n, next) => self.vim_tab(n, next),
             _ => {}
         }
@@ -457,10 +460,12 @@ impl App {
                 }
             }
             Pane::Down | Pane::Right => {
+                // Closing an open cell editor here would drop what was typed, so Enter or Esc closes it first.
+                if self.sql_cell.is_some() || self.inline.is_some() {
+                    return;
+                }
                 surrender();
                 self.lib_ui.panel.focus = false;
-                self.sql_cell = None;
-                self.inline = None;
                 if let Some(v) = self.vim_grid(ctx) {
                     let (sel, len) = self.vim_rows(v);
                     if sel.is_none() && len > 0 {

@@ -331,7 +331,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
     let total = lead + order.iter().map(|&ci| widths[ci]).sum::<f32>();
     let aligns: Vec<u8> = set.cols.iter().enumerate().map(|(ci, c)| prefs.align.get(&names[ci]).copied().unwrap_or(if is_numeric(c.kind) { 2 } else { 0 })).collect();
     let pins = shown.iter().filter(|c| prefs.pinned.contains(*c)).count();
-    let mut out = GridOut { shown: order.iter().map(|&ci| names[ci].clone()).collect(), ..Default::default() };
+    let mut out = GridOut { shown: if cursor.is_some() { order.iter().map(|&ci| names[ci].clone()).collect() } else { Vec::new() }, ..Default::default() };
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
         let view_w = ui.available_width();
         let (head, _) = ui.allocate_exact_size(egui::vec2(view_w, TABLE_HEAD_H), Sense::hover());
@@ -393,29 +393,27 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, prefs: &ColPrefs, checked: &BTreeSet
                             }
                         }
                         // Cmd or Shift on a row checks it like in the Content grid; a plain click selects it.
+                        // The place among the shown columns of the cell under x, for the Vim cursor and the cell menu alike.
+                        let col_at = |px: f32| {
+                            let mut x = rr.left() + lead;
+                            order.iter().position(|&ci| {
+                                x += widths[ci];
+                                px < x
+                            })
+                        };
                         if resp.clicked() {
                             if shift || ui.input(|i| i.modifiers.command) {
                                 out.check = Some((i, shift));
                             } else {
                                 out.select = Some(i);
-                                if let Some(p) = resp.interact_pointer_pos() {
-                                    let mut x = rr.left() + lead;
-                                    out.col = order.iter().position(|&ci| {
-                                        x += widths[ci];
-                                        p.x < x
-                                    });
-                                }
+                                out.col = resp.interact_pointer_pos().and_then(|p| col_at(p.x));
                             }
                         }
                         // The menu knows its cell only from where the right click landed, so that is kept for it.
                         let cell_id = ui.scope_id().with("menu-cell");
                         if resp.secondary_clicked() && let Some(p) = resp.interact_pointer_pos() {
-                            let mut x = rr.left() + lead;
-                            let hit = order.iter().find(|&&ci| {
-                                x += widths[ci];
-                                p.x < x
-                            });
-                            ui.ctx().data_mut(|d| d.insert_temp(cell_id, hit.copied().unwrap_or(usize::MAX)));
+                            let hit = col_at(p.x).map(|k| order[k]);
+                            ui.ctx().data_mut(|d| d.insert_temp(cell_id, hit.unwrap_or(usize::MAX)));
                         }
                         resp.context_menu(|ui| {
                             menu_look(ui);
@@ -1347,13 +1345,15 @@ impl App {
                 // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
                 let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
-                let names: Vec<String> = if record_open { colnames.clone() } else { Vec::new() };
                 let prefs = s.qprefs.get(&colnames).cloned().unwrap_or_default();
+                // Shown columns first, in grid order, so Tab puts the record's cursor on the grid cursor's column.
+                let names = if record_open { table::record_names(&table::visible_cols(Some(&prefs), &colnames, usize::MAX), &colnames) } else { Vec::new() };
                 // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
                 let filter = sets[sel].kind == "SELECT" && sets[sel].stmt.len() < 20_000 && db::sql::source::single_table(&sets[sel].stmt, dialect).is_some();
                 let vim = self.prefs.vim && !record_open;
                 let cursor = self.prefs.vim.then_some((self.tabs[cur].vcol, record_open));
                 let scroll = std::mem::take(&mut self.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
+                self.vnav.page = (ui.available_height() / ROW_H) as usize;
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
                 let out = grid(ui, &sets[sel], &prefs, &checked, qsel, scroll, cursor, filter, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));

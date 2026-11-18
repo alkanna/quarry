@@ -255,3 +255,67 @@ fn ctrl_k_focuses_the_mongo_query() {
     ui.settle();
     assert!(ui.h.ctx.memory(|m| m.has_focus(crate::app::query::query_id("QUERY"))), "Ctrl+K did not focus the query");
 }
+
+fn modal_title(ui: &UiApp) -> Option<String> {
+    match &ui.app().modal {
+        Some(Modal::Text { title, .. }) => Some(title.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn ctrl_l_leaves_an_open_cell_editor_alone() {
+    let Some(mut ui) = demo_ui(sql_vim) else { return };
+    ui.type_text("j5li");
+    ui.wait("the cell editor on note", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
+    ui.type_text("Side gate");
+    ui.h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::L);
+    ui.settle();
+    assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.col == "note"), "Ctrl+L closed the cell editor and dropped what was typed");
+}
+
+#[test]
+fn gg_and_g_in_the_sidebar_leave_the_focus_on_its_row() {
+    let Some(mut ui) = demo_ui(sql_vim) else { return };
+    ui.h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::H);
+    ui.settle();
+    let row = ui.h.ctx.memory(|m| m.focused());
+    assert!(row.is_some(), "Ctrl+H focused no sidebar row");
+    ui.type_text("G");
+    ui.type_text("gg");
+    assert_eq!(ui.h.ctx.memory(|m| m.focused()), row, "G or gg moved the focus out of the sidebar");
+}
+
+#[test]
+fn the_query_record_opens_on_the_pinned_column_the_grid_cursor_is_on() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_query_demo();
+        a.prefs.vim = true;
+        let s = a.tm().and_then(|t| t.sql.as_mut()).unwrap();
+        let keys = crate::app::sql::query::result_keys(&s.sets[0].cols);
+        s.qprefs.insert(keys, ColPrefs { pinned: vec!["email".into()], ..Default::default() });
+    }) else {
+        return;
+    };
+    // The first column on screen is the pinned email, not the result's first.
+    ui.type_text("j");
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    assert!(ui.app().t().is_some_and(|t| t.record), "Tab did not open the record");
+    ui.type_text("v");
+    assert_eq!(modal_title(&ui).as_deref(), Some("email"), "the record's cursor was not on the grid cursor's column");
+}
+
+/// Where Alt stands in for Ctrl, winit sends the letter as text after the key; it must not also run as a Vim key.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_letter_after_an_alt_screen_key_is_not_a_second_command() {
+    let Some(mut ui) = demo_ui(sql_vim) else { return };
+    ui.type_text("5jll");
+    assert_eq!((sel(&ui), vcol(&ui)), (Some(4), 2));
+    ui.h.event(egui::Event::Key { key: egui::Key::B, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
+    ui.h.event(egui::Event::Text("b".into()));
+    ui.settle();
+    assert_eq!((sel(&ui), vcol(&ui)), (Some(0), 2), "Alt+B moved a column as well as a screen up");
+}

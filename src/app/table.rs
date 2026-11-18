@@ -1117,7 +1117,7 @@ pub(super) fn record_card(ui: &mut egui::Ui, row_w: f32, view_w: f32, add: impl 
 }
 
 /// The record's lines: the grid's columns, then the row's fields the grid does not show.
-fn record_names(cols: &[String], fields: &[String]) -> Vec<String> {
+pub(super) fn record_names(cols: &[String], fields: &[String]) -> Vec<String> {
     let shown: HashSet<&String> = cols.iter().collect();
     cols.iter().chain(fields.iter().filter(|f| !shown.contains(f))).cloned().collect()
 }
