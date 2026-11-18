@@ -2,7 +2,9 @@
 //! engines print totals that include the nodes below (PostgreSQL, MySQL's tree text) or a running total of the join
 //! (MySQL's JSON), so a node's own share has to be taken apart here.
 
-use super::{Dialect, Op, Plan};
+use super::findings::below;
+use super::{Dialect, Op, Plan, PlanNode};
+use std::collections::HashSet;
 
 /// Sets `parent` and `kids` from the depths.
 pub(super) fn link(p: &mut Plan) {
@@ -20,11 +22,16 @@ pub(super) fn link(p: &mut Plan) {
     }
 }
 
-/// Fills `self_cost`, `self_ms` and `share` on every node.
+/// Fills `sub`, `self_cost`, `self_ms` and the shares on every node.
 pub(super) fn derive(p: &mut Plan, d: Dialect) {
     let n = p.nodes.len();
     if n == 0 {
         return;
+    }
+    // Before the costs, since a subquery run per row is charged per call.
+    let subs: Vec<Option<Sub>> = (0..n).map(|k| classify(p, k)).collect();
+    for (x, s) in p.nodes.iter_mut().zip(subs) {
+        x.sub = s;
     }
     let json_my = d != Dialect::Postgres && p.nodes.iter().any(|x| x.own_cost.is_some() || x.table_ms.is_some());
     // Cost.
@@ -68,7 +75,9 @@ pub(super) fn derive(p: &mut Plan, d: Dialect) {
     let total_cost: f64 = p.nodes.iter().filter_map(|x| x.self_cost).sum();
     let by_time = p.analyzed && total_ms > 0.0;
     for x in &mut p.nodes {
-        x.share = if by_time { x.self_ms.map(|m| m / total_ms) } else if total_cost > 0.0 { x.self_cost.map(|c| c / total_cost) } else { None };
+        x.cost_share = x.self_cost.filter(|_| total_cost > 0.0).map(|c| c / total_cost);
+        x.time_share = x.self_ms.filter(|_| by_time).map(|m| m / total_ms);
+        x.share = if by_time { x.time_share } else { x.cost_share };
     }
 }
 
@@ -125,7 +134,8 @@ fn spread(p: &Plan, i: usize, scale: f64, loops: &[f64], eff: &mut [f64]) {
 /// How a PostgreSQL subquery runs for the node that tests it, read from how that node prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SubRun {
-    /// An InitPlan, a CTE or a hashed SubPlan: run once and kept.
+    /// An InitPlan, a CTE or a hashed SubPlan: run once and kept. Also a SubPlan the plan shows no sign of running per
+    /// row, which is then charged nothing per row.
     Once,
     /// A SubPlan run again for every row the node above tests. `EXISTS(SubPlan 1)` stops at its first row, `ANY` reads
     /// half of it on average and anything else, a scalar subquery, reads all of it.
@@ -134,18 +144,65 @@ pub(super) enum SubRun {
     Expr,
 }
 
+/// Where the node above uses a subquery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SubAt {
+    JoinFilter,
+    /// Any other condition or key the node prints.
+    Cond,
+    /// Nothing the node prints names it, so it is in the columns the node returns, which only VERBOSE prints.
+    Output,
+}
+
+impl SubAt {
+    /// Where the subquery is, for a finding.
+    pub(super) fn place(self) -> &'static str {
+        match self {
+            SubAt::JoinFilter => "in the join filter",
+            SubAt::Cond => "in its condition",
+            SubAt::Output => "in the columns it returns (shown only with VERBOSE)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sub {
+    pub(super) run: SubRun,
+    pub(super) at: SubAt,
+}
+
 /// How node `k` runs, when it is a subquery.
 pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
+    p.nodes[k].sub.map(|s| s.run)
+}
+
+/// How node `k` runs and where its parent uses it, when it is a subquery.
+fn classify(p: &Plan, k: usize) -> Option<Sub> {
     let n = &p.nodes[k];
-    if !n.role.starts_with("SubPlan") {
-        return (n.role.starts_with("InitPlan") || n.role.starts_with("CTE")).then_some(SubRun::Once);
+    let sub = n.role.starts_with("SubPlan");
+    if !sub && !n.role.starts_with("InitPlan") && !n.role.starts_with("CTE") {
+        return None;
     }
-    let Some(j) = n.parent else { return Some(SubRun::Once) };
-    let parent = &p.nodes[j];
+    let parent = n.parent.map(|j| &p.nodes[j]);
+    let at = match parent {
+        Some(x) if mentions(&x.join_filter.text, &n.role, "") => SubAt::JoinFilter,
+        Some(x) if x.detail.iter().any(|d| mentions(d, &n.role, "")) => SubAt::Cond,
+        _ => SubAt::Output,
+    };
+    let run = match parent {
+        Some(x) if sub => sub_plan_run(p, k, x),
+        _ => SubRun::Once,
+    };
+    Some(Sub { run, at })
+}
+
+/// How the SubPlan `k` runs for its `parent`.
+fn sub_plan_run(p: &Plan, k: usize, parent: &PlanNode) -> SubRun {
+    let n = &p.nodes[k];
     let text = parent.detail.join("\n");
     let named = |pre: &str, post: &str| mentions(&text, &format!("{pre}{}", n.role), post);
     // PostgreSQL 16 and older may print "alternatives: SubPlan 1 or hashed SubPlan 2" and pick one as it runs.
-    Some(if named("hashed ", "") || text.contains("alternatives:") {
+    if named("hashed ", "") || text.contains("alternatives:") {
         SubRun::Once
     } else if named("EXISTS(", ")") {
         SubRun::Exists
@@ -153,6 +210,9 @@ pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
         SubRun::Any
     } else if named("(", ")") && !text.contains("EXISTS") && !text.contains("ANY") && !text.contains("ALL") {
         SubRun::Expr
+    } else if n.op == Op::Materialize {
+        // An IN or ANY that PostgreSQL could not hash keeps its rows in a Materialize to search them for every row.
+        SubRun::Any
     } else if mentions(&text, &n.role, "") || correlated(p, k) {
         // Older servers print every kind as "(SubPlan 1)"; the cheapest reading keeps the charge a lower bound. A
         // SubPlan the node does not name sits in its output list, printed only with VERBOSE, and one that reads a
@@ -162,28 +222,56 @@ pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
         // Unnamed and uncorrelated, as a hashed subquery in the output list prints without VERBOSE. Calling it per row
         // would be a guess, so it counts once and ANALYZE's loops have the last word.
         SubRun::Once
-    })
+    }
 }
 
 /// Whether the subquery at `k` reads a column of a table outside it. The server qualifies those with their alias and
-/// leaves the subquery's own columns bare or qualified with aliases from inside it.
+/// leaves the subquery's own columns bare or qualified with aliases from inside it. Every condition and key a node
+/// prints counts: a column from outside in a One-Time Filter or a Sort Key correlates it as much as one in its filter.
+/// A Limit's count and a function's arguments are not printed without VERBOSE, so a correlation there goes unseen.
 fn correlated(p: &Plan, k: usize) -> bool {
-    let mut inside = vec![k];
-    let mut stack = p.nodes[k].kids.clone();
-    while let Some(j) = stack.pop() {
-        inside.push(j);
-        stack.extend(p.nodes[j].kids.iter().copied());
-    }
-    let own: Vec<&str> = inside.iter().map(|&j| p.nodes[j].alias.as_str()).collect();
-    let outer: Vec<&str> = (0..p.nodes.len()).filter(|j| !inside.contains(j)).map(|j| p.nodes[j].alias.as_str()).filter(|a| !a.is_empty() && !own.contains(a)).collect();
-    let mut hit = false;
-    for &j in &inside {
+    let inside: HashSet<usize> = std::iter::once(k).chain(below(p, k)).collect();
+    let own: HashSet<&str> = inside.iter().map(|&j| p.nodes[j].alias.as_str()).collect();
+    let outer: HashSet<&str> = (0..p.nodes.len()).filter(|j| !inside.contains(j)).map(|j| p.nodes[j].alias.as_str()).filter(|a| !a.is_empty() && !own.contains(a)).collect();
+    inside.iter().any(|&j| {
         let x = &p.nodes[j];
-        for e in [&x.filter, &x.index_cond, &x.join_cond, &x.join_filter].into_iter().filter_map(|c| c.expr.as_ref()) {
-            super::cond::walk_terms(e, &mut |t| hit |= super::cond::term_cols(t).iter().any(|c| c.qual.as_deref().is_some_and(|q| outer.contains(&q))));
+        [&x.filter.text, &x.index_cond.text, &x.join_cond.text, &x.join_filter.text, &x.one_time.text, &x.sort_key, &x.group_key].into_iter().any(|t| quals(t).iter().any(|q| outer.contains(q)))
+    })
+}
+
+/// The names in front of a dot in `text`, past string literals: "c" and "si" out of "(c.total - si.cap)". Read from the
+/// text rather than the parsed condition, so a column inside arithmetic or a key counts too.
+fn quals(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    // Bytes of a multibyte character count as letters, so every cut falls on an ASCII byte.
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+    let starts = |c: u8| c == b'"' || c.is_ascii_alphabetic() || c == b'_' || c >= 0x80;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\'' {
+            i += 1 + text[i + 1..].find('\'').map_or(b.len(), |e| e + 1);
+        } else if starts(c) {
+            let (from, to, next) = if c == b'"' {
+                let to = text[i + 1..].find('"').map_or(b.len(), |e| i + 1 + e);
+                (i + 1, to, to + 1)
+            } else {
+                let to = i + b[i..].iter().take_while(|&&c| word(c)).count();
+                (i, to, to)
+            };
+            if b.get(next) == Some(&b'.') && b.get(next + 1).is_some_and(|&c| starts(c)) {
+                out.push(&text[from..to]);
+            }
+            i = next;
+        } else if c.is_ascii_digit() {
+            // A number, decimals and all, is no name.
+            i += b[i..].iter().take_while(|&&c| c.is_ascii_alphanumeric() || c == b'.' || c == b'_').count();
+        } else {
+            i += 1;
         }
     }
-    hit
+    out
 }
 
 /// Whether `text` holds `name` then `post`, with no other digit right after the name, so "SubPlan 1" does not match
@@ -197,16 +285,19 @@ pub(super) fn mentions(text: &str, name: &str, post: &str) -> bool {
 
 /// The hashed SubPlan the node `i` tests in place of a per-row one PostgreSQL dropped. The planner may plan a subquery
 /// both ways, prices its parent with the first (per row) and only then picks the hash, so the parent's cost still holds
-/// a per-row subquery that never runs. The dropped one is the SubPlan numbered just before the hashed one.
+/// a per-row subquery that never runs. The dropped one is the SubPlan numbered just before the hashed one. The claim
+/// rests on that missing number and on nothing in the plan saying the SubPlan runs per row.
 pub(super) fn dropped_alternative(p: &Plan, i: usize) -> Option<usize> {
+    // InitPlans and CTEs take numbers from the same count, so with any of them the gap proves nothing.
+    if p.nodes.iter().any(|x| x.role.starts_with("InitPlan") || x.role.starts_with("CTE") || x.label == "CTE Scan") {
+        return None;
+    }
     let n = &p.nodes[i];
     n.kids.iter().copied().find(|&k| {
-        let role = &p.nodes[k].role;
-        let Some(num) = role.strip_prefix("SubPlan ").and_then(|s| s.parse::<u32>().ok()) else { return false };
+        let x = &p.nodes[k];
+        let Some(num) = x.role.strip_prefix("SubPlan ").and_then(|s| s.parse::<u32>().ok()) else { return false };
         let before = format!("SubPlan {}", num.saturating_sub(1));
-        // InitPlans and CTEs take numbers from the same count, so with any of them the gap proves nothing.
-        let others = p.nodes.iter().any(|x| x.role.starts_with("InitPlan") || x.role.starts_with("CTE") || x.label == "CTE Scan");
-        num >= 2 && !others && sub_run(p, k) == Some(SubRun::Once) && !p.nodes.iter().any(|x| x.role == before) && !n.detail.iter().any(|d| mentions(d, &before, ""))
+        num >= 2 && x.sub.is_some_and(|s| s.run == SubRun::Once) && !p.nodes.iter().any(|x| x.role == before) && !n.detail.iter().any(|d| mentions(d, &before, ""))
     })
 }
 
@@ -216,7 +307,7 @@ pub(super) fn dropped_alternative(p: &Plan, i: usize) -> Option<usize> {
 /// does not give, so what the subquery cost beyond that stays with the parent.
 fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
     let n = &p.nodes[k];
-    let run = sub_run(p, k)?;
+    let run = n.sub?.run;
     if run == SubRun::Once {
         return None;
     }
@@ -234,17 +325,15 @@ fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
 }
 
 /// How many times a per-row SubPlan ran, or at least runs: its loops after ANALYZE, else the rows its parent returns.
-/// After ANALYZE the loops decide whatever the text says: a SubPlan that ran no more often than its parent ran once for
-/// each run of it, as a hashed one does in every parallel worker.
+/// After ANALYZE the loops decide whatever the text says. A hashed SubPlan is built once in each process that runs its
+/// parent, so loops beyond those processes are calls per row, even when they match the parent's own loops, as under
+/// the inner side of a nested loop that tests one row a run.
 pub(super) fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
     let n = &p.nodes[k];
-    let run = sub_run(p, k)?;
-    if !n.role.starts_with("SubPlan") {
-        return None;
-    }
+    let run = n.sub.filter(|_| n.role.starts_with("SubPlan"))?.run;
     let parent = &p.nodes[n.parent?];
     match n.loops {
-        Some(l) if p.analyzed => (l > parent.loops.unwrap_or(1.0).max(1.0)).then_some((l, true)),
+        Some(l) if p.analyzed => (l > parallel_procs(p, k).unwrap_or(1.0)).then_some((l, true)),
         _ if run == SubRun::Once => None,
         _ => Some((parent.rows.unwrap_or(1.0).max(1.0), false)),
     }
@@ -264,16 +353,24 @@ fn wall_ms(p: &Plan, i: usize) -> f64 {
     }
 }
 
-/// The processes sharing a node's work: those of the Gather above it, when there is one.
-fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
+/// The Gather above node `i`, when there is one.
+pub(super) fn gather_of(p: &Plan, i: usize) -> Option<usize> {
     let mut j = p.nodes[i].parent?;
-    loop {
-        let x = &p.nodes[j];
-        if x.op == Op::Gather {
-            return Some(x.workers.unwrap_or(0.0) + 1.0);
-        }
-        j = x.parent?;
+    while p.nodes[j].op != Op::Gather {
+        j = p.nodes[j].parent?;
     }
+    Some(j)
+}
+
+/// The processes a Gather runs its plan in: its workers and the leader.
+pub(super) fn gather_procs(g: &PlanNode) -> f64 {
+    g.workers.unwrap_or(0.0) + 1.0
+}
+
+/// The processes sharing node `i`'s work: those of the Gather above it, whether the node splits its rows between them
+/// (Parallel Aware) or each one runs all of it. Their times are an average per process and their rows and buffers a sum.
+pub(super) fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
+    gather_of(p, i).map(|g| gather_procs(&p.nodes[g]))
 }
 
 /// Each node's cost, or time, with the nodes below it, built up from the own values `derive` worked out. For PostgreSQL

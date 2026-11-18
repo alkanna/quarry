@@ -49,6 +49,8 @@ pub enum Op {
     Aggregate,
     Window,
     Limit,
+    /// PostgreSQL keeps the rows of a subquery it could not hash here, to read them again for every row it tests.
+    Materialize,
     #[default]
     Other,
 }
@@ -99,6 +101,9 @@ pub struct PlanNode {
     pub join_cond: Cond,
     /// PostgreSQL's Join Filter: what each pair the join condition matched is checked against again.
     pub join_filter: Cond,
+    /// PostgreSQL's One-Time Filter: tested once per run of the node, so a column from outside a subquery here makes it
+    /// run again for every row.
+    pub one_time: Cond,
     /// Rows the filter removed, per loop.
     pub removed: Option<f64>,
     /// Pairs the join matched and its Join Filter then removed, per loop.
@@ -128,6 +133,11 @@ pub struct PlanNode {
     pub self_cost: Option<f64>,
     pub self_ms: Option<f64>,
     pub share: Option<f64>,
+    /// The node's share of the plan's cost, and of its time when it ran, worked out once for the findings.
+    cost_share: Option<f64>,
+    time_share: Option<f64>,
+    /// How a subquery runs and where the node above uses it, decided once from the plan's text.
+    sub: Option<tree::Sub>,
     /// ANALYZE never reached this node.
     pub never_ran: bool,
     /// PostgreSQL's Sort Key and Group Key, each as one line.
@@ -302,7 +312,7 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     }
     // Parsed before the costs, since a subquery that reads columns from outside it is charged per row.
     for n in &mut plan.nodes {
-        for c in [&mut n.filter, &mut n.index_cond, &mut n.join_cond, &mut n.join_filter] {
+        for c in [&mut n.filter, &mut n.index_cond, &mut n.join_cond, &mut n.join_filter, &mut n.one_time] {
             c.expr = if c.text.is_empty() { None } else { cond::parse(&c.text, d) };
         }
     }
@@ -433,6 +443,7 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         "Aggregate" | "Group" => Op::Aggregate,
         "WindowAgg" => Op::Window,
         "Limit" => Op::Limit,
+        "Materialize" => Op::Materialize,
         _ => Op::Other,
     };
     node.rows = num(n, "Plan Rows");
@@ -448,6 +459,7 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     // A Join Filter stays a detail line of its own, so a join with both shows both.
     node.join_cond.text = ["Hash Cond", "Merge Cond"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
     node.join_filter.text = text(n, "Join Filter").to_string();
+    node.one_time.text = text(n, "One-Time Filter").to_string();
     node.parallel = flag(n, "Parallel Aware");
     node.workers = num(n, "Workers Launched").or_else(|| num(n, "Workers Planned"));
     for key in ["Index Cond", "Recheck Cond", "Filter", "Join Filter", "Hash Cond", "Merge Cond", "One-Time Filter"] {

@@ -6,7 +6,7 @@
 use super::cond::{self, ColRef, SargKind, Sargs, Val};
 use super::evidence::{IndexEv, TableEv};
 use super::findings::{and_list, pct_text, size, weighs, Fix, FixKind};
-use super::tree::is_inner;
+use super::tree::{gather_of, is_inner};
 use super::{count, Dialect, Op, Plan};
 
 /// A table smaller than this reads whole about as fast as through an index.
@@ -31,9 +31,16 @@ pub enum Advice {
     Unused { index: String, cause: Option<String>, lines: Vec<String> },
     /// The statistics are too old to judge the plan by; ANALYZE first.
     Stale { why: String, fix: Fix, lines: Vec<String> },
-    /// No index to offer. `kept` is the share the filter keeps when that is why: too many rows for any index to read
-    /// fewer pages than the scan, which makes the scan the right plan rather than a missing index.
-    No { why: String, lines: Vec<String>, kept: Option<f64> },
+    /// No index to offer, and why.
+    No { why: String, lines: Vec<String> },
+    /// The filter keeps this share of the rows, too many for any index to read fewer pages than the scan, which makes
+    /// the scan the right plan rather than a missing index.
+    Reasonable { kept: f64, lines: Vec<String> },
+}
+
+/// Why a filter that keeps `kept` of the rows gets no index.
+pub(super) fn too_many(kept: f64) -> String {
+    format!("the filter keeps {} of the rows, too many for an index to read less than the scan", pct_text(kept * 100.0))
 }
 
 /// How much of the table the filter keeps, and how that is known.
@@ -61,7 +68,7 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
     if let Some(why) = stale(t) {
         return Advice::Stale { why, fix: analyze_fix(d, t), lines };
     }
-    let no = |why: String, lines: Vec<String>| Advice::No { why, lines, kept: None };
+    let no = |why: String, lines: Vec<String>| Advice::No { why, lines };
     let Some(rows) = rows else { return no(format!("the size of {name} is not known"), lines) };
     if rows < MIN_ROWS {
         return no(format!("{name} has about {} rows, few enough that reading it whole is cheap", count(rows)), lines);
@@ -80,7 +87,7 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
         }
     };
     if kept > MAX_KEPT {
-        return Advice::No { why: format!("the filter keeps {} of the rows, too many for an index to read less than the scan", pct_text(kept * 100.0)), lines, kept: Some(kept) };
+        return Advice::Reasonable { kept, lines };
     }
     let repeated = repeated(p, i);
     if let Some(s) = n.share.filter(|_| !weighs(p, i) && !repeated) {
@@ -324,21 +331,17 @@ pub(super) fn kept(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Kept {
 }
 
 /// A parallel scan's Plan Rows are per process. PostgreSQL divides by the workers plus what the leader adds
-/// (1 - 0.3 per worker, when above zero), so the estimate for the whole scan multiplies that back.
+/// (1 - 0.3 per worker, when above zero), so the estimate for the whole scan multiplies that back. Only a Parallel Aware
+/// scan splits its rows: a plain one under a Gather estimates the whole table, unlike its time, which tree::wall_ms
+/// divides for every node under a Gather.
 fn divisor(p: &Plan, i: usize) -> f64 {
-    if !p.nodes[i].parallel {
-        return 1.0;
-    }
-    let mut j = p.nodes[i].parent;
-    while let Some(k) = j {
-        if p.nodes[k].op == Op::Gather {
-            let w = p.nodes[k].workers.unwrap_or(0.0);
-            let leader = 1.0 - 0.3 * w;
-            return (w + leader.max(0.0)).max(1.0);
+    match gather_of(p, i).filter(|_| p.nodes[i].parallel) {
+        Some(g) => {
+            let w = p.nodes[g].workers.unwrap_or(0.0);
+            (w + (1.0 - 0.3 * w).max(0.0)).max(1.0)
         }
-        j = p.nodes[k].parent;
+        None => 1.0,
     }
-    1.0
 }
 
 /// Why the statistics of `t` cannot be trusted, when they cannot.
@@ -528,8 +531,8 @@ mod tests {
         assert!(why.contains("400 rows"), "{why}");
         // 80,000 of 400,000 rows is 20%.
         let p = pg_scan("(provider = 'ZEUS_AIR'::provider)", 80_000.0);
-        let Advice::No { why, .. } = advice(&p, &bookings(std_cols(), vec![])) else { panic!() };
-        assert!(why.contains("keeps 20%"), "{why}");
+        let Advice::Reasonable { kept, .. } = advice(&p, &bookings(std_cols(), vec![])) else { panic!() };
+        assert!(too_many(kept).contains("keeps 20%"), "{kept}");
     }
 
     #[test]
