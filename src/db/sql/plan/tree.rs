@@ -153,16 +153,45 @@ pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
         SubRun::Any
     } else if named("(", ")") && !text.contains("EXISTS") && !text.contains("ANY") && !text.contains("ALL") {
         SubRun::Expr
-    } else {
-        // Older servers print every kind as "(SubPlan 1)", and a SubPlan in the output list is not printed without
-        // VERBOSE; the cheapest reading keeps the charge a lower bound.
+    } else if mentions(&text, &n.role, "") || correlated(p, k) {
+        // Older servers print every kind as "(SubPlan 1)"; the cheapest reading keeps the charge a lower bound. A
+        // SubPlan the node does not name sits in its output list, printed only with VERBOSE, and one that reads a
+        // column from outside can only run per row, since PostgreSQL never hashes a correlated subquery.
         SubRun::Exists
+    } else if n.label == "Materialize" {
+        // Uncorrelated and not hashed: its rows are kept and every call reads them again.
+        SubRun::Any
+    } else {
+        // Unnamed and uncorrelated, which is how PostgreSQL 17 and later print a hashed subquery in the output list.
+        // Calling it per row would be a guess, so it counts once.
+        SubRun::Once
     })
+}
+
+/// Whether the subquery at `k` reads a column of a table outside it. The server qualifies those with their alias and
+/// leaves the subquery's own columns bare or qualified with aliases from inside it.
+fn correlated(p: &Plan, k: usize) -> bool {
+    let mut inside = vec![k];
+    let mut stack = p.nodes[k].kids.clone();
+    while let Some(j) = stack.pop() {
+        inside.push(j);
+        stack.extend(p.nodes[j].kids.iter().copied());
+    }
+    let own: Vec<&str> = inside.iter().map(|&j| p.nodes[j].alias.as_str()).collect();
+    let outer: Vec<&str> = (0..p.nodes.len()).filter(|j| !inside.contains(j)).map(|j| p.nodes[j].alias.as_str()).filter(|a| !a.is_empty() && !own.contains(a)).collect();
+    let mut hit = false;
+    for &j in &inside {
+        let x = &p.nodes[j];
+        for e in [&x.filter, &x.index_cond, &x.join_cond, &x.join_filter].into_iter().filter_map(|c| c.expr.as_ref()) {
+            super::cond::walk_terms(e, &mut |t| hit |= super::cond::term_cols(t).iter().any(|c| c.qual.as_deref().is_some_and(|q| outer.contains(&q))));
+        }
+    }
+    hit
 }
 
 /// Whether `text` holds `name` then `post`, with no other digit right after the name, so "SubPlan 1" does not match
 /// "SubPlan 12".
-fn mentions(text: &str, name: &str, post: &str) -> bool {
+pub(super) fn mentions(text: &str, name: &str, post: &str) -> bool {
     text.match_indices(name).any(|(at, m)| {
         let rest = &text[at + m.len()..];
         !rest.starts_with(|c: char| c.is_ascii_digit()) && rest.starts_with(post)
@@ -208,14 +237,19 @@ fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
 }
 
 /// How many times a per-row SubPlan ran, or at least runs: its loops after ANALYZE, else the rows its parent returns.
+/// After ANALYZE the loops decide whatever the text says: a SubPlan that ran no more often than its parent ran once for
+/// each run of it, as a hashed one does in every parallel worker.
 pub(super) fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
     let n = &p.nodes[k];
-    if matches!(sub_run(p, k), None | Some(SubRun::Once)) {
+    let run = sub_run(p, k)?;
+    if !n.role.starts_with("SubPlan") {
         return None;
     }
+    let parent = &p.nodes[n.parent?];
     match n.loops {
-        Some(l) if p.analyzed => Some((l, true)),
-        _ => Some((p.nodes[n.parent?].rows.unwrap_or(1.0).max(1.0), false)),
+        Some(l) if p.analyzed => (l > parent.loops.unwrap_or(1.0).max(1.0)).then_some((l, true)),
+        _ if run == SubRun::Once => None,
+        _ => Some((parent.rows.unwrap_or(1.0).max(1.0), false)),
     }
 }
 

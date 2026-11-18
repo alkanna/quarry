@@ -564,7 +564,7 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
         let on_cond = if cond.is_empty() { String::new() } else { format!(" on {cond}") };
         body.push(format!("Matches {} rows of {on} against {} rows of {inn}{on_cond}.", count(or), count(ir)));
     }
-    let subs: Vec<String> = n.kids.iter().filter(|&&k| super::tree::sub_run(p, k).is_some()).map(|&k| p.nodes[k].role.clone()).filter(|r| !r.is_empty()).collect();
+    let subs: Vec<String> = n.kids.iter().filter(|&&k| super::tree::sub_run(p, k).is_some()).map(|&k| p.nodes[k].role.clone()).filter(|r| !r.is_empty() && super::tree::mentions(&n.join_filter.text, r, "")).collect();
     if !n.join_filter.is_empty() {
         let runs = if subs.is_empty() { String::new() } else { format!(", which runs {}", and_list(&subs)) };
         body.push(format!("Each match is then checked again against the join filter{runs}."));
@@ -598,7 +598,10 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
             body.push(format!("The planner charges {} for the join itself, {times} the cost of the nodes below it ({}).", count(own), count(reading)));
         }
         if let Some(k) = super::tree::dropped_alternative(p, i).filter(|_| heavy) {
-            body.push(format!("PostgreSQL planned the subquery in the join filter both per row and hashed, priced the join with the per-row form, then chose the hashed {}, so much of this cost is never spent. Run with ANALYZE to see the real time.", p.nodes[k].role));
+            let role = &p.nodes[k].role;
+            // A subquery the join does not name is in the columns it returns, which only VERBOSE prints.
+            let place = if super::tree::mentions(&n.join_filter.text, role, "") { "in the join filter" } else if n.detail.iter().any(|d| super::tree::mentions(d, role, "")) { "in its condition" } else { "in the columns it returns" };
+            body.push(format!("The planner priced the subquery {place} as if it ran once per row, but PostgreSQL runs it once, hashed as {role}, so most of this cost is never spent. Run with ANALYZE to see the real time."));
         } else if heavy && !fans {
             body.push("It expects each row to match many on the other side, or a costly join filter. Run with ANALYZE to see the real time.".into());
         }
