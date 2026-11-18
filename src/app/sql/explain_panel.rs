@@ -11,8 +11,14 @@ use crate::db::sql::Dialect;
 /// The findings shown before "N more".
 const SHOWN: usize = 2;
 /// A glyph's box beside a title, and a stat tile's height.
-const GLYPH_BOX: f32 = 16.0;
+pub(super) const GLYPH_BOX: f32 = 16.0;
 const TILE_H: f32 = 54.0;
+/// The tags painted in the plan's rows: a node's type, a change, how far an estimate was off.
+pub(super) const TAG_H: f32 = 20.0;
+/// The column captions above the tree and the Compare table.
+pub(super) const HEAD_H: f32 = 24.0;
+/// The bar of the rows a node read and kept.
+const READ_BAR_H: f32 = 10.0;
 
 /// A count or time for a cell: whole numbers grouped, small ones with two decimals.
 pub(super) fn figure(n: f64) -> String {
@@ -162,7 +168,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             let read = kept + removed;
             ui.add_space(10.0);
             ui.label(caption_text("ROWS READ"));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), READ_BAR_H), Sense::hover());
             ui.painter().rect_filled(r, R_SM, TRACK());
             if read > 0.0 {
                 let w = (r.width() * (kept / read) as f32).max(4.0);
@@ -247,7 +253,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                 continue;
             }
             if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Index) {
-                candidate_box(ui, x, &fix.note, &fix.sql, acts);
+                candidate_box(ui, x, fix, acts);
                 continue;
             }
             if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Setting && x.db.pooler()) {
@@ -282,7 +288,8 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
 
 /// The index a finding suggests: why these columns in this order, the statement colored, and the two ways to take it.
 /// Nothing here runs it; the draft opens in a Query tab for the user to run.
-fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts: &mut Vec<XAct>) {
+fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut Vec<XAct>) {
+    let (note, sql) = (fix.note.as_str(), fix.sql.as_str());
     section(ui, "CANDIDATE INDEX", None, acts);
     well_frame().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -300,7 +307,7 @@ fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts:
         }
         ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
     });
-    super::explain_hypo::hypo_row(ui, x, sql, acts);
+    super::explain_hypo::hypo_row(ui, x, fix, acts);
 }
 
 /// The filter written so an index serves it. The draft is the whole statement with the condition replaced when it can be

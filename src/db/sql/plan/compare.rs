@@ -27,7 +27,7 @@ pub fn normalize(stmt: &str, d: Dialect) -> String {
     parts.join(" ")
 }
 
-/// The last plan of each statement explained this session, by connection, schema, normalized statement and whether
+/// The last plan of each statement explained this session, by connection, database, schema, normalized statement and whether
 /// it ran under ANALYZE (an estimate compared with a run would mostly show the difference between the two).
 #[derive(Default)]
 pub struct History {
@@ -37,6 +37,8 @@ pub struct History {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Key {
     pub conn: u64,
+    /// PostgreSQL's database; MySQL's is the schema.
+    pub db: String,
     pub schema: String,
     pub stmt: String,
     pub analyzed: bool,
@@ -51,6 +53,14 @@ impl History {
             self.kept.remove(0);
         }
         old.map(|(_, p, at)| (p, at))
+    }
+
+    /// Puts `plan` in place of the one kept for `key`, keeping when it was made: the same plan, found again once the
+    /// catalog answered.
+    pub fn update(&mut self, key: &Key, plan: &Plan) {
+        if let Some((_, p, _)) = self.kept.iter_mut().find(|(k, ..)| k == key) {
+            *p = plan.clone();
+        }
     }
 
     /// Forgets the plans of a connection that closed.
@@ -440,7 +450,7 @@ mod tests {
 
     #[test]
     fn history_keeps_the_last_plan_per_statement_and_forgets_a_closed_connection() {
-        let key = |conn: u64, stmt: &str| Key { conn, schema: "public".into(), stmt: stmt.into(), analyzed: false };
+        let key = |conn: u64, stmt: &str| Key { conn, db: "app".into(), schema: "public".into(), stmt: stmt.into(), analyzed: false };
         let mut h = History::default();
         assert!(h.swap(key(1, "A"), pg(BEFORE), 10).is_none());
         let (old, at) = h.swap(key(1, "A"), pg(AFTER), 20).expect("the first plan is kept");
@@ -448,6 +458,13 @@ mod tests {
         assert!(h.swap(key(1, "A"), pg(AFTER), 30).is_some_and(|(_, at)| at == 20));
         // Analyzed plans are kept apart from estimates.
         assert!(h.swap(Key { analyzed: true, ..key(1, "A") }, pg(BEFORE_RUN), 40).is_none());
+        // The same statement in another database of the connection reads other tables.
+        assert!(h.swap(Key { db: "billing".into(), ..key(1, "A") }, pg(BEFORE), 45).is_none());
+        // A plan found again keeps its place and time.
+        let mut found = pg(BEFORE);
+        found.findings.clear();
+        h.update(&key(1, "A"), &found);
+        assert!(h.swap(key(1, "A"), pg(AFTER), 50).is_some_and(|(p, at)| p.findings.is_empty() && at == 30));
         for i in 0..KEEP as u64 + 5 {
             h.swap(key(2, &format!("S{i}")), pg(BEFORE), i);
         }

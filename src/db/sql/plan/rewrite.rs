@@ -10,7 +10,7 @@ use super::super::lex::{self, Tok};
 use super::cond::{self, ColRef, Expr, SargKind, Term};
 use super::evidence::{reads_all, Evidence, TableEv};
 use super::findings::{and_list, pct_text, weight_of, Finding, Fix, FixKind, Kind, Severity};
-use super::index::{self, Kept, MAX_KEPT, MIN_ROWS};
+use super::index::{self, How, Kept, MAX_KEPT, MIN_ROWS};
 use super::{count, version_of, Dialect, Plan, PlanNode};
 use chrono::NaiveDate;
 use std::ops::Range;
@@ -117,31 +117,6 @@ fn gates(p: &Plan, i: usize, d: Dialect, t: &TableEv) -> (Vec<String>, Option<St
     (lines, why)
 }
 
-/// What kind of index `create` writes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum How {
-    Plain,
-    /// PostgreSQL's GIN, for pg_trgm.
-    Gin,
-    /// An index on an expression, which MySQL adds as a hidden generated column.
-    Expr,
-}
-
-/// `CREATE INDEX` of `parts` (what goes between the parentheses) on `t`, built without blocking writes where the server can.
-fn create(d: Dialect, t: &TableEv, name: &str, parts: &str, how: How, pooler: bool) -> String {
-    let target = d.qualified(&t.schema, &t.table);
-    let ix = d.quote_ident(name);
-    let using = if how == How::Gin { " USING gin" } else { "" };
-    match d {
-        // A pooler runs each statement in a transaction, where CONCURRENTLY is refused.
-        Dialect::Postgres if pooler => format!("-- Blocks writes to {} while it builds: CONCURRENTLY cannot run through the connection pooler.\nCREATE INDEX {ix} ON {target}{using} ({parts});", t.table),
-        Dialect::Postgres => format!("CREATE INDEX CONCURRENTLY {ix} ON {target}{using} ({parts});"),
-        // MySQL refuses LOCK=NONE for the virtual column behind an index on an expression.
-        _ if how == How::Expr => format!("-- Blocks writes to {} while it builds: MySQL adds an index on an expression under a shared lock.\nALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=SHARED;", t.table),
-        _ => format!("ALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=NONE;"),
-    }
-}
-
 /// An index name past those the table has.
 fn name_for(d: Dialect, t: &TableEv, parts: &[String], also: &[String]) -> String {
     let mut taken: Vec<&str> = t.indexes.iter().flatten().map(|ix| ix.name.as_str()).collect();
@@ -187,7 +162,7 @@ fn shape<'a>(x: &'a Expr, own: &dyn Fn(&ColRef) -> bool) -> Option<Shape<'a>> {
     let Expr::Cmp { l, op, r } = x else { return None };
     let ((col, form), other, op) = match (converted(l, own), converted(r, own)) {
         (Some(w), None) => (w, r, op.clone()),
-        (None, Some(w)) => (w, l, flip(op)),
+        (None, Some(w)) => (w, l, cond::flip(op)),
         _ => return None,
     };
     if !matches!(op.as_str(), "=" | ">=" | ">" | "<=" | "<") || !cond::term_cols(other).is_empty() {
@@ -247,17 +222,6 @@ fn year(s: &str) -> Option<i32> {
     ((1000..=9998).contains(&y) && y.to_string() == s).then_some(y)
 }
 
-fn flip(op: &str) -> String {
-    match op {
-        "<" => ">",
-        ">" => "<",
-        "<=" => ">=",
-        ">=" => "<=",
-        o => o,
-    }
-    .to_string()
-}
-
 /// The range a date or year comparison means, on `col`. The day after the last one stays in four-digit years.
 fn range_sql(s: &Shape, col: &str, one_line: bool) -> Option<String> {
     let lit = s.lit.as_deref()?;
@@ -301,7 +265,7 @@ fn dated(p: &Plan, i: usize, d: Dialect, t: &TableEv, s: &Shape) -> Option<Spot>
     }
     let how = if s.form == Form::Year { "takes its year" } else { "turns it into a date" };
     let body = vec![format!("{ix} covers {}, but the filter {how} first, so the index cannot be searched.", s.col.name), "Compare the column with a range instead and the index applies.".into()];
-    let fix = range_sql(s, &col_text(s.col, d), false).map(|sql| Fix { kind: FixKind::Rewrite, label: "Rewritten filter".into(), sql, note: format!("Same rows, and {ix} can serve it.") });
+    let fix = range_sql(s, &col_text(s.col, d), false).map(|sql| Fix { kind: FixKind::Rewrite, label: "Rewritten filter".into(), sql, note: format!("Same rows, and {ix} can serve it."), trial: None });
     Some(Spot { index: ix, body, fix, no_fix: None, lines: base_lines(p, i, d, t) })
 }
 
@@ -335,7 +299,7 @@ fn text_cast(p: &Plan, i: usize, d: Dialect, t: &TableEv, s: &Shape) -> Option<S
     let mut body = vec![format!("{ix} covers {col}, but the filter turns it into text first, so the index cannot be searched.")];
     // Only the integer's own way of writing itself is the same rows: '04242' and '4242 ' match no row as text.
     let n = s.lit.as_deref().filter(|_| s.op == "=").and_then(|l| l.parse::<i128>().ok().filter(|n| n.to_string() == l)).filter(|n| int_range(&ty).is_some_and(|(lo, hi)| (lo..=hi).contains(n)));
-    let fix = n.map(|n| Fix { kind: FixKind::Rewrite, label: "Rewritten filter".into(), sql: format!("{} = {n}", col_text(s.col, d)), note: format!("Same rows, and {ix} can serve it.") });
+    let fix = n.map(|n| Fix { kind: FixKind::Rewrite, label: "Rewritten filter".into(), sql: format!("{} = {n}", col_text(s.col, d)), note: format!("Same rows, and {ix} can serve it."), trial: None });
     body.push(if fix.is_some() { format!("Compare {col} with a number and the index applies.") } else { format!("Compare {col} with a value of its own type and the index applies.") });
     Some(Spot { index: ix, body, fix, no_fix: None, lines: base_lines(p, i, d, t) })
 }
@@ -393,8 +357,8 @@ fn folded(p: &Plan, i: usize, d: Dialect, ev: &Evidence, t: &TableEv, x: &Expr, 
                     Some(why) => spot.no_fix = Some(format!("No index suggested: {why}.")),
                     None => {
                         let name = name_for(d, t, &[f.to_string(), col.clone()], &[]);
-                        let sql = create(d, t, &name, &format!("({f}({}))", d.quote_ident(col)), How::Expr, pooler);
-                        spot.fix = Some(Fix { kind: FixKind::Index, label: "Expression index".into(), sql, note: format!("An index on the expression exactly as the filter writes it. {NOTE}") });
+                        let (sql, trial) = index::create(d, t, &name, &format!("({f}({}))", d.quote_ident(col)), How::Expr, pooler);
+                        spot.fix = Some(Fix { kind: FixKind::Index, label: "Expression index".into(), sql, note: format!("An index on the expression exactly as the filter writes it. {NOTE}"), trial });
                     }
                 }
             }
@@ -468,8 +432,8 @@ fn wild(p: &Plan, i: usize, d: Dialect, ev: &Evidence, t: &TableEv, x: &Expr, ow
             Some(why) => spot.no_fix = Some(format!("No index suggested: {why}.")),
             None => {
                 let name = name_for(d, t, &[col.clone(), "trgm".into()], &[]);
-                let sql = create(d, t, &name, &format!("{} gin_trgm_ops", d.quote_ident(col)), How::Gin, pooler);
-                spot.fix = Some(Fix { kind: FixKind::Index, label: "Trigram index".into(), sql, note: format!("A GIN index of pg_trgm, which serves LIKE and ILIKE with a wildcard anywhere. It is larger than a B-tree and slower to update. {NOTE}") });
+                let (sql, trial) = index::create(d, t, &name, &format!("{} gin_trgm_ops", d.quote_ident(col)), How::Gin, pooler);
+                spot.fix = Some(Fix { kind: FixKind::Index, label: "Trigram index".into(), sql, note: format!("A GIN index of pg_trgm, which serves LIKE and ILIKE with a wildcard anywhere. It is larger than a B-tree and slower to update. {NOTE}"), trial });
             }
         }
     }
@@ -523,10 +487,11 @@ fn either(p: &Plan, i: usize, d: Dialect, t: &TableEv, x: &Expr, own: &dyn Fn(&C
             let mut sql = Vec::new();
             for c in &names {
                 let name = name_for(d, t, std::slice::from_ref(c), &made);
-                sql.push(create(d, t, &name, &d.quote_ident(c), How::Plain, pooler));
+                sql.push(index::create(d, t, &name, &d.quote_ident(c), How::Plain, pooler).0);
                 made.push(name);
             }
-            spot.fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: sql.join("\n"), note: format!("One index for each side of the OR, so the {who} can search them all and combine the rows. {NOTE}") });
+            // A trial takes one index at a time, so the indexes of an OR have none.
+            spot.fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: sql.join("\n"), note: format!("One index for each side of the OR, so the {who} can search them all and combine the rows. {NOTE}"), trial: None });
         }
     }
     Some(spot)
@@ -588,7 +553,8 @@ fn join_buffers(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, out: &mut [Fi
             lines.push(format!("Distinct values: {col} {}.", count(nd)));
         }
         let name = name_for(d, t, std::slice::from_ref(&col), &[]);
-        out[k].fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql: create(d, t, &name, &d.quote_ident(&col), How::Plain, pooler), note: format!("An index on the join column, so each row of the tables before it looks its matches up. {NOTE}") });
+        let (sql, trial) = index::create(d, t, &name, &d.quote_ident(&col), How::Plain, pooler);
+        out[k].fix = Some(Fix { kind: FixKind::Index, label: "Candidate index".into(), sql, note: format!("An index on the join column, so each row of the tables before it looks its matches up. {NOTE}"), trial });
         out[k].evidence = lines;
         // The scan's own finding says its filter's share is a guess; the join's candidate does not rest on that share.
         for f in out.iter_mut().filter(|f| f.node == Some(ti) && f.kind == Kind::FullScan && f.fix.is_none()) {
@@ -717,7 +683,7 @@ impl Matcher<'_> {
             return None;
         }
         let k = self.value(j)?;
-        if !self.is(k, &flip(&self.s.op)) {
+        if !self.is(k, &cond::flip(&self.s.op)) {
             return None;
         }
         let (end, col) = self.conversion(k + 1)?;

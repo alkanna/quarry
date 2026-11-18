@@ -3,7 +3,7 @@
 //! went away and which are new. The matching is in `plan::compare`.
 
 use super::explain::{Pane, SqlExplain, XAct};
-use super::explain_panel::{access_color, figure};
+use super::explain_panel::{access_color, figure, GLYPH_BOX, HEAD_H, TAG_H};
 use crate::app::*;
 use crate::db::sql::plan::compare::{Delta, Diff, State};
 use crate::db::sql::plan::{findings, Plan, PlanNode};
@@ -65,9 +65,10 @@ pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32,
     let mut show = None;
     egui::ScrollArea::vertical().id_salt("sql-explain-compare").max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
         // Header, as labels so screen readers and tests find the columns.
-        let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+        let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEAD_H), Sense::hover());
         let head = |ui: &mut egui::Ui, text: &str, r: egui::Rect, right: bool| {
-            let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_align(if right { egui::Align::Max } else { egui::Align::Min });
+            // A main align of Max does not move a single label in a horizontal layout; right to left does.
+            let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
             ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| ui.label(RichText::new(text).size(TXT_SECTION).color(FAINT()).extra_letter_spacing(0.6)));
         };
         head(ui, "NODE", egui::Rect::from_min_max(hr.min + egui::vec2(8.0, 0.0), egui::pos2(hr.center().x, hr.bottom())), false);
@@ -135,7 +136,7 @@ fn summary_band(ui: &mut egui::Ui, d: &Diff, analyzed: bool, hypothetical: bool)
     egui::Frame::new().fill(tint(color, 26)).stroke(Stroke::new(1.0, tint(color, 90))).corner_radius(R_BAR).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
             match better {
                 Some(true) => glyphs::check(ui.painter(), r.center(), color),
                 Some(false) => glyphs::warn(ui.painter(), r.center(), color),
@@ -179,7 +180,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, depth: usize, su
     let col = if gone { FAINT() } else { access_color(n.access) };
     let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
     if col != TEXT() && !gone {
-        let chip = egui::Rect::from_min_size(egui::pos2(x, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+        let chip = egui::Rect::from_min_size(egui::pos2(x, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
         np.rect_filled(chip, R_SM, tint(col, 36));
         galley_at(&np, x + 6.0, top, g.clone(), col);
         x = chip.right() + 8.0;
@@ -215,7 +216,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, depth: usize, su
             None => MUTED(),
         };
         let g = p.layout_job(egui::text::LayoutJob::single_section(text, mono_fmt(TXT_SMALL, color, 500.0)));
-        let chip = egui::Rect::from_min_size(egui::pos2(right - g.size().x - 12.0, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+        let chip = egui::Rect::from_min_size(egui::pos2(right - g.size().x - 12.0, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
         p.rect_filled(chip, R_SM, tint(color, 36));
         galley_at(p, chip.left() + 6.0, top, g, color);
     }
@@ -231,7 +232,7 @@ fn finding_card(ui: &mut egui::Ui, state: State, title: &str, body: &str) {
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(egui::Margin { left: 14, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
             match state {
                 State::Resolved => glyphs::check(ui.painter(), r.center(), color),
                 State::New => glyphs::warn(ui.painter(), r.center(), color),

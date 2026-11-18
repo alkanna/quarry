@@ -941,7 +941,7 @@ impl Cx<'_> {
 }
 
 /// `5 < col` read as `col > 5`.
-fn flip(op: &str) -> String {
+pub(super) fn flip(op: &str) -> String {
     match op {
         "<" => ">",
         ">" => "<",

@@ -3,8 +3,10 @@
 //! Nothing is created and nothing runs until the button is clicked. The trial itself is `db::sql::pg::hypo`.
 
 use super::explain::{Pane, SqlExplain, XAct};
+use super::explain_panel::GLYPH_BOX;
 use crate::app::*;
 use crate::db::sql::pg::hypo;
+use crate::db::sql::plan::findings::Fix;
 use crate::db::sql::plan::{self, compare, Plan};
 use crate::db::sql::Dialect;
 
@@ -20,18 +22,15 @@ pub(in crate::app) struct HypoRun {
 }
 
 /// Why the trial cannot run, shown beside the disabled button. None when it can.
-fn blocked(x: &SqlExplain, fix: &str) -> Option<String> {
+fn blocked(x: &SqlExplain, fix: &Fix) -> Option<String> {
     if x.demo {
         return Some("The offline demo has no server to try the index on.".into());
     }
     if x.db.pooler() {
         return Some("Not behind a connection pooler: the hypothetical index and the plan could land on different server connections.".into());
     }
-    match &x.ev {
-        None if x.ev_busy => return Some("Checking whether HypoPG is installed.".into()),
-        None => return Some("The catalog could not be read to check for HypoPG.".into()),
-        Some(ev) if !ev.hypopg => return Some("Needs the HypoPG extension in this database, usable by this login.".into()),
-        Some(_) => {}
+    if let Some(why) = extension_gate(x.ev.as_ref(), x.ev_busy) {
+        return Some(why.into());
     }
     if hypo::create_sql(fix).is_none() {
         return Some("This candidate is not a CREATE INDEX HypoPG can take.".into());
@@ -39,18 +38,29 @@ fn blocked(x: &SqlExplain, fix: &str) -> Option<String> {
     hypo::refused(&x.stmt, x.locked)
 }
 
+/// Why the catalog's answer does not show HypoPG as installed. A failed read says nothing either way, unless it still saw
+/// the extension.
+fn extension_gate(ev: Option<&plan::Evidence>, busy: bool) -> Option<&'static str> {
+    match ev {
+        Some(ev) if ev.hypopg => None,
+        _ if busy => Some("Checking whether HypoPG is installed."),
+        Some(ev) if !ev.failed => Some("Needs the HypoPG extension in this database, usable by this login."),
+        _ => Some("The catalog could not be read to check for HypoPG."),
+    }
+}
+
 /// The button and the trial's answer, under the candidate `fix`. PostgreSQL only.
-pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &str, acts: &mut Vec<XAct>) {
+pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut Vec<XAct>) {
     if x.dialect != Dialect::Postgres {
         return;
     }
-    let busy = x.hypo_busy && x.hypo_fix == fix;
+    let busy = x.hypo_busy && x.hypo_fix == fix.sql;
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         let why = blocked(x, fix);
         let r = ui.add_enabled_ui(why.is_none() && !busy, |ui| quiet(ui, "Try it (nothing is created)")).inner;
         if r.on_hover_text("Plans the statement again with this index as a HypoPG hypothetical index, in a read-only transaction that is rolled back").clicked() {
-            acts.push(XAct::Hypo(fix.to_string()));
+            acts.push(XAct::Hypo(fix.clone()));
         }
         if busy {
             ui.spinner();
@@ -59,10 +69,10 @@ pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &str, acts: &mut 
             ui.label(RichText::new(why).size(TXT_SMALL).color(FAINT()));
         }
     });
-    let Some(h) = x.hypo.as_ref().filter(|h| h.fix == fix && !busy) else { return };
+    let Some(h) = x.hypo.as_ref().filter(|h| h.fix == fix.sql && !busy) else { return };
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+        let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
         if h.used {
             glyphs::check(ui.painter(), r.center(), SUCCESS());
         } else {
@@ -90,13 +100,13 @@ fn result_line(h: &HypoRun, before: Option<&Plan>) -> String {
 
 impl App {
     /// Asks the server for the plan with the candidate `fix` as a hypothetical index. Only a click gets here.
-    pub(super) fn sql_explain_hypo_try(&mut self, x: &mut SqlExplain, fix: String) {
+    pub(super) fn sql_explain_hypo_try(&mut self, x: &mut SqlExplain, fix: Fix) {
         if x.dialect != Dialect::Postgres || blocked(x, &fix).is_some() {
             return;
         }
-        let Some(create) = hypo::create_sql(&fix) else { return };
+        let Some(create) = hypo::create_sql(&fix).map(str::to_string) else { return };
         self.req += 1;
-        (x.hypo_req, x.hypo_busy, x.hypo_fix, x.hypo) = (self.req, true, fix, None);
+        (x.hypo_req, x.hypo_busy, x.hypo_fix, x.hypo) = (self.req, true, fix.sql, None);
         if x.hypo_cmp {
             x.hypo_cmp = false;
             if x.pane == Pane::Compare && x.prev.is_none() {
@@ -144,5 +154,22 @@ impl App {
         (x.hypo_req, x.hypo_busy, x.hypo_fix) = (self.req, true, fix);
         let req = self.req;
         self.sql_explain_hypo(req, Ok(trial));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_catalog_read_is_not_taken_for_a_missing_extension() {
+        let ev = |failed, hypopg| plan::Evidence { failed, hypopg, ..Default::default() };
+        assert_eq!(extension_gate(Some(&ev(true, false)), false), Some("The catalog could not be read to check for HypoPG."));
+        assert_eq!(extension_gate(Some(&ev(true, false)), true), Some("Checking whether HypoPG is installed."));
+        assert_eq!(extension_gate(Some(&ev(false, false)), false), Some("Needs the HypoPG extension in this database, usable by this login."));
+        // The tables' reads failed, but the extensions were seen.
+        assert_eq!(extension_gate(Some(&ev(true, true)), false), None);
+        assert_eq!(extension_gate(None, true), Some("Checking whether HypoPG is installed."));
+        assert_eq!(extension_gate(None, false), Some("The catalog could not be read to check for HypoPG."));
     }
 }

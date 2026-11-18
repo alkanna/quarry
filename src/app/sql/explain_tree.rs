@@ -3,7 +3,7 @@
 //! for its own share, rows and cost. After ANALYZE the columns turn to time and the estimate against what ran.
 
 use super::explain::{SqlExplain, XAct};
-use super::explain_panel::{access_color, figure, share_color};
+use super::explain_panel::{access_color, figure, share_color, HEAD_H, TAG_H};
 use crate::app::*;
 use crate::db::sql::plan::{cond, findings, Plan, PlanNode, Severity};
 
@@ -80,7 +80,7 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     let cols = columns(p, ui.available_width());
     let marks: Vec<Option<Severity>> = (0..p.nodes.len()).map(|i| p.findings.iter().filter(|f| f.node == Some(i)).map(|f| f.severity).min()).collect();
     // Header.
-    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEAD_H), Sense::hover());
     // Labels rather than painted text, so screen readers and tests find the columns.
     let head = |ui: &mut egui::Ui, text: &str, r: egui::Rect, right: bool| {
         // A main align of Max does not move a single label in a horizontal layout; right to left does.
@@ -100,7 +100,7 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     }
     ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, LINE()));
     let scroll_to = x.scroll_to.take();
-    egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - 24.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - HEAD_H).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, n) in p.nodes.iter().enumerate() {
             let sub = node_sub(n);
@@ -152,7 +152,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
     let col = access_color(n.access);
     let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
     if col != TEXT() {
-        let chip = egui::Rect::from_min_size(egui::pos2(x, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+        let chip = egui::Rect::from_min_size(egui::pos2(x, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
         np.rect_filled(chip, R_SM, tint(col, 36));
         galley_at(&np, x + 6.0, top, g.clone(), col);
         x = chip.right() + 8.0;
@@ -226,7 +226,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
                     if off >= 2.0 {
                         let color = if off >= findings::OFF_WARN { WARNING() } else { MUTED() };
                         let g = p.layout_job(egui::text::LayoutJob::single_section(findings::factor(off), mono_fmt(TXT_SMALL, color, 500.0)));
-                        let chip = egui::Rect::from_min_size(egui::pos2(cx - g.size().x - 12.0, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
+                        let chip = egui::Rect::from_min_size(egui::pos2(cx - g.size().x - 12.0, top - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
                         p.rect_filled(chip, R_SM, tint(color, 36));
                         galley_at(p, chip.left() + 6.0, top, g, color);
                     } else {

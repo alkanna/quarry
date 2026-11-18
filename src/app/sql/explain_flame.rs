@@ -18,6 +18,8 @@ const PAD: f32 = 10.0;
 const MIN_BAR: f32 = 6.0;
 /// The space under a parent its children leave is its own work; below this width it is not worth marking.
 const MIN_GAP: f32 = 6.0;
+/// The color square of a legend entry.
+const SWATCH: f32 = 10.0;
 
 pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
     let Some(p) = &x.plan else { return };
@@ -155,7 +157,7 @@ fn legend(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         for (a, label) in [(Access::Scan, "Full scan"), (Access::Index, "Index"), (Access::Other, "Join, sort and other work")] {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(SWATCH, SWATCH), Sense::hover());
             let (c, alpha) = base(a);
             ui.painter().rect_filled(r, R_SM / 2, tint(c, alpha.saturating_mul(2).max(150)));
             ui.label(RichText::new(label).size(TXT_SMALL).color(MUTED()));

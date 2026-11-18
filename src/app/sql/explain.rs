@@ -7,7 +7,7 @@ use super::explain_flame::flame_view;
 use super::explain_hypo::HypoRun;
 use super::explain_panel::{findings_strip, inspector};
 use super::explain_tree::plan_tree;
-use super::query::run_target;
+use super::query::{run_db, run_target};
 use crate::app::*;
 use crate::db::sql::plan::{self, compare, Analyze, Plan};
 use crate::db::sql::{Db, Dialect};
@@ -21,9 +21,11 @@ pub(in crate::app) struct SqlExplain {
     conn: u64,
     /// The tab's database, for the Query tab the classic rows open in.
     tab_db: String,
+    /// The database the plan was made in: the run picker's when one is picked, else the tab's.
+    database: String,
     pub(super) dialect: Dialect,
     pub(super) db: Db,
-    pub(super) schema: String,
+    pub(in crate::app) schema: String,
     pub(in crate::app) plan: Option<Plan>,
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
@@ -85,14 +87,15 @@ pub(super) enum XAct {
     /// A fix as an editable draft in a new Query tab. Nothing runs.
     Draft(String),
     /// Try this candidate index with HypoPG.
-    Hypo(String),
+    Hypo(plan::findings::Fix),
     /// Show the trial's plan in Compare.
     HypoCompare,
 }
 
 impl SqlExplain {
-    fn new(stmt: String, conn: u64, tab_db: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: 0, ev_busy: false, demo: false, locked: true, hypo_req: 0, hypo_busy: false, hypo_fix: String::new(), hypo: None, hypo_cmp: false }
+    #[allow(clippy::too_many_arguments)]
+    fn new(stmt: String, conn: u64, tab_db: String, database: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, database, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: 0, ev_busy: false, demo: false, locked: true, hypo_req: 0, hypo_busy: false, hypo_fix: String::new(), hypo: None, hypo_cmp: false }
     }
 }
 
@@ -111,7 +114,7 @@ impl App {
         }
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
         let t = &self.tabs[self.cur];
-        let tab_db = t.sel.db.clone();
+        let (tab_db, database) = (t.sel.db.clone(), run_db(t));
         let (db, schema) = run_target(t, db);
         let writable = self.conn_writable(conn);
         let analyze = plan::analyze_needs(d, &db.version).map(str::to_string).map_or_else(|| plan::analyze_mode(&text, d, db.pooler()), Err).and_then(|a| match (d, writable) {
@@ -120,7 +123,7 @@ impl App {
             (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
             _ => Ok(a),
         });
-        let mut x = SqlExplain::new(text, conn, tab_db, d, db, schema, analyze);
+        let mut x = SqlExplain::new(text, conn, tab_db, database, d, db, schema, analyze);
         self.sql_explain_send(&mut x, None);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
@@ -142,9 +145,9 @@ impl App {
         // The pool is never used; the dialect and version are what the dialog reads.
         let version = if d == Dialect::Postgres { "18.6" } else if d == Dialect::MariaDb { "11.4.3-MariaDB" } else { "8.4.3" };
         let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: d, opts: crate::db::sql::exec::Opts::My(opts), version: version.into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
-        let (conn, tab_db, schema) = self.t().map_or((0, String::new(), String::new()), |t| (t.sel.conn, t.sel.db.clone(), if d == Dialect::Postgres { t.sel.schema.clone() } else { t.sel.db.clone() }));
+        let (conn, tab_db, database, schema) = self.t().map_or(Default::default(), |t| (t.sel.conn, t.sel.db.clone(), run_db(t), if d == Dialect::Postgres { t.sel.schema.clone() } else { t.sel.db.clone() }));
         let analyze = plan::analyze_mode(text, d, false);
-        let mut x = SqlExplain::new(text.into(), conn, tab_db, d, db, schema, analyze);
+        let mut x = SqlExplain::new(text.into(), conn, tab_db, database, d, db, schema, analyze);
         (x.req, x.busy, x.demo) = (1, true, true);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
         let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
@@ -218,9 +221,8 @@ impl App {
                 x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
                 x.scroll_to = x.sel;
                 // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
-                let key = compare::Key { conn: x.conn, schema: x.schema.clone(), stmt: compare::normalize(&x.stmt, x.dialect), analyzed: p.analyzed };
                 let now = crate::library::now_secs();
-                x.prev = self.explain_prev.swap(key, p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
+                x.prev = self.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
                 if x.prev.is_none() && x.pane == Pane::Compare {
                     x.pane = Pane::Tree;
                 }
@@ -239,10 +241,27 @@ impl App {
         }
         x.ev_busy = false;
         let pooler = x.db.pooler();
+        let key = history_key(x, x.plan.as_ref().is_some_and(|p| p.analyzed));
         if let Some(p) = &mut x.plan {
             p.refind(x.dialect, Some(&ev), pooler);
+            // Each plan is compared with the findings it showed: the copy kept for the next Compare and this Compare's
+            // new side follow the strip. `differs` reads no findings, so the Compare tab stays as it was.
+            self.explain_prev.update(&key, p);
+            if let Some(prev) = &mut x.prev {
+                prev.diff = compare::diff(&prev.plan, p);
+            }
         }
         x.ev = Some(ev);
+    }
+
+    /// The catalog's answer as if the server had sent it, for the open dialog.
+    #[cfg(test)]
+    pub(in crate::app) fn demo_explain_evidence(&mut self, ev: plan::Evidence) {
+        let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
+        self.req += 1;
+        (x.ev_req, x.ev_busy) = (self.req, true);
+        let req = self.req;
+        self.sql_explain_evidence(req, ev);
     }
 
     pub(in crate::app) fn sql_explain_dialog(&mut self, ui: &mut egui::Ui, x: &mut SqlExplain, keep: &mut bool) {
@@ -381,6 +400,10 @@ impl App {
                         // The draft runs where the plan was made, not where the sidebar happens to be.
                         if x.dialect == Dialect::Postgres {
                             s.run_schema = x.schema.clone();
+                            // Left empty for the tab's own database, as the picker leaves it.
+                            if x.database != x.tab_db {
+                                s.run_db = x.database.clone();
+                            }
                         } else {
                             s.run_db = x.schema.clone();
                         }
@@ -410,6 +433,11 @@ impl App {
         }
         self.sql_run(true, false);
     }
+}
+
+/// Where this session keeps the last plan of the dialog's statement: two databases of one connection are two places.
+fn history_key(x: &SqlExplain, analyzed: bool) -> compare::Key {
+    compare::Key { conn: x.conn, db: x.database.clone(), schema: x.schema.clone(), stmt: compare::normalize(&x.stmt, x.dialect), analyzed }
 }
 
 fn pane_name(p: Pane) -> &'static str {

@@ -269,6 +269,7 @@ fn serves(ix: &IndexEv, lead: &[&str], range: Option<&str>, d: Dialect) -> bool 
     same_set && range.is_none_or(|r| same(&ix.cols[m], r, d))
 }
 
+/// PostgreSQL names are exact once folded; MySQL compares names without case on most servers.
 pub(super) fn same(a: &str, b: &str, d: Dialect) -> bool {
     if d == Dialect::Postgres { a == b } else { a.eq_ignore_ascii_case(b) }
 }
@@ -408,22 +409,45 @@ pub fn index_name(table: &str, cols: &[String], taken: &[&str], max: usize, d: D
 }
 
 fn create_fix(d: Dialect, t: &TableEv, name: &str, cols: &[String], pooler: bool) -> Fix {
-    let target = d.qualified(&t.schema, &t.table);
     let list = cols.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let (sql, trial) = create(d, t, name, &list, How::Plain, pooler);
+    Fix { kind: FixKind::Index, label: "Candidate index".into(), sql, note: NOTE.into(), trial }
+}
+
+/// What kind of index `create` writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum How {
+    Plain,
+    /// PostgreSQL's GIN, for pg_trgm.
+    Gin,
+    /// An index on an expression, which MySQL adds as a hidden generated column.
+    Expr,
+}
+
+/// `CREATE INDEX` of `parts` (what goes between the parentheses) on `t`, built without blocking writes where the server
+/// can, and the bare statement a HypoPG trial takes: PostgreSQL's, without CONCURRENTLY, which only matters for a real
+/// build, the comment and the semicolon. HypoPG simulates no GIN index, so a trigram index has none.
+pub(super) fn create(d: Dialect, t: &TableEv, name: &str, parts: &str, how: How, pooler: bool) -> (String, Option<String>) {
+    let target = d.qualified(&t.schema, &t.table);
     let ix = d.quote_ident(name);
+    let using = if how == How::Gin { " USING gin" } else { "" };
+    let bare = format!("CREATE INDEX {ix} ON {target}{using} ({parts})");
+    let trial = (d == Dialect::Postgres && how != How::Gin).then(|| bare.clone());
     let sql = match d {
         // A pooler runs each statement in a transaction, where CONCURRENTLY is refused.
-        Dialect::Postgres if pooler => format!("-- Blocks writes to {} while it builds: CONCURRENTLY cannot run through the connection pooler.\nCREATE INDEX {ix} ON {target} ({list});", t.table),
-        Dialect::Postgres => format!("CREATE INDEX CONCURRENTLY {ix} ON {target} ({list});"),
-        _ => format!("ALTER TABLE {target} ADD INDEX {ix} ({list}), ALGORITHM=INPLACE, LOCK=NONE;"),
+        Dialect::Postgres if pooler => format!("-- Blocks writes to {} while it builds: CONCURRENTLY cannot run through the connection pooler.\n{bare};", t.table),
+        Dialect::Postgres => format!("CREATE INDEX CONCURRENTLY {ix} ON {target}{using} ({parts});"),
+        // MySQL refuses LOCK=NONE for the virtual column behind an index on an expression.
+        _ if how == How::Expr => format!("-- Blocks writes to {} while it builds: MySQL adds an index on an expression under a shared lock.\nALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=SHARED;", t.table),
+        _ => format!("ALTER TABLE {target} ADD INDEX {ix} ({parts}), ALGORITHM=INPLACE, LOCK=NONE;"),
     };
-    Fix { kind: FixKind::Index, label: "Candidate index".into(), sql, note: NOTE.into() }
+    (sql, trial)
 }
 
 pub fn analyze_fix(d: Dialect, t: &TableEv) -> Fix {
     let target = d.qualified(&t.schema, &t.table);
     let sql = if d == Dialect::Postgres { format!("ANALYZE {target};") } else { format!("ANALYZE TABLE {target};") };
-    Fix { kind: FixKind::Analyze, label: "ANALYZE".into(), sql, note: format!("Refreshes the planner's statistics of {} from a sample of its rows.", t.table) }
+    Fix { kind: FixKind::Analyze, label: "ANALYZE".into(), sql, note: format!("Refreshes the planner's statistics of {} from a sample of its rows.", t.table), trial: None }
 }
 
 #[cfg(test)]
@@ -631,5 +655,21 @@ mod tests {
         p.refind(Dialect::Postgres, Some(&Evidence { failed: true, ..Default::default() }), false);
         let f = p.findings.iter().find(|f| f.kind == Kind::FullScan).unwrap();
         assert_eq!((f.fix.is_none(), f.no_fix.as_deref()), (true, Some("No suggestion: the catalog could not be read.")));
+    }
+
+    #[test]
+    fn one_builder_writes_the_index_and_its_trial() {
+        let t = bookings(std_cols(), Vec::new());
+        let bare = r#"CREATE INDEX "b_idx" ON "public"."bookings" ("provider")"#;
+        let (sql, trial) = create(Dialect::Postgres, &t, "b_idx", r#""provider""#, How::Plain, false);
+        assert_eq!((sql.as_str(), trial.as_deref()), (r#"CREATE INDEX CONCURRENTLY "b_idx" ON "public"."bookings" ("provider");"#, Some(bare)));
+        // Behind a pooler the build blocks writes and says so; the trial is the same statement.
+        let (sql, trial) = create(Dialect::Postgres, &t, "b_idx", r#""provider""#, How::Plain, true);
+        assert_eq!(sql, format!("-- Blocks writes to bookings while it builds: CONCURRENTLY cannot run through the connection pooler.\n{bare};"));
+        assert_eq!(trial.as_deref(), Some(bare));
+        assert!(create(Dialect::Postgres, &t, "e_idx", "(lower(\"email\"))", How::Expr, false).1.is_some());
+        // HypoPG simulates no GIN index, and MySQL has no HypoPG.
+        assert_eq!(create(Dialect::Postgres, &t, "t_idx", r#""email" gin_trgm_ops"#, How::Gin, false).1, None);
+        assert_eq!(create(Dialect::MySql, &t, "b_idx", "`provider`", How::Plain, false).1, None);
     }
 }

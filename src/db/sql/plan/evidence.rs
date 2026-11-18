@@ -7,6 +7,7 @@ use super::super::exec::{Cells, SqlRow};
 use super::super::lex::{self, Tok};
 use super::super::worker::text;
 use super::super::{Db, Dialect};
+use super::index::same;
 use super::{Access, Plan, PlanNode};
 use std::time::Duration;
 
@@ -79,9 +80,10 @@ impl Evidence {
         self.tables.iter().find(|t| t.names.iter().any(|(r, a)| *r == n.rel && *a == n.alias))
     }
 
-    /// Whether every table `wants` asks for is already here, so a new plan of the same statement needs no new read.
+    /// Whether every table `wants` asks for is already here, so a new plan of the same statement needs no new read. A
+    /// read that failed, perhaps only out of time, is tried again.
     pub fn covers(&self, wants: &[Want]) -> bool {
-        self.failed || wants.iter().all(|w| w.names.iter().all(|(r, a)| self.tables.iter().any(|t| t.names.iter().any(|(tr, ta)| tr == r && ta == a))))
+        !self.failed && wants.iter().all(|w| w.names.iter().all(|(r, a)| self.tables.iter().any(|t| t.names.iter().any(|(tr, ta)| tr == r && ta == a))))
     }
 
     /// Made-up evidence for the offline demo and the tests, which have no catalog to read: every filtered scan of the plan
@@ -166,7 +168,7 @@ pub struct Ref {
 
 /// Words that end a table reference where an alias could stand.
 const NOT_ALIAS: &[&str] = &[
-    "where", "join", "inner", "left", "right", "full", "outer", "cross", "natural", "on", "using", "group", "order", "limit", "offset", "having", "window", "union", "except", "intersect", "for", "lateral", "set", "values", "select", "straight_join", "use", "force", "ignore", "partition", "tablesample", "returning", "fetch", "into", "as", "when", "then", "with", "default",
+    "from", "where", "join", "inner", "left", "right", "full", "outer", "cross", "natural", "on", "using", "group", "order", "limit", "offset", "having", "window", "union", "except", "intersect", "for", "lateral", "set", "values", "select", "straight_join", "use", "force", "ignore", "partition", "tablesample", "returning", "fetch", "into", "as", "when", "then", "with", "default",
 ];
 
 /// The tables `stmt` names, with WITH names left out: those are the statement's own and no catalog table.
@@ -253,11 +255,6 @@ fn ident(t: Tok, s: &str, d: Dialect) -> Option<String> {
     }
 }
 
-/// PostgreSQL names are exact once folded; MySQL compares table names and aliases without case on most servers.
-fn same(a: &str, b: &str, d: Dialect) -> bool {
-    if d == Dialect::Postgres { a == b } else { a.eq_ignore_ascii_case(b) }
-}
-
 /// The table the statement means by a node: exactly one reference with the node's name. None when it names none (a
 /// view's table, a partition) or several different ones.
 pub fn resolve(n: &PlanNode, refs: &[Ref], d: Dialect) -> Option<(Option<String>, String)> {
@@ -280,14 +277,24 @@ pub fn resolve(n: &PlanNode, refs: &[Ref], d: Dialect) -> Option<(Option<String>
     Some((first.schema.clone(), first.table.clone()))
 }
 
-/// The tables worth reading for `p`: those its filtered full scans read, matched to the statement, at most four.
+/// The MariaDB join buffer step whose condition is about node `i`, the table it buffers.
+fn buffered_by(p: &Plan, i: usize) -> Option<&PlanNode> {
+    p.nodes[i].parent.map(|j| &p.nodes[j]).filter(|b| b.join_buffer && b.alias.is_empty() && !b.join_cond.is_empty() && b.kids.first() == Some(&i))
+}
+
+/// The tables worth reading for `p`: those its filtered full scans read, matched to the statement, at most four. A full
+/// scan under a MariaDB join buffer counts too, since the join's condition sits on the buffer step above it.
 pub fn wants(p: &Plan, stmt: &str, d: Dialect) -> Vec<Want> {
     let refs = refs(stmt, d);
     let mut out: Vec<Want> = Vec::new();
-    for n in p.nodes.iter().filter(|n| reads_all(n) && (!n.filter.is_empty() || !n.join_cond.is_empty())) {
+    for (i, n) in p.nodes.iter().enumerate() {
+        let buf = buffered_by(p, i);
+        if !reads_all(n) || (n.filter.is_empty() && n.join_cond.is_empty() && buf.is_none()) {
+            continue;
+        }
         let Some((schema, table)) = resolve(n, &refs, d) else { continue };
         let mut cols: Vec<String> = Vec::new();
-        for e in [&n.filter_expr, &n.join_cond_expr].into_iter().flatten() {
+        for e in [n.filter_expr.as_ref(), n.join_cond_expr.as_ref(), buf.and_then(|b| b.join_cond_expr.as_ref())].into_iter().flatten() {
             for c in super::cond::columns(e) {
                 if !cols.contains(&c) {
                     cols.push(c);
@@ -492,6 +499,36 @@ mod tests {
         assert_eq!(resolve(&node("", "o"), &my, Dialect::MySql), None);
         let my = refs("SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id", Dialect::MySql);
         assert_eq!(resolve(&node("", "o"), &my, Dialect::MySql), Some((None, "orders".into())));
+    }
+
+    #[test]
+    fn a_select_into_reads_the_table_after_from() {
+        let r = refs("SELECT b.id INTO newtab FROM bookings b WHERE b.status = 'DONE'", Dialect::Postgres);
+        assert_eq!(r, [Ref { schema: None, table: "newtab".into(), alias: None }, Ref { schema: None, table: "bookings".into(), alias: Some("b".into()) }]);
+    }
+
+    #[test]
+    fn a_failed_read_covers_nothing_so_a_rerun_tries_again() {
+        let want = Want { schema: None, table: "orders".into(), names: vec![(String::new(), "o".into())], cols: Vec::new() };
+        let ev = Evidence { tables: vec![TableEv { names: want.names.clone(), table: "orders".into(), ..Default::default() }], ..Default::default() };
+        assert!(ev.covers(std::slice::from_ref(&want)));
+        assert!(!Evidence { failed: true, ..ev }.covers(&[want]));
+    }
+
+    #[test]
+    fn mariadb_asks_for_the_table_under_a_join_buffer() {
+        let stmt = "SELECT o.id FROM items i JOIN orders o ON o.ref = i.sku WHERE o.status = 'paid' AND o.total > 899";
+        let json = include_str!("fixtures/mariadb-bufjoin.json");
+        // The buffered table's own filter dropped: only the buffer step above it holds a condition about it.
+        let bare = super::super::parse(Dialect::MariaDb, &json.replace(r#""o.`status` = 'paid' and o.total > 899""#, r#""""#)).unwrap();
+        assert!(bare.nodes.iter().all(|n| n.alias != "o" || n.filter.is_empty()), "the fixture's filter was not dropped");
+        let w = wants(&bare, stmt, Dialect::MariaDb);
+        assert_eq!(w.iter().map(|w| (w.table.as_str(), w.names.clone())).collect::<Vec<_>>(), [("orders", vec![(String::new(), "o".to_string())])]);
+        assert!(w[0].cols.iter().any(|c| c == "ref"), "{:?}", w[0].cols);
+        // With its filter too, the join column is read as well as the filter's.
+        let w = wants(&super::super::parse(Dialect::MariaDb, json).unwrap(), stmt, Dialect::MariaDb);
+        let o = w.iter().find(|w| w.table == "orders").unwrap();
+        assert!(["status", "total", "ref"].iter().all(|c| o.cols.iter().any(|x| x == c)), "{:?}", o.cols);
     }
 
     #[test]

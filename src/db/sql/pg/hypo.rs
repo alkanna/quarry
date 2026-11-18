@@ -7,7 +7,8 @@
 //! hypopg_create_index there (checked on PostgreSQL 18), so no write access is ever needed.
 
 use super::super::exec::Conn;
-use super::super::plan::{self, Plan};
+use super::super::plan::findings::Fix;
+use super::super::plan::{self, FixKind, Plan};
 use super::super::{lex, Db, Dialect, Pool, ResultSet};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -28,19 +29,10 @@ pub struct Trial {
     pub index: String,
 }
 
-/// The candidate's CREATE INDEX as HypoPG takes it: without CONCURRENTLY, which only matters for a real build, and
-/// without the comment and the semicolon. None when `fix` is not a single CREATE INDEX.
-pub fn create_sql(fix: &str) -> Option<String> {
-    let body: Vec<&str> = fix.lines().filter(|l| !l.trim_start().starts_with("--")).collect();
-    let s = body.join("\n");
-    let s = s.trim().trim_end_matches(';').trim_end();
-    let rest = s.strip_prefix("CREATE INDEX CONCURRENTLY ").or_else(|| s.strip_prefix("CREATE INDEX "))?;
-    let out = format!("CREATE INDEX {rest}");
-    // HypoPG simulates B-tree, BRIN, hash and bloom indexes; the trigram fix is a GIN index it cannot try.
-    if out.to_ascii_lowercase().contains(" using gin") {
-        return None;
-    }
-    (lex::split_statements(&out, Dialect::Postgres).len() == 1).then_some(out)
+/// The candidate's CREATE INDEX as HypoPG takes it, as the index builder wrote it for a trial. None when `fix` is not
+/// one index HypoPG can simulate: a GIN index, the several indexes of an OR, a setting.
+pub fn create_sql(fix: &Fix) -> Option<&str> {
+    fix.trial.as_deref().filter(|s| fix.kind == FixKind::Index && lex::split_statements(s, Dialect::Postgres).len() == 1)
 }
 
 /// The three statements of a trial, in the order they run: create the hypothetical index, explain the statement, reset.
@@ -155,14 +147,14 @@ mod tests {
     const BEFORE: &str = include_str!("../plan/fixtures/pg18-hypo-before.json");
 
     #[test]
-    fn the_candidate_loses_concurrently_its_comment_and_its_semicolon() {
-        let fix = r#"CREATE INDEX CONCURRENTLY "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status");"#;
-        assert_eq!(create_sql(fix).as_deref(), Some(r#"CREATE INDEX "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status")"#));
-        let pooled = "-- Blocks writes to bookings while it builds: CONCURRENTLY cannot run through the connection pooler.\nCREATE INDEX \"b_idx\" ON \"public\".\"bookings\" (\"provider\");";
-        assert_eq!(create_sql(pooled).as_deref(), Some(r#"CREATE INDEX "b_idx" ON "public"."bookings" ("provider")"#));
-        for bad in ["ANALYZE \"public\".\"bookings\";", "ALTER TABLE t ADD INDEX i (a)", "CREATE INDEX i ON t (a); DROP TABLE t", "", "CREATE INDEX CONCURRENTLY i ON t USING gin (email gin_trgm_ops);", "CREATE INDEX a_idx ON t (a);\nCREATE INDEX b_idx ON t (b);"] {
-            assert_eq!(create_sql(bad), None, "{bad}");
-        }
+    fn the_trial_takes_the_bare_create_index_of_an_index_fix() {
+        let fix = |kind, trial: Option<&str>| Fix { kind, label: String::new(), sql: String::new(), note: String::new(), trial: trial.map(str::to_string) };
+        let bare = r#"CREATE INDEX "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status")"#;
+        assert_eq!(create_sql(&fix(FixKind::Index, Some(bare))), Some(bare));
+        // A GIN or an OR's indexes come without one, and a setting or an ANALYZE is no index.
+        assert_eq!(create_sql(&fix(FixKind::Index, None)), None);
+        assert_eq!(create_sql(&fix(FixKind::Analyze, Some(bare))), None);
+        assert_eq!(create_sql(&fix(FixKind::Index, Some("CREATE INDEX i ON t (a); DROP TABLE t"))), None);
     }
 
     #[test]

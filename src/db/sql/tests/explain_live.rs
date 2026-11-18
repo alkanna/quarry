@@ -167,11 +167,11 @@ fn live_hypopg_trial_uses_the_hypothetical_index_and_leaves_nothing_behind() {
     settle_pg(&fx, "big");
     let stmt = "SELECT * FROM big WHERE status = 's7'";
     let p = explained(&l.w, &l.rx, &fx.db, &s, stmt, false, true);
-    let sql = candidate(&p).unwrap_or_else(|| panic!("no candidate: {:?}", reasons(&p)));
+    let fix = p.findings.iter().find_map(|f| f.fix.clone().filter(|x| x.kind == FixKind::Index)).unwrap_or_else(|| panic!("no candidate: {:?}", reasons(&p)));
     l.w.sql_explain_evidence(3, fx.db.clone(), s.clone(), plan::evidence::wants(&p, stmt, Dialect::Postgres));
     let Ok(Msg::SqlExplainEvidence { ev, .. }) = l.rx.recv_timeout(Duration::from_secs(30)) else { panic!("no evidence") };
     assert!(ev.hypopg, "the catalog does not see HypoPG");
-    let create = hypo::create_sql(&sql).unwrap_or_else(|| panic!("not a CREATE INDEX: {sql}"));
+    let create = hypo::create_sql(&fix).unwrap_or_else(|| panic!("not a CREATE INDEX: {}", fix.sql)).to_string();
     // Locked, then unlocked: both run in a read-only transaction.
     for read_only in [true, false] {
         l.w.sql_explain_hypo(4, fx.db.clone(), s.clone(), create.clone(), stmt.into(), read_only);

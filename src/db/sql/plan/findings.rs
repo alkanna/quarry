@@ -76,6 +76,9 @@ pub struct Fix {
     pub label: String,
     pub sql: String,
     pub note: String,
+    /// The bare CREATE INDEX a HypoPG trial of an index fix takes, set by the one index builder. None when HypoPG cannot
+    /// simulate it (GIN, several indexes) or the fix is no index.
+    pub trial: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -332,6 +335,7 @@ fn jit(p: &Plan, out: &mut Vec<Finding>) -> Option<usize> {
         label: "SET jit".into(),
         sql: "SET jit = off;".into(),
         note: "For this session only. PostgreSQL compiles plans that cost more than jit_above_cost, 100,000 by default; raising it on the server keeps JIT for the statements it helps.".into(),
+        trial: None,
     };
     let share = (took / exec).min(1.0);
     let about = if procs > 1.0 { "about " } else { "" };
@@ -605,5 +609,6 @@ fn work_mem(kb: f64) -> Fix {
         label: "SET work_mem".into(),
         sql: format!("SET work_mem = '{mb}MB';"),
         note: "For this session only. A higher server-wide value multiplies by every sort and hash running at once.".into(),
+        trial: None,
     }
 }

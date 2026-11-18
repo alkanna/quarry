@@ -192,6 +192,27 @@ fn a_fix_opens_as_a_draft_and_nothing_runs() {
     assert!(!reached_server_call(&ui), "opening the draft ran it");
 }
 
+/// The tab's run picker set to `database`, as before an explain that ran there.
+fn pick_db(ui: &mut UiApp, database: &str) {
+    let a = ui.h.state_mut();
+    let c = a.cur;
+    a.tabs[c].sql.as_mut().unwrap().run_db = database.into();
+}
+
+#[test]
+fn a_draft_runs_in_the_database_the_plan_was_made_in() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    pick_db(&mut ui, "billing");
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, PG_SPILL);
+    ui.settle();
+    ui.h.state_mut().status = "idle".into();
+    let schema = explain_state(&ui).schema.clone();
+    ui.click_nth("Sort spilled to disk", 0);
+    ui.click("Open in Query tab");
+    let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
+    assert_eq!((s.run_db.as_str(), s.run_schema.as_str()), ("billing", schema.as_str()), "the draft lost the database the plan was made in");
+}
+
 #[test]
 fn copy_puts_the_fix_on_the_clipboard_with_a_note() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SPILL) else { return };
@@ -260,6 +281,46 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     ui.settle();
     ui.show("Flame");
     assert!(ui.h.query_by_label("Compare").is_none(), "a plan from before the connection closed is compared");
+}
+
+#[test]
+fn the_same_statement_in_another_database_is_not_compared() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    pick_db(&mut ui, "billing");
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
+    ui.settle();
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "a plan from another database is compared");
+}
+
+const PG_DATEWRAP: &str = include_str!("../../db/sql/plan/fixtures/pg18-datewrap.json");
+
+/// Whether the plan has the finding of an index its filter defeats, which rests on the catalog.
+fn defeated(p: &crate::db::sql::plan::Plan) -> bool {
+    p.findings.iter().any(|f| f.title.contains("has an index the planner did not use"))
+}
+
+#[test]
+fn compare_follows_the_findings_once_the_catalog_answers() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, PG_DATEWRAP);
+    ui.settle();
+    assert!(defeated(explain_state(&ui).plan.as_ref().unwrap()), "the demo's catalog shows no index the filter defeats");
+    assert!(explain_state(&ui).prev.is_some(), "the two plans are not compared");
+    // The catalog answers with nothing about the table: the finding that rested on it goes, from the strip and Compare.
+    ui.h.state_mut().demo_explain_evidence(crate::db::sql::plan::Evidence::default());
+    ui.settle();
+    let x = explain_state(&ui);
+    assert!(!defeated(x.plan.as_ref().unwrap()), "the finding stayed without its evidence");
+    let titles: Vec<&str> = x.plan.as_ref().unwrap().findings.iter().map(|f| f.title.as_str()).collect();
+    for c in &x.prev.as_ref().expect("a previous plan").diff.findings {
+        let shown = titles.contains(&c.title.as_str());
+        assert_eq!(c.state != crate::db::sql::plan::compare::State::Resolved, shown, "Compare says {:?} for {}", c.state, c.title);
+    }
+    // The plan kept for the next Compare is the one found with the catalog's answer.
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, PG_SCAN);
+    ui.settle();
+    assert!(!defeated(&explain_state(&ui).prev.as_ref().expect("a previous plan").plan), "the kept plan has the findings from before the catalog answered");
 }
 
 #[test]
@@ -399,6 +460,20 @@ fn the_tree_captions_end_on_their_columns_right_edge() {
     let est = ui.h.get_by_label("EST. > ACTUAL").rect().right();
     assert!((off - right).abs() <= 2.0, "OFF ends at {off}, its column at {right}");
     assert!((est - (right - 60.0)).abs() <= 2.0, "EST. > ACTUAL ends at {est}, its column at {}", right - 60.0);
+}
+
+#[test]
+fn the_compare_captions_end_on_their_columns_right_edge() {
+    let Some(mut ui) = explain_twice(FIX_BEFORE, FIX_AFTER) else { return };
+    ui.h.set_size(egui::vec2(1400.0, 900.0));
+    ui.settle();
+    ui.click("Compare");
+    // The figures end 8 px inside the row; CHANGE is the last column, 90 px wide, and AFTER before it 120 px wide.
+    let right = ui.h.get_by_label("Bitmap Heap Scan bookings b").rect().right() - 8.0;
+    for (col, edge) in [("CHANGE", right), ("AFTER", right - 90.0), ("BEFORE", right - 210.0)] {
+        let at = ui.h.get_by_label(col).rect().right();
+        assert!((at - edge).abs() <= 2.0, "{col} ends at {at}, its column at {edge}");
+    }
 }
 
 /// The statement of the design's MySQL frame, whose plan wraps an indexed column in DATE().
