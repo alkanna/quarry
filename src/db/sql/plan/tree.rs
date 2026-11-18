@@ -114,14 +114,124 @@ pub(super) fn is_inner(p: &Plan, j: usize, k: usize) -> bool {
 }
 
 /// The cost each node carries in the whole plan. A parent that stops early (Limit, a semi join) costs less than the
-/// totals below it, so the nodes below are scaled to fit inside it and the parts add up to the plan's cost.
+/// totals below it, so the nodes below are scaled to fit inside it and the parts add up to the plan's cost. A subquery
+/// run once per row is charged per call inside its parent, so it takes its share out of what the parent has left.
 fn spread(p: &Plan, i: usize, scale: f64, loops: &[f64], eff: &mut [f64]) {
-    let own = p.nodes[i].cost.unwrap_or(0.0) * loops[i] * scale;
+    let cost = |k: usize| p.nodes[k].cost.unwrap_or(0.0) * loops[k];
+    let own = cost(i) * scale;
     eff[i] = own;
-    let raw: f64 = p.nodes[i].kids.iter().map(|&k| p.nodes[k].cost.unwrap_or(0.0) * loops[k] * scale).sum();
+    let kids = &p.nodes[i].kids;
+    let per: Vec<Option<f64>> = kids.iter().map(|&k| per_row_charge(p, k).map(|c| c * loops[k] * scale)).collect();
+    let raw: f64 = kids.iter().zip(&per).filter(|(_, c)| c.is_none()).map(|(&k, _)| cost(k) * scale).sum();
     let fit = if raw > own && raw > 0.0 { own / raw } else { 1.0 };
-    for &k in &p.nodes[i].kids {
-        spread(p, k, scale * fit, loops, eff);
+    let mut room = (own - raw * fit).max(0.0);
+    for (&k, c) in kids.iter().zip(per) {
+        let target = match c {
+            None => cost(k) * scale * fit,
+            Some(c) => {
+                let t = c.min(room);
+                room -= t;
+                t
+            }
+        };
+        spread(p, k, if cost(k) > 0.0 { target / cost(k) } else { 0.0 }, loops, eff);
+    }
+}
+
+/// How a PostgreSQL subquery runs for the node that tests it, read from how that node prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubRun {
+    /// An InitPlan, a CTE or a hashed SubPlan: run once and kept.
+    Once,
+    /// A SubPlan run again for every row the node above tests. `EXISTS(SubPlan 1)` stops at its first row, `ANY` reads
+    /// half of it on average and anything else, a scalar subquery, reads all of it.
+    Exists,
+    Any,
+    Expr,
+}
+
+/// How node `k` runs, when it is a subquery.
+pub fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
+    let n = &p.nodes[k];
+    if !n.role.starts_with("SubPlan") {
+        return (n.role.starts_with("InitPlan") || n.role.starts_with("CTE")).then_some(SubRun::Once);
+    }
+    let Some(j) = n.parent else { return Some(SubRun::Once) };
+    let parent = &p.nodes[j];
+    let text = parent.detail.join("\n");
+    let named = |pre: &str, post: &str| mentions(&text, &format!("{pre}{}", n.role), post);
+    // PostgreSQL 16 and older may print "alternatives: SubPlan 1 or hashed SubPlan 2" and pick one as it runs.
+    Some(if named("hashed ", "") || text.contains("alternatives:") {
+        SubRun::Once
+    } else if named("EXISTS(", ")") {
+        SubRun::Exists
+    } else if named("(", ").col") {
+        SubRun::Any
+    } else if named("(", ")") && !text.contains("EXISTS") && !text.contains("ANY") && !text.contains("ALL") {
+        SubRun::Expr
+    } else {
+        // Older servers print every kind as "(SubPlan 1)", and a SubPlan in the output list is not printed without
+        // VERBOSE; the cheapest reading keeps the charge a lower bound.
+        SubRun::Exists
+    })
+}
+
+/// Whether `text` holds `name` then `post`, with no other digit right after the name, so "SubPlan 1" does not match
+/// "SubPlan 12".
+fn mentions(text: &str, name: &str, post: &str) -> bool {
+    text.match_indices(name).any(|(at, m)| {
+        let rest = &text[at + m.len()..];
+        !rest.starts_with(|c: char| c.is_ascii_digit()) && rest.starts_with(post)
+    })
+}
+
+/// The hashed SubPlan the node `i` tests in place of a per-row one PostgreSQL dropped. The planner may plan a subquery
+/// both ways, prices its parent with the first (per row) and only then picks the hash, so the parent's cost still holds
+/// a per-row subquery that never runs. The dropped one is the SubPlan numbered just before the hashed one.
+pub fn dropped_alternative(p: &Plan, i: usize) -> Option<usize> {
+    let n = &p.nodes[i];
+    n.kids.iter().copied().find(|&k| {
+        let role = &p.nodes[k].role;
+        let Some(num) = role.strip_prefix("SubPlan ").and_then(|s| s.parse::<u32>().ok()) else { return false };
+        let before = format!("SubPlan {}", num.saturating_sub(1));
+        // InitPlans and CTEs take numbers from the same count, so with any of them the gap proves nothing.
+        let others = p.nodes.iter().any(|x| x.role.starts_with("InitPlan") || x.role.starts_with("CTE") || x.label == "CTE Scan");
+        num >= 2 && !others && sub_run(p, k) == Some(SubRun::Once) && !p.nodes.iter().any(|x| x.role == before) && !n.detail.iter().any(|d| mentions(d, &before, ""))
+    })
+}
+
+/// What the planner charges a per-row SubPlan inside its parent for one run of the parent: its cost per call, worked out
+/// as PostgreSQL's cost_subplan does, times the rows the parent returns. Every row the parent returns passed the test,
+/// so that is the fewest calls there can have been. A join tests every pair its condition matched, which an estimate
+/// does not give, so what the subquery cost beyond that stays with the parent.
+fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
+    let n = &p.nodes[k];
+    let run = sub_run(p, k)?;
+    if run == SubRun::Once {
+        return None;
+    }
+    let (start, total, rows) = (n.startup_cost.unwrap_or(0.0), n.cost.unwrap_or(0.0), n.rows.unwrap_or(1.0).max(1.0));
+    let body = (total - start).max(0.0);
+    // A scalar subquery reads all its rows, but it nearly always returns one, and servers before 17 print EXISTS the
+    // same way, so the first-row reading of EXISTS keeps the charge a lower bound for both.
+    let call = start
+        + match run {
+            // Half the rows, and an operator per row looked at.
+            SubRun::Any => 0.5 * body + 0.5 * rows * 0.0025,
+            _ => body / rows,
+        };
+    Some(call * p.nodes[n.parent?].rows.unwrap_or(1.0).max(1.0))
+}
+
+/// How many times a per-row SubPlan ran, or at least runs: its loops after ANALYZE, else the rows its parent returns.
+pub fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
+    let n = &p.nodes[k];
+    if matches!(sub_run(p, k), None | Some(SubRun::Once)) {
+        return None;
+    }
+    match n.loops {
+        Some(l) if p.analyzed => Some((l, true)),
+        _ => Some((p.nodes[n.parent?].rows.unwrap_or(1.0).max(1.0), false)),
     }
 }
 

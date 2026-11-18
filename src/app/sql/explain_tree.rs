@@ -83,7 +83,8 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
     // Labels rather than painted text, so screen readers and tests find the columns.
     let head = |ui: &mut egui::Ui, text: &str, r: egui::Rect, right: bool| {
-        let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_align(if right { egui::Align::Max } else { egui::Align::Min });
+        // A main align of Max does not move a single label in a horizontal layout; right to left does.
+        let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
         ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| ui.label(RichText::new(text).size(TXT_SECTION).color(FAINT()).extra_letter_spacing(0.6))).inner
     };
     head(ui, "NODE", egui::Rect::from_min_max(hr.min + egui::vec2(8.0, 0.0), egui::pos2(hr.center().x, hr.bottom())), false);
@@ -229,7 +230,8 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
                         p.rect_filled(chip, R_SM, tint(color, 36));
                         galley_at(p, chip.left() + 6.0, top, g, color);
                     } else {
-                        glyphs::check(p, egui::pos2(cx - 8.0, top), SUCCESS());
+                        // The check's ink ends 4.5 px right of its center; keep it on the column's right edge like the chips.
+                        glyphs::check(p, egui::pos2(cx - 4.5, top), SUCCESS());
                     }
                 }
             }
