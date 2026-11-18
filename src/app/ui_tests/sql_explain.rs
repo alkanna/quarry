@@ -22,6 +22,16 @@ fn has_value(ui: &UiApp, part: &str) -> bool {
 }
 
 #[test]
+fn the_plan_fills_the_dialog_width() {
+    let Some(ui) = explain_open(PLAN) else { return };
+    // The last number column ends at the body's right edge, which the footer's Close button shares, less the scroll bar.
+    let cost = ui.h.get_by_label("COST").rect();
+    let close = ui.h.get_by_label("Close").rect();
+    let gap = close.right() - (cost.left() + 84.0);
+    assert!(gap.abs() < 24.0, "the plan stops {gap} px short of the dialog's right edge");
+}
+
+#[test]
 fn the_dialog_shows_the_plan_its_cost_and_what_to_fix() {
     let Some(mut ui) = explain_open(PLAN) else { return };
     assert!(matches!(ui.app().modal, Some(Modal::SqlExplain(_))), "the explain dialog is not open");
