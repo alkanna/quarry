@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.56.0](https://github.com/alkanna/quarry/compare/v0.55.0...v0.56.0) (2026-11-18)
+
+
+### Features
+
+* Vim navigation in the grids, the record, lists and between panes ([#280](https://github.com/alkanna/quarry/issues/280)) ([d5f621b](https://github.com/alkanna/quarry/commit/d5f621b103b2a3c209219cd44092a831a958fab7))
+
 ## [0.55.0](https://github.com/alkanna/quarry/compare/v0.54.0...v0.55.0) (2026-11-17)
 
 
