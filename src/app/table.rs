@@ -574,6 +574,15 @@ impl App {
         let menu = self.row_menu_kind(agg);
         // Tab shows the selected row as a record under it; Esc or Tab again hides it.
         let record = sql && self.t().is_some_and(|t| t.record);
+        // The Vim cursor's column, scrolled into view after a Vim key moved it. With the record open it walks the record.
+        let vim = self.prefs.vim && !cols.is_empty();
+        let vk = self.t().map_or(0, |t| t.vcol).min(cols.len().saturating_sub(1));
+        let vscroll = vim && !record && std::mem::take(&mut self.vnav.scroll);
+        if !record {
+            self.vnav.cols = cols.len();
+        }
+        self.vnav.page = (ui.available_height() / ROW_H) as usize;
+        let mut click_col = None;
         let mut rec = super::sql::record::RecordOut::default();
         let mut view: Option<(String, Bson)> = None;
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
@@ -708,6 +717,11 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
+                    // After the row's own scroll, so the cell's wins sideways.
+                    if active && vscroll {
+                        let x = rr.left() + num_w + widths[..vk].iter().sum::<f32>();
+                        ui.scroll_to_rect(egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(widths[vk], ROW_H)), None);
+                    }
                     // Rows scrolled out of view keep their space but skip all layout and painting.
                     if ui.is_rect_visible(rr) {
                         let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
@@ -778,6 +792,10 @@ impl App {
                                     clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
+                            // While the record has the keys the grid's cursor stays, faint, where Tab will bring it back.
+                            if vim && active && ci == vk {
+                                paint_cursor(ui, cell, if record { FAINT() } else { PRIMARY() });
+                            }
                             let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                             // Named after the row number the grid shows, with the cell text as its value, so tests find it.
                             cr.widget_info(|| {
@@ -802,6 +820,9 @@ impl App {
                                 } else {
                                     cell_acts.push((i, vec![TreeAct::ShowFull(c.clone(), val)]));
                                 }
+                            }
+                            if cr.clicked() || cr.double_clicked() {
+                                click_col = Some(ci);
                             }
                             if cr.double_clicked() && sql_grouped {
                                 drill = Some(i);
@@ -886,13 +907,45 @@ impl App {
                         ui.add_space(6.0);
                     }
                     if record && active {
-                        let shown: HashSet<&String> = cols.iter().collect();
-                        let names: Vec<String> = cols.iter().chain(fields.iter().filter(|f| !shown.contains(f))).cloned().collect();
+                        let names = record_names(&cols, fields);
                         record_card(ui, row_w, view_w, |ui| self.sql_record(ui, docs, i, agg, &names, &fks, menu, &checked, &mut rec));
                     }
                 }
             });
         });
+        if let Some(c) = click_col
+            && let Some(t) = self.tm()
+        {
+            t.vcol = c;
+        }
+        // What a Vim key asked of the cell under the cursor, or of the record's line, as a click on it would do.
+        if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.prefs.vim)
+            && let Some(a) = self.vnav.act.filter(|a| !matches!(a, super::vim_nav::Act::Fold(_)))
+        {
+            self.vnav.act = None;
+            let names = if record { record_names(&cols, fields) } else { cols.clone() };
+            let at = self.t().map_or(0, |t| if record { t.vline } else { t.vcol }).min(names.len().saturating_sub(1));
+            let row = self.shown_row(docs, i, agg).or_else(|| docs.owned(i));
+            if let (Some(c), Some(d)) = (names.get(at).cloned(), row) {
+                let b = if sql { d.get(&c).cloned() } else { db::get_path(&d, &c).cloned() }.unwrap_or(Bson::Null);
+                use super::vim_nav::Act;
+                match a {
+                    Act::Edit if sql_grouped => drill = Some(i),
+                    Act::Edit if !agg => edit_cell = Some((i, c)),
+                    Act::Edit | Act::View if sql => view = Some((c, b)),
+                    Act::Edit | Act::View => cell_acts.push((i, vec![TreeAct::ShowFull(c, b)])),
+                    Act::Yank => {
+                        ui.ctx().copy_text(cell_text(&b));
+                        self.ok(format!("Copied {c}"));
+                    }
+                    Act::YankRow => {
+                        ui.ctx().copy_text(db::to_edit_value(&Bson::Document(d)));
+                        self.ok("Copied the row as JSON".to_string());
+                    }
+                    Act::Fold(_) => {}
+                }
+            }
+        }
         // The record is only drawn under the selected row, so what it asked for is that row's.
         if let Some((_, i)) = selected {
             edit_cell = rec.edit.map(|c| (i, c)).or(edit_cell);
@@ -1061,6 +1114,17 @@ pub(super) fn record_card(ui: &mut egui::Ui, row_w: f32, view_w: f32, add: impl 
         });
     });
     ui.add_space(6.0);
+}
+
+/// The record's lines: the grid's columns, then the row's fields the grid does not show.
+pub(super) fn record_names(cols: &[String], fields: &[String]) -> Vec<String> {
+    let shown: HashSet<&String> = cols.iter().collect();
+    cols.iter().chain(fields.iter().filter(|f| !shown.contains(f))).cloned().collect()
+}
+
+/// The Vim cursor: an accent outline just inside a grid cell or a record line.
+pub(super) fn paint_cursor(ui: &egui::Ui, r: egui::Rect, color: Color32) {
+    ui.painter().rect_stroke(r.shrink(1.0), R_SM, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
 pub(super) fn paint_row(ui: &egui::Ui, row: egui::Rect, active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) {

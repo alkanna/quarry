@@ -552,6 +552,7 @@ fn draw_row(ui: &mut egui::Ui, rows: &[CRow], i: usize, cx: &Cx, st: &mut ConnsU
                 let hot = row_hot(ui, ctx, rid, dots_id, CONN_H);
                 let r = conn_row_room(ui, c, on, if color.is_some() { MEMBER_INDENT } else { 0.0 }, &hl, !filtering, if hot { DOTS_ROOM } else { 0.0 });
                 nav.push((r.id, Nav::Conn { group: *group }));
+                super::vim_nav::side_row(ctx, &r, on);
                 if let Some(col) = color {
                     ui.painter().vline(r.rect.left() + GUIDE_X, r.rect.y_range().expand(1.0), Stroke::new(1.0, tint(col, 128)));
                 }

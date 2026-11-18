@@ -164,10 +164,26 @@ pub(crate) fn demo(ui: &egui::Ui, id: egui::Id, text: &str) {
 /// `begin`, the editor, then `end`, for editors whose wrappers hand back more than the TextEdit's
 /// output, like the suggestion lists.
 pub(crate) fn wrap_with<R>(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> (TextEditOutput, R)) -> (TextEditOutput, R) {
+    let pass = ui.ctx().cumulative_pass_nr();
+    ui.ctx().data_mut(|d| {
+        if d.get_temp::<(u64, egui::Id)>(first_id()).is_none_or(|(p, _)| p != pass) {
+            d.insert_temp(first_id(), (pass, id));
+        }
+    });
     begin(ui, id, text);
     let (mut out, r) = show(ui, text);
     end(ui, id, &mut out);
     (out, r)
+}
+
+fn first_id() -> egui::Id {
+    egui::Id::unique("vim-first-editor")
+}
+
+/// The first Vim editor drawn last pass, which is the page's own: the dialogs draw after the page. Ctrl+k focuses it.
+pub(crate) fn page_editor(ctx: &egui::Context) -> Option<egui::Id> {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<(u64, egui::Id)>(first_id())).filter(|(p, _)| p + 1 == pass).map(|(_, id)| id)
 }
 
 /// `wrap_with` for editors that hand back only the TextEdit's output.

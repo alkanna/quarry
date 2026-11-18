@@ -63,6 +63,7 @@ mod tabs;
 mod tools;
 mod tree;
 mod undo;
+mod vim_nav;
 mod users;
 mod value_edit;
 #[cfg(test)]
@@ -107,7 +108,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 39] = [
+const SHORTCUTS: [(&str, &str); 47] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -140,6 +141,14 @@ const SHORTCUTS: [(&str, &str); 39] = [
     ("Ctrl+Space", "Suggestions in a query or SQL field, also where none show by themselves"),
     ("Tab", "Show the selected SQL row as a record, one line per column; Esc closes it"),
     ("Vim motions", "Modal editing in the code editors, turned on in Settings > Editing"),
+    ("", "With Vim motions on, where no text field has the keys:"),
+    ("h j k l, w b", "Move the grid's cell cursor; in a record, j and k walk its lines and h and l fold its JSON"),
+    ("gg, G, {n}G, 0, $", "First, last or nth row; first or last column"),
+    ("Ctrl+d/u, Ctrl+f/b", "Half a screen or a screen of rows down or up (Alt where Ctrl is the command key)"),
+    ("i, v", "Edit the cell under the cursor, or view its value in full"),
+    ("yy, Y", "Copy the cell's value, or the row as JSON"),
+    ("gt, gT, {n}gt", "Next, previous or nth tab"),
+    ("Ctrl+h, Ctrl+k, Ctrl+j/l", "Move the keys to the sidebar, the query or editor, the grid (Alt where Ctrl is the command key)"),
     ("Cmd+S", "Save the script to the library, or write the library script or file it came from"),
     ("Cmd+Shift+S", "Save the script to the library as a new one"),
     ("Cmd+O", "Pick a script of the library for this view"),
@@ -298,6 +307,8 @@ pub struct App {
     restores: Vec<(u64, Restore)>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     scroll_sel: bool,
+    /// Vim navigation outside the editors: pending keys, the grid action they asked for and what the grid drew.
+    vnav: vim_nav::VimNav,
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
     tab_seen: Option<usize>,
     demo: bool,
@@ -460,6 +471,7 @@ impl App {
             rail_open: HashSet::new(),
             restores: Vec::new(),
             scroll_sel: false,
+            vnav: Default::default(),
             tab_seen: None,
             demo,
             ephemeral: demo,
@@ -840,6 +852,7 @@ impl eframe::App for App {
         }
         let ctx = ui.ctx().clone();
         self.lock_scroll_axis(&ctx);
+        self.vim_begin(&ctx);
         self.record_key(&ctx);
         self.stop_hidden_watches();
         self.remember_tabs();
@@ -856,6 +869,7 @@ impl eframe::App for App {
         if !self.prefs.sidebar_hidden {
             self.sidebar(ui);
         }
+        vim_nav::side_done(&ctx);
         self.query_log(ui);
         if !self.prefs.open_inline && self.selected_doc().is_some() {
             self.inspector(ui);
@@ -898,6 +912,7 @@ impl eframe::App for App {
         // Last: an agent call waiting for an answer stacks above everything, Settings included.
         self.agents_approval(&ctx);
         self.screenshot(&ctx);
+        self.vim_end(&ctx);
     }
 }
 fn human_bytes(n: usize) -> String {
