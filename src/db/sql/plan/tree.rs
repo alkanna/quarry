@@ -2,9 +2,10 @@
 //! engines print totals that include the nodes below (PostgreSQL, MySQL's tree text) or a running total of the join
 //! (MySQL's JSON), so a node's own share has to be taken apart here.
 
-use super::findings::below;
+use super::super::lex::{self, Tok};
 use super::{Dialect, Op, Plan, PlanNode};
 use std::collections::HashSet;
+use std::ops::Range;
 
 /// Sets `parent` and `kids` from the depths.
 pub(super) fn link(p: &mut Plan) {
@@ -148,8 +149,10 @@ pub(super) enum SubRun {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SubAt {
     JoinFilter,
-    /// Any other condition or key the node prints.
+    /// Any other condition the node prints.
     Cond,
+    SortKey,
+    GroupKey,
     /// Nothing the node prints names it, so it is in the columns the node returns, which only VERBOSE prints.
     Output,
 }
@@ -160,6 +163,8 @@ impl SubAt {
         match self {
             SubAt::JoinFilter => "in the join filter",
             SubAt::Cond => "in its condition",
+            SubAt::SortKey => "in its sort key",
+            SubAt::GroupKey => "in its group key",
             SubAt::Output => "in the columns it returns (shown only with VERBOSE)",
         }
     }
@@ -187,8 +192,13 @@ fn classify(p: &Plan, k: usize) -> Option<Sub> {
     let parent = n.parent.map(|j| &p.nodes[j]);
     let at = match parent {
         Some(x) if mentions(&x.join_filter.text, &n.role, "") => SubAt::JoinFilter,
-        Some(x) if x.detail.iter().any(|d| mentions(d, &n.role, "")) => SubAt::Cond,
-        _ => SubAt::Output,
+        Some(x) => match x.detail.iter().find(|d| mentions(d, &n.role, "")) {
+            Some(d) if d.starts_with("Sort Key:") => SubAt::SortKey,
+            Some(d) if d.starts_with("Group Key:") => SubAt::GroupKey,
+            Some(_) => SubAt::Cond,
+            None => SubAt::Output,
+        },
+        None => SubAt::Output,
     };
     let run = match parent {
         Some(x) if sub => sub_plan_run(p, k, x),
@@ -203,17 +213,18 @@ fn sub_plan_run(p: &Plan, k: usize, parent: &PlanNode) -> SubRun {
     let text = parent.detail.join("\n");
     let named = |pre: &str, post: &str| mentions(&text, &format!("{pre}{}", n.role), post);
     // PostgreSQL 16 and older may print "alternatives: SubPlan 1 or hashed SubPlan 2" and pick one as it runs.
-    if named("hashed ", "") || text.contains("alternatives:") {
+    if hashed(parent, &n.role) || text.contains("alternatives:") {
         SubRun::Once
     } else if named("EXISTS(", ")") {
         SubRun::Exists
     } else if named("(", ").col") {
         SubRun::Any
-    } else if named("(", ")") && !text.contains("EXISTS") && !text.contains("ANY") && !text.contains("ALL") {
-        SubRun::Expr
     } else if n.op == Op::Materialize {
         // An IN or ANY that PostgreSQL could not hash keeps its rows in a Materialize to search them for every row.
+        // Checked before the scalar reading, since servers before 17 print a NOT IN as "(NOT (SubPlan 1))".
         SubRun::Any
+    } else if named("(", ")") && !text.contains("EXISTS") && !text.contains("ANY") && !text.contains("ALL") {
+        SubRun::Expr
     } else if mentions(&text, &n.role, "") || correlated(p, k) {
         // Older servers print every kind as "(SubPlan 1)"; the cheapest reading keeps the charge a lower bound. A
         // SubPlan the node does not name sits in its output list, printed only with VERBOSE, and one that reads a
@@ -224,6 +235,11 @@ fn sub_plan_run(p: &Plan, k: usize, parent: &PlanNode) -> SubRun {
         // would be a guess, so it counts once and ANALYZE's loops have the last word.
         SubRun::Once
     }
+}
+
+/// Whether `parent` names the SubPlan `role` as hashed: built into a hash table and probed, never run per row.
+fn hashed(parent: &PlanNode, role: &str) -> bool {
+    parent.detail.iter().any(|d| mentions(d, &format!("hashed {role}"), ""))
 }
 
 /// Whether the subquery at `k` reads a column of a table outside it. The server qualifies those with their alias and
@@ -243,36 +259,19 @@ fn correlated(p: &Plan, k: usize) -> bool {
 /// The names in front of a dot in `text`, past string literals: "c" and "si" out of "(c.total - si.cap)". Read from the
 /// text rather than the parsed condition, so a column inside arithmetic or a key counts too.
 fn quals(text: &str) -> Vec<&str> {
-    let b = text.as_bytes();
-    // Bytes of a multibyte character count as letters, so every cut falls on an ASCII byte.
-    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
-    let starts = |c: u8| c == b'"' || c.is_ascii_alphabetic() || c == b'_' || c >= 0x80;
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        if c == b'\'' {
-            i += 1 + text[i + 1..].find('\'').map_or(b.len(), |e| e + 1);
-        } else if starts(c) {
-            let (from, to, next) = if c == b'"' {
-                let to = text[i + 1..].find('"').map_or(b.len(), |e| i + 1 + e);
-                (i + 1, to, to + 1)
-            } else {
-                let to = i + b[i..].iter().take_while(|&&c| word(c)).count();
-                (i, to, to)
-            };
-            if b.get(next) == Some(&b'.') && b.get(next + 1).is_some_and(|&c| starts(c)) {
-                out.push(&text[from..to]);
-            }
-            i = next;
-        } else if c.is_ascii_digit() {
-            // A number, decimals and all, is no name.
-            i += b[i..].iter().take_while(|&&c| c.is_ascii_alphanumeric() || c == b'.' || c == b'_').count();
-        } else {
-            i += 1;
-        }
+    let toks = lex::tokens(text, Dialect::Postgres);
+    toks.windows(3).filter(|w| w[1].0 == Tok::Punct && &text[w[1].1.clone()] == "." && name_at(text, &w[2]).is_some()).filter_map(|w| name_at(text, &w[0])).collect()
+}
+
+/// The name a token of `text` holds, unquoted. A number such as 1.5 lexes as words around a dot, and $1 as a word, so
+/// a word that starts that way is no name.
+fn name_at<'a>(text: &'a str, (t, r): &(Tok, Range<usize>)) -> Option<&'a str> {
+    let s = &text[r.clone()];
+    match t {
+        Tok::Word if !s.starts_with(|c: char| c.is_ascii_digit() || c == '$') => Some(s),
+        Tok::Quoted => Some(s.trim_start_matches('"').trim_end_matches('"')),
+        _ => None,
     }
-    out
 }
 
 /// Whether `text` holds `name` then `post`, with no other digit right after the name, so "SubPlan 1" does not match
@@ -326,13 +325,17 @@ fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
 }
 
 /// How many times a per-row SubPlan ran, or at least runs: its loops after ANALYZE, else the rows its parent returns.
-/// After ANALYZE the loops decide whatever the text says. A hashed SubPlan is built once in each process that runs its
-/// parent, so loops beyond those processes are calls per row, even when they match the parent's own loops, as under
-/// the inner side of a nested loop that tests one row a run.
+/// A SubPlan its parent names as hashed is never per row: it is built once in each process that runs the parent, and
+/// again on each rescan of it, so its loops count hash tables built. For any other SubPlan the loops after ANALYZE decide
+/// whatever the text says: loops beyond the processes are calls per row, even when they match the parent's own loops,
+/// as under the inner side of a nested loop that tests one row a run.
 pub(super) fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
     let n = &p.nodes[k];
     let run = n.sub.filter(|_| n.role.starts_with("SubPlan"))?.run;
     let parent = &p.nodes[n.parent?];
+    if hashed(parent, &n.role) {
+        return None;
+    }
     match n.loops {
         Some(l) if p.analyzed => (l > parallel_procs(p, k).unwrap_or(1.0)).then_some((l, true)),
         _ if run == SubRun::Once => None,
@@ -370,8 +373,36 @@ pub(super) fn gather_procs(g: &PlanNode) -> f64 {
 
 /// The processes sharing node `i`'s work: those of the Gather above it, whether the node splits its rows between them
 /// (Parallel Aware) or each one runs all of it. Their times are an average per process and their rows and buffers a sum.
+/// A subquery attached to the Gather itself, as in its output list, runs in the leader alone. Below it, a node runs in
+/// no more processes than the fewest loops on its way up to the Gather: a subquery only the leader ran has one loop,
+/// while the inner side of a nested loop inside it runs many times in that one process.
 pub(super) fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
-    gather_of(p, i).map(|g| gather_procs(&p.nodes[g]))
+    let mut c = i;
+    let mut fewest = f64::INFINITY;
+    loop {
+        if let Some(l) = p.nodes[c].loops.filter(|&l| l >= 1.0) {
+            fewest = fewest.min(l);
+        }
+        let j = p.nodes[c].parent?;
+        if p.nodes[j].op == Op::Gather {
+            let x = &p.nodes[c];
+            if x.role.starts_with("InitPlan") || x.role.starts_with("SubPlan") || x.role.starts_with("CTE") {
+                return None;
+            }
+            return Some(gather_procs(&p.nodes[j]).min(fewest));
+        }
+        c = j;
+    }
+}
+
+/// Every node below `i`.
+pub(super) fn below(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
+    let mut stack = p.nodes[i].kids.clone();
+    std::iter::from_fn(move || {
+        let k = stack.pop()?;
+        stack.extend(p.nodes[k].kids.iter().copied());
+        Some(k)
+    })
 }
 
 /// Each node's cost, or time, with the nodes below it, built up from the own values `derive` worked out. For PostgreSQL

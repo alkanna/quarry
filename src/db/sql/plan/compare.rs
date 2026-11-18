@@ -235,7 +235,7 @@ fn matches(before: &Plan, after: &Plan) -> Vec<Option<usize>> {
         if table(p, i).is_some() {
             return None;
         }
-        let mut below: Vec<String> = super::findings::below(p, i).filter_map(|k| table(p, k)).map(|(r, a)| format!("{r} {a}")).collect();
+        let mut below: Vec<String> = super::tree::below(p, i).filter_map(|k| table(p, k)).map(|(r, a)| format!("{r} {a}")).collect();
         below.sort();
         Some(format!("{}\u{0}{}", p.nodes[i].label, below.join(",")))
     });
@@ -250,7 +250,7 @@ fn index_of(p: &Plan, i: usize) -> Option<String> {
     if !n.index.is_empty() {
         return Some(n.index.clone());
     }
-    super::findings::below(p, i).map(|k| &p.nodes[k]).find(|k| !k.index.is_empty() && k.rel.is_empty() && k.alias.is_empty()).map(|k| k.index.clone())
+    super::tree::below(p, i).map(|k| &p.nodes[k]).find(|k| !k.index.is_empty() && k.rel.is_empty() && k.alias.is_empty()).map(|k| k.index.clone())
 }
 
 fn summary(before: &Plan, after: &Plan, rows: &[Row], cost: Delta, time: Option<Delta>) -> String {

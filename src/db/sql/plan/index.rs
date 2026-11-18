@@ -333,7 +333,7 @@ pub(super) fn kept(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Kept {
 /// A parallel scan's Plan Rows are per process. PostgreSQL divides by the workers plus what the leader adds
 /// (1 - 0.3 per worker, when above zero), so the estimate for the whole scan multiplies that back. Only a Parallel Aware
 /// scan splits its rows: a plain one under a Gather estimates the whole table, unlike its time, which tree::wall_ms
-/// divides for every node under a Gather.
+/// divides by the processes that ran it.
 fn divisor(p: &Plan, i: usize) -> f64 {
     match gather_of(p, i).filter(|_| p.nodes[i].parallel) {
         Some(g) => {

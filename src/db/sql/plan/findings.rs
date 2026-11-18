@@ -4,7 +4,7 @@
 
 use super::evidence::{Evidence, TableEv};
 use super::index::{self, Advice};
-use super::tree::{self, SubAt, SubRun};
+use super::tree::{self, below, SubAt, SubRun};
 use super::{count, Access, Dialect, Op, Plan, PlanNode, BIG_SCAN};
 
 /// A node below this share of the plan's cost is not worth a finding about its scan, unless its time says otherwise.
@@ -26,11 +26,11 @@ pub(super) const SHARE_MOST: f64 = 0.5;
 const SLOW_MS: f64 = 100.0;
 const SLOW_COST: f64 = 10_000.0;
 /// Microseconds per row read above which a scan of pages already in memory is slow. Plain scans in the captured plans
-/// take 0.03 to 0.07 µs a row; a function on every row took 2.9, and JIT counted in the scan 3 to 8.
+/// take 0.03 to 0.07 us a row; a function on every row took 2.9, and JIT counted in the scan 3 to 8.
 const SLOW_US: f64 = 1.0;
 /// Microseconds per 8 kB page read from memory above which a scan is slow. Per row alone misjudges wide rows: 13,895
-/// rows of 2 kB in 3,316 pages take 1 µs a row at a normal 4.4 µs a page. Plain Seq Scans in the captured plans take
-/// 2.4 to 8.2 µs a page (pg18-scan bookings 4.1, pg18-join si 6.8, pg18-stale events 8.2) and the user's wide tables
+/// rows of 2 kB in 3,316 pages take 1 us a row at a normal 4.4 us a page. Plain Seq Scans in the captured plans take
+/// 2.4 to 8.2 us a page (pg18-scan bookings 4.1, pg18-join si 6.8, pg18-stale events 8.2) and the user's wide tables
 /// 3.3 to 7 across runs, while md5 on every row took 456 and JIT counted in the scan 476. 50 is twice 25, itself three
 /// times the slowest plain scan, so a plain scan would need to run six times slower than any captured one: half again
 /// either way between runs of one plan cannot cross it.
@@ -135,8 +135,9 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
     let mut out: Vec<Finding> = Vec::new();
     let by_time = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
     let jit_node = jit(p, &mut out);
-    // What the catalog says of each filtered full scan, worked out once: it decides the scan's verdict, then fills it in.
-    let advice: Vec<Option<(&TableEv, Advice)>> = p.nodes.iter().enumerate().map(|(i, n)| ev?.table(n).filter(|_| n.access == Access::Scan && !n.filter.is_empty()).map(|t| (t, index::advise(p, i, d, t, pooler)))).collect();
+    // What the catalog says of each filtered scan, worked out at most once and only where it is read: in the verdict of
+    // a plain filtered full scan, then in with_evidence.
+    let mut advice: Vec<Advised> = p.nodes.iter().map(|n| Advised::Later(ev.and_then(|ev| ev.table(n)).filter(|_| n.access == Access::Scan && !n.filter.is_empty()))).collect();
     for (i, n) in p.nodes.iter().enumerate() {
         let share = n.share.unwrap_or(0.0);
         // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
@@ -148,8 +149,11 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
         // PostgreSQL's estimate gives only the rows a scan returns, so its own cost stands in for its size.
         let big = read.is_some_and(|r| r >= BIG_SCAN) || n.removed.is_some_and(|r| r >= BIG_SCAN) || (d == Dialect::Postgres && n.self_cost.is_some_and(|c| c >= BIG_SCAN));
         let full = n.access == Access::Scan && big && weighty;
-        let reasonable = match advice[i] {
-            Some((_, Advice::Reasonable { kept, .. })) => Some(kept),
+        // Only a plain filtered full scan can be called reasonable, so no other scan needs its advice yet.
+        let plain = full && !n.filter.is_empty() && jit_node != Some(i) && slow_per_row(p, i).is_none();
+        let adv = if plain { advice[i].get(p, i, d, pooler) } else { None };
+        let reasonable = match adv {
+            Some((_, Advice::Reasonable { kept, .. })) => Some(*kept),
             _ => None,
         };
         match verdict(p, i, full, weighty, jit_node == Some(i), reasonable) {
@@ -231,7 +235,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
         }
     }
     if let Some(ev) = ev {
-        with_evidence(p, d, ev, by_time, advice, &mut out);
+        with_evidence(p, d, ev, by_time, pooler, advice, &mut out);
         super::rewrite::add(p, d, ev, pooler, by_time, &mut out);
     }
     // MySQL's tree text labels a node with its whole line, which does not read as a node type.
@@ -249,10 +253,35 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
     out
 }
 
+/// The index advice on one filtered scan: its matched table until the advice is needed, then the advice.
+enum Advised<'a> {
+    Later(Option<&'a TableEv>),
+    Done(Option<(&'a TableEv, Advice)>),
+}
+
+impl<'a> Advised<'a> {
+    fn get(&mut self, p: &Plan, i: usize, d: Dialect, pooler: bool) -> Option<&(&'a TableEv, Advice)> {
+        if let Advised::Later(t) = *self {
+            *self = Advised::Done(t.map(|t| (t, index::advise(p, i, d, t, pooler))));
+        }
+        match self {
+            Advised::Done(a) => a.as_ref(),
+            Advised::Later(_) => None,
+        }
+    }
+
+    fn take(self, p: &Plan, i: usize, d: Dialect, pooler: bool) -> Option<(&'a TableEv, Advice)> {
+        match self {
+            Advised::Later(t) => t.map(|t| (t, index::advise(p, i, d, t, pooler))),
+            Advised::Done(a) => a,
+        }
+    }
+}
+
 /// What the catalog adds: on each filtered full scan an index to create, the index that already serves it, stale
 /// statistics to refresh, or why none of that is offered. A scan with no finding of its own gets one only when it runs
-/// many times inside a nested loop and an index is the fix. `advice` is what `find` worked out for each node.
-fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, by_time: bool, advice: Vec<Option<(&TableEv, Advice)>>, out: &mut Vec<Finding>) {
+/// many times inside a nested loop and an index is the fix. `advice` is what `find` matched or worked out for each node.
+fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, by_time: bool, pooler: bool, advice: Vec<Advised>, out: &mut Vec<Finding>) {
     for ((i, n), advice) in p.nodes.iter().enumerate().zip(advice) {
         if n.access != Access::Scan || n.filter.is_empty() {
             continue;
@@ -263,7 +292,7 @@ fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, by_time: bool, advice: Vec
         if scan.is_none() && mis.is_none() && !repeated {
             continue;
         }
-        let Some((t, advice)) = advice else {
+        let Some((t, advice)) = advice.take(p, i, d, pooler) else {
             if let Some(k) = scan {
                 out[k].no_fix = Some(if ev.failed { "No suggestion: the catalog could not be read." } else { "No index suggested: the table could not be matched to one table of the statement." }.into());
             }
@@ -629,16 +658,6 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
         }
     }
     body
-}
-
-/// Every node below `i`.
-pub fn below(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
-    let mut stack = p.nodes[i].kids.clone();
-    std::iter::from_fn(move || {
-        let k = stack.pop()?;
-        stack.extend(p.nodes[k].kids.iter().copied());
-        Some(k)
-    })
 }
 
 /// The rows a scan reads per loop: what it returned and what its filter removed, or the estimate.

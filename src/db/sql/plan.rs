@@ -310,9 +310,9 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     if !json {
         tree_filters(&mut plan);
     }
-    // Parsed before the costs, since a subquery that reads columns from outside it is charged per row.
+    // The findings and the panes read the parsed conditions; a One-Time Filter is only ever read as text.
     for n in &mut plan.nodes {
-        for c in [&mut n.filter, &mut n.index_cond, &mut n.join_cond, &mut n.join_filter, &mut n.one_time] {
+        for c in [&mut n.filter, &mut n.index_cond, &mut n.join_cond, &mut n.join_filter] {
             c.expr = if c.text.is_empty() { None } else { cond::parse(&c.text, d) };
         }
     }
@@ -751,7 +751,8 @@ pub(crate) fn user_plan(join_filter: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::findings::{below, Kind};
+    use super::findings::Kind;
+    use super::tree::below;
     use super::*;
 
     const PG: &str = r#"[{"Plan":{"Node Type":"Hash Join","Join Type":"Inner","Startup Cost":10.5,"Total Cost":2500.25,"Plan Rows":50000,"Plan Width":40,"Hash Cond":"(o.customer_id = c.id)","Plans":[
@@ -1173,7 +1174,7 @@ mod tests {
             assert!(!f.evidence.is_empty() && f.no_fix.is_none(), "{f:?}");
             assert!(f.body.iter().any(|l| l.starts_with("A full scan is reasonable here: the filter keeps 36%")), "{:?}", f.body);
         }
-        // Half again slower than their slowest run, at 10 µs a page, these scans are still read at a normal pace.
+        // Half again slower than their slowest run, at 10 us a page, these scans are still read at a normal pace.
         let p = user_runs(23.9, 21.8, 75.0);
         assert!(of(&p, Kind::SlowRows).is_none() && of(&p, Kind::FullScan).is_some_and(|f| f.body.len() == 1), "{:?}", p.findings);
     }
@@ -1463,7 +1464,7 @@ mod tests {
 
     #[test]
     fn a_plain_scan_in_parallel_workers_is_judged_in_their_time() {
-        // Each of three processes read the whole table in 20 ms: 30,000 rows and 600 pages in 60 ms of work, 2 µs a row.
+        // Each of three processes read the whole table in 20 ms: 30,000 rows and 600 pages in 60 ms of work, 2 us a row.
         let text = r#"[{"Plan":{"Node Type":"Gather","Startup Cost":1000,"Total Cost":20000,"Plan Rows":30000,"Workers Planned":2,"Workers Launched":2,"Actual Startup Time":1,"Actual Total Time":25,"Actual Rows":30000,"Actual Loops":1,"Plans":[
             {"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"events","Alias":"e","Startup Cost":0,"Total Cost":19000,"Plan Rows":10000,"Plan Width":40,"Actual Startup Time":0.01,"Actual Total Time":20,"Actual Rows":10000,"Actual Loops":3,"Shared Hit Blocks":600,"Shared Read Blocks":0}]},"Planning Time":0.1,"Execution Time":26}]"#;
         let p = parse(Dialect::Postgres, text).unwrap();
