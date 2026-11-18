@@ -22,6 +22,8 @@ P = $(shell expr $(1) + $(SET) \* 100)
 PG18 = postgres://postgres:quarry@$(ADDR):$(call P,55418)/postgres
 PG13 = postgres://postgres:quarry@$(ADDR):$(call P,55413)/postgres
 PGBOUNCER = postgres://postgres:quarry@$(ADDR):$(call P,56432)/postgres
+# PostgreSQL 18 with the HypoPG extension installed (docker/pg-hypopg), for the Explain dialog's hypothetical index trial.
+PGHYPO = postgres://postgres:quarry@$(ADDR):$(call P,56434)/postgres
 MYSQL = mysql://root:quarry@$(ADDR):$(call P,53306)
 MARIADB = mariadb://root:quarry@$(ADDR):$(call P,53307)
 MONGO = mongodb://$(ADDR):$(call P,57017)/?directConnection=true
@@ -36,7 +38,7 @@ SSH = root:quarry@$(ADDR):$(call P,52222)
 # The live tests mostly wait on the servers, so they run on 32 threads, which takes PostgreSQL and MySQL past their default
 # connection limits. Not 500 for MySQL: a test proves SET GLOBAL max_connections = 500 was refused. The servers hold only
 # test data, so they skip flushing to disk.
-LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)' QUARRY_TEST_SOCKS='$(SOCKS)' QUARRY_TEST_MONGO_TLS='$(MONGO_TLS)' QUARRY_TEST_MONGO_SET='$(MONGO_SET)' QUARRY_TEST_SSH='$(SSH)'
+LIVE = RUST_TEST_THREADS=32 QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_POSTGRES_HYPOPG='$(PGHYPO)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)' QUARRY_TEST_SOCKS='$(SOCKS)' QUARRY_TEST_MONGO_TLS='$(MONGO_TLS)' QUARRY_TEST_MONGO_SET='$(MONGO_SET)' QUARRY_TEST_SSH='$(SSH)'
 
 PG_FAST = -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=500
 MY_FAST = --innodb-flush-log-at-trx-commit=0 --sync-binlog=0 --max-connections=400
@@ -146,6 +148,9 @@ servers-up:
 	@$(DOCKER) network create $(N)-pgb >/dev/null 2>&1 || true
 	@$(call UP,$(N)-pgb-pg,--network $(N)-pgb -e POSTGRES_PASSWORD=quarry postgres:18 $(PG_FAST))
 	@$(call UP,$(N)-pgbouncer,--network $(N)-pgb -p $(call P,56432):5432 -e DB_HOST=$(N)-pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer)
+	@# Built from docker/pg-hypopg; the build is cached, so this is quick once the image exists.
+	@$(DOCKER) build -q -t quarry-pghypo docker/pg-hypopg >/dev/null
+	@$(call UP,$(N)-pghypo,-p $(call P,56434):5432 -e POSTGRES_PASSWORD=quarry quarry-pghypo $(PG_FAST))
 	@echo "waiting for the servers"
 	@# Over TCP: on first start the MySQL and MariaDB images run a temporary server on the socket only, then restart,
 	@# so a socket ping answers before the real server is up.
@@ -156,13 +161,13 @@ servers-up:
 	@until $(DOCKER) exec $(N)-ssh pgrep sshd >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-mariadb mariadb-admin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
-	@until $(DOCKER) exec $(N)-pg18 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pg13 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pgb-pg pg_isready -U postgres -q; do sleep 1; done
+	@until $(DOCKER) exec $(N)-pg18 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pg13 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pgb-pg pg_isready -U postgres -q && $(DOCKER) exec $(N)-pghypo pg_isready -U postgres -q; do sleep 1; done
 	@until $(DOCKER) run --rm --network $(N)-pgb -e PGPASSWORD=quarry postgres:18 psql -h $(N)-pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
 	@echo "servers ready"
 
 # -v also removes their anonymous data volumes, which would otherwise pile up unused.
 servers-down:
-	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-mongo-tls $(N)-mongo-set $(N)-ssh $(N)-socks $(N)-pgbouncer $(N)-pgb-pg
+	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-mongo-tls $(N)-mongo-set $(N)-ssh $(N)-socks $(N)-pgbouncer $(N)-pgb-pg $(N)-pghypo
 	-$(DOCKER) network rm $(N)-pgb
 
 servers-status:
