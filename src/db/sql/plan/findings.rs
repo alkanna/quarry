@@ -82,6 +82,8 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
     let by_time = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
     for (i, n) in p.nodes.iter().enumerate() {
         let share = n.share.unwrap_or(0.0);
+        // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
+        let weighty = n.share.is_none_or(|s| s >= SHARE_MIN);
         let weight = weight_of(n, by_time);
         let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix });
         let name = n.name();
@@ -89,17 +91,17 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
         // PostgreSQL's estimate gives only the rows a scan returns, so its own cost stands in for its size.
         let big = read.is_some_and(|r| r >= BIG_SCAN) || n.removed.is_some_and(|r| r >= BIG_SCAN) || (d == Dialect::Postgres && n.self_cost.is_some_and(|c| c >= BIG_SCAN));
         let filtered = !n.filter.is_empty();
-        if n.access == Access::Scan && big && share >= SHARE_MIN {
+        if n.access == Access::Scan && big && weighty {
             if filtered {
                 push(Kind::FullScan, Severity::Warn, format!("Full scan of {name}"), weight.clone(), vec![scan_body(n)], None);
             } else if n.join_cond.is_empty() {
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
             }
-        } else if n.label == "index" && n.access == Access::Other && big && share >= SHARE_MIN {
+        } else if n.label == "index" && n.access == Access::Other && big && weighty {
             push(Kind::FullIndexScan, Severity::Warn, format!("Full index scan of {name}"), weight.clone(), vec![format!("Reads every entry of {}, about {} of them, instead of searching it.", if n.index.is_empty() { "the index" } else { &n.index }, count(read.unwrap_or(0.0)))], None);
-        } else if let (Some(r), Some(k)) = (n.removed, n.actual_rows) {
-            if r >= BIG_SCAN && r >= 10.0 * k && share >= SHARE_MIN {
+        } else if let (Some(r), Some(k)) = (n.removed, n.kept_rows()) {
+            if r >= BIG_SCAN && r >= 10.0 * k && weighty {
                 push(Kind::Discards, Severity::Warn, format!("{name} discards most rows it reads"), weight.clone(), vec![kept_line(r, k)], None);
             }
         }
@@ -169,7 +171,7 @@ pub fn below(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
 
 /// The rows a scan reads per loop: what it returned and what its filter removed, or the estimate.
 pub fn rows_read(n: &PlanNode) -> Option<f64> {
-    match (n.actual_rows, n.removed) {
+    match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) => Some(k + r),
         _ => n.rows.map(|r| r + n.removed.unwrap_or(0.0)),
     }
@@ -185,7 +187,7 @@ fn weight_of(n: &PlanNode, by_time: bool) -> String {
 
 fn scan_body(n: &PlanNode) -> String {
     let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default();
-    match (n.actual_rows, n.removed) {
+    match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) if r > 0.0 => kept_line(r, k),
         _ if !cols.is_empty() => format!("Reads every row, then keeps those matching {}.", and_list(&cols)),
         _ => "Reads every row, then filters them.".into(),

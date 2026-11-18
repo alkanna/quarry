@@ -19,7 +19,7 @@ pub(in crate::app) struct SqlExplain {
     /// The tab's database, for the Query tab the classic rows open in.
     tab_db: String,
     pub(super) dialect: Dialect,
-    db: Db,
+    pub(super) db: Db,
     schema: String,
     pub(in crate::app) plan: Option<Plan>,
     /// Why the plan could not be drawn, when the server's text could not be read.
@@ -88,6 +88,14 @@ impl App {
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
 
+    /// The offline demo's dialog: ANALYZE would send the statement to a server that is not there, so it is turned off.
+    pub(in crate::app) fn demo_explain_offline(&mut self, d: Dialect, text: &str, plan: &str) {
+        self.demo_explain(d, text, plan);
+        if let Some(Modal::SqlExplain(x)) = &mut self.modal {
+            x.analyze = Err("The offline demo has no server to run the statement on.".into());
+        }
+    }
+
     /// Opens the dialog on `plan` as if the server had answered, over a pool that never connects: the offline demo and
     /// the tests have no server for `sql_explain` to ask.
     pub(in crate::app) fn demo_explain(&mut self, d: Dialect, text: &str, plan: &str) {
@@ -97,9 +105,9 @@ impl App {
         // The pool is never used; the dialect and version are what the dialog reads.
         let version = if d == Dialect::Postgres { "18.6" } else if d == Dialect::MariaDb { "11.4.3-MariaDB" } else { "8.4.3" };
         let db = Db { pool: crate::db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: d, opts: crate::db::sql::exec::Opts::My(opts), version: version.into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
-        let conn = self.t().map_or(0, |t| t.sel.conn);
+        let (conn, tab_db, schema) = self.t().map_or((0, String::new(), String::new()), |t| (t.sel.conn, t.sel.db.clone(), if d == Dialect::Postgres { t.sel.schema.clone() } else { t.sel.db.clone() }));
         let analyze = plan::analyze_mode(text, d, false);
-        let mut x = SqlExplain::new(text.into(), conn, "shop".into(), d, db, "shop".into(), analyze);
+        let mut x = SqlExplain::new(text.into(), conn, tab_db, d, db, schema, analyze);
         (x.req, x.busy) = (1, true);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
         let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
@@ -258,6 +266,12 @@ impl App {
                     self.sql_new_query(x.conn, x.tab_db.clone());
                     if let Some(s) = self.tabs[self.cur].sql.as_mut() {
                         s.query = sql;
+                        // The draft runs where the plan was made, not where the sidebar happens to be.
+                        if x.dialect == Dialect::Postgres {
+                            s.run_schema = x.schema.clone();
+                        } else {
+                            s.run_db = x.schema.clone();
+                        }
                     }
                     return;
                 }

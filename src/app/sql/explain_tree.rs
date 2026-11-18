@@ -6,7 +6,6 @@ use super::explain::{SqlExplain, XAct};
 use super::explain_panel::{access_color, figure, share_color};
 use crate::app::*;
 use crate::db::sql::plan::{cond, findings, Plan, PlanNode, Severity};
-use crate::db::sql::Dialect;
 
 const ROW: f32 = 32.0;
 const ROW_SUB: f32 = 46.0;
@@ -103,7 +102,7 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - 24.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, n) in p.nodes.iter().enumerate() {
-            let sub = node_sub(n, x.dialect);
+            let sub = node_sub(n);
             let name = format!("{} {}", n.label, n.name()).trim().to_string();
             let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &name, |pt, rect| paint_row(pt, rect, n, sub.as_deref(), marks[i], &cols));
             if scroll_to == Some(i) {
@@ -117,8 +116,7 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
 }
 
 /// The second line of a row: the columns its filter tests, or the condition it searches or joins on.
-fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
-    let cols = |text: &str| cond::parse(text, d).map(|e| cond::columns(&e)).filter(|c| !c.is_empty());
+fn node_sub(n: &PlanNode) -> Option<String> {
     if let Some(e) = &n.filter_expr {
         let c = cond::columns(e);
         if !c.is_empty() {
@@ -128,11 +126,11 @@ fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
     if !n.filter.is_empty() {
         return Some("Filter".into());
     }
-    if let Some(c) = cols(&n.index_cond) {
+    if let Some(c) = n.index_cond_expr.as_ref().map(cond::columns).filter(|c| !c.is_empty()) {
         return Some(format!("Index Cond: {}", c.join(", ")));
     }
     if !n.join_cond.is_empty() {
-        let line = cond::parse(&n.join_cond, d).map(|e| cond::one_line(&e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+        let line = n.join_cond_expr.as_ref().map(|e| cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
         let short: String = line.chars().take(60).collect();
         return Some(if n.label.contains("Join") || n.label == "Hash" { short } else { format!("Lookup: {short}") });
     }
@@ -201,9 +199,9 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
                     galley_at(p, cx - tw, top, g, color);
                     let track = egui::Rect::from_min_max(egui::pos2(left + 4.0, top - 3.0), egui::pos2(cx - tw - 10.0, top + 3.0));
                     if track.width() > 12.0 {
-                        p.rect_filled(track, 3, TRACK());
+                        p.rect_filled(track, R_SM, TRACK());
                         let fill = egui::Rect::from_min_size(track.min, egui::vec2((track.width() * s as f32).max(3.0), track.height()));
-                        p.rect_filled(fill, 3, color);
+                        p.rect_filled(fill, R_SM, color);
                     }
                 }
             }

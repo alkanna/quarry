@@ -25,6 +25,7 @@ pub(super) fn link(p: &mut Plan) {
             p.nodes[i].filter = p.nodes[j].filter.clone();
             if let (Some(read), Some(kept)) = (p.nodes[i].actual_rows, p.nodes[j].actual_rows) {
                 p.nodes[i].removed = Some((read - kept).max(0.0));
+                p.nodes[i].kept = Some(kept);
             }
         }
     }
@@ -89,13 +90,27 @@ fn est_loops(p: &Plan) -> Vec<f64> {
         let Some(j) = p.nodes[i].parent else { continue };
         let parent = &p.nodes[j];
         let mut l = loops[j];
-        if parent.label.starts_with("Nested Loop") && p.nodes[i].role == "Inner" {
-            let outer = parent.kids.iter().find(|&&k| p.nodes[k].role == "Outer").and_then(|&k| p.nodes[k].rows).unwrap_or(1.0);
+        if is_nested_loop(&parent.label) && is_inner(p, j, i) {
+            let outer = parent.kids.iter().find(|&&k| !is_inner(p, j, k)).and_then(|&k| p.nodes[k].rows).unwrap_or(1.0);
             l *= outer.max(1.0);
         }
         loops[i] = l;
     }
     loops
+}
+
+/// PostgreSQL's "Nested Loop" and MySQL's "Nested loop inner join".
+pub(super) fn is_nested_loop(label: &str) -> bool {
+    label.to_ascii_lowercase().starts_with("nested loop")
+}
+
+/// Whether `k` is the inner side of the join `j`: PostgreSQL names it, MySQL's tree puts the outer side first.
+pub(super) fn is_inner(p: &Plan, j: usize, k: usize) -> bool {
+    match p.nodes[k].role.as_str() {
+        "Inner" => true,
+        "" => p.nodes[j].kids.first() != Some(&k),
+        _ => false,
+    }
 }
 
 /// The cost each node carries in the whole plan. A parent that stops early (Limit, a semi join) costs less than the

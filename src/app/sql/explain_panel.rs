@@ -9,6 +9,9 @@ use crate::db::sql::Dialect;
 
 /// The findings shown before "N more".
 const SHOWN: usize = 2;
+/// A glyph's box beside a title, and a stat tile's height.
+const GLYPH_BOX: f32 = 16.0;
+const TILE_H: f32 = 54.0;
 
 /// A count or time for a cell: whole numbers grouped, small ones with two decimals.
 pub(super) fn figure(n: f64) -> String {
@@ -45,7 +48,7 @@ pub(super) fn findings_strip(ui: &mut egui::Ui, x: &mut SqlExplain, acts: &mut V
     let Some(p) = &x.plan else { return };
     if p.findings.is_empty() {
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
             glyphs::check(ui.painter(), r.center(), SUCCESS());
             ui.label(RichText::new("Nothing in this plan stands out.").color(MUTED()));
         });
@@ -86,7 +89,7 @@ fn finding_card(ui: &mut egui::Ui, f: &Finding, selected: bool, acts: &mut Vec<X
     let out = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, color)).corner_radius(R_LG).inner_margin(egui::Margin { left: 14, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
             match f.severity {
                 Severity::Warn => glyphs::warn(ui.painter(), r.center(), color),
                 Severity::Note => glyphs::info(ui.painter(), r.center(), color),
@@ -104,13 +107,9 @@ fn finding_card(ui: &mut egui::Ui, f: &Finding, selected: bool, acts: &mut Vec<X
                 for b in &f.body {
                     ui.label(RichText::new(b).size(TXT_SMALL).color(MUTED()));
                 }
+                // The fix is beside the plan once the card is clicked; a button here would sit under the card's own click.
                 if let Some(fix) = &f.fix {
-                    ui.add_space(4.0);
-                    if ui.small_button(&fix.label).on_hover_text("Show the fix beside the plan").clicked() {
-                        if let Some(n) = f.node {
-                            acts.push(XAct::Select(n));
-                        }
-                    }
+                    ui.label(RichText::new(format!("Fix: {}", fix.label)).size(TXT_SMALL).color(C_LINK()));
                 }
             });
         });
@@ -155,17 +154,17 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
         ui.add_space(8.0);
         tiles(ui, p, n);
         // How many rows the node read and kept, and from where.
-        if let (Some(kept), Some(removed)) = (n.actual_rows, n.removed) {
+        if let (Some(kept), Some(removed)) = (n.kept_rows(), n.removed) {
             let loops = n.loops.unwrap_or(1.0);
             let (kept, removed) = (kept * loops, removed * loops);
             let read = kept + removed;
             ui.add_space(10.0);
             ui.label(caption_text("ROWS READ"));
             let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), Sense::hover());
-            ui.painter().rect_filled(r, 5, TRACK());
+            ui.painter().rect_filled(r, R_SM, TRACK());
             if read > 0.0 {
                 let w = (r.width() * (kept / read) as f32).max(4.0);
-                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(w, r.height())), 5, SUCCESS());
+                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(w, r.height())), R_SM, SUCCESS());
             }
             let pct = if read > 0.0 { kept / read * 100.0 } else { 0.0 };
             ui.label(RichText::new(format!("{} read  ·  {} kept ({})  ·  {} removed by the filter", figure(read), figure(kept), findings::pct_text(pct), figure(removed))).size(TXT_SMALL).color(TEXT()));
@@ -183,13 +182,13 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                 }
             }
         }
-        for (title, text) in [("INDEX CONDITION", &n.index_cond), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond)] {
+        for (title, text, expr) in [("INDEX CONDITION", &n.index_cond, &n.index_cond_expr), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond, &n.join_cond_expr)] {
             if text.is_empty() {
                 continue;
             }
             section(ui, title, Some(text), acts);
-            match cond::parse(text, x.dialect) {
-                Some(e) => condition_lines(ui, &e),
+            match expr {
+                Some(e) => condition_lines(ui, e),
                 None => {
                     ui.label(crate::ui::editor::sql_job_in(text, TXT_SMALL, x.dialect));
                 }
@@ -206,7 +205,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
         for f in p.findings.iter().filter(|f| f.node == Some(i)) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
                 match f.severity {
                     Severity::Warn => glyphs::warn(ui.painter(), r.center(), WARNING()),
                     Severity::Note => glyphs::info(ui.painter(), r.center(), MUTED()),
@@ -215,6 +214,11 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             });
             for b in &f.body {
                 ui.label(RichText::new(b).size(TXT_SMALL).color(MUTED()));
+            }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Setting && x.db.pooler()) {
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Behind a connection pooler a session setting does not last to the next statement, so {} is not offered here. Set it on the role or the server instead.", fix.label)).size(TXT_SMALL).color(MUTED()));
+                continue;
             }
             if let Some(fix) = &f.fix {
                 let sql = if fix.kind == FixKind::Setting { format!("{}\n{};", fix.sql, x.stmt.trim().trim_end_matches(';')) } else { fix.sql.clone() };
@@ -232,7 +236,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                     if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens it as a draft in a new Query tab. Nothing runs.").clicked() {
                         acts.push(XAct::Draft(sql.clone()));
                     }
-                    if ui.button("Copy").clicked() {
+                    if quiet(ui, "Copy").clicked() {
                         acts.push(XAct::Copy(sql));
                     }
                 });
@@ -242,7 +246,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
 }
 
 /// Detail lines the panel already shows in a better form.
-const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Join Filter:", "Rows removed by filter:", "Buffers:", "Index condition:", "Lookup:"];
+const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Rows removed by filter:", "Buffers:", "Index condition:", "Lookup:"];
 
 fn section(ui: &mut egui::Ui, title: &str, copy: Option<&String>, acts: &mut Vec<XAct>) {
     ui.add_space(10.0);
@@ -250,7 +254,7 @@ fn section(ui: &mut egui::Ui, title: &str, copy: Option<&String>, acts: &mut Vec
         ui.label(caption_text(title));
         if let Some(text) = copy {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("Copy").size(TXT_SMALL).color(C_LINK())).frame(false)).on_hover_text(format!("Copy the {} as the server wrote it", title.to_lowercase())).clicked() {
+                if quiet(ui, "Copy").on_hover_text(format!("Copy the {} as the server wrote it", title.to_lowercase())).clicked() {
                     acts.push(XAct::Copy(text.clone()));
                 }
             });
@@ -308,7 +312,7 @@ fn tiles(ui: &mut egui::Ui, p: &crate::db::sql::plan::Plan, n: &PlanNode) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (label, value, note, color) in items {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 54.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, TILE_H), Sense::hover());
             let pt = ui.painter();
             pt.rect(rect, R_BAR, PANEL(), Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
             let g = pt.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.6)));
@@ -339,7 +343,7 @@ fn context_line(p: &crate::db::sql::plan::Plan, i: usize) -> String {
             format!("{}, runs for {pl}", n.role)
         } else if pl == "Hash" {
             "builds the join's hash table".to_string()
-        } else if pl.starts_with("Nested Loop") || pl == "Nested loop" {
+        } else if pl.to_ascii_lowercase().starts_with("nested loop") {
             if first { "drives the nested loop".into() } else { "runs once per row of the side above".into() }
         } else if pl.contains("Join") {
             if first { "the join's outer side".into() } else { "the join's inner side".into() }

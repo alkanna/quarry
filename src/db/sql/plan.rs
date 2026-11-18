@@ -58,10 +58,15 @@ pub struct PlanNode {
     pub filter: String,
     pub index_cond: String,
     pub join_cond: String,
-    /// `filter` read into a condition, when it reads.
+    /// The conditions read, when they read; parsed once so drawing a frame never lexes them.
     pub filter_expr: Option<cond::Expr>,
+    pub index_cond_expr: Option<cond::Expr>,
+    pub join_cond_expr: Option<cond::Expr>,
     /// Rows the filter removed, per loop.
     pub removed: Option<f64>,
+    /// Rows the filter kept, per loop, when that is not `actual_rows`: MySQL's tree prints the filter as a node of its
+    /// own above the scan, so the scan's actual rows are the rows it read.
+    pub kept: Option<f64>,
     /// Shared buffers found in memory and read from disk.
     pub buffers: Option<(f64, f64)>,
     /// A sort that spilled, in kB on disk.
@@ -102,6 +107,11 @@ impl PlanNode {
     }
 
     /// How far the estimate was from what ran, as a factor of one or more, when both are known.
+    /// Rows kept by the node's filter, per loop.
+    pub fn kept_rows(&self) -> Option<f64> {
+        self.kept.or(self.actual_rows)
+    }
+
     pub fn off(&self) -> Option<f64> {
         if self.never_ran {
             return None;
@@ -223,9 +233,8 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     tree::link(&mut plan);
     tree::derive(&mut plan, d);
     for n in &mut plan.nodes {
-        if !n.filter.is_empty() {
-            n.filter_expr = cond::parse(&n.filter, d);
-        }
+        let read = |t: &str| if t.is_empty() { None } else { cond::parse(t, d) };
+        (n.filter_expr, n.index_cond_expr, n.join_cond_expr) = (read(&n.filter), read(&n.index_cond), read(&n.join_cond));
     }
     plan.findings = findings::find(&plan, d);
     plan.warnings = plan.findings.iter().map(Finding::line).collect();
@@ -340,7 +349,8 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     node.never_ran = node.loops == Some(0.0);
     node.filter = text(n, "Filter").to_string();
     node.index_cond = [text(n, "Index Cond"), text(n, "Recheck Cond")].into_iter().find(|s| !s.is_empty()).unwrap_or_default().to_string();
-    node.join_cond = ["Hash Cond", "Merge Cond", "Join Filter"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    // A Join Filter stays a detail line of its own, so a join with both shows both.
+    node.join_cond = ["Hash Cond", "Merge Cond"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
     node.parallel = flag(n, "Parallel Aware");
     node.workers = num(n, "Workers Launched").or_else(|| num(n, "Workers Planned"));
     for key in ["Index Cond", "Recheck Cond", "Filter", "Join Filter", "Hash Cond", "Merge Cond", "One-Time Filter"] {
@@ -846,5 +856,26 @@ mod tests {
         let p = parse(Dialect::MariaDb, fixture("mariadb-joinbuf-analyze")).unwrap();
         let o = p.nodes.iter().find(|n| n.alias == "o").unwrap();
         assert!((o.self_ms.unwrap() - 43.22).abs() < 0.01 && o.self_cost.is_some());
+    }
+
+    #[test]
+    fn review_cases_count_rows_once_and_keep_old_mariadb_findings() {
+        // MySQL's tree: the scan read 200,000 rows and its filter kept none.
+        let p = parse(Dialect::MySql, fixture("mysql-join-analyze")).unwrap();
+        let f = p.findings.iter().find(|f| f.kind == Kind::FullScan).unwrap();
+        assert_eq!(f.body, ["Read 200,000 rows to keep 0 (0%)."]);
+        // The inner side of MySQL's nested loop runs once per outer row, so the loop itself costs little of its own.
+        let p = parse(Dialect::MySql, fixture("mysql-joinbuf-analyze")).unwrap();
+        let nl = &p.nodes[0];
+        assert!(nl.label.starts_with("Nested loop") && nl.self_cost.unwrap() < 0.3 * nl.cost.unwrap(), "{:?} of {:?}", nl.self_cost, nl.cost);
+        // MariaDB before 11 gives no cost per table; a big filtered scan is still a finding.
+        let old = r#"{"query_block":{"select_id":1,"table":{"table_name":"orders","access_type":"ALL","rows":200000,"filtered":100,"attached_condition":"orders.`status` = 'x'"}}}"#;
+        assert!(parse(Dialect::MariaDb, old).unwrap().findings.iter().any(|f| f.kind == Kind::FullScan));
+        // A join's filter stays visible beside its hash condition.
+        let pg = r#"[{"Plan":{"Node Type":"Hash Join","Join Type":"Inner","Total Cost":10,"Plan Rows":5,"Hash Cond":"(o.cid = c.id)","Join Filter":"(o.total > c.cap)"}}]"#;
+        let p = parse(Dialect::Postgres, pg).unwrap();
+        assert_eq!(p.nodes[0].join_cond, "(o.cid = c.id)");
+        assert!(p.nodes[0].detail.contains(&"Join Filter: (o.total > c.cap)".to_string()));
+        assert!(p.nodes[0].join_cond_expr.is_some());
     }
 }
