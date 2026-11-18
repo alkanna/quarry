@@ -12,6 +12,9 @@ pub(super) const SHARE_MIN: f64 = 0.20;
 pub const OFF_WARN: f64 = 5.0;
 /// A sort or temporary table over fewer rows than this costs too little to mention.
 const BIG_SORT: f64 = 10_000.0;
+/// Below this share of the time a node's share of the cost does not count for it. Far under SHARE_MIN, so noise between
+/// runs moves a node across it only when the node costs too little time to matter.
+const TIME_FLOOR: f64 = 0.05;
 /// A node with this share of the plan is what the plan's cost or time is, so it always gets a finding.
 pub(super) const SHARE_MOST: f64 = 0.5;
 /// A plan this slow, or this costly when it did not run, explains its largest node even below SHARE_MOST, so it never
@@ -21,6 +24,13 @@ const SLOW_COST: f64 = 10_000.0;
 /// Microseconds per row read above which a scan of pages already in memory is slow. Plain scans in the captured plans
 /// take 0.03 to 0.07 µs a row; a function on every row took 2.9, and JIT counted in the scan 3 to 8.
 const SLOW_US: f64 = 1.0;
+/// Microseconds per 8 kB page read from memory above which a scan is slow. Per row alone misjudges wide rows: 13,895
+/// rows of 2 kB in 3,316 pages take 1 µs a row at a normal 4.4 µs a page. Plain Seq Scans in the captured plans take
+/// 2.4 to 8.2 µs a page (pg18-scan bookings 4.1, pg18-join si 6.8, pg18-stale events 8.2) and the user's wide tables
+/// 3.3 to 7 across runs, while md5 on every row took 456 and JIT counted in the scan 476. The bound is 25, three times
+/// the slowest plain scan, and a scan must be twice over it, so a plain scan would need to run six times slower than
+/// any captured one: half again either way between runs of one plan cannot cross it.
+const SLOW_PAGE_US: f64 = 2.0 * 25.0;
 /// Below this, a slow scan or a JIT compile is too short to be worth a finding.
 const SLOW_MIN_MS: f64 = 10.0;
 /// A subquery run fewer times than this costs too little to mention.
@@ -44,7 +54,8 @@ pub enum Kind {
     Dominant,
     /// A PostgreSQL SubPlan that runs again for every row its parent tests.
     SubPlanPerRow,
-    /// A scan that spends far longer per row than reading a row takes.
+    /// A scan that spends far longer per row and per page than reading them takes. On a filtered full scan it is a line
+    /// of the FullScan finding instead, so one read never carries two warnings.
     SlowRows,
     /// JIT compilation that took a large part of the run.
     Jit,
@@ -118,10 +129,12 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
     let mut out: Vec<Finding> = Vec::new();
     let by_time = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
     let jit_node = jit(p, &mut out);
+    // Full scans whose slowness went into their FullScan finding, which stays a warning whatever the catalog says.
+    let mut slow_scans = Vec::new();
     for (i, n) in p.nodes.iter().enumerate() {
         let share = n.share.unwrap_or(0.0);
         // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
-        let weighty = n.share.is_none_or(|s| s >= SHARE_MIN);
+        let weighty = weight_share(p, i).is_none_or(|s| s >= SHARE_MIN);
         let weight = weight_of(n, by_time);
         let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix, evidence: Vec::new(), no_fix: None });
         let name = n.name();
@@ -129,27 +142,25 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
         // PostgreSQL's estimate gives only the rows a scan returns, so its own cost stands in for its size.
         let big = read.is_some_and(|r| r >= BIG_SCAN) || n.removed.is_some_and(|r| r >= BIG_SCAN) || (d == Dialect::Postgres && n.self_cost.is_some_and(|c| c >= BIG_SCAN));
         let filtered = !n.filter.is_empty();
-        let slow_any = slow_per_row(n).filter(|_| n.access == Access::Scan && weighty);
+        let slow_any = slow_per_row(p, i).filter(|_| n.access == Access::Scan && weighty);
         // The scan that holds a JIT compile is explained by the JIT finding.
-        let slow = slow_any.filter(|_| jit_node != Some(i));
-        if let Some(us) = slow {
-            let rows = ran_rows(n).unwrap_or(0.0);
-            let pages = n.buffers.map_or(0.0, |(hit, read)| hit + read);
-            // Over about 1 kB a row the row itself is wide, so unpacking it comes first among the causes.
-            let wide = n.width.is_some_and(|w| w >= 1024.0) || (rows > 0.0 && pages * 8192.0 / rows >= 1024.0);
-            let mut body = vec![format!("It took {} ms for {} rows, {} µs a row, with its pages already in memory. A plain scan takes well under 0.1 µs a row.", ms_text(n.self_ms.unwrap_or(0.0)), count(rows), us_text(us))];
-            body.push(match &p.jit {
-                Some(j) => format!("This run used JIT, which took {} ms to compile {} functions, and PostgreSQL counts that time in the nodes that first ran the compiled code.", ms_text(j.total_ms), count(j.functions)),
-                None if wide => format!("Its rows are wide, about {} each in {} pages, so unpacking wide or compressed columns is the likely cost; a function in the output or the filter, or a row-level security policy, would also run for every row.", size(pages * 8.0 / rows.max(1.0)), count(pages)),
-                None => "Something runs for every row: a function in the output or the filter, a row-level security policy, or wide or compressed columns being unpacked.".into(),
-            });
+        let slow = slow_any.as_ref().filter(|_| jit_node != Some(i)).map(|s| slow_body(p, n, s));
+        let full = n.access == Access::Scan && big && weighty;
+        if let Some(body) = slow.clone().filter(|_| !(full && filtered)) {
             push(Kind::SlowRows, Severity::Warn, format!("Reading {name} is slow per row"), weight.clone(), body, None);
         }
-        // A scan that is most of the plan, slow, or holding a JIT compile is explained by its own finding, not called right.
-        let plain = slow_any.is_none() && share < SHARE_MOST && jit_node != Some(i);
-        if n.access == Access::Scan && big && weighty {
+        // A slow scan or one holding a JIT compile is explained by its own finding, not called right. A scan that is
+        // most of the plan is called right too, which dominant() then leaves alone, so the note does not come and go
+        // with its share of the time.
+        let plain = slow_any.is_none() && jit_node != Some(i);
+        if full {
             if filtered {
-                push(Kind::FullScan, Severity::Warn, format!("Full scan of {name}"), weight.clone(), vec![scan_body(n)], None);
+                let mut body = vec![scan_body(n)];
+                if let Some(s) = slow {
+                    body.extend(s);
+                    slow_scans.push(i);
+                }
+                push(Kind::FullScan, Severity::Warn, format!("Full scan of {name}"), weight.clone(), body, None);
             } else if n.join_cond.is_empty() && plain {
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
@@ -214,7 +225,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
         }
     }
     if let Some(ev) = ev {
-        with_evidence(p, d, ev, pooler, by_time, &mut out);
+        with_evidence(p, d, ev, pooler, by_time, &slow_scans, &mut out);
         super::rewrite::add(p, d, ev, pooler, by_time, &mut out);
     }
     // MySQL's tree text labels a node with its whole line, which does not read as a node type.
@@ -235,7 +246,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
 /// What the catalog adds: on each filtered full scan an index to create, the index that already serves it, stale
 /// statistics to refresh, or why none of that is offered. A scan with no finding of its own gets one only when it runs
 /// many times inside a nested loop and an index is the fix.
-fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: bool, out: &mut Vec<Finding>) {
+fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: bool, slow_scans: &[usize], out: &mut Vec<Finding>) {
     for (i, n) in p.nodes.iter().enumerate() {
         if n.access != Access::Scan || n.filter.is_empty() {
             continue;
@@ -288,9 +299,17 @@ fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: boo
                 let body = cause.unwrap_or_else(|| format!("{ix} serves this filter, yet the planner chose a full scan. Run with ANALYZE to see whether its row estimate is why."));
                 out.push(Finding { kind: Kind::UnusedIndex, severity: Severity::Warn, node: Some(i), title: format!("{name} has an index the planner did not use"), weight: weight_of(n, by_time), share: n.share.unwrap_or(0.0), body: vec![body], fix: None, evidence: lines, no_fix: None });
             }
-            Advice::No { why, lines } => {
-                if let Some(k) = scan {
-                    (out[k].no_fix, out[k].evidence) = (Some(format!("No index suggested: {why}.")), lines);
+            Advice::No { why, lines, kept } => {
+                let Some(k) = scan else { continue };
+                match kept {
+                    // The catalog shows no index could read less, so the scan is what to expect, unless it was slow
+                    // for another reason.
+                    Some(f) if !slow_scans.contains(&i) => {
+                        out[k].severity = Severity::Note;
+                        out[k].body.push(format!("A full scan is reasonable here: the filter keeps {} of the rows, too many for an index to read less than the scan.", pct_text(f * 100.0)));
+                        (out[k].no_fix, out[k].evidence) = (None, lines);
+                    }
+                    _ => (out[k].no_fix, out[k].evidence) = (Some(format!("No index suggested: {why}.")), lines),
                 }
             }
         }
@@ -343,17 +362,82 @@ fn jit(p: &Plan, out: &mut Vec<Finding>) -> Option<usize> {
     Some(i)
 }
 
-/// Microseconds per row a scan spent of its own time, when it ran long enough to tell and its pages were in memory.
-/// A scan that read most of its pages from disk is waiting on the disk, which is not slow per row in this sense.
-fn slow_per_row(n: &PlanNode) -> Option<f64> {
+/// The share that decides whether a node weighs enough for a finding: the larger of its share of the time and of the
+/// planner's cost. The cost is the same on every run of a plan, so a finding it justifies never comes and goes with
+/// timing noise; the time only adds findings for nodes that really took it. A node that took under TIME_FLOOR of the
+/// time is judged by its time alone: the cost was wrong about it, as MySQL's is when it leaves a dependent subquery out.
+pub(super) fn weight_share(p: &Plan, i: usize) -> Option<f64> {
+    let total: f64 = p.nodes.iter().filter_map(|n| n.self_cost).sum();
+    let n = &p.nodes[i];
+    let cost = n.self_cost.filter(|_| total > 0.0).map(|c| c / total);
+    match (n.share, cost) {
+        (Some(t), Some(c)) if t >= TIME_FLOOR => Some(t.max(c)),
+        (t, c) => t.or(c),
+    }
+}
+
+/// How slow a scan was, per row and per page, in the time of the processes that ran it.
+struct Slow {
+    us_row: f64,
+    us_page: f64,
+    rows: f64,
+    pages: f64,
+    procs: f64,
+}
+
+/// A scan that spent far longer per row and per page of its own time than reading them takes, when it ran long enough
+/// to tell and its pages were in memory. A scan that read most of its pages from disk is waiting on the disk, which is
+/// not slow in this sense. Per row alone would flag wide rows read at a normal pace, so the page must be slow too.
+fn slow_per_row(p: &Plan, i: usize) -> Option<Slow> {
+    let n = &p.nodes[i];
     let ms = n.self_ms.filter(|&m| m >= SLOW_MIN_MS)?;
     let rows = ran_rows(n)?;
     let (hit, read) = n.buffers?;
-    if rows < 1.0 || read > 0.1 * (hit + read) {
+    let pages = hit + read;
+    if rows < 1.0 || pages < 1.0 || read > 0.1 * pages {
         return None;
     }
-    let us = ms * 1000.0 / rows;
-    (us >= SLOW_US).then_some(us)
+    // A parallel scan's time is side by side while its rows and pages add up every process's.
+    let procs = procs(p, i);
+    let busy_us = ms * 1000.0 * procs;
+    let s = Slow { us_row: busy_us / rows, us_page: busy_us / pages, rows, pages, procs };
+    (s.us_row >= SLOW_US && s.us_page >= SLOW_PAGE_US).then_some(s)
+}
+
+/// The processes that ran node `i`: the workers of the Gather above a parallel node and the leader, else one.
+fn procs(p: &Plan, i: usize) -> f64 {
+    if !p.nodes[i].parallel {
+        return 1.0;
+    }
+    let mut at = p.nodes[i].parent;
+    while let Some(j) = at {
+        if p.nodes[j].op == Op::Gather {
+            return p.nodes[j].workers.unwrap_or(0.0) + 1.0;
+        }
+        at = p.nodes[j].parent;
+    }
+    1.0
+}
+
+/// What a slow scan's finding says: the numbers, then the likely cause.
+fn slow_body(p: &Plan, n: &PlanNode, s: &Slow) -> Vec<String> {
+    let over = if s.procs > 1.0 { format!(" side by side in {} processes", count(s.procs)) } else { String::new() };
+    let mut body = vec![format!(
+        "It took {} ms{over} for {} rows in {} pages already in memory: {} µs a row and {} µs a page. A plain scan takes well under 0.1 µs a row and 10 µs a page.",
+        ms_text(n.self_ms.unwrap_or(0.0)),
+        count(s.rows),
+        count(s.pages),
+        us_text(s.us_row),
+        us_text(s.us_page)
+    )];
+    // Over about 1 kB a row the row itself is wide, so unpacking it comes first among the causes.
+    let wide = n.width.is_some_and(|w| w >= 1024.0) || s.pages * 8192.0 / s.rows >= 1024.0;
+    body.push(match &p.jit {
+        Some(j) => format!("This run used JIT, which took {} ms to compile {} functions, and PostgreSQL counts that time in the nodes that first ran the compiled code.", ms_text(j.total_ms), count(j.functions)),
+        None if wide => format!("Its rows are wide, about {} each in {} pages, so unpacking wide or compressed columns is the likely cost; a function in the output or the filter, or a row-level security policy, would also run for every row.", size(s.pages * 8.0 / s.rows), count(s.pages)),
+        None => "Something runs for every row: a function in the output or the filter, a row-level security policy, or wide or compressed columns being unpacked.".into(),
+    });
+    body
 }
 
 /// The rows a scan read over every loop, from what ran: the rows it returned and those its filter removed.
@@ -407,7 +491,9 @@ fn dominant(p: &Plan, by_time: bool, out: &mut Vec<Finding>) {
     if !slow {
         return;
     }
-    let warned = |out: &Vec<Finding>, i: usize| out.iter().any(|f| f.node == Some(i) && f.severity == Severity::Warn);
+    // A scan already judged, even as a note, keeps that judgment: a full scan the catalog showed to be reasonable must
+    // not come back as a warning that it is most of the plan.
+    let warned = |out: &Vec<Finding>, i: usize| out.iter().any(|f| f.node == Some(i) && (f.severity == Severity::Warn || matches!(f.kind, Kind::FullScan | Kind::ScanIsRight)));
     let mut picks: Vec<usize> = (0..p.nodes.len()).filter(|&i| p.nodes[i].share.is_some_and(|s| s >= SHARE_MOST)).collect();
     if picks.is_empty() && !out.iter().any(|f| f.severity == Severity::Warn) {
         let s = |i: usize| p.nodes[i].share.unwrap_or(0.0);

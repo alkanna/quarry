@@ -1107,6 +1107,85 @@ mod tests {
         for name in ["pg18-scan-analyze", "pg18-join-analyze", "pg18-subhash-analyze", "pg18-parallel-analyze", "pg13-join-analyze"] {
             assert!(of(&parse(Dialect::Postgres, fixture(name)).unwrap(), Kind::SlowRows).is_none(), "{name}");
         }
+        // At half its time it is still far over the page bound, so noise between runs does not hide it.
+        let half = fixture("pg18-slowrow-analyze").replace(r#""Actual Total Time":36.951"#, r#""Actual Total Time":18.4755"#);
+        assert!(of(&parse(Dialect::Postgres, &half).unwrap(), Kind::SlowRows).is_some());
+    }
+
+    /// The user's join of bookings b and service_inductors si as PostgreSQL 18 ran it, with every page in memory: b
+    /// read 13,530 rows of about 1 kB in 2,273 pages and kept 4,911, si read all 13,895 rows of about 2 kB in 3,316.
+    fn user_runs(b_ms: f64, si_ms: f64, total_ms: f64) -> Plan {
+        let b = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"bookings","Alias":"b","Startup Cost":0,"Total Cost":2442.6,"Plan Rows":4900,"Plan Width":40,"Actual Startup Time":0.02,"Actual Total Time":{b_ms},"Actual Rows":4911,"Actual Loops":1,"Filter":"(status = 'DONE'::text)","Rows Removed by Filter":8619,"Shared Hit Blocks":2273,"Shared Read Blocks":0}}"#);
+        let si = format!(r#"{{"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"service_inductors","Alias":"si","Startup Cost":0,"Total Cost":3454.9,"Plan Rows":13895,"Plan Width":60,"Actual Startup Time":0.01,"Actual Total Time":{si_ms},"Actual Rows":13895,"Actual Loops":1,"Shared Hit Blocks":3316,"Shared Read Blocks":0}}"#);
+        let hash = format!(r#"{{"Node Type":"Hash","Parent Relationship":"Inner","Startup Cost":3454.9,"Total Cost":3454.9,"Plan Rows":13895,"Actual Startup Time":{h},"Actual Total Time":{h},"Actual Rows":13895,"Actual Loops":1,"Plans":[{si}]}}"#, h = si_ms + 1.0);
+        let plan = format!(r#"[{{"Plan":{{"Node Type":"Hash Join","Join Type":"Inner","Startup Cost":3628,"Total Cost":6100,"Plan Rows":4900,"Actual Startup Time":{h},"Actual Total Time":{total_ms},"Actual Rows":4911,"Actual Loops":1,"Hash Cond":"(b.service_id = si.service_id)","Plans":[{b},{hash}]}},"Planning Time":0.4,"Execution Time":{e}}}]"#, h = si_ms + 1.2, e = total_ms + 0.2);
+        parse(Dialect::Postgres, &plan).unwrap()
+    }
+
+    #[test]
+    fn the_same_plan_run_again_gives_the_same_findings() {
+        let set = |p: &Plan| {
+            let mut s: Vec<(String, Kind, Severity)> = p.findings.iter().map(|f| (f.node.map(|i| p.nodes[i].name()).unwrap_or_default(), f.kind, f.severity)).collect();
+            s.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+            s
+        };
+        let (b, si) = ("bookings b".to_string(), "service_inductors si".to_string());
+        // Four runs the user made, then one where b took only 18% of the time: its cost share keeps its finding.
+        for (b_ms, si_ms, total) in [(8.7, 11.0, 40.5), (13.7, 14.5, 60.7), (9.2, 11.6, 42.0), (15.9, 11.9, 50.8), (9.0, 11.9, 50.0)] {
+            let mut p = user_runs(b_ms, si_ms, total);
+            if b_ms == 9.0 {
+                let i = p.nodes.iter().position(|n| n.alias == "b").unwrap();
+                assert!(p.nodes[i].share.unwrap() < findings::SHARE_MIN, "{:?}", p.nodes[i].share);
+            }
+            assert_eq!(set(&p), [(b.clone(), Kind::FullScan, Severity::Warn), (si.clone(), Kind::ScanIsRight, Severity::Note)], "{b_ms} ms: {:?}", p.findings);
+            assert!(p.findings.iter().all(|f| f.evidence.is_empty()));
+            // The catalog shows the filter keeps 36%: no index reads less, so the full scan is a note that says so.
+            let mut ev = Evidence::demo(&p, Dialect::Postgres);
+            ev.tables[0].rows = Some(13_530.0);
+            p.refind(Dialect::Postgres, Some(&ev), false);
+            assert_eq!(set(&p), [(b.clone(), Kind::FullScan, Severity::Note), (si.clone(), Kind::ScanIsRight, Severity::Note)], "{b_ms} ms: {:?}", p.findings);
+            let f = of(&p, Kind::FullScan).unwrap();
+            assert!(!f.evidence.is_empty() && f.no_fix.is_none(), "{f:?}");
+            assert!(f.body.iter().any(|l| l.starts_with("A full scan is reasonable here: the filter keeps 36%")), "{:?}", f.body);
+        }
+        // Half again slower than their slowest run, at 10 µs a page, these scans are still read at a normal pace.
+        let p = user_runs(23.9, 21.8, 75.0);
+        assert!(of(&p, Kind::SlowRows).is_none() && of(&p, Kind::FullScan).is_some_and(|f| f.body.len() == 1), "{:?}", p.findings);
+    }
+
+    #[test]
+    fn a_slow_filtered_scan_is_one_warning_whatever_the_catalog_says() {
+        // The md5 scan with a filter that keeps 37%: one full scan finding that says it is slow, not two.
+        let text = fixture("pg18-slowrow-analyze").replace(r#""Actual Rows":12622.0,"#, r#""Actual Rows":4622.0,"Rows Removed by Filter":8000,"Filter":"(service_id = 5)","#);
+        let mut p = parse(Dialect::Postgres, &text).unwrap();
+        assert!(of(&p, Kind::SlowRows).is_none(), "{:?}", p.findings);
+        let f = of(&p, Kind::FullScan).unwrap();
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.body.iter().any(|l| l.contains("2.9 µs a row")), "{:?}", f.body);
+        // Keeping too many rows for an index does not make a slow scan reasonable.
+        let ev = Evidence::demo(&p, Dialect::Postgres);
+        p.refind(Dialect::Postgres, Some(&ev), false);
+        let f = of(&p, Kind::FullScan).unwrap();
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.no_fix.as_deref().is_some_and(|w| w.contains("too many for an index")), "{:?}", f.no_fix);
+    }
+
+    #[test]
+    fn a_reasonable_full_scan_that_is_most_of_a_costly_plan_stays_a_note() {
+        // Not run, cost over 10,000, and the estimate keeps 36% of 400,000 rows.
+        let text = r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"bookings","Alias":"b","Startup Cost":0,"Total Cost":12000,"Plan Rows":144000,"Plan Width":40,"Filter":"(status = 'DONE'::text)"}}]"#;
+        let mut p = parse(Dialect::Postgres, text).unwrap();
+        assert_eq!(of(&p, Kind::FullScan).map(|f| f.severity), Some(Severity::Warn));
+        let ev = Evidence::demo(&p, Dialect::Postgres);
+        p.refind(Dialect::Postgres, Some(&ev), false);
+        assert_eq!(of(&p, Kind::FullScan).map(|f| f.severity), Some(Severity::Note), "{:?}", p.findings);
+        assert!(!p.findings.iter().any(|f| f.severity == Severity::Warn), "{:?}", p.findings);
+        // A filter that wraps an indexed column gets no warning about the index either: at 36% it would read no less.
+        let mut p = parse(Dialect::Postgres, &text.replace("(status = 'DONE'::text)", "(lower(email) = 'a@b.c'::text)")).unwrap();
+        let mut ev = Evidence::demo(&p, Dialect::Postgres);
+        ev.tables[0].indexes.as_mut().unwrap().push(evidence::IndexEv { name: "bookings_email_idx".into(), cols: vec!["email".into()], btree: true, ..Default::default() });
+        p.refind(Dialect::Postgres, Some(&ev), false);
+        assert!(!p.findings.iter().any(|f| f.severity == Severity::Warn), "{:?}", p.findings);
     }
 
     #[test]
@@ -1211,5 +1290,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_scan_the_planner_prices_high_weighs_by_its_cost_on_every_run() {
+        let has = |p: &Plan, alias: &str, kind: Kind| p.findings.iter().any(|f| f.kind == kind && f.node.is_some_and(|i| p.nodes[i].alias == alias));
+        // b filters 400,000 rows to 6,252 at 45% of the cost; its 12% of the time comes from the hashed subquery.
+        assert!(has(&parse(Dialect::Postgres, fixture("pg18-subhash-analyze")).unwrap(), "b", Kind::FullScan));
+        // c filters 1.2 million rows at 46% of the cost while JIT takes the time.
+        assert!(has(&parse(Dialect::Postgres, fixture("pg18-jitpar-analyze")).unwrap(), "c", Kind::FullScan));
+        // All 400,000 rows go into the CTE at 73% of the cost and 18% of the time.
+        let p = parse(Dialect::Postgres, fixture("pg18-cte-analyze")).unwrap();
+        assert!(p.findings.iter().any(|f| f.kind == Kind::ScanIsRight && f.node.is_some_and(|i| p.nodes[i].rel == "bookings")), "{:?}", p.findings);
+        // MySQL leaves the dependent subquery out of its costs, so c is all of them while it took almost none of the time.
+        assert!(!has(&parse(Dialect::MySql, fixture("mysql-dep-analyze")).unwrap(), "c", Kind::FullScan));
     }
 }

@@ -31,7 +31,9 @@ struct Spot {
 /// Adds what the catalog shows about filters that defeat an index, to the reads that are already a finding.
 pub(super) fn add(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: bool, out: &mut Vec<Finding>) {
     for (i, n) in p.nodes.iter().enumerate() {
-        let flagged = out.iter().any(|f| f.node == Some(i) && matches!(f.kind, Kind::FullScan | Kind::FullIndexScan | Kind::UnusedIndex | Kind::Misestimate));
+        // A full scan the catalog showed to be reasonable is a note: an index would read no less however the filter is
+        // written, so no warning about a defeated index goes back on it.
+        let flagged = out.iter().any(|f| f.node == Some(i) && f.severity == Severity::Warn && matches!(f.kind, Kind::FullScan | Kind::FullIndexScan | Kind::UnusedIndex | Kind::Misestimate));
         if !reads_all(n) || !flagged {
             continue;
         }

@@ -5,7 +5,7 @@
 
 use super::cond::{self, ColRef, SargKind, Sargs, Val};
 use super::evidence::{IndexEv, TableEv};
-use super::findings::{and_list, pct_text, size, Fix, FixKind, SHARE_MIN};
+use super::findings::{and_list, pct_text, size, weight_share, Fix, FixKind, SHARE_MIN};
 use super::tree::is_inner;
 use super::{count, Dialect, Op, Plan};
 
@@ -31,7 +31,9 @@ pub enum Advice {
     Unused { index: String, cause: Option<String>, lines: Vec<String> },
     /// The statistics are too old to judge the plan by; ANALYZE first.
     Stale { why: String, fix: Fix, lines: Vec<String> },
-    No { why: String, lines: Vec<String> },
+    /// No index to offer. `kept` is the share the filter keeps when that is why: too many rows for any index to read
+    /// fewer pages than the scan, which makes the scan the right plan rather than a missing index.
+    No { why: String, lines: Vec<String>, kept: Option<f64> },
 }
 
 /// How much of the table the filter keeps, and how that is known.
@@ -59,7 +61,7 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
     if let Some(why) = stale(t) {
         return Advice::Stale { why, fix: analyze_fix(d, t), lines };
     }
-    let no = |why: String, lines: Vec<String>| Advice::No { why, lines };
+    let no = |why: String, lines: Vec<String>| Advice::No { why, lines, kept: None };
     let Some(rows) = rows else { return no(format!("the size of {name} is not known"), lines) };
     if rows < MIN_ROWS {
         return no(format!("{name} has about {} rows, few enough that reading it whole is cheap", count(rows)), lines);
@@ -78,10 +80,10 @@ pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) 
         }
     };
     if kept > MAX_KEPT {
-        return no(format!("the filter keeps {} of the rows, too many for an index to read less than the scan", pct_text(kept * 100.0)), lines);
+        return Advice::No { why: format!("the filter keeps {} of the rows, too many for an index to read less than the scan", pct_text(kept * 100.0)), lines, kept: Some(kept) };
     }
     let repeated = repeated(p, i);
-    if let Some(s) = n.share.filter(|&s| s < SHARE_MIN && !repeated) {
+    if let Some(s) = weight_share(p, i).filter(|&s| s < SHARE_MIN && !repeated) {
         return no(format!("this scan is only {} of the plan", pct_text(s * 100.0)), lines);
     }
     let own = |c: &ColRef| c.qual.as_deref().is_none_or(|q| same(q, &n.alias, d) || same(q, &n.rel, d) || same(q, &t.table, d));
