@@ -17,6 +17,7 @@ pub mod ddl_trig;
 pub mod import;
 pub mod roles;
 pub mod routines;
+pub mod hypo;
 
 use super::se;
 use super::exec::{Cells, Conn, Opts};

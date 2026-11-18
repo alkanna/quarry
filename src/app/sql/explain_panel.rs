@@ -286,6 +286,7 @@ fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts:
         }
         ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
     });
+    super::explain_hypo::hypo_row(ui, x, sql, acts);
 }
 
 /// Detail lines the panel already shows in a better form.

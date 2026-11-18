@@ -238,6 +238,8 @@ pub enum Msg {
     SqlExplained { req: u64, sets: Vec<sql::ResultSet> },
     /// The catalog's evidence for the index suggestions of the explain dialog's request `req`.
     SqlExplainEvidence { req: u64, ev: sql::plan::Evidence },
+    /// The plan of the explain dialog's statement with a HypoPG hypothetical index in place, for its request `req`.
+    SqlExplainHypo { req: u64, res: Res<sql::pg::hypo::Trial> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
     /// What the live check of request `req` found in the statement under the Query editor's caret; see `sql::lint`.

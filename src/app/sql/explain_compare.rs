@@ -50,10 +50,15 @@ pub(super) fn clock(secs: u64) -> String {
 }
 
 pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32, acts: &mut Vec<XAct>) {
-    let (Some(after), Some(prev)) = (&x.plan, &x.prev) else { return };
-    let d = &prev.diff;
+    // A HypoPG trial compares the dialog's plan, as before, with the trial's, as after; else the last plan is before.
+    let hypo = x.hypo.as_ref().filter(|_| x.hypo_cmp);
+    let (after, before, d) = match (hypo, &x.plan, &x.prev) {
+        (Some(h), Some(p), _) => (&h.plan, p, &h.diff),
+        (None, Some(p), Some(prev)) => (p, &prev.plan, &prev.diff),
+        _ => return,
+    };
     let timed = d.time.is_some();
-    summary_band(ui, d, after.analyzed);
+    summary_band(ui, d, after.analyzed, hypo.is_some());
     ui.add_space(16.0);
     // Measured after the band, as the tree is after the findings, so the table never runs past the dialog.
     let body_h = (screen_h - 330.0).clamp(260.0, 640.0).min(body_room(ui, 74.0));
@@ -77,15 +82,17 @@ pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32,
             // A node that went away is drawn from the old plan.
             let n = match (r.after, r.before) {
                 (Some(a), _) => &after.nodes[a],
-                (None, Some(b)) => &prev.plan.nodes[b],
+                (None, Some(b)) => &before.nodes[b],
                 _ => continue,
             };
             let delta = if timed { r.time.unwrap_or_default() } else { r.cost };
             let sub = row_sub(r.was.as_deref(), r.after.is_none(), n);
             let name = format!("{} {}", n.label, n.name()).trim().to_string();
-            let resp = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, r.after.is_some() && r.after == x.sel, &name, |pt, rect| paint_row(pt, rect, n, r.depth, sub.as_deref(), delta, timed, r.after.is_none()));
+            // The tree shows the dialog's plan, which is the before side of a trial.
+            let own = if hypo.is_some() { r.before } else { r.after };
+            let resp = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, own.is_some() && own == x.sel, &name, |pt, rect| paint_row(pt, rect, n, r.depth, sub.as_deref(), delta, timed, r.after.is_none()));
             if resp.clicked() {
-                show = r.after;
+                show = own;
             }
         }
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -112,13 +119,13 @@ pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32,
     });
     // A node of the new plan opens in the tree with its panel.
     if let Some(i) = show {
-        x.pane = Pane::Tree;
+        (x.pane, x.hypo_cmp) = (Pane::Tree, false);
         acts.push(XAct::Select(i));
     }
 }
 
 /// The verdict in a band tinted by whether the plan got better.
-fn summary_band(ui: &mut egui::Ui, d: &Diff, analyzed: bool) {
+fn summary_band(ui: &mut egui::Ui, d: &Diff, analyzed: bool, hypothetical: bool) {
     let better = d.better();
     let color = match better {
         Some(true) => SUCCESS(),
@@ -136,7 +143,9 @@ fn summary_band(ui: &mut egui::Ui, d: &Diff, analyzed: bool) {
             }
             ui.vertical(|ui| {
                 ui.label(medium(RichText::new(&d.summary).color(BRIGHT())));
-                if !analyzed {
+                if hypothetical {
+                    ui.label(RichText::new("After is hypothetical: HypoPG planned the statement as if the candidate index existed. Nothing was created.").size(TXT_SMALL).color(MUTED()));
+                } else if !analyzed {
                     ui.label(RichText::new("Run with ANALYZE to check the time as well as the estimate.").size(TXT_SMALL).color(MUTED()));
                 }
             });

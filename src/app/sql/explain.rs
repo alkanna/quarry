@@ -4,6 +4,7 @@
 
 use super::explain_compare::{clock, compare_view, Prev};
 use super::explain_flame::flame_view;
+use super::explain_hypo::HypoRun;
 use super::explain_panel::{findings_strip, inspector};
 use super::explain_tree::plan_tree;
 use super::query::run_target;
@@ -22,13 +23,13 @@ pub(in crate::app) struct SqlExplain {
     tab_db: String,
     pub(super) dialect: Dialect,
     pub(super) db: Db,
-    schema: String,
+    pub(super) schema: String,
     pub(in crate::app) plan: Option<Plan>,
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
     raw: String,
     /// The head tab: the tree or the raw text.
-    raw_tab: bool,
+    pub(super) raw_tab: bool,
     /// The node the panel shows, and one the tree should scroll to.
     pub(in crate::app) sel: Option<usize>,
     pub(super) scroll_to: Option<usize>,
@@ -53,11 +54,20 @@ pub(in crate::app) struct SqlExplain {
     pub(in crate::app) prev: Option<Prev>,
     /// The catalog's evidence for the index suggestions, kept across an ANALYZE rerun of the same statement, and the
     /// request reading it, apart from `req` so a rerun does not drop it.
-    ev: Option<plan::Evidence>,
+    pub(super) ev: Option<plan::Evidence>,
     ev_req: u64,
     pub(super) ev_busy: bool,
     /// The offline demo and the tests: made-up evidence instead of a catalog read.
-    demo: bool,
+    pub(super) demo: bool,
+    /// The connection is locked, as of the last frame drawn.
+    pub(super) locked: bool,
+    /// The HypoPG trial of a candidate index: the request in flight and the candidate it tries, its answer, and whether
+    /// Compare shows the trial's plan instead of the last one. Apart from `req`, like `ev_req`.
+    pub(super) hypo_req: u64,
+    pub(super) hypo_busy: bool,
+    pub(super) hypo_fix: String,
+    pub(in crate::app) hypo: Option<HypoRun>,
+    pub(in crate::app) hypo_cmp: bool,
 }
 
 /// The views of a readable plan.
@@ -74,11 +84,15 @@ pub(super) enum XAct {
     Copy(String),
     /// A fix as an editable draft in a new Query tab. Nothing runs.
     Draft(String),
+    /// Try this candidate index with HypoPG.
+    Hypo(String),
+    /// Show the trial's plan in Compare.
+    HypoCompare,
 }
 
 impl SqlExplain {
     fn new(stmt: String, conn: u64, tab_db: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: 0, ev_busy: false, demo: false }
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: 0, ev_busy: false, demo: false, locked: true, hypo_req: 0, hypo_busy: false, hypo_fix: String::new(), hypo: None, hypo_cmp: false }
     }
 }
 
@@ -200,6 +214,7 @@ impl App {
                     p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
                 }
                 // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
+                (x.hypo, x.hypo_busy, x.hypo_cmp) = (None, false, false);
                 x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
                 x.scroll_to = x.sel;
                 // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
@@ -234,8 +249,9 @@ impl App {
         let ctx = ui.ctx().clone();
         let screen = ctx.content_rect();
         ui.set_width(fit_width(&ctx, (screen.width() * 0.85).clamp(760.0, 1160.0)));
+        x.locked = !self.conn_writable(x.conn);
         let mut names = vec!["Tree"];
-        if x.prev.is_some() {
+        if x.prev.is_some() || x.hypo_cmp {
             names.push("Compare");
         }
         names.extend(["Flame", "Raw"]);
@@ -246,6 +262,8 @@ impl App {
         }
         if let Some(t) = dialog_head(ui, &head) {
             x.raw_tab = names[t] == "Raw";
+            // Compare goes back to the last plan once left; Show in Compare brings the trial back.
+            x.hypo_cmp &= names[t] == "Compare";
             x.pane = match names[t] {
                 "Flame" => Pane::Flame,
                 "Compare" => Pane::Compare,
@@ -267,7 +285,7 @@ impl App {
                 });
             }
             b.end(ui);
-        } else if x.pane == Pane::Compare && x.prev.is_some() {
+        } else if x.pane == Pane::Compare && (x.prev.is_some() || x.hypo_cmp) {
             dialog_flush(ui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 16 }).show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -338,6 +356,7 @@ impl App {
             rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
             let note = match (&x.prev, x.pane) {
                 _ if x.raw_tab || x.plan.is_none() => None,
+                (_, Pane::Compare) if x.hypo_cmp => Some("Compared with the plan the server would choose with the hypothetical index. Nothing was created.".to_string()),
                 (Some(prev), Pane::Compare) => Some(format!("Compared with the plan from {}.", clock(prev.at))),
                 (_, Pane::Flame) => Some("Each bar is as wide as its share of the plan. Click one to see it.".to_string()),
                 _ => None,
@@ -351,6 +370,8 @@ impl App {
                     ctx.copy_text(text);
                     self.toast_ok("Copied.".into(), None);
                 }
+                XAct::Hypo(fix) => self.sql_explain_hypo_try(x, fix),
+                XAct::HypoCompare => self.sql_explain_hypo_compare(x),
                 XAct::Draft(sql) => {
                     *keep = false;
                     self.sql_explain_stop(x);

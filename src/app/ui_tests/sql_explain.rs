@@ -322,3 +322,54 @@ fn a_mysql_estimate_alone_suggests_no_index_and_says_why() {
     assert!(ui.shows("No index suggested: the 10% of rows the server says the filter keeps is its guess. Run with ANALYZE to measure it."), "the panel does not say why there is no index");
     assert!(ui.h.query_by_label("CANDIDATE INDEX").is_none(), "a guess gave a candidate");
 }
+
+const HYPO_TRIAL: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-trial.json");
+const HYPO_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-before.json");
+
+fn trial(plan: &str) -> crate::db::sql::pg::hypo::Trial {
+    crate::db::sql::pg::hypo::Trial { plan: plan.into(), index: "<13640>btree_bookings_provider_status".into() }
+}
+
+#[test]
+fn the_hypopg_trial_is_off_in_the_demo_and_says_why() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    ui.h.state_mut().status = "idle".into();
+    ui.show("CANDIDATE INDEX");
+    assert!(ui.disabled("Try it (nothing is created)"), "the trial is offered in the offline demo");
+    assert!(ui.shows("The offline demo has no server to try the index on."), "the reason the trial is off is not given");
+    assert!(!reached_server_call(&ui));
+    // MySQL has no HypoPG, so a MySQL dialog has no button at all.
+    let Some(mut ui) = explain_open(PLAN) else { return };
+    ui.show("Full scan of orders");
+    assert!(ui.h.query_by_label("Try it (nothing is created)").is_none(), "the trial is offered on MySQL");
+}
+
+#[test]
+fn a_trial_that_uses_the_index_gives_its_cost_and_opens_in_compare() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    ui.h.state_mut().demo_explain_hypo(trial(HYPO_TRIAL));
+    ui.settle();
+    ui.show("CANDIDATE INDEX");
+    assert!(ui.shows("With this index: cost 2,704, was 5,769 (-53%)."), "the trial's cost is not given");
+    assert!(explain_state(&ui).hypo.as_ref().is_some_and(|h| h.used));
+    ui.click("Show in Compare");
+    let x = explain_state(&ui);
+    assert_eq!((x.pane, x.hypo_cmp), (crate::app::sql::explain::Pane::Compare, true));
+    assert!(ui.shows("After is hypothetical"), "Compare does not say the plan is hypothetical");
+    assert!(ui.shows("Cost down 53%."), "the summary does not give the trial's cost change");
+    assert!(ui.shows("Compared with the plan the server would choose with the hypothetical index."), "the footer does not say what is compared");
+    // Leaving Compare drops the trial from it; with no earlier plan the tab goes away.
+    ui.click("Tree");
+    assert!(!explain_state(&ui).hypo_cmp);
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "Compare stays without a plan to compare with");
+}
+
+#[test]
+fn a_trial_the_planner_ignores_says_so() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    ui.h.state_mut().demo_explain_hypo(trial(HYPO_BEFORE));
+    ui.settle();
+    ui.show("CANDIDATE INDEX");
+    assert!(ui.shows("The planner would not use this index."), "an unused index is not reported");
+}

@@ -147,3 +147,48 @@ fn live_mysql_and_mariadb_suggest_an_index_once_analyze_measured_the_filter() {
         assert_eq!(candidate(&p), None, "{var}");
     });
 }
+
+#[test]
+fn live_hypopg_trial_uses_the_hypothetical_index_and_leaves_nothing_behind() {
+    use crate::db::sql::pg::hypo;
+    let Some(l) = crate::db::sql::testing::live_pg("QUARRY_TEST_POSTGRES_HYPOPG") else { return };
+    if l.one("SELECT count(*)::text FROM pg_available_extensions WHERE name = 'hypopg'") == "0" {
+        return;
+    }
+    let s = unique_name("qhypo");
+    let fx = PgFixture::new(
+        &l,
+        &s,
+        "CREATE TABLE big (id int PRIMARY KEY, status text NOT NULL, kind int NOT NULL, note text); \
+         INSERT INTO big SELECT g, 's' || (g % 50), g % 7, repeat('x', 40) FROM generate_series(1, 50000) g;",
+    );
+    // In public, so dropping the fixture's schema does not take the extension with it.
+    l.qsql(&fx.pool, "CREATE EXTENSION IF NOT EXISTS hypopg SCHEMA public");
+    settle_pg(&fx, "big");
+    let stmt = "SELECT * FROM big WHERE status = 's7'";
+    let p = explained(&l.w, &l.rx, &fx.db, &s, stmt, false, true);
+    let sql = candidate(&p).unwrap_or_else(|| panic!("no candidate: {:?}", reasons(&p)));
+    l.w.sql_explain_evidence(3, fx.db.clone(), s.clone(), plan::evidence::wants(&p, stmt, Dialect::Postgres));
+    let Ok(Msg::SqlExplainEvidence { ev, .. }) = l.rx.recv_timeout(Duration::from_secs(30)) else { panic!("no evidence") };
+    assert!(ev.hypopg, "the catalog does not see HypoPG");
+    let create = hypo::create_sql(&sql).unwrap_or_else(|| panic!("not a CREATE INDEX: {sql}"));
+    // Locked, then unlocked: both run in a read-only transaction.
+    for read_only in [true, false] {
+        l.w.sql_explain_hypo(4, fx.db.clone(), s.clone(), create.clone(), stmt.into(), read_only);
+        let Ok(Msg::SqlExplainHypo { res, .. }) = l.rx.recv_timeout(Duration::from_secs(60)) else { panic!("no trial") };
+        let t = res.unwrap_or_else(|e| panic!("read_only {read_only}: {e}"));
+        assert!(hypo::is_hypothetical(&t.index), "{}", t.index);
+        let trial = plan::parse(Dialect::Postgres, &t.plan).unwrap();
+        assert!(hypo::uses(&trial, &t.index), "read_only {read_only}: the trial does not use {}:\n{}", t.index, t.plan);
+        assert!(trial.cost.unwrap() < p.cost.unwrap(), "the trial costs {:?}, the plan {:?}", trial.cost, p.cost);
+    }
+    // Unlocked, a write is only planned: the read-only transaction lets EXPLAIN plan it, and nothing is deleted.
+    l.w.sql_explain_hypo(5, fx.db.clone(), s.clone(), create.clone(), "DELETE FROM big WHERE status = 's7'".into(), false);
+    let Ok(Msg::SqlExplainHypo { res, .. }) = l.rx.recv_timeout(Duration::from_secs(60)) else { panic!("no trial") };
+    let t = res.unwrap_or_else(|e| panic!("DELETE: {e}"));
+    assert!(hypo::uses(&plan::parse(Dialect::Postgres, &t.plan).unwrap(), &t.index), "{}", t.plan);
+    assert_eq!(fx.one("SELECT count(*)::text FROM big"), "50000");
+    // Nothing was created: the table has its primary key alone, and a new session has no hypothetical index.
+    assert_eq!(fx.one("SELECT count(*)::text FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'big'"), "1");
+    assert_eq!(fx.one("SELECT count(*)::text FROM public.hypopg_list_indexes"), "0");
+}

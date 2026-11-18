@@ -51,6 +51,7 @@ impl App {
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlExplained { req, sets } => self.sql_explained(req, sets),
                 Msg::SqlExplainEvidence { req, ev } => self.sql_explain_evidence(req, ev),
+                Msg::SqlExplainHypo { req, res } => self.sql_explain_hypo(req, res),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlLint { req, lint } => self.sql_linted(req, lint),
                 Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),

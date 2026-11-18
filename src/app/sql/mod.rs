@@ -12,6 +12,7 @@ pub(super) mod edit;
 pub(super) mod explain;
 mod explain_compare;
 mod explain_flame;
+mod explain_hypo;
 mod explain_panel;
 mod explain_tree;
 pub(super) mod filter_cells;
