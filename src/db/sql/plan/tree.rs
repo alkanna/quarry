@@ -158,12 +158,9 @@ pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
         // SubPlan the node does not name sits in its output list, printed only with VERBOSE, and one that reads a
         // column from outside can only run per row, since PostgreSQL never hashes a correlated subquery.
         SubRun::Exists
-    } else if n.label == "Materialize" {
-        // Uncorrelated and not hashed: its rows are kept and every call reads them again.
-        SubRun::Any
     } else {
-        // Unnamed and uncorrelated, which is how PostgreSQL 17 and later print a hashed subquery in the output list.
-        // Calling it per row would be a guess, so it counts once.
+        // Unnamed and uncorrelated, as a hashed subquery in the output list prints without VERBOSE. Calling it per row
+        // would be a guess, so it counts once and ANALYZE's loops have the last word.
         SubRun::Once
     })
 }

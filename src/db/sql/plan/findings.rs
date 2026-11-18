@@ -597,11 +597,15 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
             let times = if own >= 20.0 * reading { "over 20 times".to_string() } else { factor(own / reading) };
             body.push(format!("The planner charges {} for the join itself, {times} the cost of the nodes below it ({}).", count(own), count(reading)));
         }
+        // A subquery the join does not name is in the columns it returns, which only VERBOSE prints.
+        let unnamed = |k: usize| !n.detail.iter().any(|d| super::tree::mentions(d, &p.nodes[k].role, ""));
+        let hidden = n.kids.iter().copied().find(|&k| p.nodes[k].role.starts_with("SubPlan") && unnamed(k));
         if let Some(k) = super::tree::dropped_alternative(p, i).filter(|_| heavy) {
             let role = &p.nodes[k].role;
-            // A subquery the join does not name is in the columns it returns, which only VERBOSE prints.
-            let place = if super::tree::mentions(&n.join_filter.text, role, "") { "in the join filter" } else if n.detail.iter().any(|d| super::tree::mentions(d, role, "")) { "in its condition" } else { "in the columns it returns" };
+            let place = if super::tree::mentions(&n.join_filter.text, role, "") { "in the join filter" } else if !unnamed(k) { "in its condition" } else { "in the columns it returns (shown only with VERBOSE)" };
             body.push(format!("The planner priced the subquery {place} as if it ran once per row, but PostgreSQL runs it once, hashed as {role}, so most of this cost is never spent. Run with ANALYZE to see the real time."));
+        } else if let Some(k) = hidden.filter(|_| heavy) {
+            body.push(format!("This cost likely includes {}, a subquery in the columns the join returns, which the plan shows only with VERBOSE. Run with ANALYZE to see the real time.", p.nodes[k].role));
         } else if heavy && !fans {
             body.push("It expects each row to match many on the other side, or a costly join filter. Run with ANALYZE to see the real time.".into());
         }

@@ -959,6 +959,8 @@ mod tests {
             "pg18-subcorr-analyze" => include_str!("plan/fixtures/pg18-subcorr-analyze.json"),
             "pg18-subin" => include_str!("plan/fixtures/pg18-subin.json"),
             "pg18-subin-analyze" => include_str!("plan/fixtures/pg18-subin-analyze.json"),
+            "pg18-user-subplan" => include_str!("plan/fixtures/pg18-user-subplan.json"),
+            "pg18-user-subplan-analyze" => include_str!("plan/fixtures/pg18-user-subplan-analyze.json"),
             _ => panic!("no fixture {name}"),
         }
     }
@@ -973,7 +975,7 @@ mod tests {
 
     #[test]
     fn real_postgres_plans_add_up_and_link() {
-        for name in ["pg18-join-analyze", "pg18-scan-analyze", "pg18-scan", "pg18-parallel-analyze", "pg18-spill-analyze", "pg18-limit-analyze", "pg18-cte-analyze", "pg18-subplan-analyze", "pg13-join-analyze", "pg18-subjoin", "pg18-subjoin-analyze", "pg18-subhash", "pg18-subhash-analyze", "pg18-subscalar", "pg18-subscalar-analyze", "pg18-subexists", "pg18-submat", "pg18-jitscan-analyze", "pg18-slowrow-analyze", "pg18-pairs", "pg18-pairs-analyze", "pg13-subalt", "pg13-submat", "pg18-jitpar-analyze", "pg18-subout", "pg18-subout-analyze", "pg18-subcorr", "pg18-subcorr-analyze", "pg18-subin", "pg18-subin-analyze"] {
+        for name in ["pg18-join-analyze", "pg18-scan-analyze", "pg18-scan", "pg18-parallel-analyze", "pg18-spill-analyze", "pg18-limit-analyze", "pg18-cte-analyze", "pg18-subplan-analyze", "pg13-join-analyze", "pg18-subjoin", "pg18-subjoin-analyze", "pg18-subhash", "pg18-subhash-analyze", "pg18-subscalar", "pg18-subscalar-analyze", "pg18-subexists", "pg18-submat", "pg18-jitscan-analyze", "pg18-slowrow-analyze", "pg18-pairs", "pg18-pairs-analyze", "pg13-subalt", "pg13-submat", "pg18-jitpar-analyze", "pg18-subout", "pg18-subout-analyze", "pg18-subcorr", "pg18-subcorr-analyze", "pg18-subin", "pg18-subin-analyze", "pg18-user-subplan", "pg18-user-subplan-analyze"] {
             let p = parse(Dialect::Postgres, fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             sum_close(&p);
             for (i, n) in p.nodes.iter().enumerate() {
@@ -1266,7 +1268,7 @@ mod tests {
         assert!(of(&p, Kind::SubPlanPerRow).is_none(), "{:?}", p.findings);
         let f = of(&p, Kind::Dominant).expect("the join is not explained");
         assert_eq!((f.title.as_str(), f.node), ("Hash Join does most of the work", Some(join)));
-        assert!(f.body.iter().any(|b| b == "The planner priced the subquery in the columns it returns as if it ran once per row, but PostgreSQL runs it once, hashed as SubPlan 2, so most of this cost is never spent. Run with ANALYZE to see the real time."), "{:?}", f.body);
+        assert!(f.body.iter().any(|b| b == "The planner priced the subquery in the columns it returns (shown only with VERBOSE) as if it ran once per row, but PostgreSQL runs it once, hashed as SubPlan 2, so most of this cost is never spent. Run with ANALYZE to see the real time."), "{:?}", f.body);
         assert!(!f.body.iter().any(|b| b.starts_with("It expects each row") || b.contains("join filter")), "{:?}", f.body);
         // It ran once.
         let p = parse(Dialect::Postgres, fixture("pg18-subout-analyze")).unwrap();
@@ -1281,12 +1283,25 @@ mod tests {
             assert!(of(&p, Kind::SubPlanPerRow).is_none(), "{name}: {:?}", p.findings);
             assert!(!p.findings.iter().any(|f| f.body.iter().any(|b| b.contains("hashed as"))), "{name}");
         }
-        // The user's plan as the dialog showed it: a lone SubPlan 2 and no join filter.
-        let p = parse(Dialect::Postgres, &user_plan("").replace("SubPlan 1", "SubPlan 2")).unwrap();
+        // The user's plan from PostgreSQL 18.6: a lone SubPlan 2 that no condition names, and no join filter.
+        let p = parse(Dialect::Postgres, fixture("pg18-user-subplan")).unwrap();
         sum_close(&p);
+        let join = p.nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
+        assert!(p.nodes[join].join_filter.is_empty() && p.nodes.iter().any(|n| n.role == "SubPlan 2"));
         assert!(of(&p, Kind::SubPlanPerRow).is_none(), "{:?}", p.findings);
         let f = of(&p, Kind::Dominant).expect("the join is not explained");
-        assert!(f.body.iter().any(|b| b.starts_with("The planner priced the subquery in the columns it returns as if it ran once per row")), "{:?}", f.body);
+        assert_eq!(f.node, Some(join));
+        assert!(f.body.iter().any(|b| b.starts_with("The planner priced the subquery in the columns it returns (shown only with VERBOSE) as if it ran once per row")), "{:?}", f.body);
+        assert!(!f.body.iter().any(|b| b.starts_with("It expects each row")), "{:?}", f.body);
+        // After ANALYZE it ran once, and the join itself took about 11 ms of 47.
+        let p = parse(Dialect::Postgres, fixture("pg18-user-subplan-analyze")).unwrap();
+        sum_close(&p);
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 2").unwrap();
+        assert_eq!(p.nodes[sub].loops, Some(1.0));
+        assert!(of(&p, Kind::SubPlanPerRow).is_none(), "{:?}", p.findings);
+        let own = p.nodes[join].self_ms.unwrap();
+        assert!((10.0..13.0).contains(&own), "{own}");
+        assert!(!p.findings.iter().any(|f| f.body.iter().any(|b| b.starts_with("It expects each row") || b.contains("hashed as"))), "{:?}", p.findings);
     }
 
     #[test]
