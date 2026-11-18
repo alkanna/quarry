@@ -1395,4 +1395,82 @@ mod tests {
         // All 100,439 rows go into the join buffer in 15% of the time.
         assert!(has(&parse(Dialect::MariaDb, fixture("mariadb-joinbuf-analyze")).unwrap(), "i", Kind::ScanIsRight));
     }
+
+    #[test]
+    fn a_subplan_under_the_inner_side_of_a_nested_loop_runs_per_row() {
+        // The inner index scan runs 5,000 times and tests one row each time, so its SubPlan ran as often as it did.
+        let text = r#"[{"Plan":{"Node Type":"Nested Loop","Join Type":"Inner","Startup Cost":0,"Total Cost":40100,"Plan Rows":5000,"Actual Startup Time":0.1,"Actual Total Time":300,"Actual Rows":5000,"Actual Loops":1,"Plans":[
+            {"Node Type":"Seq Scan","Parent Relationship":"Outer","Relation Name":"orders","Alias":"o","Startup Cost":0,"Total Cost":100,"Plan Rows":5000,"Actual Startup Time":0.01,"Actual Total Time":2,"Actual Rows":5000,"Actual Loops":1},
+            {"Node Type":"Index Scan","Parent Relationship":"Inner","Index Name":"customers_pkey","Relation Name":"customers","Alias":"c","Startup Cost":0.3,"Total Cost":8,"Plan Rows":1,"Actual Startup Time":0.01,"Actual Total Time":0.05,"Actual Rows":1,"Actual Loops":5000,"Index Cond":"(id = o.customer_id)","Filter":"(NOT (SubPlan 1))","Plans":[
+                {"Node Type":"Index Only Scan","Parent Relationship":"SubPlan","Subplan Name":"SubPlan 1","Index Name":"bans_pkey","Relation Name":"bans","Alias":"x","Startup Cost":0.3,"Total Cost":4,"Plan Rows":1,"Actual Startup Time":0.01,"Actual Total Time":0.02,"Actual Rows":0,"Actual Loops":5000,"Index Cond":"(customer_id = c.id)"}]}]},"Planning Time":0.1,"Execution Time":301}]"#;
+        let p = parse(Dialect::Postgres, text).unwrap();
+        let f = of(&p, Kind::SubPlanPerRow).expect("no per-row finding");
+        assert!(f.body[0].starts_with("SubPlan 1 (Index Only Scan on bans x) ran 5,000 times"), "{:?}", f.body);
+        // A hashed SubPlan built once in each of three processes ran once.
+        for name in ["pg18-subhash-analyze", "pg18-jitpar-analyze"] {
+            assert!(of(&parse(Dialect::Postgres, fixture(name)).unwrap(), Kind::SubPlanPerRow).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_plain_scan_in_parallel_workers_is_judged_in_their_time() {
+        // Each of three processes read the whole table in 20 ms: 30,000 rows and 600 pages in 60 ms of work, 2 µs a row.
+        let text = r#"[{"Plan":{"Node Type":"Gather","Startup Cost":1000,"Total Cost":20000,"Plan Rows":30000,"Workers Planned":2,"Workers Launched":2,"Actual Startup Time":1,"Actual Total Time":25,"Actual Rows":30000,"Actual Loops":1,"Plans":[
+            {"Node Type":"Seq Scan","Parent Relationship":"Outer","Parallel Aware":false,"Relation Name":"events","Alias":"e","Startup Cost":0,"Total Cost":19000,"Plan Rows":10000,"Plan Width":40,"Actual Startup Time":0.01,"Actual Total Time":20,"Actual Rows":10000,"Actual Loops":3,"Shared Hit Blocks":600,"Shared Read Blocks":0}]},"Planning Time":0.1,"Execution Time":26}]"#;
+        let p = parse(Dialect::Postgres, text).unwrap();
+        let f = of(&p, Kind::SlowRows).expect("no slow scan finding");
+        assert!(f.body[0].contains("side by side in 3 processes") && f.body[0].contains("2 µs a row"), "{:?}", f.body);
+        assert!(of(&p, Kind::ScanIsRight).is_none(), "{:?}", p.findings);
+    }
+
+    /// The plan in `text` with the leaf node of SubPlan `sub` moved under a new node `top`, which becomes the SubPlan.
+    fn under(text: &str, sub: &str, top: &str) -> String {
+        let head = format!(r#""Parent Relationship":"SubPlan","Subplan Name":"{sub}","#);
+        let at = text.find(&head).unwrap();
+        let (start, end) = (text[..at].rfind('{').unwrap(), at + text[at..].find('}').unwrap() + 1);
+        let node = text[start..end].replace(&head, r#""Parent Relationship":"Outer","#);
+        format!(r#"{}{{{top},{head}"Plans":[{node}]}}{}"#, &text[..start], &text[end..])
+    }
+
+    #[test]
+    fn a_subquery_that_cannot_be_hashed_or_reads_outside_in_its_keys_runs_per_row() {
+        let hashed = |p: &Plan| p.findings.iter().any(|f| f.body.iter().any(|b| b.contains("hashed as")));
+        // An IN PostgreSQL could not hash: a plain SubPlan over a Materialize, read again for every row.
+        let p = parse(Dialect::Postgres, &under(fixture("pg18-subout"), "SubPlan 2", r#""Node Type":"Materialize","Startup Cost":0.0,"Total Cost":10533.0,"Plan Rows":39813,"Plan Width":8"#)).unwrap();
+        sum_close(&p);
+        let sub = p.nodes.iter().position(|n| n.role == "SubPlan 2").unwrap();
+        assert_ne!(tree::sub_run(&p, sub), Some(tree::SubRun::Once));
+        assert!(of(&p, Kind::SubPlanPerRow).is_some() && !hashed(&p), "{:?}", p.findings);
+        // Correlated only in a One-Time Filter or a Sort Key, which no condition of the scan shows.
+        for top in [r#""Node Type":"Result","Startup Cost":0.0,"Total Cost":10334.0,"Plan Rows":39813,"Plan Width":8,"One-Time Filter":"(si.active)""#, r#""Node Type":"Sort","Startup Cost":0.0,"Total Cost":10334.0,"Plan Rows":39813,"Plan Width":8,"Sort Key":["(c.total - si.cap)"]"#] {
+            let p = parse(Dialect::Postgres, &under(fixture("pg18-subout"), "SubPlan 2", top)).unwrap();
+            let sub = p.nodes.iter().position(|n| n.role == "SubPlan 2").unwrap();
+            assert_ne!(tree::sub_run(&p, sub), Some(tree::SubRun::Once), "{top}");
+            assert!(of(&p, Kind::SubPlanPerRow).is_some() && !hashed(&p), "{top}: {:?}", p.findings);
+        }
+    }
+
+    #[test]
+    fn a_join_never_says_its_cost_includes_a_subquery_charged_apart() {
+        // pg18-subcorr with a cheap correlated subquery: charged per row out of the join, which stays most of the plan.
+        let p = parse(Dialect::Postgres, &fixture("pg18-subcorr").replace(r#""Startup Cost":125.72,"Total Cost":125.73"#, r#""Startup Cost":1.0,"Total Cost":1.01"#)).unwrap();
+        let f = of(&p, Kind::Dominant).expect("the join is not explained");
+        assert!(p.nodes[f.node.unwrap()].label.starts_with("Hash Join"), "{f:?}");
+        assert!(!f.body.iter().any(|b| b.contains("likely includes")), "{:?}", f.body);
+    }
+
+    #[test]
+    fn a_filtered_scan_holding_the_jit_compile_stays_a_warning() {
+        // b keeps 60,000 of 400,000 rows, too many for an index, but its time is the JIT compile, not a reasonable scan.
+        let text = fixture("pg18-subjoin-analyze").replace(r#""Actual Rows":6252.0,"#, r#""Actual Rows":60000.0,"#).replace(r#""Rows Removed by Filter":393748"#, r#""Rows Removed by Filter":340000"#);
+        let mut p = parse(Dialect::Postgres, &text).unwrap();
+        let b = p.nodes.iter().position(|n| n.alias == "b").unwrap();
+        assert_eq!(of(&p, Kind::Jit).and_then(|f| f.node), Some(b));
+        let ev = Evidence::demo(&p, Dialect::Postgres);
+        p.refind(Dialect::Postgres, Some(&ev), false);
+        let f = p.findings.iter().find(|f| f.kind == Kind::FullScan && f.node == Some(b)).expect("no full scan finding");
+        assert_eq!(f.severity, Severity::Warn, "{f:?}");
+        assert!(!f.body.iter().any(|l| l.starts_with("A full scan is reasonable")), "{:?}", f.body);
+        assert!(f.no_fix.as_deref().is_some_and(|w| w.contains("too many for an index")), "{:?}", f.no_fix);
+    }
 }
