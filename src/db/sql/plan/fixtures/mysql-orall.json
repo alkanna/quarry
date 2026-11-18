@@ -1,0 +1,34 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "20162.55"
+    },
+    "table": {
+      "table_name": "orders",
+      "access_type": "ALL",
+      "possible_keys": [
+        "idx_orders_email"
+      ],
+      "rows_examined_per_scan": 199143,
+      "rows_produced_per_join": 19918,
+      "filtered": "10.00",
+      "cost_info": {
+        "read_cost": "18170.67",
+        "eval_cost": "1991.88",
+        "prefix_cost": "20162.55",
+        "data_read_per_join": "12M"
+      },
+      "used_columns": [
+        "id",
+        "customer_id",
+        "created_at",
+        "status",
+        "total",
+        "email",
+        "ref"
+      ],
+      "attached_condition": "((`shop`.`orders`.`email` = 'user42@example.com') or (`shop`.`orders`.`ref` = 'R4242'))"
+    }
+  }
+}

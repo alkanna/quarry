@@ -64,6 +64,8 @@ fn the_sql_and_postgres_screenshot_views_draw() {
     ui.h.state_mut().sql_demo("explain");
     ui.settle();
     ui.show("Full scan of o");
+    // The design's MySQL frame: DATE() around an indexed column, rewritten.
+    ui.show("REWRITTEN FILTER");
     for (which, shows) in [("explain", "Full scan of bookings"), ("explain-analyze", "Sort spilled to disk"), ("explain-flame", "WIDTH BY"), ("explain-compare", "BEFORE")] {
         let Some(mut ui) = demo_ui(|_| {}) else { return };
         ui.h.state_mut().pg_demo(which);

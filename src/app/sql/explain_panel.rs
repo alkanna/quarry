@@ -4,7 +4,8 @@
 
 use super::explain::{SqlExplain, XAct};
 use crate::app::*;
-use crate::db::sql::plan::{cond, findings, Access, Finding, FixKind, PlanNode, Severity};
+use crate::db::sql::plan::findings::{self, Fix};
+use crate::db::sql::plan::{cond, rewrite, Access, Finding, FixKind, PlanNode, Severity};
 use crate::db::sql::Dialect;
 
 /// The findings shown before "N more".
@@ -241,6 +242,10 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                     ui.label(RichText::new("Reading the table's statistics and indexes").size(TXT_SMALL).color(MUTED()));
                 });
             }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Rewrite) {
+                rewrite_box(ui, x, n, fix, acts);
+                continue;
+            }
             if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Index) {
                 candidate_box(ui, x, &fix.note, &fix.sql, acts);
                 continue;
@@ -296,6 +301,28 @@ fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts:
         ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
     });
     super::explain_hypo::hypo_row(ui, x, sql, acts);
+}
+
+/// The filter written so an index serves it. The draft is the whole statement with the condition replaced when it can be
+/// found there for certain, else the condition alone; Copy takes the condition.
+fn rewrite_box(ui: &mut egui::Ui, x: &SqlExplain, n: &PlanNode, fix: &Fix, acts: &mut Vec<XAct>) {
+    section(ui, "REWRITTEN FILTER", None, acts);
+    well_frame().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(&fix.note).size(TXT_SMALL).color(MUTED()));
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(crate::ui::editor::sql_job_in(&fix.sql, TXT_SMALL, x.dialect)).wrap());
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens the statement with this filter as a draft in a new Query tab. Nothing runs.").clicked() {
+            acts.push(XAct::Draft(rewrite::statement(&x.stmt, x.dialect, n, fix).unwrap_or_else(|| fix.sql.clone())));
+        }
+        if quiet(ui, "Copy").clicked() {
+            acts.push(XAct::Copy(fix.sql.clone()));
+        }
+        ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
+    });
 }
 
 /// Detail lines the panel already shows in a better form.

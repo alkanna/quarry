@@ -65,6 +65,8 @@ pub enum FixKind {
     Index,
     /// ANALYZE of a table whose statistics are stale.
     Analyze,
+    /// The same filter written so an existing index can serve it. `sql` is the condition, not a statement.
+    Rewrite,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +151,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
             }
-        } else if n.label == "index" && n.access == Access::Other && big && weighty {
+        } else if ((n.label == "index" && n.access == Access::Other) || super::evidence::full_index_scan(&n.label)) && big && weighty {
             push(Kind::FullIndexScan, Severity::Warn, format!("Full index scan of {name}"), weight.clone(), vec![format!("Reads every entry of {}, about {} of them, instead of searching it.", if n.index.is_empty() { "the index" } else { &n.index }, count(read.unwrap_or(0.0)))], None);
         } else if let (Some(r), Some(k)) = (n.removed, n.kept_rows()) {
             if r >= BIG_SCAN && r >= 10.0 * k && weighty {
@@ -157,7 +159,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
             }
         }
         if n.access == Access::Scan && n.index.is_empty() && !n.possible_keys.is_empty() && big {
-            push(Kind::UnusedIndex, Severity::Warn, format!("{name} has an index the server did not use"), weight.clone(), vec![format!("Possible keys: {}. The server judged a full scan cheaper, or the filter cannot use them.", n.possible_keys.join(", "))], None);
+            push(Kind::UnusedIndex, Severity::Warn, format!("{name} has an index the server did not use"), weight.clone(), unused_body(n), None);
         }
         if let Some(off) = n.off().filter(|&o| o >= OFF_WARN) {
             let (est, act) = (n.rows.unwrap_or(0.0), n.actual_rows.unwrap_or(0.0));
@@ -210,6 +212,7 @@ pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Fi
     }
     if let Some(ev) = ev {
         with_evidence(p, d, ev, pooler, by_time, &mut out);
+        super::rewrite::add(p, d, ev, pooler, by_time, &mut out);
     }
     // MySQL's tree text labels a node with its whole line, which does not read as a node type.
     if d == Dialect::Postgres {
@@ -522,7 +525,16 @@ pub fn rows_read(n: &PlanNode) -> Option<f64> {
     }
 }
 
-fn weight_of(n: &PlanNode, by_time: bool) -> String {
+/// MySQL's possible keys without a key: the names and the server's guess at what the filter keeps, which is all the plan says.
+fn unused_body(n: &PlanNode) -> Vec<String> {
+    let mut body = vec![format!("Possible keys: {}. The server judged a full scan cheaper, or the filter cannot use them.", n.possible_keys.join(", "))];
+    if let Some(f) = n.filtered_pct {
+        body.push(format!("The server guesses the filter keeps {} of the rows it reads.", pct_text(f)));
+    }
+    body
+}
+
+pub(super) fn weight_of(n: &PlanNode, by_time: bool) -> String {
     match (by_time, n.self_ms, n.share) {
         (true, Some(ms), _) => format!("{} ms", ms_text(ms)),
         (_, _, Some(s)) => format!("{}% of cost", (s * 100.0).round()),

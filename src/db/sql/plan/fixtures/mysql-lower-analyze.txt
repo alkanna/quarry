@@ -1,0 +1,3 @@
+-> Filter: (lower(orders.email) = 'user42@example.com')  (cost=20177 rows=199290) (actual time=19.7..23.5 rows=5 loops=1)
+    -> Covering index scan on orders using idx_orders_email  (cost=20177 rows=199290) (actual time=0.0221..11.6 rows=200000 loops=1)
+

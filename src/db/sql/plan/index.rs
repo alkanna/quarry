@@ -36,7 +36,7 @@ pub enum Advice {
 
 /// How much of the table the filter keeps, and how that is known.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Kept {
+pub(super) enum Kept {
     /// ANALYZE counted it.
     Measured(f64),
     /// PostgreSQL's estimated rows over the table's.
@@ -205,7 +205,7 @@ fn pick(s: &Sargs, t: &TableEv, rows: f64, d: Dialect) -> Pick {
 
 /// Whether a plain index can hold the column whole: MySQL needs a prefix length for TEXT and BLOB and takes no JSON or
 /// spatial column, and PostgreSQL's json and xml have no B-tree operator class.
-fn indexable(ty: &str, d: Dialect) -> bool {
+pub(super) fn indexable(ty: &str, d: Dialect) -> bool {
     let t = ty.to_ascii_lowercase();
     let base = t.split(['(', ' ']).next().unwrap_or_default();
     if d == Dialect::Postgres {
@@ -247,14 +247,14 @@ fn sel(t: &TableEv, col: &str, values: &[Val], rows: f64) -> Option<f64> {
 }
 
 /// A column's distinct values as a count: pg_stats writes a share of the rows as a negative number.
-fn distinct(t: &TableEv, col: &str, rows: f64) -> Option<f64> {
+pub(super) fn distinct(t: &TableEv, col: &str, rows: f64) -> Option<f64> {
     let n = t.col(col)?.n_distinct?;
     let n = if n < 0.0 { -n * rows } else { n };
     (n > 0.0).then_some(n)
 }
 
 /// A B-tree over plain columns of every row, which an equality or range on its leading columns can search.
-fn usable(ix: &IndexEv) -> bool {
+pub(super) fn usable(ix: &IndexEv) -> bool {
     ix.btree && !ix.partial && !ix.invalid && !ix.invisible
 }
 
@@ -269,7 +269,7 @@ fn serves(ix: &IndexEv, lead: &[&str], range: Option<&str>, d: Dialect) -> bool 
     same_set && range.is_none_or(|r| same(&ix.cols[m], r, d))
 }
 
-fn same(a: &str, b: &str, d: Dialect) -> bool {
+pub(super) fn same(a: &str, b: &str, d: Dialect) -> bool {
     if d == Dialect::Postgres { a == b } else { a.eq_ignore_ascii_case(b) }
 }
 
@@ -289,7 +289,7 @@ pub fn repeated(p: &Plan, i: usize) -> bool {
 
 /// The rows of the table: PostgreSQL's reltuples; on MySQL the larger of TABLE_ROWS, which can lag a day behind, and the
 /// rows the full scan expects to read.
-fn table_rows(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Option<f64> {
+pub(super) fn table_rows(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Option<f64> {
     if d == Dialect::Postgres {
         return t.rows;
     }
@@ -300,7 +300,7 @@ fn table_rows(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Option<f64> {
     }
 }
 
-fn kept(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Kept {
+pub(super) fn kept(p: &Plan, i: usize, t: &TableEv, d: Dialect) -> Kept {
     let n = &p.nodes[i];
     if p.analyzed && !n.never_ran {
         if let (Some(k), Some(r)) = (n.kept_rows(), n.removed) {
@@ -339,7 +339,7 @@ fn divisor(p: &Plan, i: usize) -> f64 {
 }
 
 /// Why the statistics of `t` cannot be trusted, when they cannot.
-fn stale(t: &TableEv) -> Option<String> {
+pub(super) fn stale(t: &TableEv) -> Option<String> {
     if t.never_analyzed {
         return Some(format!("{} has never been analyzed", t.table));
     }
@@ -353,7 +353,7 @@ pub fn fresh(t: &TableEv) -> bool {
     t.analyzed_ago_s.is_some() && stale(t).is_none()
 }
 
-fn size_line(t: &TableEv, rows: Option<f64>) -> String {
+pub(super) fn size_line(t: &TableEv, rows: Option<f64>) -> String {
     let mut s = format!("{}.{}", t.schema, t.table);
     if let Some(r) = rows {
         s += &format!(": about {} rows", count(r));
@@ -364,7 +364,7 @@ fn size_line(t: &TableEv, rows: Option<f64>) -> String {
     s + "."
 }
 
-fn stats_line(t: &TableEv) -> Option<String> {
+pub(super) fn stats_line(t: &TableEv) -> Option<String> {
     if t.never_analyzed {
         return Some("Never analyzed.".into());
     }

@@ -436,6 +436,10 @@ impl P<'_> {
             self.i += 2;
             s.push_str("[]");
         }
+        // MySQL prints `cast(id as char charset latin1)`; the character set does not change which rows match.
+        if self.eat("charset") || (self.is("character") && self.peek_at(1).is_some_and(|(_, t)| t.eq_ignore_ascii_case("set")) && self.eat("character") && self.eat("set")) {
+            self.i += 1;
+        }
         Some(s)
     }
 
@@ -1102,6 +1106,9 @@ mod tests {
         assert_eq!(columns(&e), ["status", "created_at"]);
         assert_eq!(one_line(&my("((`shop`.`orders`.`status` = 'failed') and (`shop`.`orders`.`total` > 800.00))"), 3), "orders.status = 'failed' AND orders.total > 800.00");
         assert!(matches!(my("(year(`shop`.`orders`.`created_at`) = 2026)"), Expr::Cmp { l: Term::Func { ref name, .. }, .. } if name == "year"));
+        // The character set of a cast to char is read past.
+        assert!(matches!(my("(cast(`shop`.`orders`.`id` as char charset latin1) = '4242')"), Expr::Cmp { l: Term::Cast { ref ty, .. }, .. } if ty == "char"));
+        assert!(matches!(parse("cast(orders.`id` as char character set utf8mb3) = '4242'", Dialect::MariaDb), Some(Expr::Cmp { l: Term::Cast { ref ty, .. }, .. }) if ty == "char"));
         assert!(matches!(my("(`shop`.`orders`.`email` like '%42@example.com')"), Expr::Like { ci: false, not: false, .. }));
         assert!(matches!(my("((`shop`.`orders`.`created_at` >= TIMESTAMP'2026-03-01 00:00:00') and (`shop`.`orders`.`created_at` < TIMESTAMP'2026-03-02 00:00:00'))"), Expr::And(_)));
         let maria = parse("orders.created_at between '2026-03-01 00:00:00' and '2026-03-01 23:59:59' and orders.`status` = 'refunded'", Dialect::MariaDb).unwrap();

@@ -18,10 +18,12 @@ pub(super) fn link(p: &mut Plan) {
         }
         stack.push(i);
     }
-    // MySQL's tree prints "Filter: (cond)" over the "Table scan on o" it filters; the scan is what the filter slows down.
+    // MySQL's tree prints "Filter: (cond)" over the "Table scan on o" or full index scan it filters; the scan is what the
+    // filter slows down.
     for i in 0..p.nodes.len() {
         let Some(j) = p.nodes[i].parent else { continue };
-        if p.nodes[i].label.starts_with("Table scan") && p.nodes[i].filter.is_empty() && !p.nodes[j].filter.is_empty() && p.nodes[j].kids.len() == 1 {
+        let l = &p.nodes[i].label;
+        if (l.starts_with("Table scan") || super::evidence::full_index_scan(l)) && p.nodes[i].filter.is_empty() && !p.nodes[j].filter.is_empty() && p.nodes[j].kids.len() == 1 {
             p.nodes[i].filter = p.nodes[j].filter.clone();
             if let (Some(read), Some(kept)) = (p.nodes[i].actual_rows, p.nodes[j].actual_rows) {
                 p.nodes[i].removed = Some((read - kept).max(0.0));

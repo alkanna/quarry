@@ -400,3 +400,25 @@ fn the_tree_captions_end_on_their_columns_right_edge() {
     assert!((off - right).abs() <= 2.0, "OFF ends at {off}, its column at {right}");
     assert!((est - (right - 60.0)).abs() <= 2.0, "EST. > ACTUAL ends at {est}, its column at {}", right - 60.0);
 }
+
+/// The statement of the design's MySQL frame, whose plan wraps an indexed column in DATE().
+const DATE_STMT: &str = "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'";
+const MY_JOIN: &str = include_str!("../../db/sql/plan/fixtures/mysql-join.json");
+
+#[test]
+fn a_filter_that_defeats_an_index_shows_it_rewritten_and_drafts_the_statement() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    ui.h.state_mut().demo_explain(Dialect::MySql, DATE_STMT, MY_JOIN);
+    ui.settle();
+    ui.show("REWRITTEN FILTER");
+    assert!(ui.shows("Same rows, and o_created_at_idx can serve it."), "the rewrite does not say why it helps");
+    assert!(ui.shows("Fix: Rewritten filter"), "the finding card does not name its fix");
+    ui.h.state_mut().status = "idle".into();
+    let before = ui.app().tabs.len();
+    ui.click("Open in Query tab");
+    assert!(ui.app().modal.is_none(), "the dialog stayed open");
+    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
+    assert_eq!(s.query, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND o.created_at >= '2026-11-01' AND o.created_at < '2026-11-02'");
+    assert!(!reached_server_call(&ui), "opening the draft ran it");
+}

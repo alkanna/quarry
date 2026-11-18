@@ -192,3 +192,73 @@ fn live_hypopg_trial_uses_the_hypothetical_index_and_leaves_nothing_behind() {
     assert_eq!(fx.one("SELECT count(*)::text FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'big'"), "1");
     assert_eq!(fx.one("SELECT count(*)::text FROM public.hypopg_list_indexes"), "0");
 }
+
+/// The statement with the condition the rewrite finding offers in place of the one it rewrites.
+fn rewritten(p: &Plan, stmt: &str, d: Dialect) -> Option<String> {
+    let f = p.findings.iter().find(|f| f.fix.as_ref().is_some_and(|x| x.kind == FixKind::Rewrite))?;
+    plan::rewrite::statement(stmt, d, &p.nodes[f.node?], f.fix.as_ref()?)
+}
+
+fn titles(p: &Plan) -> Vec<String> {
+    p.findings.iter().map(|f| f.title.clone()).collect()
+}
+
+fn labels(p: &Plan) -> Vec<String> {
+    p.nodes.iter().map(|n| format!("{} {}", n.label, n.index)).collect()
+}
+
+#[test]
+fn live_postgres_rewrites_a_date_of_an_indexed_column_as_a_range_the_index_serves() {
+    every_pg(|l, var| {
+        let s = unique_name("qexp");
+        // A hundred rows a day over 500 days, so one day is a small share of the table.
+        let fx = PgFixture::new(
+            l,
+            &s,
+            "CREATE TABLE ev (id int PRIMARY KEY, created_at timestamptz NOT NULL, note text); \
+             INSERT INTO ev SELECT g, timestamptz '2026-01-01' + (g % 500) * interval '1 day' + (g % 1440) * interval '1 minute', repeat('x', 40) FROM generate_series(1, 50000) g; \
+             CREATE INDEX ev_created_at_idx ON ev (created_at);",
+        );
+        settle_pg(&fx, "ev");
+        let stmt = "SELECT * FROM ev WHERE date(created_at) = '2026-03-01'";
+        let p = explained(&l.w, &l.rx, &fx.db, &s, stmt, false, true);
+        let sql = rewritten(&p, stmt, Dialect::Postgres).unwrap_or_else(|| panic!("{var}: no rewrite: {:?}", titles(&p)));
+        assert_eq!(sql, "SELECT * FROM ev WHERE created_at >= '2026-03-01' AND created_at < '2026-03-02'", "{var}");
+        // The rewritten statement reads through the index, and nothing is left to rewrite.
+        let p = explained(&l.w, &l.rx, &fx.db, &s, &sql, false, true);
+        assert!(p.nodes.iter().any(|n| n.index == "ev_created_at_idx"), "{var}: {:?}", labels(&p));
+        assert_eq!(rewritten(&p, &sql, Dialect::Postgres), None, "{var}");
+    });
+}
+
+#[test]
+fn live_mysql_rewrites_a_date_of_an_indexed_column_and_mariadb_needs_none() {
+    every_server(|l, var| {
+        let s = unique_name("qexp");
+        let _fx = MyFixture::new(
+            l,
+            &s,
+            &format!(
+                "CREATE TABLE `{s}`.digits (n int); INSERT INTO `{s}`.digits VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9); \
+                 CREATE TABLE `{s}`.ev (id int PRIMARY KEY, created_at datetime NOT NULL, note varchar(60), KEY ev_created_at_idx (created_at)); \
+                 INSERT INTO `{s}`.ev SELECT g.n, TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (g.n % 500) DAY + INTERVAL (g.n % 1440) MINUTE, REPEAT('x', 40) \
+                   FROM (SELECT 1 + a.n + 10 * b.n + 100 * c.n + 1000 * d.n + 10000 * e.n AS n FROM `{s}`.digits a, `{s}`.digits b, `{s}`.digits c, `{s}`.digits d, `{s}`.digits e WHERE e.n < 5) g; \
+                 ANALYZE TABLE `{s}`.ev"
+            ),
+        );
+        let d = l.db.dialect;
+        let stmt = "SELECT * FROM ev WHERE DATE(created_at) = '2026-03-01'";
+        let p = explained(&l.w, &l.rx, &l.db, &s, stmt, false, true);
+        if d == Dialect::MariaDb {
+            // MariaDB turns DATE() of a column into a range itself: the index is used and nothing is rewritten.
+            assert_eq!(rewritten(&p, stmt, d), None, "{var}");
+            assert!(p.nodes.iter().any(|n| n.index == "ev_created_at_idx"), "{var}: {:?}", labels(&p));
+            return;
+        }
+        let sql = rewritten(&p, stmt, d).unwrap_or_else(|| panic!("{var}: no rewrite: {:?}", titles(&p)));
+        assert_eq!(sql, "SELECT * FROM ev WHERE created_at >= '2026-03-01' AND created_at < '2026-03-02'", "{var}");
+        let p = explained(&l.w, &l.rx, &l.db, &s, &sql, false, true);
+        assert!(p.nodes.iter().any(|n| n.index == "ev_created_at_idx"), "{var}: {:?}", labels(&p));
+        assert_eq!(rewritten(&p, &sql, d), None, "{var}");
+    });
+}
