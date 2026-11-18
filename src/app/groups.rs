@@ -214,6 +214,16 @@ mod tests {
     }
 
     #[test]
+    fn an_open_rail_folder_stays_open_in_the_saved_file_and_older_files_load_closed() {
+        let mut g = two();
+        g.groups[0].rail_open = true;
+        let back: Groups = serde_json::from_slice(&serde_json::to_vec(&g).unwrap()).unwrap();
+        assert!(back.groups[0].rail_open && !back.groups[1].rail_open);
+        let old: Groups = serde_json::from_str(r#"{"groups":[{"id":1,"name":"Prod","members":[1]}]}"#).unwrap();
+        assert!(!old.groups[0].rail_open);
+    }
+
+    #[test]
     fn undoing_a_drop_moves_back_only_what_it_moved() {
         let mut g = two();
         let all = [1, 2, 3, 4, 5];
