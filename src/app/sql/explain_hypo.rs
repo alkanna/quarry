@@ -27,9 +27,9 @@ fn blocked(x: &SqlExplain, fix: &Fix) -> Option<String> {
         return Some("The offline demo has no server to try the index on.".into());
     }
     if x.db.pooler() {
-        return Some("Not behind a connection pooler: the hypothetical index and the plan could land on different server connections.".into());
+        return Some(hypo::POOLER.into());
     }
-    if let Some(why) = extension_gate(x.ev.as_ref(), x.ev_busy) {
+    if let Some(why) = extension_gate(x.ev.as_ref(), x.ev_req.is_some()) {
         return Some(why.into());
     }
     if hypo::create_sql(fix).is_none() {
@@ -54,7 +54,7 @@ pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut 
     if x.dialect != Dialect::Postgres {
         return;
     }
-    let busy = x.hypo_busy && x.hypo_fix == fix.sql;
+    let busy = x.hypo_wait.as_ref().is_some_and(|(_, f)| *f == fix.sql);
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         let why = blocked(x, fix);
@@ -106,23 +106,15 @@ impl App {
         }
         let Some(create) = hypo::create_sql(&fix).map(str::to_string) else { return };
         self.req += 1;
-        (x.hypo_req, x.hypo_busy, x.hypo_fix, x.hypo) = (self.req, true, fix.sql, None);
-        if x.hypo_cmp {
-            x.hypo_cmp = false;
-            if x.pane == Pane::Compare && x.prev.is_none() {
-                x.pane = Pane::Tree;
-            }
-        }
+        (x.hypo_wait, x.hypo, x.hypo_cmp) = (Some((self.req, fix.sql)), None, false);
+        x.leave_empty_compare();
         self.worker.sql_explain_hypo(self.req, x.db.clone(), x.schema.clone(), create, x.stmt.clone(), x.locked);
     }
 
     /// The answer of a trial of the open dialog.
     pub(in crate::app) fn sql_explain_hypo(&mut self, req: u64, res: db::Res<hypo::Trial>) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if x.hypo_req != req || !x.hypo_busy {
-            return;
-        }
-        x.hypo_busy = false;
+        let Some(fix) = x.hypo_wait.take_if(|(r, _)| *r == req).map(|(_, f)| f) else { return };
         let t = match res {
             Ok(t) => t,
             Err(e) => return self.err(e),
@@ -135,13 +127,13 @@ impl App {
         p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
         let Some(before) = &x.plan else { return };
         let diff = compare::diff(before, &p);
-        x.hypo = Some(HypoRun { fix: x.hypo_fix.clone(), used: hypo::uses(&p, &t.index), plan: p, diff });
+        x.hypo = Some(HypoRun { fix, used: hypo::uses(&p, &t.index), plan: p, diff });
     }
 
     /// Opens the trial's plan in Compare, against the dialog's own.
     pub(super) fn sql_explain_hypo_compare(&mut self, x: &mut SqlExplain) {
         if x.hypo.is_some() {
-            (x.hypo_cmp, x.pane, x.raw_tab) = (true, Pane::Compare, false);
+            (x.hypo_cmp, x.pane) = (true, Pane::Compare);
         }
     }
 
@@ -151,7 +143,7 @@ impl App {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
         let fix = x.plan.as_ref().and_then(|p| p.findings.iter().find_map(|f| f.fix.as_ref().filter(|fx| fx.kind == plan::FixKind::Index))).map(|fx| fx.sql.clone()).expect("a candidate index");
         self.req += 1;
-        (x.hypo_req, x.hypo_busy, x.hypo_fix) = (self.req, true, fix);
+        x.hypo_wait = Some((self.req, fix));
         let req = self.req;
         self.sql_explain_hypo(req, Ok(trial));
     }

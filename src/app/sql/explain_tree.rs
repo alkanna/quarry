@@ -118,7 +118,7 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
 
 /// The second line of a row: the columns its filter tests, or the condition it searches or joins on.
 fn node_sub(n: &PlanNode) -> Option<String> {
-    if let Some(e) = &n.filter_expr {
+    if let Some(e) = &n.filter.expr {
         let c = cond::columns(e);
         if !c.is_empty() {
             return Some(format!("Filter: {}", c.join(", ")));
@@ -127,11 +127,11 @@ fn node_sub(n: &PlanNode) -> Option<String> {
     if !n.filter.is_empty() {
         return Some("Filter".into());
     }
-    if let Some(c) = n.index_cond_expr.as_ref().map(cond::columns).filter(|c| !c.is_empty()) {
+    if let Some(c) = n.index_cond.expr.as_ref().map(cond::columns).filter(|c| !c.is_empty()) {
         return Some(format!("Index Cond: {}", c.join(", ")));
     }
     if !n.join_cond.is_empty() {
-        let line = n.join_cond_expr.as_ref().map(|e| cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+        let line = n.join_cond.expr.as_ref().map(|e| cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.text.trim_start_matches('(').trim_end_matches(')').to_string());
         let short: String = line.chars().take(60).collect();
         return Some(if n.op.is_join() || n.op == Op::Hash { short } else { format!("Lookup: {short}") });
     }

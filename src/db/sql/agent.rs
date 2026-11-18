@@ -239,7 +239,7 @@ pub(in crate::db) async fn explain_sql(db: &Db, schema: &str, sql: &str, rules: 
         .iter()
         .map(|f| json!({ "node": f.node, "title": nsr.scrub_text(&f.title), "detail": scrub(&f.body), "fix": f.fix.as_ref().map(|x| nsr.scrub_text(&x.sql)) }))
         .collect();
-    capped(Answer::new(json!({ "nodes": nodes, "findings": findings, "warnings": scrub(&plan.warnings), "cost": plan.cost }), summary), limits)
+    capped(Answer::new(json!({ "nodes": nodes, "findings": findings, "warnings": scrub(&plan.findings.iter().map(super::plan::Finding::line).collect::<Vec<_>>()), "cost": plan.cost }), summary), limits)
 }
 
 /// An explain answer is one piece that cannot be paged, so one past the byte limit is refused whole.

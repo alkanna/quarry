@@ -97,7 +97,7 @@ impl Evidence {
                 continue;
             }
             let ix = |name: String, cols: &[&str], unique| IndexEv { name, cols: cols.iter().map(|c| c.to_string()).collect(), unique, btree: true, ..Default::default() };
-            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { ty: demo_type(&name, d).into(), name, null_frac: Some(0.0), ..Default::default() }).collect();
+            let cols = n.filter.expr.as_ref().map(super::cond::columns).unwrap_or_default().into_iter().map(|name| ColEv { ty: demo_type(&name, d).into(), name, null_frac: Some(0.0), ..Default::default() }).collect();
             tables.push(TableEv {
                 names: vec![(n.rel.clone(), n.alias.clone())],
                 schema: if d == Dialect::Postgres { "public".into() } else { "shop".into() },
@@ -132,7 +132,7 @@ fn demo_type(name: &str, d: Dialect) -> &'static str {
 
 /// A node that reads every row of its table: a full scan, or MySQL's full index scan, which a filter on an indexed
 /// column it cannot search also leaves reading everything.
-pub fn reads_all(n: &PlanNode) -> bool {
+pub(super) fn reads_all(n: &PlanNode) -> bool {
     n.access == Access::Scan || (n.op == Op::FullIndexScan && !n.alias.is_empty())
 }
 
@@ -289,7 +289,7 @@ pub fn wants(p: &Plan, stmt: &str, d: Dialect) -> Vec<Want> {
         }
         let Some((schema, table)) = resolve(n, &refs, d) else { continue };
         let mut cols: Vec<String> = Vec::new();
-        for e in [n.filter_expr.as_ref(), n.join_cond_expr.as_ref(), buf.and_then(|b| b.join_cond_expr.as_ref())].into_iter().flatten() {
+        for e in [n.filter.expr.as_ref(), n.join_cond.expr.as_ref(), buf.and_then(|b| b.join_cond.expr.as_ref())].into_iter().flatten() {
             for c in super::cond::columns(e) {
                 if !cols.contains(&c) {
                     cols.push(c);

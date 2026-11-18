@@ -30,8 +30,6 @@ pub(in crate::app) struct SqlExplain {
     /// Why the plan could not be drawn, when the server's text could not be read.
     unread: Option<String>,
     raw: String,
-    /// The head tab: the tree or the raw text.
-    pub(super) raw_tab: bool,
     /// The node the panel shows, and one the tree should scroll to.
     pub(in crate::app) sel: Option<usize>,
     pub(super) scroll_to: Option<usize>,
@@ -48,36 +46,45 @@ pub(in crate::app) struct SqlExplain {
     run: db::sql::RunHandle,
     /// Stop was pressed, so the answer that follows is no error to show.
     stopped: bool,
-    /// What the head shows when Raw is not chosen.
+    /// The head tab.
     pub(in crate::app) pane: Pane,
     /// The flame chart is as wide as each node's time, not its cost.
     pub(in crate::app) flame_time: bool,
     /// The last plan of this statement this session, when it differs from this one.
     pub(in crate::app) prev: Option<Prev>,
     /// The catalog's evidence for the index suggestions, kept across an ANALYZE rerun of the same statement, and the
-    /// request reading it, apart from `req` so a rerun does not drop it.
+    /// request reading it while it reads, apart from `req` so a rerun does not drop it.
     pub(super) ev: Option<plan::Evidence>,
-    ev_req: u64,
-    pub(super) ev_busy: bool,
+    pub(super) ev_req: Option<u64>,
     /// The offline demo and the tests: made-up evidence instead of a catalog read.
     pub(super) demo: bool,
     /// The connection is locked, as of the last frame drawn.
     pub(super) locked: bool,
     /// The HypoPG trial of a candidate index: the request in flight and the candidate it tries, its answer, and whether
     /// Compare shows the trial's plan instead of the last one. Apart from `req`, like `ev_req`.
-    pub(super) hypo_req: u64,
-    pub(super) hypo_busy: bool,
-    pub(super) hypo_fix: String,
+    pub(super) hypo_wait: Option<(u64, String)>,
     pub(in crate::app) hypo: Option<HypoRun>,
     pub(in crate::app) hypo_cmp: bool,
 }
 
-/// The views of a readable plan.
+/// The head tabs: the views of a readable plan and the server's text.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::app) enum Pane {
     Tree,
     Flame,
     Compare,
+    Raw,
+}
+
+impl Pane {
+    fn name(self) -> &'static str {
+        match self {
+            Pane::Tree => "Tree",
+            Pane::Flame => "Flame",
+            Pane::Compare => "Compare",
+            Pane::Raw => "Raw",
+        }
+    }
 }
 
 /// What a click in the dialog asks for, done once the frame is drawn.
@@ -95,7 +102,14 @@ pub(super) enum XAct {
 impl SqlExplain {
     #[allow(clippy::too_many_arguments)]
     fn new(stmt: String, conn: u64, tab_db: String, database: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, database, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: 0, ev_busy: false, demo: false, locked: true, hypo_req: 0, hypo_busy: false, hypo_fix: String::new(), hypo: None, hypo_cmp: false }
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, database, dialect, db, schema, plan: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
+    }
+
+    /// Compare has nothing to show once neither a last plan nor a trial is set against this one.
+    pub(super) fn leave_empty_compare(&mut self) {
+        if self.pane == Pane::Compare && self.prev.is_none() && !self.hypo_cmp {
+            self.pane = Pane::Tree;
+        }
     }
 }
 
@@ -181,17 +195,16 @@ impl App {
         let text = match plan::plan_text(&sets) {
             Ok(t) => t,
             Err(e) => {
-                if x.stopped {
-                    if x.plan.is_none() && x.unread.is_none() {
-                        self.modal = None;
-                    }
-                    return;
-                }
+                let stopped = x.stopped;
                 // A failed first read leaves nothing to show; a failed ANALYZE keeps the plan it already had.
                 if x.plan.is_none() && x.unread.is_none() {
                     self.modal = None;
                 }
-                return self.err(e);
+                // After Stop the error is the cancel itself.
+                if !stopped {
+                    self.err(e);
+                }
+                return;
             }
         };
         x.raw = plan::raw_text(&text);
@@ -208,7 +221,7 @@ impl App {
                     let held = !wants.is_empty() && x.ev.as_ref().is_some_and(|e| e.covers(&wants));
                     if !wants.is_empty() && !held {
                         self.req += 1;
-                        (x.ev_req, x.ev_busy) = (self.req, true);
+                        x.ev_req = Some(self.req);
                         self.worker.sql_explain_evidence(self.req, x.db.clone(), x.schema.clone(), wants);
                     }
                     held
@@ -217,29 +230,27 @@ impl App {
                     p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
                 }
                 // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
-                (x.hypo, x.hypo_busy, x.hypo_cmp) = (None, false, false);
+                (x.hypo, x.hypo_wait, x.hypo_cmp) = (None, None, false);
                 x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
                 x.scroll_to = x.sel;
                 // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
                 let now = crate::library::now_secs();
                 x.prev = self.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
-                if x.prev.is_none() && x.pane == Pane::Compare {
-                    x.pane = Pane::Tree;
-                }
+                x.leave_empty_compare();
                 (x.plan, x.unread) = (Some(p), None);
             }
             // The raw text is still worth reading.
-            Err(e) => (x.plan, x.unread, x.raw_tab) = (None, Some(e), true),
+            Err(e) => (x.plan, x.unread, x.pane) = (None, Some(e), Pane::Raw),
         }
     }
 
     /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
     pub(in crate::app) fn sql_explain_evidence(&mut self, req: u64, ev: plan::Evidence) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if x.ev_req != req || !x.ev_busy {
+        if x.ev_req != Some(req) {
             return;
         }
-        x.ev_busy = false;
+        x.ev_req = None;
         let pooler = x.db.pooler();
         let key = history_key(x, x.plan.as_ref().is_some_and(|p| p.analyzed));
         if let Some(p) = &mut x.plan {
@@ -264,7 +275,7 @@ impl App {
     pub(in crate::app) fn demo_explain_evidence(&mut self, ev: plan::Evidence) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
         self.req += 1;
-        (x.ev_req, x.ev_busy) = (self.req, true);
+        x.ev_req = Some(self.req);
         let req = self.req;
         self.sql_explain_evidence(req, ev);
     }
@@ -274,29 +285,23 @@ impl App {
         let screen = ctx.content_rect();
         ui.set_width(fit_width(&ctx, (screen.width() * 0.85).clamp(760.0, 1160.0)));
         x.locked = !self.conn_writable(x.conn);
-        let mut names = vec!["Tree"];
+        let mut panes = vec![Pane::Tree];
         if x.prev.is_some() || x.hypo_cmp {
-            names.push("Compare");
+            panes.push(Pane::Compare);
         }
-        names.extend(["Flame", "Raw"]);
+        panes.extend([Pane::Flame, Pane::Raw]);
+        let names: Vec<&str> = panes.iter().map(|p| p.name()).collect();
         let mut head = Head::new(if x.analyzed { "Explain analyze" } else { "Explain" }).sub(head_line(x)).glyph(glyphs::list);
-        let shown = if x.raw_tab { "Raw" } else { pane_name(x.pane) };
         if x.plan.is_some() {
-            head = head.tabs(&names, names.iter().position(|n| *n == shown).unwrap_or(0));
+            head = head.tabs(&names, panes.iter().position(|p| *p == x.pane).unwrap_or(0));
         }
         if let Some(t) = dialog_head(ui, &head) {
-            x.raw_tab = names[t] == "Raw";
+            x.pane = panes[t];
             // Compare goes back to the last plan once left; Show in Compare brings the trial back.
-            x.hypo_cmp &= names[t] == "Compare";
-            x.pane = match names[t] {
-                "Flame" => Pane::Flame,
-                "Compare" => Pane::Compare,
-                "Raw" => x.pane,
-                _ => Pane::Tree,
-            };
+            x.hypo_cmp &= x.pane == Pane::Compare;
         }
         let mut acts = Vec::new();
-        if x.raw_tab || x.plan.is_none() {
+        if x.pane == Pane::Raw || x.plan.is_none() {
             let mut b = body_begin(ui);
             {
                 let ui = &mut b.content_ui;
@@ -379,7 +384,7 @@ impl App {
             }
             rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
             let note = match (&x.prev, x.pane) {
-                _ if x.raw_tab || x.plan.is_none() => None,
+                _ if x.plan.is_none() => None,
                 (_, Pane::Compare) if x.hypo_cmp => Some("Compared with the plan the server would choose with the hypothetical index. Nothing was created.".to_string()),
                 (Some(prev), Pane::Compare) => Some(format!("Compared with the plan from {}.", clock(prev.at))),
                 (_, Pane::Flame) => Some("Each bar is as wide as its share of the plan. Click one to see it.".to_string()),
@@ -443,14 +448,6 @@ impl App {
 /// Where this session keeps the last plan of the dialog's statement: two databases of one connection are two places.
 fn history_key(x: &SqlExplain, analyzed: bool) -> compare::Key {
     compare::Key { conn: x.conn, db: x.database.clone(), schema: x.schema.clone(), stmt: compare::normalize(&x.stmt, x.dialect), analyzed }
-}
-
-fn pane_name(p: Pane) -> &'static str {
-    match p {
-        Pane::Tree => "Tree",
-        Pane::Flame => "Flame",
-        Pane::Compare => "Compare",
-    }
 }
 
 /// The line under the title: the engine, then the size of the plan or what the run took.

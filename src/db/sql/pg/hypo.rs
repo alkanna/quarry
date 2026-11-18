@@ -20,6 +20,10 @@ const TRIAL_MS: u64 = 10_000;
 /// The schema HypoPG is installed in, which the functions are called through so a search_path never picks another.
 const EXT_SCHEMA: &str = "SELECT n.nspname::text AS name FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'hypopg'";
 
+/// Why a trial is not offered behind a pooler: it can hand the explain to another backend than the one that holds the
+/// hypothetical index.
+pub const POOLER: &str = "Not behind a connection pooler: the hypothetical index and the plan could land on different server connections.";
+
 /// What a trial gave.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trial {
@@ -72,9 +76,8 @@ pub(in crate::db::sql) async fn trial(db: &Db, schema: &str, create: &str, stmt:
     if db.dialect != Dialect::Postgres {
         return Err("HypoPG is a PostgreSQL extension.".into());
     }
-    // A pooler can hand the explain to another backend than the one that holds the hypothetical index.
     if db.pooler() {
-        return Err("Behind a connection pooler the hypothetical index and the plan could land on different server connections.".into());
+        return Err(POOLER.into());
     }
     if let Some(why) = refused(stmt, read_only) {
         return Err(why);

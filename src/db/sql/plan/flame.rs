@@ -17,33 +17,31 @@ pub fn timed(p: &Plan) -> bool {
     p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some())
 }
 
-/// Each node's cost, or time, with the nodes below it: what its bar's width stands for.
-pub fn weights(p: &Plan, time: bool) -> Vec<f64> {
-    super::tree::inclusive(p, time)
+/// The bars of a plan and what their widths stand for.
+#[derive(Clone, Debug, Default)]
+pub struct Layout {
+    pub bars: Vec<Bar>,
+    /// Each node's cost, or time, with the nodes below it, and the sum over the roots.
+    pub weights: Vec<f64>,
+    pub total: f64,
 }
 
-/// The bars of `p`, weighed by time when `time` and by cost otherwise. Nodes that weigh nothing get no bar.
-#[cfg(test)]
-pub fn layout(p: &Plan, time: bool) -> Vec<Bar> {
-    layout_min(p, time, 0.0)
-}
-
-/// `layout` with every bar that weighs something at least `min` wide, as a fraction of the full width, so a node too
-/// small to see still has a bar to point at and click. A bar never grows past the room its parent has left, so it can
-/// still come out narrower at the end of a crowded row.
-pub fn layout_min(p: &Plan, time: bool, min: f64) -> Vec<Bar> {
-    let weight = super::tree::inclusive(p, time);
+/// The bars of `p`, weighed by time when `time` and by cost otherwise. Nodes that weigh nothing get no bar; every other
+/// bar is at least `min` wide, as a fraction of the full width, so a node too small to see still has a bar to point at
+/// and click. A bar never grows past the room its parent has left, so it can still come out narrower at the end of a
+/// crowded row.
+pub fn layout(p: &Plan, time: bool, min: f64) -> Layout {
+    let weights = super::tree::inclusive(p, time);
     let roots: Vec<usize> = (0..p.nodes.len()).filter(|&i| p.nodes[i].parent.is_none()).collect();
-    let total: f64 = roots.iter().map(|&i| weight[i]).sum();
-    let mut out = Vec::new();
-    if total <= 0.0 || !total.is_finite() {
-        return out;
+    let total: f64 = roots.iter().map(|&i| weights[i]).sum();
+    let mut bars = Vec::new();
+    if total > 0.0 && total.is_finite() {
+        let mut x = 0.0;
+        for &r in &roots {
+            x += place(p, &weights, total, min, r, 0, x, 1.0 - x, &mut bars);
+        }
     }
-    let mut x = 0.0;
-    for &r in &roots {
-        x += place(p, &weight, total, min, r, 0, x, 1.0 - x, &mut out);
-    }
-    out
+    Layout { bars, weights, total }
 }
 
 /// Places node `i` at `x` in at most `room`, then its children under it; returns the width it took.
@@ -100,7 +98,7 @@ mod tests {
                 if time && !timed(&p) {
                     continue;
                 }
-                let bars = layout(&p, time);
+                let bars = layout(&p, time, 0.0).bars;
                 assert!(!bars.is_empty(), "no bars for {d:?} (time {time})");
                 check(&p, &bars);
                 if p.nodes.iter().filter(|n| n.parent.is_none()).count() == 1 {
@@ -116,7 +114,7 @@ mod tests {
         let p = parse(Dialect::Postgres, include_str!("fixtures/pg18-limit-analyze.json")).unwrap();
         assert!(p.nodes[1].cost.unwrap() > p.nodes[0].cost.unwrap() * 100.0);
         for time in [false, true] {
-            let bars = layout(&p, time);
+            let bars = layout(&p, time, 0.0).bars;
             check(&p, &bars);
             assert_eq!(bars[0].node, 0);
             assert!((bars[0].w - 1.0).abs() < 1e-9);
@@ -129,7 +127,7 @@ mod tests {
         for n in &mut p.nodes {
             n.self_cost = None;
         }
-        assert!(layout(&p, false).is_empty());
-        assert!(layout(&p, true).is_empty(), "a plan that never ran has no times to weigh");
+        assert!(layout(&p, false, 0.0).bars.is_empty());
+        assert!(layout(&p, true, 0.0).bars.is_empty(), "a plan that never ran has no times to weigh");
     }
 }

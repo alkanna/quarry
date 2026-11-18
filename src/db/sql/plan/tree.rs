@@ -124,7 +124,7 @@ fn spread(p: &Plan, i: usize, scale: f64, loops: &[f64], eff: &mut [f64]) {
 
 /// How a PostgreSQL subquery runs for the node that tests it, read from how that node prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubRun {
+pub(super) enum SubRun {
     /// An InitPlan, a CTE or a hashed SubPlan: run once and kept.
     Once,
     /// A SubPlan run again for every row the node above tests. `EXISTS(SubPlan 1)` stops at its first row, `ANY` reads
@@ -135,7 +135,7 @@ pub enum SubRun {
 }
 
 /// How node `k` runs, when it is a subquery.
-pub fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
+pub(super) fn sub_run(p: &Plan, k: usize) -> Option<SubRun> {
     let n = &p.nodes[k];
     if !n.role.starts_with("SubPlan") {
         return (n.role.starts_with("InitPlan") || n.role.starts_with("CTE")).then_some(SubRun::Once);
@@ -172,7 +172,7 @@ fn mentions(text: &str, name: &str, post: &str) -> bool {
 /// The hashed SubPlan the node `i` tests in place of a per-row one PostgreSQL dropped. The planner may plan a subquery
 /// both ways, prices its parent with the first (per row) and only then picks the hash, so the parent's cost still holds
 /// a per-row subquery that never runs. The dropped one is the SubPlan numbered just before the hashed one.
-pub fn dropped_alternative(p: &Plan, i: usize) -> Option<usize> {
+pub(super) fn dropped_alternative(p: &Plan, i: usize) -> Option<usize> {
     let n = &p.nodes[i];
     n.kids.iter().copied().find(|&k| {
         let role = &p.nodes[k].role;
@@ -208,7 +208,7 @@ fn per_row_charge(p: &Plan, k: usize) -> Option<f64> {
 }
 
 /// How many times a per-row SubPlan ran, or at least runs: its loops after ANALYZE, else the rows its parent returns.
-pub fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
+pub(super) fn sub_calls(p: &Plan, k: usize) -> Option<(f64, bool)> {
     let n = &p.nodes[k];
     if matches!(sub_run(p, k), None | Some(SubRun::Once)) {
         return None;
@@ -249,7 +249,7 @@ fn parallel_procs(p: &Plan, i: usize) -> Option<f64> {
 /// and MySQL's tree text that is the loop-scaled cost `spread` gives; MySQL's JSON has only a running total, so its own
 /// costs are summed. Building up from own values keeps every parent at least as heavy as its children, which the
 /// times alone do not (parallel workers, loops).
-pub(crate) fn inclusive(p: &Plan, time: bool) -> Vec<f64> {
+pub(super) fn inclusive(p: &Plan, time: bool) -> Vec<f64> {
     let mut w = vec![0.0; p.nodes.len()];
     // Children follow their parent, so walking back sees every child first.
     for i in (0..p.nodes.len()).rev() {

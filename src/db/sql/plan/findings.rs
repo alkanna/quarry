@@ -7,13 +7,13 @@ use super::index::{self, Advice};
 use super::{count, Access, Dialect, Op, Plan, PlanNode, BIG_SCAN};
 
 /// A node below this share of the plan's cost or time is not worth a finding about its scan.
-pub const SHARE_MIN: f64 = 0.20;
+pub(super) const SHARE_MIN: f64 = 0.20;
 /// An estimate this many times off is worth a finding.
 pub const OFF_WARN: f64 = 5.0;
 /// A sort or temporary table over fewer rows than this costs too little to mention.
 const BIG_SORT: f64 = 10_000.0;
 /// A node with this share of the plan is what the plan's cost or time is, so it always gets a finding.
-pub const SHARE_MOST: f64 = 0.5;
+pub(super) const SHARE_MOST: f64 = 0.5;
 /// A plan this slow, or this costly when it did not run, explains its largest node even below SHARE_MOST, so it never
 /// reads as if nothing stood out.
 const SLOW_MS: f64 = 100.0;
@@ -431,7 +431,7 @@ fn dominant(p: &Plan, by_time: bool, out: &mut Vec<Finding>) {
             (Severity::Note, format!("Reading {} {most}", n.name()), vec![format!("Reads all {} rows of {} and nothing filters them, so a full scan is the right way to read them.", count(rows), n.name())])
         } else if n.access != Access::Other {
             let read = rows_read(n).unwrap_or(0.0) * if p.analyzed { n.loops.unwrap_or(1.0) } else { 1.0 };
-            let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default();
+            let cols = n.filter.expr.as_ref().map(super::cond::columns).unwrap_or_default();
             let how = if n.index.is_empty() { String::new() } else { format!(" through {}", n.index) };
             let keep = if cols.is_empty() { String::new() } else { format!(" and keeps those matching {}", and_list(&cols)) };
             let sev = if n.access == Access::Scan { Severity::Warn } else { Severity::Note };
@@ -456,7 +456,7 @@ fn join_body(p: &Plan, i: usize) -> Vec<String> {
         let k = if p.nodes[k].op == Op::Hash { p.nodes[k].kids.first().copied().unwrap_or(k) } else { k };
         (rows_out(p, k).unwrap_or(0.0), below_name(p, k).unwrap_or_else(|| kind_of(&p.nodes[k].label).to_string()))
     };
-    let cond = n.join_cond_expr.as_ref().map(|e| super::cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+    let cond = n.join_cond.expr.as_ref().map(|e| super::cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.text.trim_start_matches('(').trim_end_matches(')').to_string());
     let mut body = Vec::new();
     let mut sides_rows = 0.0;
     if let [outer, inner, ..] = sides[..] {
@@ -518,7 +518,7 @@ pub fn below(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
 }
 
 /// The rows a scan reads per loop: what it returned and what its filter removed, or the estimate.
-pub fn rows_read(n: &PlanNode) -> Option<f64> {
+pub(super) fn rows_read(n: &PlanNode) -> Option<f64> {
     match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) => Some(k + r),
         _ => n.rows.map(|r| r + n.removed.unwrap_or(0.0)),
@@ -543,7 +543,7 @@ pub(super) fn weight_of(n: &PlanNode, by_time: bool) -> String {
 }
 
 fn scan_body(n: &PlanNode) -> String {
-    let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default();
+    let cols = n.filter.expr.as_ref().map(super::cond::columns).unwrap_or_default();
     match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) if r > 0.0 => kept_line(r, k),
         _ if !cols.is_empty() => format!("Reads every row, then keeps those matching {}.", and_list(&cols)),
@@ -558,7 +558,7 @@ fn kept_line(removed: f64, kept: f64) -> String {
 }
 
 /// "created_at, provider and status".
-pub fn and_list(xs: &[String]) -> String {
+pub(super) fn and_list(xs: &[String]) -> String {
     match xs {
         [] => String::new(),
         [a] => a.clone(),

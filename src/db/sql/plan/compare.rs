@@ -6,7 +6,7 @@ use super::findings::Kind;
 use super::{count, lex, Access, Dialect, Plan};
 
 /// A change under this share is "same": plans of an unchanged statement still move a little with the statistics.
-pub const SAME: f64 = 0.01;
+const SAME: f64 = 0.01;
 /// Plans kept for comparing, the oldest going first.
 pub const KEEP: usize = 50;
 

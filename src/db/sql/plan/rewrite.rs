@@ -35,7 +35,7 @@ pub(super) fn add(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: bo
         if !reads_all(n) || !flagged {
             continue;
         }
-        let (Some(t), Some(e)) = (ev.table(n), &n.filter_expr) else { continue };
+        let (Some(t), Some(e)) = (ev.table(n), &n.filter.expr) else { continue };
         // A table this small reads whole about as fast as through an index, rewritten or not.
         if !index::table_rows(p, i, t, d).is_some_and(|r| r >= MIN_ROWS) {
             continue;
@@ -516,7 +516,7 @@ fn join_buffers(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, out: &mut [Fi
             continue;
         }
         let Some(k) = out.iter().position(|f| f.node == Some(i) && f.kind == Kind::JoinBuffer) else { continue };
-        let (ti, e) = if n.alias.is_empty() { (n.kids.first().copied(), n.join_cond_expr.as_ref()) } else { (Some(i), n.filter_expr.as_ref()) };
+        let (ti, e) = if n.alias.is_empty() { (n.kids.first().copied(), n.join_cond.expr.as_ref()) } else { (Some(i), n.filter.expr.as_ref()) };
         let (Some(ti), Some(e)) = (ti, e) else { continue };
         let tn = &p.nodes[ti];
         let Some(t) = ev.table(tn) else { continue };
@@ -596,7 +596,7 @@ pub fn statement(stmt: &str, d: Dialect, n: &PlanNode, fix: &Fix) -> Option<Stri
         return None;
     }
     let own = |c: &ColRef| c.qual.as_deref().is_none_or(|q| index::same(q, &n.alias, d) || index::same(q, &n.rel, d));
-    let s = conjuncts(n.filter_expr.as_ref()?).into_iter().find_map(|x| shape(x, &own).filter(|s| plan_sql(s, d).as_deref() == Some(fix.sql.as_str())))?;
+    let s = conjuncts(n.filter.expr.as_ref()?).into_iter().find_map(|x| shape(x, &own).filter(|s| plan_sql(s, d).as_deref() == Some(fix.sql.as_str())))?;
     let toks = significant(stmt, d);
     let word = |j: usize, w: &str| toks.get(j).is_some_and(|(t, r)| *t == Tok::Word && stmt[r.clone()].eq_ignore_ascii_case(w));
     if (0..toks.len()).any(|j| word(j, "between")) {

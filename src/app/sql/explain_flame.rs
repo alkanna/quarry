@@ -37,14 +37,12 @@ pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, act
         }
     });
     ui.add_space(12.0);
-    let bars = flame::layout_min(p, x.flame_time, (MIN_BAR / ui.available_width().max(1.0)) as f64);
+    let flame::Layout { bars, weights: all, total } = flame::layout(p, x.flame_time, (MIN_BAR / ui.available_width().max(1.0)) as f64);
     if bars.is_empty() {
         ui.label(RichText::new("The plan gives no cost to draw. See Tree.").color(MUTED()));
         return;
     }
     // The figure on each bar is the weight its width comes from.
-    let all = flame::weights(p, x.flame_time);
-    let total: f64 = (0..p.nodes.len()).filter(|&k| p.nodes[k].parent.is_none()).map(|k| all[k]).sum();
     let rows = bars.iter().map(|b| b.row).max().unwrap_or(0) + 1;
     let scroll_to = x.scroll_to.take();
     let mut picked = None;
@@ -184,7 +182,7 @@ mod tests {
 
     fn check_labels(p: &crate::db::sql::plan::Plan) {
         let w = 700.0_f32;
-        let bars = flame::layout_min(p, false, (MIN_BAR / w) as f64);
+        let bars = flame::layout(p, false, (MIN_BAR / w) as f64).bars;
         // Text is about 8 px a character in the bar's mono font.
         let text_w = |s: &str| s.chars().count() as f32 * 8.0;
         let mut labelled = Vec::new();

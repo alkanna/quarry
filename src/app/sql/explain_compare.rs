@@ -161,7 +161,7 @@ fn row_sub(was: Option<&str>, gone: bool, n: &PlanNode) -> Option<String> {
     }
     let was = was?;
     let mut s = format!("was {was}");
-    if let Some(c) = n.index_cond_expr.as_ref().map(crate::db::sql::plan::cond::columns).filter(|c| !c.is_empty()) {
+    if let Some(c) = n.index_cond.expr.as_ref().map(crate::db::sql::plan::cond::columns).filter(|c| !c.is_empty()) {
         s = format!("{s}  ·  Index Cond: {}", c.join(", "));
     }
     Some(s)

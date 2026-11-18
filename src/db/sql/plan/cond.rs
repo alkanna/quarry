@@ -674,7 +674,7 @@ fn split_array(s: &str) -> Vec<String> {
 }
 
 /// The columns a term reads, through functions and casts.
-pub fn term_cols(t: &Term) -> Vec<&ColRef> {
+pub(super) fn term_cols(t: &Term) -> Vec<&ColRef> {
     match t {
         Term::Col(c) => vec![c],
         Term::Cast { inner, .. } => term_cols(inner),
@@ -684,7 +684,7 @@ pub fn term_cols(t: &Term) -> Vec<&ColRef> {
 }
 
 /// Calls `f` on every term at the top of each condition in `e`.
-pub fn walk_terms<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Term)) {
+pub(super) fn walk_terms<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Term)) {
     match e {
         Expr::And(xs) | Expr::Or(xs) => xs.iter().for_each(|x| walk_terms(x, f)),
         Expr::Not(x) => walk_terms(x, f),
@@ -773,7 +773,7 @@ pub struct Sargs {
 /// table scanned; with `outer_const` a column of another table counts as a value, as on the inner side of a nested loop
 /// where it is fixed for each loop. `ty` gives a column's catalog type: PostgreSQL prints a varchar column compared with
 /// text as `(col)::text`, a cast that an index on the column still serves, and only the type tells that cast apart.
-pub fn sargs(e: &Expr, d: Dialect, own: &dyn Fn(&ColRef) -> bool, outer_const: bool, ty: &dyn Fn(&str) -> Option<String>) -> Sargs {
+pub(super) fn sargs(e: &Expr, d: Dialect, own: &dyn Fn(&ColRef) -> bool, outer_const: bool, ty: &dyn Fn(&str) -> Option<String>) -> Sargs {
     let mut out = Sargs::default();
     let parts = match e {
         Expr::And(xs) => xs.iter().collect::<Vec<_>>(),

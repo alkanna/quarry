@@ -10,9 +10,9 @@ use super::tree::is_inner;
 use super::{count, Dialect, Op, Plan};
 
 /// A table smaller than this reads whole about as fast as through an index.
-pub const MIN_ROWS: f64 = 10_000.0;
+pub(super) const MIN_ROWS: f64 = 10_000.0;
 /// A filter that keeps more than this share of the rows reads most pages either way.
-pub const MAX_KEPT: f64 = 0.05;
+pub(super) const MAX_KEPT: f64 = 0.05;
 /// A column that keeps more than this share narrows too little to be worth a place in the index.
 const WEAK: f64 = 0.5;
 const MAX_COLS: usize = 3;
@@ -47,7 +47,7 @@ pub(super) enum Kept {
 }
 
 /// What the catalog and the plan say about the filtered full scan `i` of table `t`.
-pub fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) -> Advice {
+pub(super) fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) -> Advice {
     let n = &p.nodes[i];
     let name = t.table.as_str();
     let mut lines = Vec::new();
@@ -64,7 +64,7 @@ pub fn advise(p: &Plan, i: usize, d: Dialect, t: &TableEv, pooler: bool) -> Advi
     if rows < MIN_ROWS {
         return no(format!("{name} has about {} rows, few enough that reading it whole is cheap", count(rows)), lines);
     }
-    let Some(e) = &n.filter_expr else { return no("the filter could not be read".into(), lines) };
+    let Some(e) = &n.filter.expr else { return no("the filter could not be read".into(), lines) };
     let kept = match kept(p, i, t, d) {
         Kept::Guess(f) => return no(format!("the {} of rows the server says the filter keeps is its guess. Run with ANALYZE to measure it", pct_text(f * 100.0)), lines),
         Kept::Unknown => return no("how many rows the filter keeps is not known".into(), lines),
@@ -378,7 +378,7 @@ pub(super) fn stats_line(t: &TableEv) -> Option<String> {
 }
 
 /// 90 as "2 minutes", 7200 as "2 hours".
-pub fn ago_text(s: f64) -> String {
+pub(super) fn ago_text(s: f64) -> String {
     let unit = |n: f64, w: &str| {
         let n = n.round().max(1.0);
         format!("{} {w}{}", count(n), if n == 1.0 { "" } else { "s" })
@@ -444,7 +444,7 @@ pub(super) fn create(d: Dialect, t: &TableEv, name: &str, parts: &str, how: How,
     (sql, trial)
 }
 
-pub fn analyze_fix(d: Dialect, t: &TableEv) -> Fix {
+pub(super) fn analyze_fix(d: Dialect, t: &TableEv) -> Fix {
     let target = d.qualified(&t.schema, &t.table);
     let sql = if d == Dialect::Postgres { format!("ANALYZE {target};") } else { format!("ANALYZE TABLE {target};") };
     Fix { kind: FixKind::Analyze, label: "ANALYZE".into(), sql, note: format!("Refreshes the planner's statistics of {} from a sample of its rows.", t.table), trial: None }

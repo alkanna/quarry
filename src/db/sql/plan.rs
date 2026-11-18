@@ -18,7 +18,7 @@ pub use evidence::Evidence;
 pub use findings::{Finding, FixKind, Severity};
 
 /// A scan that reads at least this many rows is worth a warning. Below it a full scan is often the cheapest plan.
-pub const BIG_SCAN: f64 = 1000.0;
+const BIG_SCAN: f64 = 1000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Access {
@@ -93,17 +93,12 @@ pub struct PlanNode {
     pub loops: Option<f64>,
     /// MariaDB's time in this table over every loop.
     pub table_ms: Option<f64>,
-    /// The filter applied to the rows read, as the server wrote it, and the condition used to search an index or join.
-    pub filter: String,
-    pub index_cond: String,
-    pub join_cond: String,
+    /// The filter applied to the rows read, and the condition used to search an index or join.
+    pub filter: Cond,
+    pub index_cond: Cond,
+    pub join_cond: Cond,
     /// PostgreSQL's Join Filter: what each pair the join condition matched is checked against again.
-    pub join_filter: String,
-    /// The conditions read, when they read; parsed once so drawing a frame never lexes them.
-    pub filter_expr: Option<cond::Expr>,
-    pub index_cond_expr: Option<cond::Expr>,
-    pub join_cond_expr: Option<cond::Expr>,
-    pub join_filter_expr: Option<cond::Expr>,
+    pub join_filter: Cond,
     /// Rows the filter removed, per loop.
     pub removed: Option<f64>,
     /// Pairs the join matched and its Join Filter then removed, per loop.
@@ -142,6 +137,19 @@ pub struct PlanNode {
     pub detail: Vec<String>,
 }
 
+/// A condition as the server wrote it, and read, when it reads. Parsed once so drawing a frame never lexes it.
+#[derive(Clone, Debug, Default)]
+pub struct Cond {
+    pub text: String,
+    pub expr: Option<cond::Expr>,
+}
+
+impl Cond {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
 impl PlanNode {
     /// "bookings b", "orders" or "o": what the node reads, for findings and the inspector.
     pub fn name(&self) -> String {
@@ -153,12 +161,12 @@ impl PlanNode {
         }
     }
 
-    /// How far the estimate was from what ran, as a factor of one or more, when both are known.
     /// Rows kept by the node's filter, per loop.
     pub fn kept_rows(&self) -> Option<f64> {
         self.kept.or(self.actual_rows)
     }
 
+    /// How far the estimate was from what ran, as a factor of one or more, when both are known.
     pub fn off(&self) -> Option<f64> {
         if self.never_ran {
             return None;
@@ -173,8 +181,6 @@ pub struct Plan {
     pub nodes: Vec<PlanNode>,
     /// What is worth fixing, most important first.
     pub findings: Vec<Finding>,
-    /// Every finding as one line, for the agent.
-    pub warnings: Vec<String>,
     pub cost: Option<f64>,
     pub planning_ms: Option<f64>,
     pub exec_ms: Option<f64>,
@@ -296,8 +302,9 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
     }
     tree::derive(&mut plan, d);
     for n in &mut plan.nodes {
-        let read = |t: &str| if t.is_empty() { None } else { cond::parse(t, d) };
-        (n.filter_expr, n.index_cond_expr, n.join_cond_expr, n.join_filter_expr) = (read(&n.filter), read(&n.index_cond), read(&n.join_cond), read(&n.join_filter));
+        for c in [&mut n.filter, &mut n.index_cond, &mut n.join_cond, &mut n.join_filter] {
+            c.expr = if c.text.is_empty() { None } else { cond::parse(&c.text, d) };
+        }
     }
     plan.refind(d, None, false);
     Ok(plan)
@@ -307,7 +314,6 @@ impl Plan {
     /// Works the findings out again, with what the catalog said once it answers.
     pub fn refind(&mut self, d: Dialect, ev: Option<&Evidence>, pooler: bool) {
         self.findings = findings::find(self, d, ev, pooler);
-        self.warnings = self.findings.iter().map(Finding::line).collect();
     }
 }
 
@@ -444,11 +450,11 @@ fn pg_node(n: &Value, depth: usize, out: &mut Vec<PlanNode>) {
     node.actual_ms = num(n, "Actual Total Time");
     node.loops = num(n, "Actual Loops");
     node.never_ran = node.loops == Some(0.0);
-    node.filter = text(n, "Filter").to_string();
-    node.index_cond = [text(n, "Index Cond"), text(n, "Recheck Cond")].into_iter().find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    node.filter.text = text(n, "Filter").to_string();
+    node.index_cond.text = [text(n, "Index Cond"), text(n, "Recheck Cond")].into_iter().find(|s| !s.is_empty()).unwrap_or_default().to_string();
     // A Join Filter stays a detail line of its own, so a join with both shows both.
-    node.join_cond = ["Hash Cond", "Merge Cond"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
-    node.join_filter = text(n, "Join Filter").to_string();
+    node.join_cond.text = ["Hash Cond", "Merge Cond"].into_iter().map(|k| text(n, k)).find(|s| !s.is_empty()).unwrap_or_default().to_string();
+    node.join_filter.text = text(n, "Join Filter").to_string();
     node.parallel = flag(n, "Parallel Aware");
     node.workers = num(n, "Workers Launched").or_else(|| num(n, "Workers Planned"));
     for key in ["Index Cond", "Recheck Cond", "Filter", "Join Filter", "Hash Cond", "Merge Cond", "One-Time Filter"] {
@@ -529,7 +535,7 @@ fn my_walk(o: &Value, depth: usize, out: &mut Vec<PlanNode>) {
             "filesort" => my_op("Filesort", &joined(v, "sort_key"), v, depth, out, |n| (n.filesort, n.op) = (true, Op::Sort)),
             "temporary_table" => my_op("Temporary table", "", v, depth, out, |n| n.temp_table = true),
             // The join's own condition sits here, apart from the filter of the table below.
-            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| (n.join_buffer, n.op, n.join_cond) = (true, Op::JoinBuffer, text(v, "attached_condition").to_string())),
+            "block-nl-join" => my_op("Join buffer", text(v, "join_type"), v, depth, out, |n| (n.join_buffer, n.op, n.join_cond.text) = (true, Op::JoinBuffer, text(v, "attached_condition").to_string())),
             "query_specifications" => v.as_array().into_iter().flatten().for_each(|s| my_walk(s, depth, out)),
             "attached_subqueries" | "optimized_away_subqueries" | "subqueries" => {
                 for s in v.as_array().into_iter().flatten() {
@@ -588,9 +594,9 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
     };
     node.actual_ms = num(t, "r_total_time_ms").or(node.table_ms);
-    node.filter = text(t, "attached_condition").to_string();
-    node.index_cond = text(t, "index_condition").to_string();
-    node.join_cond = joined(t, "ref");
+    node.filter.text = text(t, "attached_condition").to_string();
+    node.index_cond.text = text(t, "index_condition").to_string();
+    node.join_cond.text = joined(t, "ref");
     node.filtered_pct = num(t, "filtered");
     node.possible_keys = match t.get("possible_keys") {
         Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
@@ -673,7 +679,7 @@ fn parse_tree(text: &str) -> Plan {
             }
         }
         if let Some(c) = l.strip_prefix("Filter: ") {
-            node.filter = c.to_string();
+            node.filter.text = c.to_string();
         }
         node.filesort = l.starts_with("Sort");
         node.temp_table = l.contains("temporary table") || l.contains("Temporary table");
@@ -693,7 +699,7 @@ fn tree_filters(p: &mut Plan) {
         let Some(j) = p.nodes[i].parent else { continue };
         let n = &p.nodes[i];
         if (n.label.starts_with("Table scan") || n.op == Op::FullIndexScan) && n.filter.is_empty() && !p.nodes[j].filter.is_empty() && p.nodes[j].kids.len() == 1 {
-            p.nodes[i].filter = p.nodes[j].filter.clone();
+            p.nodes[i].filter.text = p.nodes[j].filter.text.clone();
             if let (Some(read), Some(kept)) = (p.nodes[i].actual_rows, p.nodes[j].actual_rows) {
                 p.nodes[i].removed = Some((read - kept).max(0.0));
                 p.nodes[i].kept = Some(kept);
@@ -761,7 +767,7 @@ mod tests {
         assert_eq!((seq.parent, p.nodes[0].kids.clone(), seq.name()), (Some(0), vec![1, 2], "orders o".to_string()));
         assert_eq!(p.findings.len(), 1);
         assert_eq!((p.findings[0].kind, p.findings[0].node, p.findings[0].title.as_str()), (Kind::FullScan, Some(1), "Full scan of orders o"));
-        assert_eq!(p.warnings, ["Full scan of orders o. Reads every row, then keeps those matching total."]);
+        assert_eq!(p.findings.iter().map(Finding::line).collect::<Vec<_>>(), ["Full scan of orders o. Reads every row, then keeps those matching total."]);
         let ix = &p.nodes[3];
         assert_eq!((ix.target.as_str(), ix.index.as_str(), ix.access), ("public.customers as c", "customers_pkey", Access::Index));
         // Own costs add up to the plan's: the join's 2,500 less the 2,100 and 5 below it.
@@ -1014,7 +1020,7 @@ mod tests {
         let p = parse(Dialect::MySql, fixture("mysql-join-analyze")).unwrap();
         let scan = p.nodes.iter().find(|n| n.label == "Table scan on o").unwrap();
         assert_eq!((scan.alias.as_str(), scan.removed), ("o", Some(200000.0)));
-        assert!(scan.filter_expr.is_some());
+        assert!(scan.filter.expr.is_some());
         let p = parse(Dialect::MySql, fixture("mysql-joinbuf-analyze")).unwrap();
         let f = p.nodes.iter().find(|n| n.label.starts_with("Filter")).unwrap();
         // "actual time=662e-6..662e-6" is under a millisecond, not 662.
@@ -1042,11 +1048,11 @@ mod tests {
         // A join's filter stays visible beside its hash condition.
         let pg = r#"[{"Plan":{"Node Type":"Hash Join","Join Type":"Inner","Total Cost":10,"Plan Rows":5,"Hash Cond":"(o.cid = c.id)","Join Filter":"(o.total > c.cap)"}}]"#;
         let p = parse(Dialect::Postgres, pg).unwrap();
-        assert_eq!(p.nodes[0].join_cond, "(o.cid = c.id)");
+        assert_eq!(p.nodes[0].join_cond.text, "(o.cid = c.id)");
         assert!(p.nodes[0].detail.contains(&"Join Filter: (o.total > c.cap)".to_string()));
-        assert!(p.nodes[0].join_cond_expr.is_some());
-        assert_eq!(p.nodes[0].join_filter, "(o.total > c.cap)");
-        assert!(p.nodes[0].join_filter_expr.is_some());
+        assert!(p.nodes[0].join_cond.expr.is_some());
+        assert_eq!(p.nodes[0].join_filter.text, "(o.total > c.cap)");
+        assert!(p.nodes[0].join_filter.expr.is_some());
     }
 
     fn of(p: &Plan, kind: Kind) -> Option<&Finding> {
@@ -1060,7 +1066,7 @@ mod tests {
         let p = parse(Dialect::Postgres, fixture("pg18-subjoin")).unwrap();
         let join = p.nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
         assert!(p.nodes[join].share.unwrap() > 0.9, "{:?}", p.nodes[join].share);
-        assert!(p.nodes[join].join_filter.contains("hashed SubPlan 2") && p.nodes[join].join_filter_expr.is_some());
+        assert!(p.nodes[join].join_filter.text.contains("hashed SubPlan 2") && p.nodes[join].join_filter.expr.is_some());
         let f = of(&p, Kind::Dominant).expect("the join is not explained");
         assert_eq!((f.title.as_str(), f.severity, f.node), ("Hash Join does most of the work", Severity::Warn, Some(join)));
         assert_eq!(f.body[0], "Matches 4,846 rows of bookings b against 12,622 rows of service_inductors si on b.service_id = si.service_id.");

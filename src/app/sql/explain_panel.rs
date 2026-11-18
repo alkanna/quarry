@@ -181,24 +181,15 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             ui.label(RichText::new(format!("Buffers  {} hit  ·  {} read from disk", figure(hit), figure(read))).size(TXT_SMALL).color(if read > hit { WARNING() } else { MUTED() }));
         }
         // Conditions.
-        if !n.filter.is_empty() {
-            section(ui, "FILTER", Some(&n.filter), acts);
-            match &n.filter_expr {
-                Some(e) => condition_lines(ui, e),
-                None => {
-                    ui.label(crate::ui::editor::sql_job_in(&n.filter, TXT_SMALL, x.dialect));
-                }
-            }
-        }
-        for (title, text, expr) in [("INDEX CONDITION", &n.index_cond, &n.index_cond_expr), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond, &n.join_cond_expr), ("JOIN FILTER", &n.join_filter, &n.join_filter_expr)] {
-            if text.is_empty() {
+        for (title, c) in [("FILTER", &n.filter), ("INDEX CONDITION", &n.index_cond), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond), ("JOIN FILTER", &n.join_filter)] {
+            if c.is_empty() {
                 continue;
             }
-            section(ui, title, Some(text), acts);
-            match expr {
+            section(ui, title, Some(&c.text), acts);
+            match &c.expr {
                 Some(e) => condition_lines(ui, e),
                 None => {
-                    ui.label(crate::ui::editor::sql_job_in(text, TXT_SMALL, x.dialect));
+                    ui.label(crate::ui::editor::sql_job_in(&c.text, TXT_SMALL, x.dialect));
                 }
             }
         }
@@ -241,7 +232,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                 ui.add_space(6.0);
                 ui.label(RichText::new(why).size(TXT_SMALL).color(MUTED()));
             }
-            if x.ev_busy && f.fix.is_none() && f.no_fix.is_none() && n.access == Access::Scan && !n.filter.is_empty() {
+            if x.ev_req.is_some() && f.fix.is_none() && f.no_fix.is_none() && n.access == Access::Scan && !n.filter.is_empty() {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
