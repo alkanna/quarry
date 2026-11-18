@@ -199,3 +199,76 @@ fn copy_puts_the_fix_on_the_clipboard_with_a_note() {
     ui.click_last("Copy");
     assert!(ui.shows("Copied."), "copying said nothing");
 }
+
+const FIX_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before.json");
+const FIX_AFTER: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-after.json");
+const FIX_BEFORE_RUN: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before-analyze.json");
+
+/// The statement explained once on `before`, then again on `after`, as after creating an index.
+fn explain_twice(before: &'static str, after: &'static str) -> Option<UiApp> {
+    let mut ui = explain_in(Dialect::Postgres, before)?;
+    ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, after);
+    ui.settle();
+    Some(ui)
+}
+
+#[test]
+fn explaining_again_after_an_index_shows_what_changed_in_compare() {
+    let Some(mut ui) = explain_twice(FIX_BEFORE, FIX_AFTER) else { return };
+    assert!(ui.shows("cost 3,073, was 5,769"), "the head does not give the old cost");
+    ui.click("Compare");
+    for col in ["NODE", "BEFORE", "AFTER", "CHANGE"] {
+        ui.show(col);
+    }
+    assert!(ui.shows("Cost down 47%."), "the summary does not give the cost change");
+    assert!(ui.shows("bookings b now reads through bookings_provider_status_idx."), "the summary does not name the index now used");
+    assert!(ui.shows("Compared with the plan from "), "the footer does not say when the old plan was made");
+    // The scan that became a bitmap scan is one row that says what it was.
+    ui.show("Bitmap Heap Scan bookings b");
+    let x = explain_state(&ui);
+    let d = &x.prev.as_ref().expect("a previous plan").diff;
+    let heap = x.plan.as_ref().unwrap().nodes.iter().position(|n| n.label == "Bitmap Heap Scan").unwrap();
+    let row = d.rows.iter().find(|r| r.after == Some(heap)).unwrap();
+    assert_eq!(row.was.as_deref(), Some("Seq Scan"));
+    assert!(row.cost.text().starts_with('-'), "{}", row.cost.text());
+    // The full scan is gone from the new plan.
+    ui.show("Full scan of bookings b");
+    ui.show("resolved");
+    // A row opens its node in the tree.
+    ui.click("Bitmap Heap Scan bookings b");
+    let x = explain_state(&ui);
+    assert_eq!((x.pane, x.sel), (crate::app::sql::explain::Pane::Tree, Some(heap)));
+}
+
+#[test]
+fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "Compare is offered with nothing to compare with");
+    let Some(mut ui) = explain_twice(FIX_BEFORE, FIX_BEFORE) else { return };
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "Compare is offered for the same plan");
+    // An estimate is not compared with a run.
+    let Some(mut ui) = explain_twice(FIX_BEFORE, FIX_BEFORE_RUN) else { return };
+    ui.show("Flame");
+    assert!(ui.h.query_by_label("Compare").is_none(), "an analyzed plan is compared with an estimate");
+}
+
+#[test]
+fn a_flame_bar_selects_its_node_and_time_waits_for_analyze() {
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
+    ui.click("Flame");
+    ui.show("WIDTH BY");
+    assert!(ui.disabled("Time"), "Time is offered before ANALYZE");
+    assert!(ui.shows("Time needs ANALYZE"), "the reason Time is off is not given");
+    let join = explain_state(&ui).plan.as_ref().unwrap().nodes.iter().position(|n| n.label == "Hash Join (Inner)").unwrap();
+    ui.click("Hash Join (Inner)");
+    assert_eq!(explain_state(&ui).sel, Some(join), "clicking a bar did not select its node");
+    assert!(ui.shows("the join's outer side") || ui.shows("under Sort") || ui.shows("feeds the sort"), "the panel does not follow the bar");
+    // After ANALYZE the bars can follow the time.
+    let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE_RUN) else { return };
+    ui.click("Flame");
+    assert!(!ui.disabled("Time"), "Time is off after ANALYZE");
+    ui.click("Time");
+    assert!(explain_state(&ui).flame_time, "Time did not switch the widths");
+}

@@ -170,6 +170,8 @@ pub struct App {
     sql_asked: HashSet<(u64, String)>,
     /// PostgreSQL: (connection, database, schema) whose table list was asked for.
     pg_tables_asked: Asked,
+    /// The last plan of each statement explained this session, for the explain dialog's Compare tab.
+    explain_prev: db::sql::plan::compare::History,
     /// Sidebar lists that failed to load, by connection and namespace key (a database, or a PostgreSQL database and
     /// schema), so the sidebar shows the failure with a retry instead of an empty list that never fills.
     side_err: HashMap<(u64, String), String>,
@@ -385,6 +387,7 @@ impl App {
             side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
             pg_tables_asked: Asked::default(),
+            explain_prev: Default::default(),
             side_err: HashMap::new(),
             tabs: Vec::new(),
             cur: 0,

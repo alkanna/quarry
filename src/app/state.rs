@@ -1772,6 +1772,8 @@ impl App {
         c.client = None;
         c.sql = None;
         c.tunnel = None;
+        // A new session may see other indexes and statistics, so its plans start fresh.
+        self.explain_prev.forget(id);
         // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
         c.writable = false;
         // Asked again once connected, so a changed or failed server never shows the old one.

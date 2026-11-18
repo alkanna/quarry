@@ -601,6 +601,7 @@ impl App {
         let name = c.meta.name.clone();
         self.stop_conn_work(id);
         self.pg_tables_asked.forget(id, None, None);
+        self.explain_prev.forget(id);
         Some(name)
     }
 

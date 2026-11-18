@@ -2,11 +2,13 @@
 //! selected node on the right, the raw plan, and an optional ANALYZE run that shows what the server actually did. The
 //! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
+use super::explain_compare::{clock, compare_view, Prev};
+use super::explain_flame::flame_view;
 use super::explain_panel::{findings_strip, inspector};
 use super::explain_tree::plan_tree;
 use super::query::run_target;
 use crate::app::*;
-use crate::db::sql::plan::{self, Analyze, Plan};
+use crate::db::sql::plan::{self, compare, Analyze, Plan};
 use crate::db::sql::{Db, Dialect};
 
 /// The state of one open SQL explain dialog.
@@ -43,6 +45,20 @@ pub(in crate::app) struct SqlExplain {
     run: db::sql::RunHandle,
     /// Stop was pressed, so the answer that follows is no error to show.
     stopped: bool,
+    /// What the head shows when Raw is not chosen.
+    pub(in crate::app) pane: Pane,
+    /// The flame chart is as wide as each node's time, not its cost.
+    pub(in crate::app) flame_time: bool,
+    /// The last plan of this statement this session, when it differs from this one.
+    pub(in crate::app) prev: Option<Prev>,
+}
+
+/// The views of a readable plan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::app) enum Pane {
+    Tree,
+    Flame,
+    Compare,
 }
 
 /// What a click in the dialog asks for, done once the frame is drawn.
@@ -55,7 +71,7 @@ pub(super) enum XAct {
 
 impl SqlExplain {
     fn new(stmt: String, conn: u64, tab_db: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false }
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None }
     }
 }
 
@@ -162,6 +178,13 @@ impl App {
                 // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
                 x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
                 x.scroll_to = x.sel;
+                // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
+                let key = compare::Key { conn: x.conn, schema: x.schema.clone(), stmt: compare::normalize(&x.stmt, x.dialect), analyzed: p.analyzed };
+                let now = crate::library::now_secs();
+                x.prev = self.explain_prev.swap(key, p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
+                if x.prev.is_none() && x.pane == Pane::Compare {
+                    x.pane = Pane::Tree;
+                }
                 (x.plan, x.unread) = (Some(p), None);
             }
             // The raw text is still worth reading.
@@ -173,12 +196,24 @@ impl App {
         let ctx = ui.ctx().clone();
         let screen = ctx.content_rect();
         ui.set_width(fit_width(&ctx, (screen.width() * 0.85).clamp(760.0, 1160.0)));
+        let mut names = vec!["Tree"];
+        if x.prev.is_some() {
+            names.push("Compare");
+        }
+        names.extend(["Flame", "Raw"]);
         let mut head = Head::new(if x.analyzed { "Explain analyze" } else { "Explain" }).sub(head_line(x)).glyph(glyphs::list);
+        let shown = if x.raw_tab { "Raw" } else { pane_name(x.pane) };
         if x.plan.is_some() {
-            head = head.tabs(&["Tree", "Raw"], usize::from(x.raw_tab));
+            head = head.tabs(&names, names.iter().position(|n| *n == shown).unwrap_or(0));
         }
         if let Some(t) = dialog_head(ui, &head) {
-            x.raw_tab = t == 1;
+            x.raw_tab = names[t] == "Raw";
+            x.pane = match names[t] {
+                "Flame" => Pane::Flame,
+                "Compare" => Pane::Compare,
+                "Raw" => x.pane,
+                _ => Pane::Tree,
+            };
         }
         let mut acts = Vec::new();
         if x.raw_tab || x.plan.is_none() {
@@ -194,6 +229,15 @@ impl App {
                 });
             }
             b.end(ui);
+        } else if x.pane == Pane::Compare && x.prev.is_some() {
+            dialog_flush(ui, |ui| {
+                egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 16 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    status_lines(ui, x);
+                    let body_h = (screen.height() - 330.0).clamp(260.0, 640.0).min(body_room(ui, 74.0));
+                    compare_view(ui, x, body_h, &mut acts);
+                });
+            });
         } else {
             dialog_flush(ui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 16, bottom: 0 }).show(ui, |ui| {
@@ -210,7 +254,11 @@ impl App {
                     egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 8, top: 12, bottom: 16 }).show(ui, |ui| {
                         ui.vertical(|ui| {
                             ui.set_width(w - panel_w - 28.0 - 20.0);
-                            plan_tree(ui, x, body_h, &mut acts);
+                            if x.pane == Pane::Flame {
+                                flame_view(ui, x, body_h, &mut acts);
+                            } else {
+                                plan_tree(ui, x, body_h, &mut acts);
+                            }
                         });
                     });
                     egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 20, top: 12, bottom: 16 }).show(ui, |ui| {
@@ -251,7 +299,13 @@ impl App {
                 acts.push(XAct::Copy(x.raw.clone()));
             }
             rows = ui.button("Show rows in Query tab").on_hover_text("Run the classic EXPLAIN and show the server's rows").clicked();
-            foot_note(ui, if x.analyzed { "Ran the statement. Times are each node's own, without the nodes below it." } else { "Estimated by the planner. Nothing ran." });
+            let note = match (&x.prev, x.pane) {
+                _ if x.raw_tab || x.plan.is_none() => None,
+                (Some(prev), Pane::Compare) => Some(format!("Compared with the plan from {}.", clock(prev.at))),
+                (_, Pane::Flame) => Some("Each bar is as wide as its share of the plan. Click one to see it.".to_string()),
+                _ => None,
+            };
+            foot_note(ui, note.as_deref().unwrap_or(if x.analyzed { "Ran the statement. Times are each node's own, without the nodes below it." } else { "Estimated by the planner. Nothing ran." }));
         });
         for a in acts {
             match a {
@@ -300,6 +354,14 @@ impl App {
     }
 }
 
+fn pane_name(p: Pane) -> &'static str {
+    match p {
+        Pane::Tree => "Tree",
+        Pane::Flame => "Flame",
+        Pane::Compare => "Compare",
+    }
+}
+
 /// The line under the title: the engine, then the size of the plan or what the run took.
 fn head_line(x: &SqlExplain) -> String {
     let mut sub = x.db.label();
@@ -319,6 +381,9 @@ fn head_line(x: &SqlExplain) -> String {
         sub = format!("{sub}  ·  {} node{}", p.nodes.len(), if p.nodes.len() == 1 { "" } else { "s" });
         if let Some(c) = p.cost {
             sub = format!("{sub}  ·  cost {}", group(&format!("{c:.0}")));
+            if let Some(was) = x.prev.as_ref().and_then(|v| v.plan.cost).filter(|w| (w - c).abs() >= 0.5) {
+                sub = format!("{sub}, was {}", group(&format!("{was:.0}")));
+            }
         }
         if let Some(r) = root.and_then(|n| n.rows) {
             sub = format!("{sub}  ·  est. {} rows", group(&format!("{r:.0}")));

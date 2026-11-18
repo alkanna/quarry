@@ -17,6 +17,11 @@ pub fn timed(p: &Plan) -> bool {
     p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some())
 }
 
+/// Each node's cost, or time, with the nodes below it: what its bar's width stands for.
+pub fn weights(p: &Plan, time: bool) -> Vec<f64> {
+    super::tree::inclusive(p, time)
+}
+
 /// The bars of `p`, weighed by time when `time` and by cost otherwise. Nodes that weigh nothing get no bar.
 pub fn layout(p: &Plan, time: bool) -> Vec<Bar> {
     let weight = super::tree::inclusive(p, time);
