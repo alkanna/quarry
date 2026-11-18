@@ -900,6 +900,12 @@ impl Worker {
         });
     }
 
+    /// What the catalog says about the tables an explained plan scans, for its index suggestions. Never fails: a part that
+    /// cannot be read is left empty and the dialog keeps the plan's own findings.
+    pub fn sql_explain_evidence(&self, req: u64, db: Db, schema: String, wants: Vec<super::plan::evidence::Want>) {
+        self.spawn(async move { Msg::SqlExplainEvidence { req, ev: super::plan::evidence::load(&db, &schema, &wants).await } });
+    }
+
     /// The row count of a paged statement, read in the background on a connection of its own under the
     /// statement timeout. `idx` is the result tab it belongs to.
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {

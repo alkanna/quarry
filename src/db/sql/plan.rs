@@ -6,9 +6,12 @@ use super::{lex, Dialect, ResultSet};
 use serde_json::Value;
 
 pub mod cond;
+pub mod evidence;
 pub mod findings;
+pub mod index;
 mod tree;
 
+pub use evidence::Evidence;
 pub use findings::{Finding, FixKind, Severity};
 
 /// A scan that reads at least this many rows is worth a warning. Below it a full scan is often the cheapest plan.
@@ -236,9 +239,16 @@ pub fn parse(d: Dialect, text: &str) -> Result<Plan, String> {
         let read = |t: &str| if t.is_empty() { None } else { cond::parse(t, d) };
         (n.filter_expr, n.index_cond_expr, n.join_cond_expr) = (read(&n.filter), read(&n.index_cond), read(&n.join_cond));
     }
-    plan.findings = findings::find(&plan, d);
-    plan.warnings = plan.findings.iter().map(Finding::line).collect();
+    plan.refind(d, None, false);
     Ok(plan)
+}
+
+impl Plan {
+    /// Works the findings out again, with what the catalog said once it answers.
+    pub fn refind(&mut self, d: Dialect, ev: Option<&Evidence>, pooler: bool) {
+        self.findings = findings::find(self, d, ev, pooler);
+        self.warnings = self.findings.iter().map(Finding::line).collect();
+    }
 }
 
 /// Pretty JSON for the Raw view; other text stays as the server wrote it.
@@ -470,6 +480,11 @@ fn my_table(t: &Value, depth: usize, out: &mut Vec<PlanNode>) {
         _ => num(t, "cost"),
     };
     node.actual_rows = num(t, "r_rows");
+    // MariaDB's ANALYZE counts the rows read and the share its condition kept, so the rows kept and removed follow.
+    if let (Some(read), Some(pct)) = (node.actual_rows, num(t, "r_filtered").filter(|_| t.get("attached_condition").is_some())) {
+        let kept = read * pct / 100.0;
+        (node.kept, node.removed) = (Some(kept), Some((read - kept).max(0.0)));
+    }
     node.loops = num(t, "r_loops");
     node.never_ran = node.loops == Some(0.0);
     node.table_ms = match (num(t, "r_table_time_ms"), num(t, "r_other_time_ms")) {

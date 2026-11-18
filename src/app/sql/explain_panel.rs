@@ -215,6 +215,27 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             for b in &f.body {
                 ui.label(RichText::new(b).size(TXT_SMALL).color(MUTED()));
             }
+            if !f.evidence.is_empty() {
+                section(ui, "FROM THE CATALOG", None, acts);
+                for line in &f.evidence {
+                    ui.label(RichText::new(line).size(TXT_SMALL).color(TEXT()));
+                }
+            }
+            if let Some(why) = &f.no_fix {
+                ui.add_space(6.0);
+                ui.label(RichText::new(why).size(TXT_SMALL).color(MUTED()));
+            }
+            if x.ev_busy && f.fix.is_none() && f.no_fix.is_none() && n.access == Access::Scan && !n.filter.is_empty() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Reading the table's statistics and indexes").size(TXT_SMALL).color(MUTED()));
+                });
+            }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Index) {
+                candidate_box(ui, x, &fix.note, &fix.sql, acts);
+                continue;
+            }
             if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Setting && x.db.pooler()) {
                 ui.add_space(6.0);
                 ui.label(RichText::new(format!("Behind a connection pooler a session setting does not last to the next statement, so {} is not offered here. Set it on the role or the server instead.", fix.label)).size(TXT_SMALL).color(MUTED()));
@@ -242,6 +263,28 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                 });
             }
         }
+    });
+}
+
+/// The index a finding suggests: why these columns in this order, the statement colored, and the two ways to take it.
+/// Nothing here runs it; the draft opens in a Query tab for the user to run.
+fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, note: &str, sql: &str, acts: &mut Vec<XAct>) {
+    section(ui, "CANDIDATE INDEX", None, acts);
+    well_frame().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(note).size(TXT_SMALL).color(MUTED()));
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(crate::ui::editor::sql_job_in(sql, TXT_SMALL, x.dialect)).wrap());
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens it as a draft in a new Query tab. Nothing runs.").clicked() {
+            acts.push(XAct::Draft(sql.to_string()));
+        }
+        if quiet(ui, "Copy").clicked() {
+            acts.push(XAct::Copy(sql.to_string()));
+        }
+        ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
     });
 }
 

@@ -2,6 +2,8 @@
 //! seen, with the numbers that show it, and offers a fix only when the plan is enough to back it; the rest is left to
 //! the evidence the catalog adds later. Precision over recall: a finding that is wrong teaches people to ignore them all.
 
+use super::evidence::Evidence;
+use super::index::{self, Advice};
 use super::{count, Access, Dialect, Plan, PlanNode, BIG_SCAN};
 
 /// A node below this share of the plan's cost or time is not worth a finding about its scan.
@@ -38,6 +40,10 @@ pub enum Severity {
 pub enum FixKind {
     /// A session setting run before the statement, so the draft holds both.
     Setting,
+    /// An index to create, from the filter and the catalog.
+    Index,
+    /// ANALYZE of a table whose statistics are stale.
+    Analyze,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +67,10 @@ pub struct Finding {
     pub share: f64,
     pub body: Vec<String>,
     pub fix: Option<Fix>,
+    /// What the catalog showed, one fact a line: the table's size, how much the filter keeps, the indexes it has.
+    pub evidence: Vec<String>,
+    /// Why no fix is offered where one could be expected, as "No index suggested: ...".
+    pub no_fix: Option<String>,
 }
 
 impl Finding {
@@ -76,8 +86,9 @@ impl Finding {
     }
 }
 
-/// The findings of a parsed plan, most important first.
-pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
+/// The findings of a parsed plan, most important first. With the catalog's `ev`, filtered full scans also get an index
+/// suggestion or the reason there is none; `pooler` says the connection goes through one, which changes how an index is built.
+pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Finding> {
     let mut out: Vec<Finding> = Vec::new();
     let by_time = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
     for (i, n) in p.nodes.iter().enumerate() {
@@ -85,7 +96,7 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
         // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
         let weighty = n.share.is_none_or(|s| s >= SHARE_MIN);
         let weight = weight_of(n, by_time);
-        let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix });
+        let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix, evidence: Vec::new(), no_fix: None });
         let name = n.name();
         let read = rows_read(n);
         // PostgreSQL's estimate gives only the rows a scan returns, so its own cost stands in for its size.
@@ -148,6 +159,9 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
             push(Kind::DependentSubquery, Severity::Warn, "Dependent subquery".into(), String::new(), vec!["The subquery runs once for every row of the outer query.".into()], None);
         }
     }
+    if let Some(ev) = ev {
+        with_evidence(p, d, ev, pooler, by_time, &mut out);
+    }
     out.sort_by(|a, b| a.severity.cmp(&b.severity).then(b.share.total_cmp(&a.share)));
     let mut seen = Vec::new();
     out.retain(|f| {
@@ -157,6 +171,71 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
         fresh
     });
     out
+}
+
+/// What the catalog adds: on each filtered full scan an index to create, the index that already serves it, stale
+/// statistics to refresh, or why none of that is offered. A scan with no finding of its own gets one only when it runs
+/// many times inside a nested loop and an index is the fix.
+fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, pooler: bool, by_time: bool, out: &mut Vec<Finding>) {
+    for (i, n) in p.nodes.iter().enumerate() {
+        if n.access != Access::Scan || n.filter.is_empty() {
+            continue;
+        }
+        let at = |out: &Vec<Finding>, k: Kind| out.iter().position(|f| f.node == Some(i) && f.kind == k);
+        let (scan, mis) = (at(out, Kind::FullScan), at(out, Kind::Misestimate));
+        let repeated = index::repeated(p, i);
+        if scan.is_none() && mis.is_none() && !repeated {
+            continue;
+        }
+        let Some(t) = ev.table(n) else {
+            if let Some(k) = scan {
+                out[k].no_fix = Some(if ev.failed { "No suggestion: the catalog could not be read." } else { "No index suggested: the table could not be matched to one table of the statement." }.into());
+            }
+            continue;
+        };
+        let advice = index::advise(p, i, d, t, pooler);
+        if let (Some(k), false) = (mis, matches!(advice, Advice::Stale { .. })) {
+            if d == Dialect::Postgres && index::fresh(t) {
+                out[k].body.push("Statistics are recent, so the estimate is off for another reason.".into());
+            }
+        }
+        let name = n.name();
+        match advice {
+            Advice::Stale { why, fix, lines } => {
+                if let Some(k) = mis {
+                    out[k].body.push(format!("Its statistics are stale: {why}."));
+                    (out[k].fix, out[k].evidence) = (Some(fix.clone()), lines.clone());
+                }
+                if let Some(k) = scan {
+                    out[k].no_fix = Some(format!("No index suggested: {why}. Refresh the statistics first."));
+                    out[k].evidence = lines;
+                    if mis.is_none() {
+                        out[k].fix = Some(fix);
+                    }
+                }
+            }
+            Advice::Create { fix, lines } => match scan {
+                Some(k) => (out[k].fix, out[k].evidence) = (Some(fix), lines),
+                None if repeated => {
+                    let loops = n.loops.map(|l| format!("Runs {} times", count(l))).unwrap_or_else(|| "Runs once per row of the side above".into());
+                    out.push(Finding { kind: Kind::FullScan, severity: Severity::Warn, node: Some(i), title: format!("Repeated full scan of {name}"), weight: weight_of(n, by_time), share: n.share.unwrap_or(0.0), body: vec![format!("{loops} and reads every row each time.")], fix: Some(fix), evidence: lines, no_fix: None });
+                }
+                None => {}
+            },
+            Advice::Unused { index: ix, cause, lines } => {
+                let Some(k) = scan else { continue };
+                out[k].no_fix = Some(format!("No index suggested: {ix} already serves this filter."));
+                out.retain(|f| !(f.node == Some(i) && f.kind == Kind::UnusedIndex));
+                let body = cause.unwrap_or_else(|| format!("{ix} serves this filter, yet the planner chose a full scan. Run with ANALYZE to see whether its row estimate is why."));
+                out.push(Finding { kind: Kind::UnusedIndex, severity: Severity::Warn, node: Some(i), title: format!("{name} has an index the planner did not use"), weight: weight_of(n, by_time), share: n.share.unwrap_or(0.0), body: vec![body], fix: None, evidence: lines, no_fix: None });
+            }
+            Advice::No { why, lines } => {
+                if let Some(k) = scan {
+                    (out[k].no_fix, out[k].evidence) = (Some(format!("No index suggested: {why}.")), lines);
+                }
+            }
+        }
+    }
 }
 
 /// Every node below `i`.

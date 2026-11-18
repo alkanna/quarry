@@ -43,6 +43,13 @@ pub(in crate::app) struct SqlExplain {
     run: db::sql::RunHandle,
     /// Stop was pressed, so the answer that follows is no error to show.
     stopped: bool,
+    /// The catalog's evidence for the index suggestions, kept across an ANALYZE rerun of the same statement, and the
+    /// request reading it, apart from `req` so a rerun does not drop it.
+    ev: Option<plan::Evidence>,
+    ev_req: u64,
+    pub(super) ev_busy: bool,
+    /// The offline demo and the tests: made-up evidence instead of a catalog read.
+    demo: bool,
 }
 
 /// What a click in the dialog asks for, done once the frame is drawn.
@@ -55,7 +62,7 @@ pub(super) enum XAct {
 
 impl SqlExplain {
     fn new(stmt: String, conn: u64, tab_db: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false }
+        SqlExplain { req: 0, busy: false, stmt, conn, tab_db, dialect, db, schema, plan: None, unread: None, raw: String::new(), raw_tab: false, sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, ev: None, ev_req: 0, ev_busy: false, demo: false }
     }
 }
 
@@ -108,7 +115,7 @@ impl App {
         let (conn, tab_db, schema) = self.t().map_or((0, String::new(), String::new()), |t| (t.sel.conn, t.sel.db.clone(), if d == Dialect::Postgres { t.sel.schema.clone() } else { t.sel.db.clone() }));
         let analyze = plan::analyze_mode(text, d, false);
         let mut x = SqlExplain::new(text.into(), conn, tab_db, d, db, schema, analyze);
-        (x.req, x.busy) = (1, true);
+        (x.req, x.busy, x.demo) = (1, true, true);
         self.modal = Some(Modal::SqlExplain(Box::new(x)));
         let col = db::sql::Col::plain("EXPLAIN", "TEXT", db::sql::value::Kind::Text, false);
         let set = db::sql::ResultSet { cols: vec![col], rows: db::Row::from_doc(&mongodb::bson::doc! { "EXPLAIN": plan }).into_iter().collect(), ..db::sql::ResultSet::new(text) };
@@ -158,7 +165,24 @@ impl App {
         x.analyzed = x.asked.is_some();
         x.rolled_back = x.asked == Some(Analyze::Rollback) && !crate::db::sql::lex::pageable(&x.stmt, x.dialect);
         match plan::parse(x.dialect, &text) {
-            Ok(p) => {
+            Ok(mut p) => {
+                let ready = if x.demo {
+                    x.ev = Some(plan::Evidence::demo(&p, x.dialect));
+                    true
+                } else {
+                    let wants = plan::evidence::wants(&p, &x.stmt, x.dialect);
+                    // A rerun of the same statement scans the same tables, so the evidence already read still holds.
+                    let held = !wants.is_empty() && x.ev.as_ref().is_some_and(|e| e.covers(&wants));
+                    if !wants.is_empty() && !held {
+                        self.req += 1;
+                        (x.ev_req, x.ev_busy) = (self.req, true);
+                        self.worker.sql_explain_evidence(self.req, x.db.clone(), x.schema.clone(), wants);
+                    }
+                    held
+                };
+                if ready {
+                    p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
+                }
                 // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
                 x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
                 x.scroll_to = x.sel;
@@ -167,6 +191,20 @@ impl App {
             // The raw text is still worth reading.
             Err(e) => (x.plan, x.unread, x.raw_tab) = (None, Some(e), true),
         }
+    }
+
+    /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
+    pub(in crate::app) fn sql_explain_evidence(&mut self, req: u64, ev: plan::Evidence) {
+        let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
+        if x.ev_req != req || !x.ev_busy {
+            return;
+        }
+        x.ev_busy = false;
+        let pooler = x.db.pooler();
+        if let Some(p) = &mut x.plan {
+            p.refind(x.dialect, Some(&ev), pooler);
+        }
+        x.ev = Some(ev);
     }
 
     pub(in crate::app) fn sql_explain_dialog(&mut self, ui: &mut egui::Ui, x: &mut SqlExplain, keep: &mut bool) {
