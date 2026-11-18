@@ -196,11 +196,16 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "macos", windows, all(target_os = "linux", target_env = "gnu")))]
     fn a_large_allocation_shows_in_the_heap_figure() {
-        // Larger than what parallel tests take or free meanwhile, and small enough to commit anywhere.
-        let before = super::read().malloc.unwrap();
-        let v = std::hint::black_box(vec![0u8; 256 << 20]);
-        assert!(super::read().malloc.unwrap() > before + (128 << 20));
-        drop(v);
+        // The figure covers the whole process, so a test running alongside can free a large block between the two
+        // reads and hide this one. That is momentary, so a few tries tell a heap figure that misses allocations from noise.
+        let grew = (0..5).any(|_| {
+            let before = super::read().malloc.unwrap();
+            let v = std::hint::black_box(vec![0u8; 256 << 20]);
+            let after = super::read().malloc.unwrap();
+            drop(v);
+            after > before + (128 << 20)
+        });
+        assert!(grew, "a 256 MB allocation never showed in the heap figure");
     }
 
     #[test]
