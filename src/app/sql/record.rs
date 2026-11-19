@@ -161,8 +161,22 @@ impl App {
                     out.edit = Some(c.to_string());
                 }
             }
+            let (mut toggle, mut all) = (false, None);
             r.context_menu(|ui| {
                 menu_look(ui);
+                if json {
+                    toggle = ui.button(if open { "Collapse" } else { "Expand" }).clicked();
+                    if ui.button("Expand all").clicked() {
+                        all = Some(true);
+                    }
+                    if open && ui.button("Collapse all").clicked() {
+                        all = Some(false);
+                    }
+                    if toggle || all.is_some() {
+                        ui.close();
+                    }
+                    ui.separator();
+                }
                 if agg {
                     if read_menu(ui, v) {
                         out.view = Some((c.to_string(), Val::owned(v)));
@@ -185,13 +199,18 @@ impl App {
                 chevron(ui.painter(), egui::pos2(val.left() + 10.0, val.center().y), open, if state > 0 { BRIGHT() } else { MUTED() });
                 focus_ring(ui, &tr, tr.rect, R_SM as f32);
                 // A click on the value folds too. A double click folds twice, so the tree ends as it was.
-                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || r.clicked() {
+                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || r.clicked() || toggle {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {
                         json_tree::forget(ui.ctx(), tree_id(c));
                         ui.data_mut(|d| d.remove::<f32>(room));
                     }
+                }
+                if let Some(o) = all {
+                    open = true;
+                    ui.data_mut(|d| d.insert_temp(open_id, true));
+                    json_tree::fold_all(ui.ctx(), tree_id(c), o);
                 }
             }
             if let Some(k) = fk && fk_link(ui, val, rid.with(("fk", c)), &fks[k]).clicked() {

@@ -114,6 +114,12 @@ pub(crate) fn show_text(ui: &mut egui::Ui, id: egui::Id, text: &str) {
     }
 }
 
+/// Opens or closes every node of the tree `show_text` draws under `id` on its next frame, as Expand all and Collapse
+/// all do, for menus outside the tree.
+pub(crate) fn fold_all(ctx: &egui::Context, id: egui::Id, open: bool) {
+    ctx.data_mut(|d| d.insert_temp(id.with("tree").with("fold-all"), open));
+}
+
 /// Text or tree, for a value that parses as JSON. Remembered per `id`, so the dialog opens the way it was left.
 pub(crate) fn mode_switch(ui: &mut egui::Ui, id: egui::Id) -> bool {
     let key = id.with("as-tree");
@@ -129,7 +135,7 @@ pub(crate) fn mode_switch(ui: &mut egui::Ui, id: egui::Id) -> bool {
 
 /// The tree with Expand all and Collapse all over it. The first two levels start open.
 pub(crate) fn show(ui: &mut egui::Ui, id: egui::Id, v: &Bson) {
-    let mut fold = None;
+    let mut fold = ui.data_mut(|d| d.remove_temp::<bool>(id.with("fold-all")));
     ui.horizontal(|ui| {
         if quiet(ui, "Expand all").clicked() {
             fold = Some(true);

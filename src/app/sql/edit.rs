@@ -167,7 +167,9 @@ pub(in crate::app) fn copy_as_menu(ui: &mut egui::Ui, sql: bool) -> Option<DocsA
     // A stable id: the copy action reads the switch back by it.
     let id = egui::Id::unique("copy-with-header");
     let on = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
-    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y), Sense::click());
+    // As wide as the items above: available_width is all the room left on screen, and the menu would grow to it.
+    let label_w = ui.fonts_mut(|f| f.layout_no_wrap("Include column names".into(), FontId::proportional(TXT_BODY), TEXT()).size().x);
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.min_rect().width().max(label_w + 44.0), ui.spacing().interact_size.y), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(row, R_SM, MENU_HOVER());
     }
