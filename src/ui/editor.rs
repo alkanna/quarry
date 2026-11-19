@@ -637,55 +637,17 @@ impl Find {
         }
     }
 
-    /// Splits the sections at match edges. Hits are sorted, so one pass covers both lists.
+    /// Splits the sections at match edges: the current match on the accent, the others tinted.
     pub(crate) fn mark(&self, job: &mut LayoutJob) {
         let hits = self.hits(&job.text);
-        if hits.is_empty() {
-            return;
-        }
-        let mut out = Vec::with_capacity(job.sections.len() + 2 * hits.len());
-        use egui::text::ByteIndex;
-        let mut j = 0;
-        for s in job.sections.drain(..) {
-            let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
-            let mut at = start;
-            while j < hits.len() && hits[j].end <= at {
-                j += 1;
+        mark_ranges(job, &hits, |k, f| {
+            if k == self.cur {
+                f.background = WARNING();
+                f.color = BG();
+            } else {
+                f.background = WARNING().gamma_multiply(0.3);
             }
-            let mut k = j;
-            while at < end {
-                let mut piece = s.clone();
-                if at > start {
-                    piece.leading_space = 0.0;
-                }
-                match hits.get(k).filter(|h| h.start < end) {
-                    Some(h) if h.start <= at => {
-                        let e = h.end.min(end);
-                        if k == self.cur {
-                            piece.format.background = WARNING();
-                            piece.format.color = BG();
-                        } else {
-                            piece.format.background = WARNING().gamma_multiply(0.3);
-                        }
-                        piece.byte_range = ByteIndex(at)..ByteIndex(e);
-                        at = e;
-                        if h.end <= end {
-                            k += 1;
-                        }
-                    }
-                    Some(h) => {
-                        piece.byte_range = ByteIndex(at)..ByteIndex(h.start);
-                        at = h.start;
-                    }
-                    None => {
-                        piece.byte_range = ByteIndex(at)..ByteIndex(end);
-                        at = end;
-                    }
-                }
-                out.push(piece);
-            }
-        }
-        job.sections = out;
+        });
     }
 
     /// Scrolls the current match into view. Call inside the text area's ScrollArea.
@@ -793,4 +755,50 @@ mod tests {
         assert_eq!((out.as_str(), c), ("{\n  }", 5));
         assert!(closer_dedent("{ a }", 5).is_none());
     }
+}
+
+/// Cuts the sections of `job` at the edges of `ranges` (sorted, not overlapping) and lets `style` restyle the pieces
+/// inside range `k`. One pass covers both lists. For find matches and a snippet's `{{...}}` placeholders.
+pub(crate) fn mark_ranges(job: &mut LayoutJob, ranges: &[std::ops::Range<usize>], style: impl Fn(usize, &mut egui::TextFormat)) {
+    if ranges.is_empty() {
+        return;
+    }
+    use egui::text::ByteIndex;
+    let mut out = Vec::with_capacity(job.sections.len() + 2 * ranges.len());
+    let mut j = 0;
+    for s in job.sections.drain(..) {
+        let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
+        let mut at = start;
+        while j < ranges.len() && ranges[j].end <= at {
+            j += 1;
+        }
+        let mut k = j;
+        while at < end {
+            let mut piece = s.clone();
+            if at > start {
+                piece.leading_space = 0.0;
+            }
+            match ranges.get(k).filter(|h| h.start < end) {
+                Some(h) if h.start <= at => {
+                    let e = h.end.min(end);
+                    style(k, &mut piece.format);
+                    piece.byte_range = ByteIndex(at)..ByteIndex(e);
+                    at = e;
+                    if h.end <= end {
+                        k += 1;
+                    }
+                }
+                Some(h) => {
+                    piece.byte_range = ByteIndex(at)..ByteIndex(h.start);
+                    at = h.start;
+                }
+                None => {
+                    piece.byte_range = ByteIndex(at)..ByteIndex(end);
+                    at = end;
+                }
+            }
+            out.push(piece);
+        }
+    }
+    job.sections = out;
 }

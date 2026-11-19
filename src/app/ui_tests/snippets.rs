@@ -43,8 +43,8 @@ fn enter_on_a_snippet_asks_for_its_values_and_enter_runs_the_filled_read() {
     let f = form(ui.h.state_mut());
     assert_eq!(f.name, "Orders on a day");
     // Defaults come in; a value with none waits for the person.
-    assert_eq!(f.values, ["", "paid", "10"]);
-    f.values[0] = "2026-11-03".into();
+    assert_eq!([&f.values["day"], &f.values["status"], &f.values["n"]], ["", "paid", "10"]);
+    f.values.insert("day".into(), "2026-11-03".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
     assert!(ui.app().modal.is_none());
@@ -52,7 +52,7 @@ fn enter_on_a_snippet_asks_for_its_values_and_enter_runs_the_filled_read() {
     // The next time, the values of the last run come back.
     let id = id_of(ui.app(), "Orders on a day");
     ui.h.state_mut().open_snippet_form(id, String::new());
-    assert_eq!(form(ui.h.state_mut()).values[0], "2026-11-03");
+    assert_eq!(form(ui.h.state_mut()).values["day"], "2026-11-03");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn a_bad_value_keeps_the_form_open() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Orders on a day");
     ui.h.state_mut().open_snippet_form(id, String::new());
-    form(ui.h.state_mut()).values[0] = "tomorrow".into();
+    form(ui.h.state_mut()).values.insert("day".into(), "tomorrow".into());
     ui.h.run_steps(2);
     ui.show_contains("day needs a date");
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
@@ -101,7 +101,7 @@ fn a_write_asks_first_and_esc_steps_back() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Mark orders shipped");
     ui.h.state_mut().open_snippet_form(id, String::new());
-    form(ui.h.state_mut()).values[0] = "1, 2".into();
+    form(ui.h.state_mut()).values.insert("ids".into(), "1, 2".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
     assert!(form(ui.h.state_mut()).stage == Stage::Confirm);
@@ -122,14 +122,14 @@ fn a_write_on_a_locked_connection_unlocks_then_confirms() {
     }
     let id = id_of(ui.app(), "Mark orders shipped");
     ui.h.state_mut().open_snippet_form(id, String::new());
-    form(ui.h.state_mut()).values[0] = "4405".into();
+    form(ui.h.state_mut()).values.insert("ids".into(), "4405".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(3, _))));
     ui.click("Allow writes");
     let f = form(ui.h.state_mut());
     assert!(f.stage == Stage::Confirm);
-    assert_eq!(f.values, ["4405"]);
+    assert_eq!(f.values["ids"], "4405");
 }
 
 #[test]

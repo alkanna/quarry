@@ -957,7 +957,7 @@ impl App {
         let conn = t.sel.conn;
         let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
         // A statement with {{...}} values is not SQL until Run fills it, so the server is not asked about it.
-        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || s.query[r.clone()].contains("{{") {
+        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || crate::library::snippet::is_snippet(&s.query[r.clone()], self.dialect_of(conn)) {
             return;
         }
         let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
@@ -1143,7 +1143,7 @@ impl App {
                         super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
                     });
                     if ui.add_enabled(picked.is_some(), egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number").clicked() {
-                        make_value = picked.clone();
+                        make_value = picked;
                         ui.close();
                     }
                 });

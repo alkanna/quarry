@@ -38,11 +38,6 @@ impl App {
         let make_default = saved.filter(|s| s.conn != conn || s.db != db).map(|s| s.id);
         let mut set_default = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return false };
-        for v in &p.vars {
-            if !s.snip_vals.contains_key(&v.name) {
-                s.snip_vals.insert(v.name.clone(), v.default.clone().unwrap_or_default());
-            }
-        }
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -56,7 +51,7 @@ impl App {
                 ui.separator();
                 for v in &p.vars {
                     ui.label(RichText::new(&v.name).font(FontId::monospace(TXT_SMALL)).color(MUTED())).on_hover_text(v.ty.spec());
-                    let val = s.snip_vals.entry(v.name.clone()).or_default();
+                    let val = s.snip_vals.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
                     match &v.ty {
                         Ty::Choice(c) => {
                             let shown = if val.is_empty() { "pick\u{2026}".to_string() } else { val.clone() };
@@ -72,12 +67,7 @@ impl App {
                         }
                         _ => {
                             let w = (val.chars().count().max(4) as f32 * 7.6 + 12.0).min(220.0);
-                            let hint = match v.ty {
-                                Ty::Date => "2026-11-03",
-                                Ty::IntList => "1, 2",
-                                _ => "",
-                            };
-                            ui.add(egui::TextEdit::singleline(val).font(FontId::monospace(TXT_SMALL)).desired_width(w).hint_text(RichText::new(hint).color(FAINT())));
+                            ui.add(egui::TextEdit::singleline(val).font(FontId::monospace(TXT_SMALL)).desired_width(w).hint_text(RichText::new(v.ty.hint()).color(FAINT())));
                         }
                     }
                 }
@@ -92,9 +82,7 @@ impl App {
         ui.add_space(6.0);
         let filled = s.snip_filled;
         if let Some(id) = set_default {
-            crate::library::ops::set_target(&mut self.library, id, conn, &db, &schema);
-            self.save_library();
-            self.ok(format!("Runs on {target} by default"));
+            self.set_snippet_default(id, conn, &db, &schema);
         }
         filled
     }
@@ -110,7 +98,8 @@ impl App {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().id_salt("snip-filled").max_height((ui.available_height() * 0.5).max(96.0)).show(ui, |ui| match out {
                 Ok(t) => {
-                    ui.label(crate::ui::editor::sql_job_in(&t, TXT_SMALL, d));
+                    // Laid out once per text, not every frame.
+                    ui.label(crate::ui::editor::memo_galley(ui, 10, &t, ui.available_width(), || crate::ui::editor::sql_job_in(&t, TXT_SMALL, d)));
                 }
                 Err(e) => {
                     ui.label(RichText::new(e).color(ALERT()));
@@ -144,15 +133,14 @@ impl App {
             _ => "value",
         };
         let name = std::iter::once(base.to_string()).chain((2..).map(|i| format!("{base}{i}"))).find(|n| !taken.iter().any(|v| &v.name == n)).unwrap_or_default();
-        let keep = default.is_some();
-        self.modal = Some(Modal::MakeValue(Box::new(MakeValue { uid: t.uid, range, literal, name, ty: ty.spec(), default, keep })));
+        self.modal = Some(Modal::MakeValue(Box::new(MakeValue { uid: t.uid, range, literal, name, ty: ty.spec(), keep: default.is_some(), default })));
     }
 
     pub(in crate::app) fn make_value_dialog(&mut self, ui: &mut egui::Ui, f: &mut MakeValue, keep: &mut bool) {
         ui.set_width(fit_width(ui.ctx(), 460.0));
         dialog_head(ui, &Head::new("Make it a value").sub(format!("Replaces {}", f.literal)).glyph(glyphs::code));
         let ty = Ty::read(f.ty.trim());
-        let name_ok = !f.name.is_empty() && f.name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && f.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let name_ok = snippet::valid_name(f.name.trim());
         dialog_body(ui, |ui| {
             stacked_field(ui, "Name", "Letters, digits and _", |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(FontId::monospace(TXT_BODY)).desired_width(f32::INFINITY));
@@ -203,30 +191,12 @@ impl App {
     }
 }
 
-/// `job` with the bytes of `holes` in the accent on a tint, for the placeholders of the Query editor. Sections are cut at
-/// the edges of each hole, since a token may run across one.
+/// `job` with the bytes of `holes` in the accent on a tint, for the placeholders of the Query editor.
 pub(in crate::app) fn tint_holes(job: &mut egui::text::LayoutJob, holes: &[Range<usize>]) {
-    if holes.is_empty() {
-        return;
-    }
-    let mut out = Vec::with_capacity(job.sections.len() + holes.len() * 2);
-    for sec in std::mem::take(&mut job.sections) {
-        let (mut a, end): (usize, usize) = (sec.byte_range.start.into(), sec.byte_range.end.into());
-        let first = a;
-        let mut cuts: Vec<usize> = holes.iter().flat_map(|h| [h.start, h.end]).filter(|c| *c > a && *c < end).collect();
-        cuts.sort_unstable();
-        cuts.push(end);
-        for c in cuts {
-            let mut format = sec.format.clone();
-            if holes.iter().any(|h| h.start <= a && a < h.end) {
-                format.color = PRIMARY();
-                format.background = tint(PRIMARY(), 32);
-            }
-            out.push(egui::text::LayoutSection { leading_space: if a == first { sec.leading_space } else { 0.0 }, byte_range: egui::text::ByteIndex(a)..egui::text::ByteIndex(c), format });
-            a = c;
-        }
-    }
-    job.sections = out;
+    crate::ui::editor::mark_ranges(job, holes, |_, f| {
+        f.color = PRIMARY();
+        f.background = tint(PRIMARY(), 32);
+    });
 }
 
 /// The byte range of the one literal the selection covers, string or number, spaces around it left out.

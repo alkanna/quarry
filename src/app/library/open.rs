@@ -215,6 +215,11 @@ impl App {
         }
     }
 
+    /// The `{{...}}` values of a SQL script, or None for one without any. Plain SQL costs one scan for `{{`.
+    pub(in crate::app) fn script_snippet(&self, s: &crate::library::Script) -> Option<crate::library::snippet::Parsed> {
+        (s.kind == "sql" && s.body.contains("{{")).then(|| crate::library::snippet::parse(&s.body, self.dialect_of(s.conn))).filter(|p| p.is_snippet())
+    }
+
     /// Whether running this script now could change data: a SQL statement that is not a read, a pipeline with a write stage,
     /// or any Shell script, whose code can do anything.
     fn script_writes(&self, s: &crate::library::Script) -> bool {
@@ -274,7 +279,7 @@ impl App {
         // Run on a snippet asks for its values first, whether from Cmd+K, the Library panel or a picker.
         if how == How::Run
             && let ScriptRef::Saved(id) = r
-            && self.library.scripts.iter().any(|s| s.id == *id && s.kind == "sql" && crate::library::snippet::parse(&s.body, self.dialect_of(s.conn)).is_snippet())
+            && self.library.scripts.iter().any(|s| s.id == *id && self.script_snippet(s).is_some())
         {
             return self.open_snippet_form(*id, String::new());
         }
@@ -381,7 +386,7 @@ impl App {
                     q.run_db = String::new();
                 }
                 // A linked file with {{...}} values opens to be filled in; it never runs with them empty.
-                let snippet = crate::library::snippet::parse(&s.body, self.dialect_of(s.conn)).is_snippet();
+                let snippet = self.script_snippet(&s).is_some();
                 self.bind_script(r.clone(), View::Sql, s.body);
                 if run && !snippet {
                     self.sql_run(true, false);

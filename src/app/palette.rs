@@ -5,7 +5,7 @@ use super::*;
 use super::rail::{engine_mark, logo, mark_color, search_icon};
 
 const PAL_W: f32 = 640.0;
-const LIST_MAX_H: f32 = 440.0;
+pub(in crate::app) const LIST_MAX_H: f32 = 440.0;
 
 pub(super) const MONGO_VIEWS: [(View, &str); 8] = [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")];
 pub(super) const SQL_VIEWS: [(View, &str); 7] = [(View::Documents, "Content"), (View::Structure, "Structure"), (View::Relations, "Relations"), (View::Triggers, "Triggers"), (View::Info, "Info"), (View::Sql, "Query"), (View::Shell, "Shell")];
@@ -300,11 +300,10 @@ impl App {
                 let folder = crate::library::ops::folder_path(&self.library, s.folder);
                 let conn = self.conn(s.conn).map_or("removed connection", |c| c.meta.name.as_str());
                 let sub = if folder.is_empty() { conn.to_string() } else { format!("{conn} \u{203a} {folder}") };
-                let vars = if s.kind == "sql" { crate::library::snippet::parse(&s.body, self.dialect_of(s.conn)) } else { Default::default() };
-                let (act, tag) = match vars.vars.len() {
-                    _ if !vars.is_snippet() => (Act::Script(crate::library::ScriptRef::Saved(s.id)), String::new()),
-                    1 => (Act::Snippet(s.id), "1 value".into()),
-                    n => (Act::Snippet(s.id), format!("{n} values")),
+                let (act, tag) = match self.script_snippet(s).map(|p| p.vars.len()) {
+                    None => (Act::Script(crate::library::ScriptRef::Saved(s.id)), String::new()),
+                    Some(1) => (Act::Snippet(s.id), "1 value".into()),
+                    Some(n) => (Act::Snippet(s.id), format!("{n} values")),
                 };
                 scripts.push((score, Row { sub, meta: s.kind.clone(), tag, ..Row { act, ..Row::cmd(&s.name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
             }
@@ -694,8 +693,13 @@ impl App {
 
 /// The footer band of the palette and the tab list, `rect` widened to `band`, with its top line.
 fn paint_footer_band(p: &egui::Painter, band: egui::Rect, corner: u8) {
-    p.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, RAISED().lerp_to_gamma(PANEL(), 0.5));
-    p.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
+    paint_band(p, band, corner, RAISED().lerp_to_gamma(PANEL(), 0.5), RAISED_LINE());
+}
+
+/// A band along the bottom of a popup, its lower corners rounded by `corner`, with a line on top.
+pub(in crate::app) fn paint_band(p: &egui::Painter, band: egui::Rect, corner: u8, fill: Color32, line: Color32) {
+    p.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, fill);
+    p.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, line));
 }
 
 /// Key caps and their labels from `x` along a footer, the labels muted. Returns where they end.

@@ -313,9 +313,9 @@ impl RowCx<'_> {
                         _ => s.db.clone(),
                     }
                 };
-                let pg = self.conns.iter().any(|c| c.meta.id == s.conn && c.meta.engine == db::sql::Engine::Postgres);
-                let d = if pg { db::sql::Dialect::Postgres } else { db::sql::Dialect::MySql };
-                if s.kind == "sql" && crate::library::snippet::parse(&s.body, d).is_snippet() {
+                // The engine is looked up only for a script that may hold values: plain SQL costs one scan for `{{`.
+                let dialect = || if self.conns.iter().any(|c| c.meta.id == s.conn && c.meta.engine == db::sql::Engine::Postgres) { db::sql::Dialect::Postgres } else { db::sql::Dialect::MySql };
+                if s.kind == "sql" && s.body.contains("{{") && crate::library::snippet::is_snippet(&s.body, dialect()) {
                     let mut look = Look::new(s.name.clone(), "snippet".into(), right);
                     look.label = format!("{} (snippet)", s.name);
                     return look;

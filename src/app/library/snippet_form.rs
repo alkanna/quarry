@@ -22,10 +22,18 @@ pub(in crate::app) struct SnippetForm {
     pub conn: u64,
     pub db: String,
     pub schema: String,
-    pub values: Vec<String>,
+    pub values: snippet::Values,
     pub stage: Stage,
     /// The palette's query, put back by Esc.
     pub query: String,
+}
+
+/// The bar at the bottom of the form: the keys, the confirm of a write, or Unlock on a locked connection.
+#[derive(Clone, Copy, PartialEq)]
+enum Bar {
+    Keys,
+    Confirm,
+    Unlock,
 }
 
 /// What a click or key in the form asks for, done once the form is drawn.
@@ -44,8 +52,10 @@ impl App {
         let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
         let p = snippet::parse(&s.body, self.dialect_of(s.conn));
         // By name, so a value renamed or moved in the statement never takes another one's last value.
-        let last = self.lib_ui.snippet_values.get(&id);
-        let values = p.vars.iter().map(|v| last.and_then(|l| l.get(&v.name)).cloned().or_else(|| v.default.clone()).unwrap_or_default()).collect();
+        let mut values = self.lib_ui.snippet_values.get(&id).cloned().unwrap_or_default();
+        for v in &p.vars {
+            values.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
+        }
         let conn = if self.conn(s.conn).is_some() { s.conn } else { self.conns.iter().find(|c| c.meta.engine.is_sql()).map_or(s.conn, |c| c.meta.id) };
         let db = if s.db.is_empty() || conn != s.conn { self.default_db(conn) } else { s.db.clone() };
         // A PostgreSQL schema belongs to the script's own connection; another one starts from its own default.
@@ -78,16 +88,18 @@ impl App {
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
         let d = self.dialect_of(f.conn);
         let p = snippet::parse(&f.body, d);
-        f.values.resize(p.vars.len(), String::new());
         let filled = snippet::fill(&f.body, &p, &f.values, d, self.sql_bs_of(f.conn));
         let writes = filled.as_ref().is_ok_and(|t| db::sql::lex::read_only_check(t, d).is_err());
-        let writable = self.conn_writable(f.conn);
+        let bar = match (writes, self.conn_writable(f.conn), f.stage) {
+            (true, false, _) => Bar::Unlock,
+            (true, true, Stage::Confirm) => Bar::Confirm,
+            _ => Bar::Keys,
+        };
         let ready = self.conn(f.conn).is_some_and(|c| c.status == Status::Ready) || self.demo;
         let failed = self.conn(f.conn).is_some_and(|c| matches!(c.status, Status::Failed(_)));
         let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| s.conn == f.conn && (s.db == f.db || s.db.is_empty() && f.db == self.default_db(f.conn)));
         let cname = self.conn_name(f.conn);
         let prod = self.conn(f.conn).is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
-        let conns: Vec<(u64, String, Vec<String>)> = self.snippet_conns(f.id).into_iter().map(|c| (c, self.conn_name(c), self.conn(c).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default())).collect();
         let mut todo: Vec<Do> = Vec::new();
         let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
             let form_w = fit_width(ctx, FORM_W);
@@ -109,23 +121,27 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(14.0);
                     let label = if f.db.is_empty() { cname.clone() } else { format!("{cname} \u{b7} {}", f.db) };
+                    // Built only while the menu is open, and scrolled, since a server can hold hundreds of databases.
                     ui.menu_button(RichText::new(label).color(BRIGHT()), |ui| {
                         menu_list(ui);
-                        for (c, name, dbs) in &conns {
-                            ui.horizontal(|ui| {
-                                ui.add_space(10.0);
-                                caption(ui, name.to_uppercase());
-                            });
-                            let dbs = if dbs.is_empty() { vec![if *c == f.conn { f.db.clone() } else { String::new() }] } else { dbs.clone() };
-                            for db in dbs {
-                                let on = *c == f.conn && db == f.db;
-                                let text = if db.is_empty() { name.clone() } else { db.clone() };
-                                if ui.selectable_label(on, text).clicked() {
-                                    todo.push(Do::Target(*c, db));
-                                    ui.close();
+                        egui::ScrollArea::vertical().max_height(LIST_MAX_H).show(ui, |ui| {
+                            for c in self.snippet_conns(f.id) {
+                                let Some(conn) = self.conn(c) else { continue };
+                                ui.horizontal(|ui| {
+                                    ui.add_space(10.0);
+                                    caption(ui, conn.meta.name.to_uppercase());
+                                });
+                                let here = (c == f.conn).then_some(f.db.as_str()).unwrap_or_default();
+                                let dbs: Vec<&str> = if conn.dbs.is_empty() { vec![here] } else { conn.dbs.iter().map(|d| d.0.as_str()).collect() };
+                                for db in dbs {
+                                    let text = if db.is_empty() { conn.meta.name.as_str() } else { db };
+                                    if ui.selectable_label(c == f.conn && db == f.db, text).clicked() {
+                                        todo.push(Do::Target(c, db.to_string()));
+                                        ui.close();
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
                     if !saved_default && quiet(ui, "Make default").on_hover_text("Run this snippet here from now on").clicked() {
                         todo.push(Do::MakeDefault);
@@ -140,6 +156,7 @@ impl App {
             // One row per value.
             let locked = f.stage == Stage::Confirm;
             for (i, v) in p.vars.iter().enumerate() {
+                let val = f.values.entry(v.name.clone()).or_default();
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     ui.vertical(|ui| {
@@ -149,24 +166,19 @@ impl App {
                     });
                     ui.add_enabled_ui(!locked, |ui| match &v.ty {
                         Ty::Choice(c) => {
-                            let mut k = c.iter().position(|c| *c == f.values[i]).unwrap_or(usize::MAX);
-                            let opts: Vec<(usize, &str)> = c.iter().enumerate().map(|(j, c)| (j, c.as_str())).collect();
+                            let mut k = c.iter().position(|c| c == val);
+                            let opts: Vec<(Option<usize>, &str)> = c.iter().enumerate().map(|(j, c)| (Some(j), c.as_str())).collect();
                             segmented(ui, &mut k, &opts);
-                            if let Some(c) = c.get(k) {
-                                f.values[i] = c.clone();
+                            if let Some(j) = k {
+                                *val = c[j].clone();
                             }
                         }
                         _ => {
                             let fid = egui::Id::unique(("snippet-value", f.id, i));
-                            let hint = match &v.ty {
-                                Ty::Date => "2026-11-03",
-                                Ty::DateTime => "2026-11-03 14:30",
-                                Ty::IntList => "4405, 4407",
-                                _ => v.default.as_deref().unwrap_or(""),
-                            };
+                            let hint = Some(v.ty.hint()).filter(|h| !h.is_empty()).or(v.default.as_deref()).unwrap_or("");
                             well_field(ui, fid, FieldIcon::Plus, None, |ui| {
                                 let w = form_w - LABEL_W - 80.0 - if v.ty == Ty::Date { 150.0 } else { 0.0 };
-                                let r = ui.add(field_edit(&mut f.values[i], fid, hint, w, egui::TextStyle::Monospace));
+                                let r = ui.add(field_edit(val, fid, hint, w, egui::TextStyle::Monospace));
                                 if i == 0 && f.stage == Stage::Fill && !ui.memory(|m| m.focused().is_some()) {
                                     r.request_focus();
                                 }
@@ -174,10 +186,10 @@ impl App {
                                     use crate::ui::pickers::{local_now, sql_text, Civil};
                                     let day = |back: i64| sql_text(Civil { day: local_now().day - back, ms: 0 }, false);
                                     if quiet(ui, "yesterday").clicked() {
-                                        f.values[i] = day(1);
+                                        *val = day(1);
                                     }
                                     if quiet(ui, "today").clicked() {
-                                        f.values[i] = day(0);
+                                        *val = day(0);
                                     }
                                 }
                             });
@@ -210,7 +222,8 @@ impl App {
                     ui.set_width(form_w - 56.0);
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| match &filled {
                         Ok(t) => {
-                            ui.label(crate::ui::editor::sql_job_in(t, TXT_BODY, d));
+                            // Laid out once per text, not every frame the form is open.
+                            ui.label(crate::ui::editor::memo_galley(ui, 9, t, ui.available_width(), || crate::ui::editor::sql_job_in(t, TXT_BODY, d)));
                         }
                         Err(e) => {
                             ui.label(RichText::new(e).color(ALERT()));
@@ -220,19 +233,21 @@ impl App {
             });
             ui.add_space(14.0);
             // The footer: keys, or the question a write asks.
-            let (band, _) = ui.allocate_exact_size(egui::vec2(form_w, if writes && f.stage == Stage::Confirm || writes && !writable { CONFIRM_BAR_H } else { PALETTE_FOOT_H }), Sense::hover());
+            let (band, _) = ui.allocate_exact_size(egui::vec2(form_w, if bar == Bar::Keys { PALETTE_FOOT_H } else { CONFIRM_BAR_H }), Sense::hover());
             let pnt = ui.painter().clone();
-            if writes && !writable {
-                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, tint(WARNING(), 22));
-                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, WARNING()));
+            let (fill, line) = match bar {
+                Bar::Unlock => (tint(WARNING(), 22), WARNING()),
+                Bar::Confirm => (tint(ALERT(), 22), ALERT()),
+                Bar::Keys => (RAISED().lerp_to_gamma(PANEL(), 0.5), RAISED_LINE()),
+            };
+            crate::app::palette::paint_band(&pnt, band, R_LG, fill, line);
+            if bar == Bar::Unlock {
                 band_lines(&pnt, band, &format!("{cname} is read-only"), "Unlock it, then confirm here. The values stay filled.");
                 let b = egui::Rect::from_min_size(band.right_center() - egui::vec2(126.0, BUTTON_H / 2.0), egui::vec2(110.0, BUTTON_H));
                 if ui.put(b, primary_button(ui, "Unlock\u{2026}", WARNING())).clicked() || enter && ready {
                     todo.push(Do::Unlock);
                 }
-            } else if writes && f.stage == Stage::Confirm {
-                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, tint(ALERT(), 22));
-                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, ALERT()));
+            } else if bar == Bar::Confirm {
                 let tag = if prod { ", a Production connection" } else { "" };
                 let sub = if ready { format!("{} runs as written. Undo can't reverse it.", verb(filled.as_deref().unwrap_or(""))) } else { format!("Waiting for {cname} to connect.") };
                 band_lines(&pnt, band, &format!("Changes data on {cname}{tag}"), &sub);
@@ -241,8 +256,6 @@ impl App {
                     todo.push(Do::Run);
                 }
             } else {
-                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, RAISED().lerp_to_gamma(PANEL(), 0.5));
-                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
                 let run = if ready { "run" } else if failed { "connection failed, retrying" } else { "connecting\u{2026}" };
                 crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["tab"], "next value"), (&["\u{21b5}"], run)]);
                 crate::app::palette::key_hint_right(&pnt, band.right() - 16.0, band.center().y, "esc", "back to search");
@@ -274,11 +287,7 @@ impl App {
                     f.stage = Stage::Fill;
                     self.wake_conn(c);
                 }
-                Do::MakeDefault => {
-                    crate::library::ops::set_target(&mut self.library, f.id, f.conn, &f.db, &f.schema);
-                    self.save_library();
-                    self.ok(format!("{} now runs on {cname} by default", f.name));
-                }
+                Do::MakeDefault => self.set_snippet_default(f.id, f.conn, &f.db, &f.schema),
                 Do::Edit => {
                     keep = false;
                     self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here);
@@ -293,8 +302,7 @@ impl App {
                 Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
                 Do::Run => {
                     let Ok(text) = filled.clone() else { continue };
-                    let named = p.vars.iter().map(|v| v.name.clone()).zip(f.values.iter().cloned()).collect();
-                    self.lib_ui.snippet_values.insert(f.id, named);
+                    self.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     self.run_snippet(&f, text);
                     return;
                 }
@@ -303,6 +311,14 @@ impl App {
         if keep && self.modal.is_none() {
             self.modal = Some(Modal::Snippet(f));
         }
+    }
+
+    /// Make default, from the form or a snippet's tab: the script runs on `conn` and `db` from Cmd+K from now on.
+    pub(in crate::app) fn set_snippet_default(&mut self, id: u64, conn: u64, db: &str, schema: &str) {
+        crate::library::ops::set_target(&mut self.library, id, conn, db, schema);
+        self.save_library();
+        let at = if db.is_empty() { self.conn_name(conn) } else { format!("{} \u{b7} {db}", self.conn_name(conn)) };
+        self.ok(format!("Runs on {at} by default"));
     }
 
     /// Runs the filled statement in a Query tab on the form's target: the current tab when it holds nothing of the
@@ -362,7 +378,7 @@ impl App {
         let (reports, maint) = (folder(self, "Reports"), folder(self, "Maintenance"));
         let read = add(self, "Orders on a day", "SELECT o.id, o.customer_id, o.total, o.status\nFROM orders o\nWHERE DATE(o.created_at) = {{day:date}}\n  AND o.status = {{status:paid|pending|refunded=paid}}\nORDER BY o.created_at\nLIMIT {{limit:int=100}};", reports);
         let write = add(self, "Mark orders shipped", "UPDATE orders SET status = 'shipped', shipped_at = NOW()\nWHERE id IN ({{ids:int list}});", maint);
-        let named = |v: &[(&str, &str)]| v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let named = |v: &[(&str, &str)]| -> snippet::Values { v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
         self.lib_ui.snippet_values.insert(read, named(&[("day", "2026-11-03"), ("status", "paid"), ("limit", "100")]));
         self.lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
         match state {
