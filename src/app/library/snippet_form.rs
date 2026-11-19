@@ -147,7 +147,7 @@ impl App {
                             }
                         }
                         _ => {
-                            let fid = egui::Id::new(("snippet-value", f.id, i));
+                            let fid = egui::Id::unique(("snippet-value", f.id, i));
                             let hint = match &v.ty {
                                 Ty::Date => "2026-11-03",
                                 Ty::DateTime => "2026-11-03 14:30",
@@ -274,7 +274,6 @@ impl App {
                     self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here);
                 }
                 Do::Unlock => {
-                    keep = false;
                     let mut back = f;
                     back.stage = Stage::Confirm;
                     let conn = back.conn;
@@ -284,7 +283,6 @@ impl App {
                 Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
                 Do::Run => {
                     let Ok(text) = filled.clone() else { continue };
-                    keep = false;
                     self.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     self.run_snippet(&f, text);
                     return;
@@ -321,4 +319,61 @@ impl App {
 fn verb(text: &str) -> String {
     let t = text.trim_start();
     t.split(|c: char| !c.is_ascii_alphabetic()).next().filter(|w| !w.is_empty()).map(|w| w.to_ascii_uppercase()).unwrap_or_else(|| "it".into())
+}
+
+impl App {
+    /// QUARRY_TEST_SNIPPET=<state> over the MySQL demo: palette (Cmd+K finding two snippets), form (a read filled in),
+    /// write (the confirm of a write), locked (a write on a locked connection), tab (a snippet open on Template), filled
+    /// (the same on Filled) or make (Make it a value on a plain script).
+    pub(in crate::app) fn demo_snippet(&mut self, state: &str) {
+        use crate::library::Script;
+        (self.conns, self.tabs) = (Vec::new(), Vec::new());
+        self.open_dbs.clear();
+        self.load_sql_demo();
+        self.sql_query_demo();
+        self.demo_scripts();
+        let folder = |a: &App, name: &str| a.library.folders.iter().find(|f| f.name == name).map(|f| f.id);
+        let add = |a: &mut App, name: &str, body: &str, folder: Option<u64>| {
+            let id = a.library.next_id();
+            a.library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), folder, updated: 1_731_400_000, ..Default::default() });
+            id
+        };
+        let (reports, maint) = (folder(self, "Reports"), folder(self, "Maintenance"));
+        let read = add(self, "Orders on a day", "SELECT o.id, o.customer_id, o.total, o.status\nFROM orders o\nWHERE DATE(o.created_at) = {{day:date}}\n  AND o.status = {{status:paid|pending|refunded=paid}}\nORDER BY o.created_at\nLIMIT {{limit:int=100}};", reports);
+        let write = add(self, "Mark orders shipped", "UPDATE orders SET status = 'shipped', shipped_at = NOW()\nWHERE id IN ({{ids:int list}});", maint);
+        self.lib_ui.snippet_values.insert(read, vec!["2026-11-03".into(), "paid".into(), "100".into()]);
+        self.lib_ui.snippet_values.insert(write, vec!["4405, 4407, 4412".into()]);
+        match state {
+            "palette" => self.open_palette_with("orders".into()),
+            "form" => self.open_snippet_form(read, "orders".into()),
+            "write" | "locked" => {
+                if state == "write"
+                    && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3)
+                {
+                    c.writable = true;
+                }
+                self.open_snippet_form(write, "orders".into());
+                if let Some(Modal::Snippet(f)) = self.modal.as_mut()
+                    && state == "write"
+                {
+                    f.stage = Stage::Confirm;
+                }
+            }
+            "tab" | "filled" => {
+                self.open_script(&ScriptRef::Saved(read), crate::app::library::open::How::Here);
+                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+                    s.snip_vals = [("day", "2026-11-03"), ("status", "paid"), ("limit", "100")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                    s.snip_filled = state == "filled";
+                }
+            }
+            "make" => {
+                let plain = add(self, "Orders of one day", "SELECT o.id, o.total FROM orders o WHERE DATE(o.created_at) = '2026-11-03';", reports);
+                self.open_script(&ScriptRef::Saved(plain), crate::app::library::open::How::Here);
+                if let Some(at) = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.query.find("'2026-11-03'")) {
+                    self.ask_make_value(at..at + 12);
+                }
+            }
+            _ => {}
+        }
+    }
 }

@@ -348,6 +348,30 @@ pub(crate) fn split_statement(before: &str, tail: &str, dl: Dialect) -> (String,
     (all[start..before.len()].to_string(), all[start..end].to_string())
 }
 
+/// Inside a snippet's `{{` not yet closed: the names of the values the statement already has, and after the colon the
+/// types a value can take.
+fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
+    use crate::library::snippet;
+    let open = before.rfind("{{")?;
+    if before[open..].contains("}}") || before[open + 2..].contains('\n') {
+        return None;
+    }
+    let inner = &before[open + 2..];
+    let sugs: Vec<Sug>;
+    let from;
+    if let Some(colon) = inner.find(':') {
+        let typed = inner[colon + 1..].trim_start();
+        from = before.len() - typed.len();
+        sugs = snippet::TYPES.iter().filter(|(t, _)| starts_ci(t, typed) && *t != typed).map(|(t, d)| sug((*t).to_string(), "type", format!("{t}}}}}"), (*d).to_string(), String::new())).collect();
+    } else {
+        let typed = inner.trim_start();
+        from = before.len() - typed.len();
+        let names = snippet::parse(full_stmt, dl).vars;
+        sugs = names.iter().filter(|v| starts_ci(&v.name, typed) && v.name != typed).map(|v| sug(v.name.clone(), "column", format!("{}}}}}", v.name), v.ty.spec(), String::new())).collect();
+    }
+    (!sugs.is_empty()).then_some(Out { from, sugs, ..Default::default() })
+}
+
 /// Suggestions for the text before the caret, with the heading, footer and lookups. None where nothing should pop up: in a comment, in a string
 /// that is not a value, in a closed identifier, or in an empty word where a list would only be noise. `force` is Ctrl+Space, which lists
 /// what fits even in an empty word.
@@ -380,6 +404,9 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
             return value_list(&prev_all[..upto], &before[at + 1..], at + 1, &before[at..at + 1], &rts, values);
         }
         _ => {}
+    }
+    if let Some(out) = placeholder_list(before, full_stmt, scope.dialect) {
+        return Some(out);
     }
     let in_tick = open == Some(Tok::Quoted);
     // The word being typed, and the tokens before it.
