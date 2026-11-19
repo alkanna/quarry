@@ -43,9 +43,8 @@ impl App {
         let mut set_default = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return false };
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let digit = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(TXT_SMALL), '0'));
                 ui.label(RichText::new("Run on").color(MUTED()));
                 ui.label(RichText::new(&target).color(BRIGHT()));
                 if let Some(id) = make_default
@@ -53,15 +52,33 @@ impl App {
                 {
                     set_default = Some(id);
                 }
-                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    segmented(ui, &mut s.snip_filled, &[(true, "Filled"), (false, "Template")]);
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let mono = FontId::monospace(TXT_SMALL);
+                let digit = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
                 for v in &p.vars {
-                    ui.label(RichText::new(&v.name).font(FontId::monospace(TXT_SMALL)).color(MUTED())).on_hover_text(v.ty.spec());
                     let val = s.snip_vals.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
+                    // As wide as the value or its hint, never so short that typing scrolls it at once.
+                    let w = match &v.ty {
+                        Ty::Choice(c) => c.iter().map(|c| c.chars().count()).max().unwrap_or(0).max(5) as f32 * digit + BUTTON_H,
+                        _ => (val.chars().count().max(v.ty.hint().chars().count()).max(16) as f32 * digit + BUTTON_H / 2.0).min(VALUE_FIELD_MAX_W),
+                    };
+                    // A name and its field wrap together, so many values flow onto more lines without splitting.
+                    let name_w = v.name.chars().count() as f32 * digit;
+                    if ui.available_rect_before_wrap().width() < name_w + w + 3.0 * ui.spacing().item_spacing.x {
+                        ui.end_row();
+                    }
+                    ui.label(RichText::new(&v.name).font(mono.clone()).color(MUTED())).on_hover_text(v.ty.spec());
                     match &v.ty {
                         Ty::Choice(c) => {
                             let shown = if val.is_empty() { "pick\u{2026}".to_string() } else { val.clone() };
                             let mut picks = Vec::new();
-                            ui.menu_button(RichText::new(shown).font(FontId::monospace(TXT_SMALL)).color(C_STRING()), |ui| {
+                            ui.menu_button(RichText::new(shown).font(mono.clone()).color(C_STRING()), |ui| {
                                 menu_list(ui);
                                 for c in c {
                                     menu_act(ui, &mut picks, c.clone(), |ui| ui.selectable_label(val == c, c));
@@ -72,15 +89,11 @@ impl App {
                             }
                         }
                         _ => {
-                            // As wide as the value, in the editor's mono digits, between a short field and a long one.
-                            let w = (val.chars().count().max(4) as f32 * digit + BUTTON_H / 2.0).min(VALUE_FIELD_MAX_W);
-                            ui.add(egui::TextEdit::singleline(val).font(FontId::monospace(TXT_SMALL)).desired_width(w).hint_text(RichText::new(v.ty.hint()).color(FAINT())));
+                            ui.add(egui::TextEdit::singleline(val).font(mono.clone()).desired_width(w).hint_text(RichText::new(v.ty.hint()).color(FAINT())));
                         }
                     }
+                    ui.add_space(8.0);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    segmented(ui, &mut s.snip_filled, &[(true, "Filled"), (false, "Template")]);
-                });
             });
             if let Some(e) = &p.err {
                 ui.label(RichText::new(&e.msg).size(TXT_SMALL).color(ALERT()));
