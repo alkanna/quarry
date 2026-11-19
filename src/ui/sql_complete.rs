@@ -357,7 +357,7 @@ fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
         return None;
     }
     // Only a `{{` in code opens a placeholder, not one inside a string or a comment.
-    if !lex::tokens(before, dl).iter().any(|(t, r)| *t == Tok::Punct && r.contains(&open)) {
+    if !lex::tokens(before, dl).iter().any(|(t, r)| matches!(t, Tok::Punct | Tok::Str) && r.contains(&open)) {
         return None;
     }
     // A placeholder already closed after the caret gets no second `}}`.
@@ -408,8 +408,14 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     let full_toks = lex::tokens(full_stmt, scope.dialect);
     let full_sig = sig(full_stmt, &full_toks);
     let rts = resolve(&parse_refs(&full_sig, scope.dialect), scope);
+    if open == Some(Tok::Comment) {
+        return None;
+    }
+    // Before the string's values: `LIKE '%{{` is a placeholder being named, not text to complete.
+    if let Some(out) = placeholder_list(before, full_stmt, scope.dialect) {
+        return Some(out);
+    }
     match open {
-        Some(Tok::Comment) => return None,
         Some(Tok::Str) => {
             // A dollar quoted body is text, and a prefix such as E or B sits before the opening quote.
             let qoff = before[orng.start..].find(['\'', '"']).filter(|_| !before[orng.start..].starts_with('$'))?;
@@ -418,9 +424,6 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
             return value_list(&prev_all[..upto], &before[at + 1..], at + 1, &before[at..at + 1], &rts, values);
         }
         _ => {}
-    }
-    if let Some(out) = placeholder_list(before, full_stmt, scope.dialect) {
-        return Some(out);
     }
     let in_tick = open == Some(Tok::Quoted);
     // The word being typed, and the tokens before it.

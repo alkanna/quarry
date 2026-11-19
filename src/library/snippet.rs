@@ -1,6 +1,7 @@
 //! Snippets: SQL scripts with values to fill in, written `{{name}}`, `{{name:type}}` or `{{name:type=default}}` in the
-//! statement itself, so nothing about them is stored apart from the script. A placeholder counts only in code: inside a
-//! string or a comment it is plain text. Values go into the statement as literals of their type, never as SQL text.
+//! statement itself, so nothing about them is stored apart from the script. In code a value goes in as a literal of its
+//! type; inside a string, as in `LIKE '%{{name}}%'`, it joins that string with its quotes escaped. Never as SQL text. In
+//! a comment, a quoted name or a dollar-quoted body a placeholder is plain text.
 use crate::db::sql::lex::{tokens, Tok};
 use crate::db::sql::value::{lit, pg_lit};
 use crate::db::sql::Dialect;
@@ -91,11 +92,20 @@ pub struct Var {
     pub default: Option<String>,
 }
 
+/// Where a placeholder sits: in code, or inside a string closed by that quote, or inside a PostgreSQL `E'...'` string.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum At {
+    Code,
+    Str(char),
+    EStr,
+}
+
 /// One placeholder in the text: which value it takes and the bytes it covers, braces included.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hole {
     pub var: usize,
     pub span: Range<usize>,
+    pub at: At,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,15 +135,32 @@ pub fn is_snippet(body: &str, d: Dialect) -> bool {
     body.contains("{{") && parse(body, d).is_snippet()
 }
 
-/// Whether byte `i` is code, outside strings, quoted names and comments.
-fn code_mask(text: &str, d: Dialect) -> Vec<bool> {
+/// Whether byte `i` is code, outside strings, quoted names and comments, and the strings a placeholder can sit in: their
+/// insides, between the quotes, and how they quote.
+fn code_mask(text: &str, d: Dialect) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
     let mut m = vec![false; text.len()];
+    let mut strs = Vec::new();
     for (t, r) in tokens(text, d) {
         if matches!(t, Tok::Word | Tok::Punct | Tok::Space | Tok::ExecOpen | Tok::ExecClose) {
             m[r].fill(true);
+        } else if t == Tok::Str && r.len() >= 2 {
+            let s = &text[r.clone()];
+            // Prefixed strings other than E'..', and dollar quotes, have no escape this could rely on: their placeholders
+            // stay text. So does a plain string with a backslash, which ends elsewhere when the server reads backslashes
+            // the other way, and would put the value in code.
+            let plain = !s.contains('\\');
+            let at = match s.as_bytes()[0] {
+                b'\'' if plain => Some((1, At::Str('\''))),
+                b'"' if plain && d != Dialect::Postgres => Some((1, At::Str('"'))),
+                b'E' | b'e' if d == Dialect::Postgres && s.as_bytes()[1] == b'\'' => Some((2, At::EStr)),
+                _ => None,
+            };
+            if let Some((open, at)) = at {
+                strs.push((r.start + open..r.end - 1, at));
+            }
         }
     }
-    m
+    (m, strs)
 }
 
 /// A value name: letters, digits and _, not starting with a digit.
@@ -147,24 +174,46 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
     if !text.contains("{{") {
         return out;
     }
-    let code = code_mask(text, d);
+    let (code, strs) = code_mask(text, d);
     let mut i = 0;
     while let Some(off) = text[i..].find("{{") {
         let s = i + off;
-        if !code[s] || !code[s + 1] {
+        let (at, end) = if code[s] && code[s + 1] {
+            (At::Code, text.len())
+        } else if let Some((r, at)) = strs.iter().find(|(r, _)| r.contains(&s)) {
+            // Inside a string the placeholder must close before the string does, or it is just braces in the text.
+            if !text[s + 2..r.end].contains("}}") {
+                i = s + 2;
+                continue;
+            }
+            (*at, r.end)
+        } else {
             i = s + 2;
             continue;
-        }
-        let Some(len) = text[s + 2..].find("}}") else {
+        };
+        let Some(len) = text[s + 2..end].find("}}") else {
             out.err = Some(VarErr { span: s..text.len(), msg: "This {{ has no closing }}.".into() });
             return out;
         };
         let e = s + 2 + len + 2;
         let span = s..e;
-        let fail = |msg: String| Some(VarErr { span: span.clone(), msg });
-        if !code[s..e].iter().all(|c| *c) {
-            out.err = fail("A value can't hold quotes or comments.".into());
-            return out;
+        // In a string, braces that don't read as a placeholder are its text, such as a stored template: only code fails.
+        macro_rules! fail {
+            ($msg:expr) => {{
+                if at != At::Code {
+                    i = e;
+                    continue;
+                }
+                out.err = Some(VarErr { span: span.clone(), msg: $msg });
+                return out;
+            }};
+        }
+        let clean = match at {
+            At::Code => code[s..e].iter().all(|c| *c),
+            _ => !text[s..e].contains(['\'', '"', '\\']),
+        };
+        if !clean {
+            fail!("A value can't hold quotes or comments.".into());
         }
         let inner = text[s + 2..e - 2].trim();
         let (head, default) = match inner.split_once('=') {
@@ -176,16 +225,14 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
             None => (head, None),
         };
         if !valid_name(name) {
-            out.err = fail(format!("\"{name}\" is not a value name: use letters, digits and _."));
-            return out;
+            fail!(format!("\"{name}\" is not a value name: use letters, digits and _."));
         }
         let ty = match ty {
             Some(t) => match Ty::read(t) {
                 Some(ty) => Some(ty),
                 None => {
                     let names: Vec<&str> = TYPES.iter().map(|t| t.0).collect();
-                    out.err = fail(format!("\"{t}\" is not a type. Use {}.", names.join(", ")));
-                    return out;
+                    fail!(format!("\"{t}\" is not a type. Use {}.", names.join(", ")));
                 }
             },
             None => None,
@@ -195,8 +242,7 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
                 let v = &mut out.vars[k];
                 match ty {
                     Some(t) if v.ty != t && v.ty != Ty::Text => {
-                        out.err = fail(format!("{name} is already a {}.", v.ty.spec()));
-                        return out;
+                        fail!(format!("{name} is already a {}.", v.ty.spec()));
                     }
                     // The first mention without a type is text until a later one names it.
                     Some(t) => v.ty = t,
@@ -212,7 +258,7 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
                 out.vars.len() - 1
             }
         };
-        out.holes.push(Hole { var, span });
+        out.holes.push(Hole { var, span, at });
         i = e;
     }
     out
@@ -266,28 +312,68 @@ fn quote(s: &str, d: Dialect, bs: bool) -> String {
     if d == Dialect::Postgres { pg_lit(s) } else { lit(s, bs) }
 }
 
-/// The literal one value becomes, or why it can't.
-pub fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
+/// The value once it reads as its type, before any quoting, or why it can't.
+fn checked(v: &Var, value: &str) -> Result<String, String> {
     let s = value.trim();
     let bad = |what: &str| format!("{} needs {what}.", v.name);
     match &v.ty {
-        Ty::Text => Ok(quote(value, d, bs)),
-        Ty::Int => int(s).map(signed).ok_or_else(|| bad("a whole number")),
-        Ty::Number => number(s).map(signed).ok_or_else(|| bad("a number")),
-        Ty::Date if is_date(s) => Ok(quote(s, d, bs)),
+        Ty::Text => Ok(value.to_string()),
+        Ty::Int => int(s).ok_or_else(|| bad("a whole number")),
+        Ty::Number => number(s).ok_or_else(|| bad("a number")),
+        Ty::Date if is_date(s) => Ok(s.into()),
         Ty::Date => Err(bad("a date like 2026-11-03")),
-        Ty::DateTime if is_datetime(s) => Ok(quote(s, d, bs)),
+        Ty::DateTime if is_datetime(s) => Ok(s.into()),
         Ty::DateTime => Err(bad("a date and time like 2026-11-03 14:30")),
         Ty::IntList => {
             let parts: Vec<&str> = s.split([',', ' ', '\n', '\t', ';']).filter(|p| !p.is_empty()).collect();
-            let ints: Option<Vec<String>> = parts.iter().map(|p| int(p).map(signed)).collect();
+            let ints: Option<Vec<String>> = parts.iter().map(|p| int(p)).collect();
             ints.filter(|i| !i.is_empty()).map(|i| i.join(", ")).ok_or_else(|| bad("whole numbers separated by commas"))
         }
         Ty::Ident if s.is_empty() || s.contains('\0') => Err(bad("a name")),
-        Ty::Ident => Ok(s.split('.').map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(".")),
-        Ty::Choice(c) if c.iter().any(|c| c == s) => Ok(quote(s, d, bs)),
+        Ty::Ident => Ok(s.into()),
+        Ty::Choice(c) if c.iter().any(|c| c == s) => Ok(s.into()),
         Ty::Choice(c) => Err(bad(&format!("one of {}", c.join(", ")))),
     }
+}
+
+/// The literal one value becomes, or why it can't.
+pub fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
+    let c = checked(v, value)?;
+    Ok(match &v.ty {
+        Ty::Int | Ty::Number => signed(c),
+        Ty::IntList => c.split(", ").map(|n| signed(n.into())).collect::<Vec<_>>().join(", "),
+        Ty::Ident => c.split('.').map(|p| d.quote_ident(p)).collect::<Vec<_>>().join("."),
+        _ => quote(&c, d, bs),
+    })
+}
+
+/// The value written inside a string that the statement already quotes, so it can't end that string. `bs` is the MySQL
+/// backslash reading, see `quote`.
+fn in_string(v: &Var, value: &str, at: At, d: Dialect, bs: bool) -> Result<String, String> {
+    let c = checked(v, value)?;
+    let (q, escapes) = match at {
+        At::Str(q) if d == Dialect::Postgres => {
+            // A plain PostgreSQL string reads backslashes as escapes only under standard_conforming_strings off, which
+            // the statement can't tell, so a backslash has no safe spelling here.
+            if c.contains('\\') {
+                return Err(format!("{} can't hold a backslash inside this string: write E'...' instead.", v.name));
+            }
+            (q, false)
+        }
+        At::Str(q) => (q, bs),
+        At::EStr => ('\'', true),
+        At::Code => return literal(v, value, d, bs),
+    };
+    let c = if escapes && d == Dialect::Postgres {
+        c.replace('\\', "\\\\")
+    } else if escapes {
+        // The same escapes as a MySQL literal: `lit` without its quotes.
+        let l = lit(&c, true);
+        l[1..l.len() - 1].replace("''", "'")
+    } else {
+        c
+    };
+    Ok(c.replace(q, &format!("{q}{q}")))
 }
 
 /// The values of a text by name: an empty one takes the default when there is one.
@@ -298,20 +384,17 @@ pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Re
     if let Some(e) = &p.err {
         return Err(e.msg.clone());
     }
-    let lits: Vec<String> = p
-        .vars
-        .iter()
-        .map(|v| {
-            let given = values.get(&v.name).map(String::as_str).unwrap_or("");
-            let value = if given.trim().is_empty() { v.default.as_deref().unwrap_or(given) } else { given };
-            literal(v, value, d, bs)
-        })
-        .collect::<Result<_, _>>()?;
+    let value = |v: &Var| {
+        let given = values.get(&v.name).map(String::as_str).unwrap_or("");
+        let v = if given.trim().is_empty() { v.default.as_deref().unwrap_or(given) } else { given };
+        v.to_string()
+    };
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for h in &p.holes {
+        let v = &p.vars[h.var];
         out.push_str(&text[last..h.span.start]);
-        out.push_str(&lits[h.var]);
+        out.push_str(&in_string(v, &value(v), h.at, d, bs)?);
         last = h.span.end;
     }
     out.push_str(&text[last..]);
@@ -378,18 +461,38 @@ mod tests {
     }
 
     #[test]
-    fn placeholders_are_read_only_in_code() {
-        let t = "SELECT '{{a}}', `{{b}}` -- {{c}}\nFROM t WHERE x = {{day:date}} /* {{d}} */ AND y = {{day}}";
+    fn placeholders_are_read_in_code_and_strings_only() {
+        let t = "SELECT '{{a}}', `{{b}}` -- {{c}}\nFROM t WHERE x = {{day:date}} /* {{d}} */ AND y = {{day}} AND z = '\\{{e}}'";
         let p = parse(t, MY);
         assert_eq!(p.err, None);
-        assert_eq!(p.vars, vec![Var { name: "day".into(), ty: Ty::Date, default: None }]);
-        assert_eq!(p.holes.len(), 2);
-        assert_eq!(&t[p.holes[0].span.clone()], "{{day:date}}");
+        assert_eq!(p.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["a", "day"]);
+        assert_eq!(p.holes.iter().map(|h| h.at).collect::<Vec<_>>(), [At::Str('\''), At::Code, At::Code]);
+        assert_eq!(&t[p.holes[1].span.clone()], "{{day:date}}");
         // PostgreSQL casts and dollar quotes don't get in the way.
         let p = parse("SELECT $$ {{no}} $$, created_at::date = {{d:date=2026-11-03}}", PG);
         assert_eq!(p.vars.len(), 1);
         assert_eq!(p.vars[0].default.as_deref(), Some("2026-11-03"));
         assert!(!parse("SELECT 1", MY).is_snippet());
+    }
+
+    #[test]
+    fn a_value_inside_a_string_joins_it_and_can_never_end_it() {
+        let t = "SELECT * FROM t WHERE a LIKE '%{{name}}%' AND b = \"{{name}}\"";
+        let p = parse(t, MY);
+        let v = vals_of(&p, &["O'Neil\\"]);
+        assert_eq!(fill(t, &p, &v, MY, true).unwrap(), "SELECT * FROM t WHERE a LIKE '%O''Neil\\\\%' AND b = \"O'Neil\\\\\"");
+        assert_eq!(fill(t, &p, &v, MY, false).unwrap(), "SELECT * FROM t WHERE a LIKE '%O''Neil\\%' AND b = \"O'Neil\\\"");
+        // PostgreSQL: a plain string can't say a backslash both ways, E'..' can.
+        let t = "SELECT 1 WHERE a LIKE '%{{n}}%' AND b LIKE E'{{n}}'";
+        let p = parse(t, PG);
+        assert_eq!(fill(t, &p, &vals_of(&p, &["x'y"]), PG, true).unwrap(), "SELECT 1 WHERE a LIKE '%x''y%' AND b LIKE E'x''y'");
+        assert!(fill(t, &p, &vals_of(&p, &["x\\y"]), PG, true).unwrap_err().contains("backslash"));
+        // Types still check, and a string that only holds braces is left alone.
+        let p = parse("SELECT '{{d:date}}', '{{', '}}'", MY);
+        assert_eq!(p.holes.len(), 1);
+        assert!(fill("SELECT '{{d:date}}', '{{', '}}'", &p, &vals_of(&p, &["soon"]), MY, true).is_err());
+        assert!(parse("SELECT $$ {{no}} $$", PG).holes.is_empty());
+        assert!(!parse("INSERT INTO mail VALUES ('Hello {{ user.name }}')", MY).is_snippet(), "a stored template became a broken snippet");
     }
 
     #[test]
