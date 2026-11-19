@@ -238,7 +238,7 @@ impl App {
                 ui.add_space(16.0);
                 egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
                     ui.set_width(form_w - 56.0);
-                    egui::ScrollArea::vertical().max_height(PREVIEW_MAX_H).show(ui, |ui| match &filled {
+                    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(PREVIEW_MAX_H).show(ui, |ui| match &filled {
                         Ok(t) => {
                             // Laid out once per text, not every frame the form is open.
                             ui.label(crate::ui::editor::memo_galley(ui, 9, t, ui.available_width(), || crate::ui::editor::sql_job_in(t, TXT_BODY, d)));

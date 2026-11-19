@@ -116,7 +116,7 @@ impl App {
         let out = snippet::fill_named(&s.query, &p, &s.snip_vals, d, bs);
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().id_salt("snip-filled").max_height((ui.available_height() * 0.5).max(96.0)).show(ui, |ui| match out {
+            egui::ScrollArea::vertical().id_salt("snip-filled").auto_shrink([false, true]).max_height((ui.available_height() * 0.5).max(96.0)).show(ui, |ui| match out {
                 Ok(t) => {
                     // Laid out once per text, not every frame.
                     ui.label(crate::ui::editor::memo_galley(ui, 10, &t, ui.available_width(), || crate::ui::editor::sql_job_in(&t, TXT_SMALL, d)));
