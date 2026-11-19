@@ -393,8 +393,8 @@ mod tests {
         assert!(!reads_the_same("select 'a' 'b'", "select 'a''b'", Dialect::MySql));
         assert!(!reads_the_same("select a -- x\nfrom t", "select a -- x from t", Dialect::MySql));
         assert!(reads_the_same("select  a ,b", "select a,\n  b", Dialect::MySql));
-        let s = Formatted { formatted: 2, special: 1, refused: 1, text: String::new() }.summary();
-        assert!(s.contains("Formatted 2 statements") && s.contains("DELIMITER") && s.contains("would change"), "{s}");
+        let s = Formatted { formatted: 2, special: 1, refused: 1, held: 1, text: String::new() }.summary();
+        assert!(s.contains("Formatted 2 statements") && s.contains("DELIMITER") && s.contains("would change") && s.contains("{{...}} value"), "{s}");
     }
 
     fn pg(t: &str) -> Formatted {
