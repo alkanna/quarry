@@ -372,8 +372,16 @@ fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
     } else {
         let typed = inner.trim_start();
         from = before.len() - typed.len();
-        let names = snippet::parse(full_stmt, dl).vars;
-        sugs = names.iter().filter(|v| starts_ci(&v.name, typed) && v.name != typed).map(|v| sug(v.name.clone(), "column", format!("{}{close}", v.name), v.ty.spec(), String::new())).collect();
+        // The statement without this placeholder: its unclosed `{{` would stop the parse before the values after it.
+        let rest = format!("{}{}", &before[..open], full_stmt.get(before.len()..).unwrap_or(""));
+        let mut names: Vec<(String, String)> = snippet::parse(&rest, dl).vars.into_iter().map(|v| (v.name, v.ty.spec())).collect();
+        // A first value has no name to reuse yet: the column it is compared with is the likely one.
+        let head = &before[..open];
+        let toks = sig(head, &lex::tokens(head, dl));
+        if let Some(col) = compared_end(&toks).and_then(|end| operand(&toks, end).pop()).filter(|c| snippet::valid_name(c) && !names.iter().any(|(n, _)| n == c)) {
+            names.push((col, "new value".into()));
+        }
+        sugs = names.into_iter().filter(|(n, _)| starts_ci(n, typed) && n != typed).map(|(n, d)| sug(n.clone(), "column", format!("{n}{close}"), d, String::new())).collect();
     }
     (!sugs.is_empty()).then_some(Out { from, sugs, ..Default::default() })
 }
@@ -573,8 +581,8 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
 
 /// The values of the column whose comparison the open string belongs to. `toks` are the tokens
 /// before the string.
-fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], values: &Fields) -> Option<Out> {
-    // The operand ends before `=`, `<>`, `!=`, `LIKE` or an `IN (` list.
+/// Where the operand of the comparison the caret is in ends: before `=`, `<>`, `!=`, `LIKE`, `NOT` or an `IN (` list.
+fn compared_end(toks: &[Tk]) -> Option<usize> {
     let mut end = toks.len();
     let ops = |t: &Tk| t.tok == Tok::Punct && matches!(t.s, "=" | "<" | ">" | "!");
     if end > 0 && toks[end - 1].tok == Tok::Word && ["LIKE", "REGEXP", "RLIKE"].iter().any(|k| toks[end - 1].is(k)) {
@@ -598,7 +606,11 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
     if end > 0 && toks[end - 1].is("NOT") {
         end -= 1;
     }
-    let parts = operand(toks, end);
+    Some(end)
+}
+
+fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], values: &Fields) -> Option<Out> {
+    let parts = operand(toks, compared_end(toks)?);
     let (table, col) = match parts.as_slice() {
         [c] => rts.iter().find_map(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
         [q, c] | [_, q, c] => by_qualifier(rts, q).and_then(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
@@ -872,6 +884,14 @@ mod tests {
         let mut f = Fields::new();
         f.insert(value_key("orders", "currency"), super::super::complete::FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         f
+    }
+
+    #[test]
+    fn a_placeholder_offers_the_compared_column_and_the_names_after_it() {
+        let names = |b: &str, full: &str| suggest(b, full, &scope(), &Fields::new()).map(|(_, s)| s.into_iter().map(|s| s.insert).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(names("SELECT * FROM t WHERE `firstname` LIKE {{", "SELECT * FROM t WHERE `firstname` LIKE {{"), ["firstname}}"]);
+        assert_eq!(names("SELECT * FROM t WHERE a = {{", "SELECT * FROM t WHERE a = {{ AND b = {{day:date}}"), ["day}}", "a}}"]);
+        assert_eq!(names("SELECT * FROM t WHERE a = {{x:", "SELECT * FROM t WHERE a = {{x:").len(), crate::library::snippet::TYPES.len());
     }
 
     #[test]
