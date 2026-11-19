@@ -584,7 +584,13 @@ pub(crate) fn ac_input_with(
     if ac.id == Some(id) && crate::ui::vim::normal(ui.ctx(), id) {
         ac.close();
     }
-    let open = ac.id == Some(id) && !ac.items.is_empty();
+    let mut open = ac.id == Some(id) && !ac.items.is_empty();
+    // egui drops focus on a bare Esc before widgets run, so an open list takes Esc and gives the focus back.
+    if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        ac.close();
+        open = false;
+        ui.memory_mut(|m| m.request_focus(id));
+    }
     let mut pick = None;
     let mut moved = false;
     let force = ui.memory(|m| m.has_focus(id)) && take_ctrl_space(ui);
@@ -600,9 +606,6 @@ pub(crate) fn ac_input_with(
             }
             if i.consume_key(egui::Modifiers::NONE, Key::Enter) || i.consume_key(egui::Modifiers::NONE, Key::Tab) {
                 pick = Some(ac.sel);
-            }
-            if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
-                ac.close();
             }
         });
     }

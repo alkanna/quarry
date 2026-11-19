@@ -55,9 +55,7 @@ fn a_space_after_where_opens_the_columns_and_esc_closes_them() {
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
     assert!(listed(&ui).is_empty(), "Esc left the list open: {:?}", listed(&ui));
-    // Esc takes the focus from the editor, so it is given back before typing on.
-    ui.h.ctx.memory_mut(|m| m.request_focus(App::sql_editor_id(ui.app().cur)));
-    ui.settle();
+    assert!(ui.h.ctx.memory(|m| m.has_focus(App::sql_editor_id(ui.app().cur))), "Esc on the list also left the editor");
     // The next trigger opens it again.
     ui.type_text("status = 'paid' AND ");
     assert!(listed(&ui).iter().any(|s| s == "status"), "no columns after AND: {:?}", listed(&ui));
