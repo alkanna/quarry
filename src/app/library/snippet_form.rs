@@ -1,0 +1,324 @@
+//! The Cmd+K form of a snippet: Enter on a script with `{{...}}` values asks for them in the palette's place, shows the
+//! statement they make and runs it. A read runs at once; a write asks first, and on a locked connection goes through
+//! Unlock and comes back to that question.
+use super::*;
+use crate::library::snippet::{self, Ty};
+use crate::library::ScriptRef;
+
+const FORM_W: f32 = 640.0;
+const LABEL_W: f32 = 120.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Stage {
+    Fill,
+    /// A write on a writable connection, waiting for Run.
+    Confirm,
+}
+
+pub(in crate::app) struct SnippetForm {
+    pub id: u64,
+    pub name: String,
+    pub body: String,
+    pub conn: u64,
+    pub db: String,
+    pub schema: String,
+    pub values: Vec<String>,
+    pub stage: Stage,
+    /// The palette's query, put back by Esc.
+    pub query: String,
+}
+
+/// What a click or key in the form asks for, done once the form is drawn.
+enum Do {
+    Back,
+    Run,
+    Edit,
+    Unlock,
+    Target(u64, String),
+    MakeDefault,
+}
+
+impl App {
+    /// Enter on a snippet in the palette: its values start from the last run's, else their defaults.
+    pub(in crate::app) fn open_snippet_form(&mut self, id: u64, query: String) {
+        let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
+        let p = snippet::parse(&s.body, self.dialect_of(s.conn));
+        let values = self.lib_ui.snippet_values.get(&id).filter(|v| v.len() == p.vars.len()).cloned().unwrap_or_else(|| p.vars.iter().map(|v| v.default.clone().unwrap_or_default()).collect());
+        let conn = if self.conn(s.conn).is_some() { s.conn } else { self.conns.iter().find(|c| c.meta.engine.is_sql()).map_or(s.conn, |c| c.meta.id) };
+        let db = if s.db.is_empty() || conn != s.conn { self.default_db(conn) } else { s.db.clone() };
+        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db, schema: s.schema.clone(), values, stage: Stage::Fill, query };
+        // A connection that is not open starts connecting now, so it is ready by the time the values are in.
+        if self.conn(conn).is_some_and(|c| c.status == Status::Idle) && !self.demo {
+            self.connect(conn);
+        }
+        self.modal = Some(Modal::Snippet(Box::new(form)));
+    }
+
+    /// The connections a snippet can run on: the ones of its own engine, since its SQL was written for that one.
+    fn snippet_conns(&self, id: u64) -> Vec<u64> {
+        let engine = self.library.scripts.iter().find(|s| s.id == id).and_then(|s| self.conn(s.conn)).map(|c| c.meta.engine);
+        self.conns.iter().filter(|c| match engine {
+            Some(e) => c.meta.engine == e,
+            None => c.meta.engine.is_sql(),
+        }).map(|c| c.meta.id).collect()
+    }
+
+    pub(in crate::app) fn snippet_form(&mut self, ctx: &egui::Context) {
+        let Some(Modal::Snippet(mut f)) = self.modal.take() else { return };
+        let top = ctx.content_rect().height() * 0.14;
+        let id = egui::Id::unique(("quarry-layer", "snippet"));
+        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
+        let d = self.dialect_of(f.conn);
+        let p = snippet::parse(&f.body, d);
+        f.values.resize(p.vars.len(), String::new());
+        let filled = snippet::fill(&f.body, &p, &f.values, d);
+        let writes = filled.as_ref().is_ok_and(|t| db::sql::lex::read_only_check(t, d).is_err());
+        let writable = self.conn_writable(f.conn);
+        let ready = self.conn(f.conn).is_some_and(|c| c.status == Status::Ready) || self.demo;
+        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| s.conn == f.conn && (s.db == f.db || s.db.is_empty() && f.db == self.default_db(f.conn)));
+        let cname = self.conn_name(f.conn);
+        let prod = self.conn(f.conn).is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
+        let conns: Vec<(u64, String, Vec<String>)> = self.snippet_conns(f.id).into_iter().map(|c| (c, self.conn_name(c), self.conn(c).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default())).collect();
+        let mut todo: Vec<Do> = Vec::new();
+        let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
+            ui.set_width(FORM_W);
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            let (esc, enter, cmd_enter, cmd_e) = ui.input_mut(|i| {
+                let cmd_enter = i.consume_key(egui::Modifiers::COMMAND, Key::Enter);
+                (i.consume_key(egui::Modifiers::NONE, Key::Escape), i.consume_key(egui::Modifiers::NONE, Key::Enter), cmd_enter, i.consume_key(egui::Modifiers::COMMAND, Key::E))
+            });
+            // Header: back, the name, Edit and where it runs.
+            ui.horizontal(|ui| {
+                ui.set_height(PALETTE_HEAD_H);
+                ui.add_space(12.0);
+                if quiet(ui, "\u{2039}").on_hover_text("Back to the search (Esc)").clicked() {
+                    todo.push(Do::Back);
+                }
+                ui.add_space(6.0);
+                ui.label(semibold(RichText::new(&f.name).size(TXT_SEARCH).color(BRIGHT())));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(14.0);
+                    let label = if f.db.is_empty() { cname.clone() } else { format!("{cname} \u{b7} {}", f.db) };
+                    ui.menu_button(RichText::new(format!("{label}  \u{25be}")).color(BRIGHT()), |ui| {
+                        menu_list(ui);
+                        for (c, name, dbs) in &conns {
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                caption(ui, name.to_uppercase());
+                            });
+                            let dbs = if dbs.is_empty() { vec![if *c == f.conn { f.db.clone() } else { String::new() }] } else { dbs.clone() };
+                            for db in dbs {
+                                let on = *c == f.conn && db == f.db;
+                                let text = if db.is_empty() { name.clone() } else { db.clone() };
+                                if ui.selectable_label(on, text).clicked() {
+                                    todo.push(Do::Target(*c, db));
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+                    if !saved_default && quiet(ui, "Make default").on_hover_text("Run this snippet here from now on").clicked() {
+                        todo.push(Do::MakeDefault);
+                    }
+                    if quiet(ui, format!("Edit  {}", keys(false, false, "E"))).on_hover_text("Open the snippet in a tab to change it").clicked() {
+                        todo.push(Do::Edit);
+                    }
+                });
+            });
+            ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 0.5, Stroke::new(1.0, RAISED_LINE()));
+            ui.add_space(10.0);
+            // One row per value.
+            let locked = f.stage == Stage::Confirm;
+            for (i, v) in p.vars.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(LABEL_W);
+                        ui.label(RichText::new(&v.name).font(FontId::monospace(TXT_BODY)).color(BRIGHT()));
+                        ui.label(RichText::new(v.ty.label()).size(TXT_CAPTION).color(FAINT()));
+                    });
+                    ui.add_enabled_ui(!locked, |ui| match &v.ty {
+                        Ty::Choice(c) => {
+                            let mut k = c.iter().position(|c| *c == f.values[i]).unwrap_or(usize::MAX);
+                            let opts: Vec<(usize, &str)> = c.iter().enumerate().map(|(j, c)| (j, c.as_str())).collect();
+                            segmented(ui, &mut k, &opts);
+                            if let Some(c) = c.get(k) {
+                                f.values[i] = c.clone();
+                            }
+                        }
+                        _ => {
+                            let fid = egui::Id::new(("snippet-value", f.id, i));
+                            let hint = match &v.ty {
+                                Ty::Date => "2026-11-03",
+                                Ty::DateTime => "2026-11-03 14:30",
+                                Ty::IntList => "4405, 4407",
+                                _ => v.default.as_deref().unwrap_or(""),
+                            };
+                            well_field(ui, fid, FieldIcon::Plus, None, |ui| {
+                                let w = FORM_W - LABEL_W - 80.0 - if v.ty == Ty::Date { 150.0 } else { 0.0 };
+                                let r = ui.add(field_edit(&mut f.values[i], fid, hint, w, egui::TextStyle::Monospace));
+                                if i == 0 && f.stage == Stage::Fill && !ui.memory(|m| m.focused().is_some()) {
+                                    r.request_focus();
+                                }
+                                if v.ty == Ty::Date {
+                                    use crate::ui::pickers::{local_now, sql_text, Civil};
+                                    let day = |back: i64| sql_text(Civil { day: local_now().day - back, ms: 0 }, false);
+                                    if quiet(ui, "yesterday").clicked() {
+                                        f.values[i] = day(1);
+                                    }
+                                    if quiet(ui, "today").clicked() {
+                                        f.values[i] = day(0);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
+            if let Some(e) = &p.err {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    field_note(ui, &e.msg, ALERT());
+                });
+            }
+            // The statement it will run.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                caption(ui, "WILL RUN");
+                ui.add_space(8.0);
+                if filled.is_ok() {
+                    let (t, c) = if writes { ("WRITE \u{b7} ASKS FIRST", WARNING()) } else { ("READ \u{b7} RUNS AT ONCE", SUCCESS()) };
+                    badge(ui, t, c);
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
+                    ui.set_width(FORM_W - 56.0);
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| match &filled {
+                        Ok(t) => {
+                            ui.label(crate::ui::editor::sql_job_in(t, TXT_BODY, d));
+                        }
+                        Err(e) => {
+                            ui.label(RichText::new(e).color(ALERT()));
+                        }
+                    });
+                });
+            });
+            ui.add_space(14.0);
+            // The footer: keys, or the question a write asks.
+            let (band, _) = ui.allocate_exact_size(egui::vec2(FORM_W, if writes && f.stage == Stage::Confirm || writes && !writable { 60.0 } else { PALETTE_FOOT_H }), Sense::hover());
+            let pnt = ui.painter().clone();
+            if writes && !writable {
+                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, tint(WARNING(), 22));
+                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, WARNING()));
+                pnt.text(band.left_center() + egui::vec2(20.0, -9.0), egui::Align2::LEFT_CENTER, format!("{cname} is read-only"), FontId::proportional(TXT_BODY), BRIGHT());
+                pnt.text(band.left_center() + egui::vec2(20.0, 10.0), egui::Align2::LEFT_CENTER, "Unlock it, then confirm here. The values stay filled.", FontId::proportional(TXT_SMALL), MUTED());
+                let b = egui::Rect::from_min_size(band.right_center() - egui::vec2(126.0, 15.0), egui::vec2(110.0, 30.0));
+                if ui.put(b, primary_button(ui, "Unlock\u{2026}", WARNING())).clicked() || enter && ready {
+                    todo.push(Do::Unlock);
+                }
+            } else if writes && f.stage == Stage::Confirm {
+                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, tint(ALERT(), 22));
+                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, ALERT()));
+                let tag = if prod { ", a Production connection" } else { "" };
+                pnt.text(band.left_center() + egui::vec2(20.0, -9.0), egui::Align2::LEFT_CENTER, format!("Changes data on {cname}{tag}"), FontId::proportional(TXT_BODY), BRIGHT());
+                pnt.text(band.left_center() + egui::vec2(20.0, 10.0), egui::Align2::LEFT_CENTER, format!("{} runs as written. Undo can't reverse it.", verb(filled.as_deref().unwrap_or(""))), FontId::proportional(TXT_SMALL), MUTED());
+                let b = egui::Rect::from_min_size(band.right_center() - egui::vec2(146.0, 15.0), egui::vec2(130.0, 30.0));
+                if ui.put(b, primary_button(ui, &format!("Run {}", verb(filled.as_deref().unwrap_or(""))), ALERT())).clicked() || cmd_enter {
+                    todo.push(Do::Run);
+                }
+            } else {
+                pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, RAISED().lerp_to_gamma(PANEL(), 0.5));
+                pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
+                let run = if ready { "run" } else { "connecting\u{2026}" };
+                crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["\u{21e5}"], "next value"), (&["\u{21b5}"], run)]);
+                crate::app::palette::key_hint_right(&pnt, band.right() - 16.0, band.center().y, "esc", "back to search");
+                if (enter || cmd_enter) && filled.is_ok() && ready {
+                    todo.push(Do::Run);
+                }
+            }
+            if esc {
+                todo.push(Do::Back);
+            }
+            if cmd_e {
+                todo.push(Do::Edit);
+            }
+        });
+        let mut keep = !r.should_close() || todo.iter().any(|t| matches!(t, Do::Back));
+        for t in todo {
+            match t {
+                Do::Back if f.stage == Stage::Confirm => f.stage = Stage::Fill,
+                Do::Back => {
+                    self.modal = Some(Modal::Palette { query: std::mem::take(&mut f.query), sel: 0, cmds: false, new_tab: false });
+                    return;
+                }
+                Do::Target(c, db) => {
+                    f.conn = c;
+                    f.db = db;
+                    f.stage = Stage::Fill;
+                    if self.conn(c).is_some_and(|c| c.status == Status::Idle) && !self.demo {
+                        self.connect(c);
+                    }
+                }
+                Do::MakeDefault => {
+                    crate::library::ops::set_target(&mut self.library, f.id, f.conn, &f.db, &f.schema);
+                    self.save_library();
+                    self.ok(format!("{} now runs on {cname} by default", f.name));
+                }
+                Do::Edit => {
+                    keep = false;
+                    self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here);
+                }
+                Do::Unlock => {
+                    keep = false;
+                    let mut back = f;
+                    back.stage = Stage::Confirm;
+                    let conn = back.conn;
+                    self.ask_unlock_on(conn, move |a| a.modal = Some(Modal::Snippet(back)));
+                    return;
+                }
+                Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
+                Do::Run => {
+                    let Ok(text) = filled.clone() else { continue };
+                    keep = false;
+                    self.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    self.run_snippet(&f, text);
+                    return;
+                }
+            }
+        }
+        if keep && self.modal.is_none() {
+            self.modal = Some(Modal::Snippet(f));
+        }
+    }
+
+    /// Runs the filled statement in a Query tab on the form's target: the current tab when it holds nothing of the
+    /// person's on that connection and database, else a new one. The tab is not bound to the script: its text is the
+    /// filled statement, and Cmd+S on it saves a new script.
+    fn run_snippet(&mut self, f: &SnippetForm, text: String) {
+        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == f.conn && t.sel.db == f.db);
+        if !reuse {
+            self.sql_new_query(f.conn, f.db.clone());
+        }
+        if let Some(t) = self.tm() {
+            t.script = None;
+            if let Some(q) = t.sql.as_mut() {
+                q.query = text;
+                q.caret = 0;
+                q.run_schema = f.schema.clone();
+                q.run_db = String::new();
+            }
+        }
+        self.sql_run(true, false);
+    }
+}
+
+/// The statement's first word, for "Run UPDATE".
+fn verb(text: &str) -> String {
+    let t = text.trim_start();
+    t.split(|c: char| !c.is_ascii_alphabetic()).next().filter(|w| !w.is_empty()).map(|w| w.to_ascii_uppercase()).unwrap_or_else(|| "it".into())
+}

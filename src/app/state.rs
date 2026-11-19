@@ -558,6 +558,9 @@ pub(super) struct SqlTab {
     /// `run_db` and `run_schema` as they were when the shown results ran. Paging and export read them, so a
     /// picker changed afterwards does not send the statement to another database.
     pub(super) ran_in: Option<(String, String)>,
+    /// Values of the `{{...}}` placeholders of the Query text, by name, and whether the editor shows the statement filled in.
+    pub(in crate::app) snip_vals: HashMap<String, String>,
+    pub(in crate::app) snip_filled: bool,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
@@ -1114,6 +1117,10 @@ pub(super) enum Modal {
     OpenOn(Box<super::library::open::OpenOnForm>),
     /// Link a folder on disk to the library.
     LinkFolder(Box<super::library::link_dialog::LinkForm>),
+    /// The values of a snippet picked in Cmd+K, drawn in the palette's place.
+    Snippet(Box<super::library::snippet_form::SnippetForm>),
+    /// Turn the literal selected in a Query editor into a `{{...}}` value.
+    MakeValue(Box<super::sql::snippet_strip::MakeValue>),
 }
 
 impl Modal {

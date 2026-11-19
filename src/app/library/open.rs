@@ -229,7 +229,7 @@ impl App {
 
     /// Whether tab `i` is one that opening a script can replace: it holds no text of the person's beyond the script it
     /// was opened from, and that is unchanged.
-    fn tab_clean(&self, i: usize, kind: &str) -> bool {
+    pub(in crate::app) fn tab_clean(&self, i: usize, kind: &str) -> bool {
         let Some(t) = self.tabs.get(i) else { return false };
         let text = match (kind, t.sql.as_ref()) {
             ("sql", Some(s)) if t.view == View::Sql && t.sel.coll.is_empty() => s.query.as_str(),

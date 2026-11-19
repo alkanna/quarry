@@ -31,7 +31,7 @@ pub const TYPES: [(&str, &str); 8] = [
 ];
 
 impl Ty {
-    fn read(s: &str) -> Option<Ty> {
+    pub fn read(s: &str) -> Option<Ty> {
         Some(match s {
             "text" => Ty::Text,
             "int" => Ty::Int,
@@ -297,6 +297,26 @@ pub fn fill(text: &str, p: &Parsed, values: &[String], d: Dialect) -> Result<Str
     Ok(out)
 }
 
+/// `text`, all or part of a script whose values `full` read, filled with the values by name. Each placeholder takes the
+/// type the whole script gives its name, so a statement that only says `{{day}}` still gets a date.
+pub fn fill_named(text: &str, full: &Parsed, values: &std::collections::HashMap<String, String>, d: Dialect) -> Result<String, String> {
+    if let Some(e) = &full.err {
+        return Err(e.msg.clone());
+    }
+    let mut p = parse(text, d);
+    if !p.is_snippet() {
+        return Ok(text.to_string());
+    }
+    p.err = None;
+    for v in &mut p.vars {
+        if let Some(f) = full.vars.iter().find(|f| f.name == v.name) {
+            *v = f.clone();
+        }
+    }
+    let vals: Vec<String> = p.vars.iter().map(|v| values.get(&v.name).cloned().unwrap_or_default()).collect();
+    fill(text, &p, &vals, d)
+}
+
 /// The placeholder that replaces a literal: its type read from the literal and the literal kept as the default when it
 /// can be written there.
 pub fn infer(token: &str) -> (Ty, Option<String>) {
@@ -393,6 +413,16 @@ mod tests {
         assert_eq!(literal(&dt, "2026-11-03 14:30", PG).unwrap(), "'2026-11-03 14:30'");
         assert_eq!(literal(&dt, "2026-11-03T14:30:05.123", PG).unwrap(), "'2026-11-03T14:30:05.123'");
         assert!(literal(&dt, "2026-11-03 25:00", PG).is_err());
+    }
+
+    #[test]
+    fn a_statement_alone_takes_the_types_of_its_script() {
+        let full = parse("SELECT {{day:date}};\nSELECT {{day}}", MY);
+        let vals = std::collections::HashMap::from([("day".to_string(), "2026-11-03".to_string())]);
+        assert_eq!(fill_named("SELECT {{day}}", &full, &vals, MY).unwrap(), "SELECT '2026-11-03'");
+        let bad = std::collections::HashMap::from([("day".to_string(), "soon".to_string())]);
+        assert!(fill_named("SELECT {{day}}", &full, &bad, MY).is_err());
+        assert_eq!(fill_named("SELECT 1", &full, &vals, MY).unwrap(), "SELECT 1");
     }
 
     #[test]

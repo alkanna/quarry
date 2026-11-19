@@ -15,6 +15,11 @@ pub enum DropAt {
 
 const LINKED: &str = "Linked folders are kept on disk, so nothing moves into or out of them here.";
 
+/// Where a saved script runs by default. Returns false when the script is gone.
+pub fn set_target(lib: &mut Library, id: u64, conn: u64, db: &str, schema: &str) -> bool {
+    lib.scripts.iter_mut().find(|s| s.id == id).map(|s| (s.conn, s.db, s.schema) = (conn, db.to_string(), schema.to_string())).is_some()
+}
+
 pub fn rename(lib: &mut Library, node: &Node, name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
