@@ -216,7 +216,6 @@ fn a_row_dragged_onto_a_group_header_moves_into_the_group() {
     assert_eq!(filter_txt(&ui), "`total` > 50 AND (`status` = 'paid')", "the new row of the group is not complete, so only the moved one writes SQL");
 }
 
-/// The rule of the panel's first row.
 fn first_rule(ui: &UiApp) -> crate::db::sql::rules::Rule {
     let b = bar(ui);
     let id = b.tree.rows_in_order()[0];
@@ -242,14 +241,13 @@ fn typing_in_the_operator_pill_finds_and_picks_an_operator() {
         ui.h.key_press(egui::Key::Enter);
         ui.settle();
         assert_eq!(first_rule(&ui).op, Op::StartsWith, "Enter did not pick the operator found by typing");
-        // Nothing typed starts on the current operator; an alias finds the rest.
         ui.click("Operator starts with");
         ui.type_text("null");
+        // Down moves to the second match.
         ui.h.key_press(egui::Key::ArrowDown);
         ui.h.key_press(egui::Key::Enter);
         ui.settle();
         assert_eq!(first_rule(&ui).op, Op::IsNull, "null then down did not pick the second match, IS NULL");
-        // Esc leaves the operator as it was.
         ui.click("Operator IS NULL");
         ui.type_text("contains");
         ui.h.key_press(egui::Key::Escape);

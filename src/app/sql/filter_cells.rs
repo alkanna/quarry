@@ -4,7 +4,7 @@
 use crate::app::*;
 use crate::db::sql::{
     facts::ColFacts,
-    rules::{self, Input, Op, Rule},
+    rules::{self, Input, Op, OpHit, OpMatch, Rule},
     value::Kind,
     Col, Dialect,
 };
@@ -69,24 +69,16 @@ struct PillBox {
     age: u8,
 }
 
-/// What a search pill's list returns for a frame: the row clicked, and the one under the keyboard highlight for Enter.
-struct PillPick<T> {
-    clicked: Option<T>,
-    at_sel: Option<T>,
-}
-
 /// Whether the column picker of `id` (as passed to `col_pick`) is open, its field and list on screen.
 #[cfg(test)]
 pub(in crate::app) fn col_pick_open(ctx: &egui::Context, id: egui::Id) -> bool {
     ctx.data(|d| d.get_temp::<PillBox>(id.with("col-box")).is_some())
 }
 
-/// A pill that turns into a text field in place when clicked, with a list under it that the typed text filters.
-/// `closed` draws the pill at rest. `list` draws the rows for the text; it gets the keyboard row (None until it picks
-/// its start) and the arrow step to apply, through `clamp_sel`. Esc, a click away or losing the focus leave without a
-/// pick.
+/// A pill that becomes a search field with a filtered list under it. `list` moves the keyboard row through `clamp_sel`
+/// and returns the clicked row and the row Enter picks. `list_w` is measured only while open.
 #[allow(clippy::too_many_arguments)]
-fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: Option<String>, list_w: f32, closed: impl FnOnce(&mut egui::Ui) -> egui::Response, list: impl FnOnce(&mut egui::Ui, &str, &mut Option<usize>, i64) -> PillPick<T>) -> Option<T> {
+fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: Option<String>, list_w: impl FnOnce(&egui::Ui) -> f32, closed: impl FnOnce(&mut egui::Ui) -> egui::Response, list: impl FnOnce(&mut egui::Ui, &str, &mut Option<usize>, i64) -> (Option<T>, Option<T>)) -> Option<T> {
     let edit_id = key.with("edit");
     let Some(mut st) = ui.data(|d| d.get_temp::<PillBox>(key)) else {
         let r = closed(ui);
@@ -112,6 +104,7 @@ fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: O
         st.sel = None;
     }
     let step = i64::from(down) - i64::from(up);
+    let list_w = list_w(ui);
     let mut open = true;
     let text = st.text.clone();
     let mut sel = st.sel;
@@ -121,7 +114,7 @@ fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: O
     });
     st.sel = sel;
     let (pick, at_sel, list_rect) = match shown {
-        Some(r) => (r.inner.clicked, r.inner.at_sel, Some(r.response.rect)),
+        Some(r) => (r.inner.0, r.inner.1, Some(r.response.rect)),
         None => (None, None, None),
     };
     // The list as drawn now or last frame: a press there is a pick, not leaving the field.
@@ -145,8 +138,8 @@ fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: O
     picked
 }
 
-/// The keyboard row after the arrow `step`, within `n` rows, from `start` when there is none yet (just opened or the
-/// text just changed, so an arrow typed in the same frame still counts). Also whether to scroll to it.
+/// The keyboard row after `step`, from `start` when unset so an arrow in the same frame as an edit still counts, and
+/// whether to scroll to it.
 fn clamp_sel(sel: &mut Option<usize>, start: usize, n: usize, step: i64) -> (usize, bool) {
     let fresh = sel.is_none();
     let s = (sel.unwrap_or(start) as i64 + step).clamp(0, n.saturating_sub(1) as i64) as usize;
@@ -160,8 +153,7 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
     let ty = cols.iter().find(|c| c.name == cur).map(type_name).unwrap_or_default();
     let shown = if cur.is_empty() { "column" } else { cur };
     let w = combo_w(ui, shown, &ty, min);
-    // The list is cheap to draw whole: rows off screen are skipped before any text is laid out.
-    let width = {
+    let width = |ui: &egui::Ui| {
         let longest = cols.iter().map(|c| text_w(ui, &c.name, FontId::monospace(TXT_SMALL)) + text_w(ui, &type_name(c), FontId::monospace(TXT_CAPTION))).fold(0.0, f32::max);
         (longest + 60.0).clamp(220.0, 420.0)
     };
@@ -170,6 +162,7 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
         let hits = col_filter(cols, text);
         let (at, moved) = clamp_sel(sel, 0, hits.len(), step);
         let mut clicked = None;
+        // The list is cheap to draw whole: rows off screen are skipped before any text is laid out.
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             if hits.is_empty() {
                 ui.label(RichText::new("No matching column").size(TXT_SMALL).color(FAINT()));
@@ -185,7 +178,7 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
                 }
             }
         });
-        PillPick { clicked, at_sel: hits.get(at).map(|&i| cols[i].name.clone()) }
+        (clicked, hits.get(at).map(|&i| cols[i].name.clone()))
     })
 }
 
@@ -207,88 +200,18 @@ pub(super) fn op_cat(op: Op) -> (u8, &'static str) {
     }
 }
 
-/// Other phrases an operator is found by, beyond its label and its SQL.
-fn op_aliases(op: Op) -> &'static [&'static str] {
-    use Op::*;
-    match op {
-        Eq => &["equals", "=="],
-        Ne => &["not equal", "!=", "<>"],
-        Gt => &["greater than", "more than", "after"],
-        Lt => &["less than", "fewer than", "before"],
-        Contains => &["includes"],
-        In => &["any of", "one of"],
-        IsNull => &["null", "missing"],
-        NotNull => &["not null", "present"],
-        Empty => &["blank"],
-        Regexp => &["regex", "~"],
-        _ => &[],
-    }
-}
-
-/// Where a search for an operator matched: its label, one of its aliases, or its SQL.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) enum OpMatch {
-    Label,
-    Alias,
-    Sql,
-}
-
 /// The operators of a column type the picker offers, in menu order. A text column reaches its regex operators
 /// through the cell's .* toggle instead, unless the rule already uses one, which stays listed so it can be kept.
 fn picker_ops(kind: Kind, d: Dialect, cur: Op) -> impl Iterator<Item = Op> {
     rules::ops_for(kind, d).iter().copied().filter(move |&o| kind != Kind::Text || !matches!(o, Op::Regexp | Op::NotRegexp) || o == cur)
 }
 
-/// The SQL hint of `op`, with the case setting picking it gives the rule (see `set_op`).
-fn op_hint(op: Op, kind: Kind, d: Dialect) -> String {
-    rules::op_sql_hint(op, kind, d, rules::default_case(op, d))
+fn op_filter(kind: Kind, d: Dialect, cur: Op, q: &str) -> Vec<OpHit> {
+    rules::op_search(picker_ops(kind, d, cur), kind, d, q)
 }
 
-/// The words of a hint a search can match: its keywords and functions, not the x, y and sample values standing in
-/// for the column and the value.
-fn hint_words(hint: &str) -> String {
-    let mut out = String::new();
-    for (i, part) in hint.split('\'').enumerate() {
-        // Odd parts sit between quotes.
-        if i % 2 == 0 {
-            out.push_str(part);
-            out.push(' ');
-        }
-    }
-    out.split(|c: char| c.is_whitespace() || "(),".contains(c)).filter(|w| !w.is_empty() && !matches!(*w, "x" | "y" | "a" | "b" | "7" | "days" | "…")).collect::<Vec<_>>().join(" ").to_lowercase()
-}
-
-/// An operator `q` finds, how it matched and its SQL hint.
-pub(super) struct OpHit {
-    pub(super) op: Op,
-    pub(super) by: OpMatch,
-    pub(super) hint: String,
-}
-
-/// The operators that `q` finds, labels starting with it first, then labels holding it, then aliases, then SQL; each
-/// group in menu order. An empty `q` keeps every operator in menu order.
-pub(super) fn op_filter(kind: Kind, d: Dialect, cur: Op, q: &str) -> Vec<OpHit> {
-    let q = q.trim().to_lowercase();
-    let mut tiers: [Vec<OpHit>; 4] = Default::default();
-    for op in picker_ops(kind, d, cur) {
-        let hint = op_hint(op, kind, d);
-        let tier = match rules::label(op, kind).to_lowercase().find(&q) {
-            Some(0) => Some((0, OpMatch::Label)),
-            Some(_) => Some((1, OpMatch::Label)),
-            None if op_aliases(op).iter().any(|a| a.starts_with(&q)) => Some((2, OpMatch::Alias)),
-            None if hint_words(&hint).contains(&q) => Some((3, OpMatch::Sql)),
-            None => None,
-        };
-        if let Some((t, by)) = tier {
-            tiers[t].push(OpHit { op, by, hint });
-        }
-    }
-    tiers.into_iter().flatten().collect()
-}
-
-/// The operator picker: a click turns the pill into a search field and the grouped list opens under it, each operator
-/// with the SQL it sends. Typing matches the words, aliases and the SQL. The footer writes the whole condition the
-/// highlighted operator would send with this row's column and value. `open` opens it, as the demo of the menu does.
+/// The operator picker: typed search in the pill, a grouped list with each operator's SQL, and a footer with the whole
+/// condition the highlighted one sends. `open` opens it for the demo.
 pub(super) fn op_pick(ui: &mut egui::Ui, id: egui::Id, r: &Rule, min: f32, d: Dialect, bs: bool, open: bool) -> Option<Op> {
     let (kind, cur) = (r.kind, r.op);
     let label = rules::label(cur, kind);
@@ -299,12 +222,12 @@ pub(super) fn op_pick(ui: &mut egui::Ui, id: egui::Id, r: &Rule, min: f32, d: Di
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Operator {label}")));
         r
     };
-    search_pill(ui, id.with("op-box"), w, label, open.then(String::new), 380.0, closed, |ui, text, sel, step| {
+    search_pill(ui, id.with("op-box"), w, label, open.then(String::new), |_| 380.0, closed, |ui, text, sel, step| {
         let hits = op_filter(kind, d, cur, text);
         // With nothing typed the highlight starts on the current operator, so Enter alone keeps it.
         let start = if text.trim().is_empty() { hits.iter().position(|h| h.op == cur).unwrap_or(0) } else { 0 };
         let (at, moved) = clamp_sel(sel, start, hits.len(), step);
-        // Captions only read in menu order; ranked results are listed without them.
+        // Captions only fit menu order, not ranked results.
         let grouped = text.trim().is_empty();
         let mut clicked = None;
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -322,9 +245,10 @@ pub(super) fn op_pick(ui: &mut egui::Ui, id: egui::Id, r: &Rule, min: f32, d: Di
                     caption(ui, name);
                     last = Some(cat);
                 }
-                let note = if h.by == OpMatch::Alias { op_aliases(op).join("  ") } else { h.hint.clone() };
+                let aliases = if h.by == OpMatch::Alias { rules::op_aliases(op).join("  ") } else { String::new() };
+                let note = if h.by == OpMatch::Alias { &aliases } else { &h.hint };
                 let hl = if h.by == OpMatch::Label { text.trim() } else { "" };
-                let row = menu_row_in(ui, rules::label(op, kind), color(op), op == cur, &note, hl, n == at);
+                let row = menu_row_in(ui, rules::label(op, kind), color(op), op == cur, note, hl, n == at);
                 if moved && n == at {
                     ui.scroll_to_rect(row.rect, None);
                 }
@@ -337,7 +261,7 @@ pub(super) fn op_pick(ui: &mut egui::Ui, id: egui::Id, r: &Rule, min: f32, d: Di
         if let Some(op) = at_sel {
             writes_footer(ui, r, op, d, bs);
         }
-        PillPick { clicked, at_sel }
+        (clicked, at_sel)
     })
 }
 
@@ -798,12 +722,12 @@ mod tests {
         for o in [Op::IsNull, Op::NotNull, Op::NotInOrNull] {
             assert!(null.contains(&o), "null missed {o:?}: {null:?}");
         }
-        // Hints are read with the case picking the operator gives: contains on PostgreSQL ignores case.
+        // Hints use the case a pick gives: contains ignores case on PostgreSQL.
         assert!(found(Kind::Text, "ilike").contains(&(Op::Contains, OpMatch::Sql)), "ILIKE did not find contains");
         // The stand-ins for the column and the value are not searched.
         assert!(ops("x").is_empty(), "x matched the placeholder column: {:?}", ops("x"));
         assert!(ops("zzz").is_empty());
-        // A regex rule keeps its operator listed, so opening the picker on it and pressing Enter keeps it.
+        // A regex rule stays listed so Enter keeps it.
         assert!(op_filter(Kind::Text, pg, Op::Regexp, "").iter().any(|h| h.op == Op::Regexp));
     }
 
