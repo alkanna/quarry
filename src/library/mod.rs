@@ -9,6 +9,7 @@ pub mod disk;
 pub mod format;
 pub mod migrate;
 pub mod ops;
+pub mod snippet;
 pub mod tree;
 
 use serde::{Deserialize, Serialize};
