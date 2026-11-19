@@ -67,6 +67,7 @@ fn view_value_in_the_cell_menu_opens_the_value() {
 fn edit_in_query_opens_an_update_that_already_parses() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     right_click(&mut ui, "note row 2");
+    ui.show("Filter to this row");
     ui.click("Edit in Query");
     let q = ui.query_text();
     assert!(q.contains("`note` = 'Leave at the door'"), "the SET does not hold the row's values: {q}");
