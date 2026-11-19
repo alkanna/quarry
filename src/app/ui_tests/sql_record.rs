@@ -66,6 +66,11 @@ fn a_json_value_in_the_record_folds_out_as_a_tree_and_has_the_eye() {
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "the tree is open before it was asked for");
+    // A click on the value folds the tree too.
+    ui.click("note record");
+    ui.show("Expand all");
+    ui.click("note record");
+    assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "a click on the value did not fold the tree");
     ui.click("note tree");
     ui.show("Expand all");
     ui.show("door");

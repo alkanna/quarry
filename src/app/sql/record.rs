@@ -76,8 +76,10 @@ impl App {
             }
             let open_id = rid.with(("json", c));
             let room = open_id.with("h");
-            // Lines scrolled out of view keep their space but skip the work, like the grid's rows.
-            if !ui.is_rect_visible(line) {
+            // Lines scrolled out of view keep their space but skip the work, like the grid's rows. An open tree still in
+            // view counts, or it vanishes once its line scrolls past the top.
+            let tree_h = ui.data(|d| d.get_temp::<f32>(room)).unwrap_or(0.0);
+            if !ui.is_rect_visible(line.with_max_y(line.bottom() + tree_h)) {
                 tree_room(ui, room);
                 continue;
             }
@@ -146,7 +148,12 @@ impl App {
                     clip.text(egui::pos2(text_x, val.center().y), egui::Align2::LEFT_CENTER, "—", font.clone(), FAINT());
                 }
             }
-            let r = r.on_hover_text(if blocked { "Double-click to view, right-click for more" } else { "Double-click to edit, right-click for more" });
+            let r = r.on_hover_text(match (json, blocked) {
+                (true, true) => "Click to fold, double-click to view, right-click for more",
+                (true, false) => "Click to fold, double-click to edit, right-click for more",
+                (false, true) => "Double-click to view, right-click for more",
+                (false, false) => "Double-click to edit, right-click for more",
+            });
             if r.double_clicked() {
                 if blocked {
                     out.view = Some((c.to_string(), Val::owned(v)));
@@ -177,7 +184,8 @@ impl App {
                 let state = state_of(&tr);
                 chevron(ui.painter(), egui::pos2(val.left() + 10.0, val.center().y), open, if state > 0 { BRIGHT() } else { MUTED() });
                 focus_ring(ui, &tr, tr.rect, R_SM as f32);
-                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() {
+                // A click on the value folds too. A double click folds twice, so the tree ends as it was.
+                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || r.clicked() {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {
