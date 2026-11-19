@@ -86,7 +86,7 @@ fn a_tab_reused_for_another_snippet_drops_the_old_values() {
 #[test]
 fn braces_a_value_brings_in_are_sent_as_typed() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
-    let id = ui.app().library.next_id();
+    let id = ui.h.state_mut().library.next_id();
     ui.h.state_mut().library.scripts.push(Script { id, name: "Echo".into(), kind: "sql".into(), body: "SELECT {{t}} AS v;".into(), conn: 3, db: "shop".into(), ..Default::default() });
     ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("t".into(), "Hello {{user}}".into());
