@@ -1069,7 +1069,7 @@ impl App {
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
-        let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
+        let note = if new == text && f.special == 0 && f.refused == 0 && f.held == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }
     }
@@ -1142,10 +1142,13 @@ impl App {
                         let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
                         super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
                     });
-                    if ui.add_enabled(picked.is_some(), egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number").clicked() {
-                        make_value = picked;
-                        ui.close();
+                    let mut acts = Vec::new();
+                    if let Some(r) = picked {
+                        menu_act(ui, &mut acts, r, |ui| ui.button("Make it a value\u{2026}"));
+                    } else {
+                        ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number");
                     }
+                    make_value = acts.pop().or(make_value.take());
                 });
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let info = s.caret_info(dialect);

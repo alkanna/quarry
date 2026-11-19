@@ -281,7 +281,7 @@ impl App {
             && let ScriptRef::Saved(id) = r
             && self.library.scripts.iter().any(|s| s.id == *id && self.script_snippet(s).is_some())
         {
-            return self.open_snippet_form(*id, String::new());
+            return self.open_snippet_form(*id, None);
         }
         // A script already open in another tab is switched to: a second copy comes only from New tab or a duplicated tab.
         // Opened again on the tab it is in, it takes its saved text back, and Undo keeps the edits it replaced.

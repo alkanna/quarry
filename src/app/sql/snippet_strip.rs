@@ -55,18 +55,21 @@ impl App {
                     match &v.ty {
                         Ty::Choice(c) => {
                             let shown = if val.is_empty() { "pick\u{2026}".to_string() } else { val.clone() };
+                            let mut picks = Vec::new();
                             ui.menu_button(RichText::new(shown).font(FontId::monospace(TXT_SMALL)).color(C_STRING()), |ui| {
                                 menu_list(ui);
                                 for c in c {
-                                    if ui.selectable_label(val == c, c).clicked() {
-                                        *val = c.clone();
-                                        ui.close();
-                                    }
+                                    menu_act(ui, &mut picks, c.clone(), |ui| ui.selectable_label(val == c, c));
                                 }
                             });
+                            if let Some(c) = picks.pop() {
+                                *val = c;
+                            }
                         }
                         _ => {
-                            let w = (val.chars().count().max(4) as f32 * 7.6 + 12.0).min(220.0);
+                            // As wide as the value, in the editor's mono digits, between a short field and a long one.
+                            let digit = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(TXT_SMALL), '0'));
+                            let w = (val.chars().count().max(4) as f32 * digit + BUTTON_H / 2.0).min(PREVIEW_MAX_H);
                             ui.add(egui::TextEdit::singleline(val).font(FontId::monospace(TXT_SMALL)).desired_width(w).hint_text(RichText::new(v.ty.hint()).color(FAINT())));
                         }
                     }

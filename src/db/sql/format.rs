@@ -16,18 +16,23 @@ pub struct Formatted {
     pub special: usize,
     /// Statements whose formatted text would not read the same, so the original stays.
     pub refused: usize,
+    /// Statements with a snippet's `{{...}}` that does not read yet, left as typed.
+    pub held: usize,
 }
 
 impl Formatted {
     /// The line the status shows after a format.
     pub fn summary(&self) -> String {
         let plural = |n: usize| if n == 1 { "statement" } else { "statements" };
-        let mut s = if self.formatted == 0 && self.special == 0 && self.refused == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
+        let mut s = if self.formatted == 0 && self.special == 0 && self.refused == 0 && self.held == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
         if self.special > 0 {
             s.push_str(&format!(", left {} {} with a DELIMITER, /*! */ or BEGIN ATOMIC as written", self.special, plural(self.special)));
         }
         if self.refused > 0 {
             s.push_str(&format!(", left {} {} as written because formatting would change how {} reads", self.refused, plural(self.refused), if self.refused == 1 { "it" } else { "they" }));
+        }
+        if self.held > 0 {
+            s.push_str(&format!(", left {} {} with a {{{{...}}}} value that does not read as written", self.held, plural(self.held)));
         }
         s
     }
@@ -214,7 +219,11 @@ pub fn format_script(text: &str, d: Dialect) -> Formatted {
         let holes = vals.holes;
         let mask = |i: usize| format!("__quarry_value_{i}__");
         // A placeholder that does not read is left as typed, with the rest of its statement.
-        if vals.err.is_some() || !holes.is_empty() && stmt.contains("__quarry_value_") {
+        if vals.err.is_some() {
+            res.held += 1;
+            continue;
+        }
+        if !holes.is_empty() && stmt.contains("__quarry_value_") {
             res.special += 1;
             continue;
         }

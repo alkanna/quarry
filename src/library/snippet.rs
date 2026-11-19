@@ -321,9 +321,7 @@ pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Re
 /// `text`, all or part of a script whose values `full` read, filled with the values by name. Each placeholder takes the
 /// type the whole script gives its name, so a statement that only says `{{day}}` still gets a date.
 pub fn fill_named(text: &str, full: &Parsed, values: &Values, d: Dialect, bs: bool) -> Result<String, String> {
-    if let Some(e) = &full.err {
-        return Err(e.msg.clone());
-    }
+    // Only the text that runs must read: a placeholder still being typed in another statement does not stop this one.
     let mut p = parse(text, d);
     if !p.is_snippet() {
         return Ok(text.to_string());
@@ -347,7 +345,8 @@ pub fn infer(token: &str) -> (Ty, Option<String>) {
         let ty = if is_date(&v) { Ty::Date } else if is_datetime(&v) { Ty::DateTime } else { Ty::Text };
         // A default can't hold what ends, splits or comments out a placeholder, or a backslash, whose reading depends on
         // the server and would be escaped again when filled.
-        let keep = !v.contains(['\'', '"', '=', '|', '#', '`', ';', '$', '\\', '{', '}']) && !v.contains("--") && !v.contains("/*") && !t.starts_with(['E', 'e']);
+        // Spaces at its ends would be trimmed when the placeholder is read back, so such a value is not kept either.
+        let keep = !v.contains(['\'', '"', '=', '|', '#', '`', ';', '$', '\\', '{', '}']) && !v.contains("--") && !v.contains("/*") && !t.starts_with(['E', 'e']) && v.trim() == v;
         return (ty, keep.then_some(v));
     }
     if int(t).is_some() {

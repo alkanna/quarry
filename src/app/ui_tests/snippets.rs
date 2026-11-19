@@ -51,7 +51,7 @@ fn enter_on_a_snippet_asks_for_its_values_and_enter_runs_the_filled_read() {
     assert_eq!(query(ui.app()), "SELECT id FROM orders WHERE DATE(created_at) = '2026-11-03' AND status = 'paid' LIMIT 10;");
     // The next time, the values of the last run come back.
     let id = id_of(ui.app(), "Orders on a day");
-    ui.h.state_mut().open_snippet_form(id, String::new());
+    ui.h.state_mut().open_snippet_form(id, None);
     assert_eq!(form(ui.h.state_mut()).values["day"], "2026-11-03");
 }
 
@@ -87,7 +87,7 @@ fn a_tab_reused_for_another_snippet_drops_the_old_values() {
 fn a_bad_value_keeps_the_form_open() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Orders on a day");
-    ui.h.state_mut().open_snippet_form(id, String::new());
+    ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("day".into(), "tomorrow".into());
     ui.h.run_steps(2);
     ui.show_contains("day needs a date");
@@ -100,7 +100,7 @@ fn a_bad_value_keeps_the_form_open() {
 fn a_write_asks_first_and_esc_steps_back() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Mark orders shipped");
-    ui.h.state_mut().open_snippet_form(id, String::new());
+    ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("ids".into(), "1, 2".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
@@ -121,7 +121,7 @@ fn a_write_on_a_locked_connection_unlocks_then_confirms() {
         c.writable = false;
     }
     let id = id_of(ui.app(), "Mark orders shipped");
-    ui.h.state_mut().open_snippet_form(id, String::new());
+    ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("ids".into(), "4405".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
@@ -169,4 +169,41 @@ fn make_it_a_value_turns_a_literal_into_a_placeholder() {
     ui.click("Make value");
     assert_eq!(query(ui.app()), "SELECT id FROM orders WHERE DATE(created_at) = {{day:date=2026-11-03}};");
     ui.show("Run on");
+}
+
+#[test]
+fn esc_closes_a_form_opened_outside_the_palette() {
+    let Some(mut ui) = demo_ui(with_snippets) else { return };
+    let id = id_of(ui.app(), "Orders on a day");
+    ui.h.state_mut().open_snippet_form(id, None);
+    ui.h.run_steps(2);
+    ui.key(egui::Modifiers::NONE, egui::Key::Escape);
+    assert!(ui.app().modal.is_none(), "Esc opened something instead of closing");
+}
+
+#[test]
+fn a_snippet_whose_connection_was_removed_waits_for_a_pick() {
+    let Some(mut ui) = demo_ui(with_snippets) else { return };
+    let id = id_of(ui.app(), "Orders on a day");
+    ui.h.state_mut().library.scripts.iter_mut().find(|s| s.id == id).unwrap().conn = 9999;
+    ui.h.state_mut().open_snippet_form(id, None);
+    form(ui.h.state_mut()).values.insert("day".into(), "2026-11-03".into());
+    ui.h.run_steps(2);
+    ui.show_contains("Pick a connection");
+    ui.key(egui::Modifiers::NONE, egui::Key::Enter);
+    assert!(matches!(ui.app().modal, Some(Modal::Snippet(_))), "it ran on a connection nobody picked");
+}
+
+#[test]
+fn running_from_cmd_k_leaves_the_snippet_tab_alone() {
+    let Some(mut ui) = demo_ui(with_snippets) else { return };
+    let id = id_of(ui.app(), "Orders on a day");
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
+    let tabs = ui.app().tabs.len();
+    ui.h.state_mut().open_snippet_form(id, None);
+    form(ui.h.state_mut()).values.insert("day".into(), "2026-11-03".into());
+    ui.h.run_steps(2);
+    ui.key(egui::Modifiers::NONE, egui::Key::Enter);
+    assert_eq!(ui.app().tabs.len(), tabs + 1, "the filled statement did not get a tab of its own");
+    assert!(ui.app().tabs.iter().any(|t| t.script.as_ref().is_some_and(|b| b.r == ScriptRef::Saved(id)) && t.sql.as_ref().is_some_and(|s| s.query == READ)));
 }

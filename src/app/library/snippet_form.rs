@@ -24,8 +24,8 @@ pub(in crate::app) struct SnippetForm {
     pub schema: String,
     pub values: snippet::Values,
     pub stage: Stage,
-    /// The palette's query, put back by Esc.
-    pub query: String,
+    /// The palette's query, put back by Esc. None when the form was opened from elsewhere, where Esc just closes it.
+    pub query: Option<String>,
 }
 
 /// The bar at the bottom of the form: the keys, the confirm of a write, or Unlock on a locked connection.
@@ -44,11 +44,12 @@ enum Do {
     Unlock,
     Target(u64, String),
     MakeDefault,
+    Retry,
 }
 
 impl App {
     /// Enter on a snippet in the palette: its values start from the last run's, else their defaults.
-    pub(in crate::app) fn open_snippet_form(&mut self, id: u64, query: String) {
+    pub(in crate::app) fn open_snippet_form(&mut self, id: u64, query: Option<String>) {
         let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
         let p = snippet::parse(&s.body, self.dialect_of(s.conn));
         // By name, so a value renamed or moved in the statement never takes another one's last value.
@@ -56,18 +57,16 @@ impl App {
         for v in &p.vars {
             values.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
         }
-        let conn = if self.conn(s.conn).is_some() { s.conn } else { self.conns.iter().find(|c| c.meta.engine.is_sql()).map_or(s.conn, |c| c.meta.id) };
-        let db = if s.db.is_empty() || conn != s.conn { self.default_db(conn) } else { s.db.clone() };
-        // A PostgreSQL schema belongs to the script's own connection; another one starts from its own default.
-        let schema = if conn == s.conn { s.schema.clone() } else { String::new() };
-        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db, schema, values, stage: Stage::Fill, query };
+        // A removed connection is never swapped for another at random, since it could be production: the person picks one.
+        let conn = if self.conn(s.conn).is_some() { s.conn } else { 0 };
+        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query };
         self.wake_conn(conn);
         self.modal = Some(Modal::Snippet(Box::new(form)));
     }
 
     /// A connection that is not open, or failed, starts connecting now, so it is ready by the time the values are in.
     fn wake_conn(&mut self, conn: u64) {
-        if !self.demo && self.conn(conn).is_some_and(|c| matches!(c.status, Status::Idle | Status::Failed(_))) {
+        if !self.demo && self.conn(conn).is_some_and(|c| c.status.can_connect()) {
             self.connect(conn);
         }
     }
@@ -98,7 +97,7 @@ impl App {
         let ready = self.conn(f.conn).is_some_and(|c| c.status == Status::Ready) || self.demo;
         let failed = self.conn(f.conn).is_some_and(|c| matches!(c.status, Status::Failed(_)));
         let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| s.conn == f.conn && (s.db == f.db || s.db.is_empty() && f.db == self.default_db(f.conn)));
-        let cname = self.conn_name(f.conn);
+        let cname = if self.conn(f.conn).is_some() { self.conn_name(f.conn) } else { "Pick a connection".to_string() };
         let prod = self.conn(f.conn).is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
         let mut todo: Vec<Do> = Vec::new();
         let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
@@ -120,6 +119,7 @@ impl App {
                 ui.label(semibold(RichText::new(&f.name).size(TXT_SEARCH).color(BRIGHT())));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(14.0);
+                    // An empty database is the connection's default, worked out when it runs.
                     let label = if f.db.is_empty() { cname.clone() } else { format!("{cname} \u{b7} {}", f.db) };
                     // Built only while the menu is open, and scrolled, since a server can hold hundreds of databases.
                     ui.menu_button(RichText::new(label).color(BRIGHT()), |ui| {
@@ -135,10 +135,7 @@ impl App {
                                 let dbs: Vec<&str> = if conn.dbs.is_empty() { vec![here] } else { conn.dbs.iter().map(|d| d.0.as_str()).collect() };
                                 for db in dbs {
                                     let text = if db.is_empty() { conn.meta.name.as_str() } else { db };
-                                    if ui.selectable_label(c == f.conn && db == f.db, text).clicked() {
-                                        todo.push(Do::Target(c, db.to_string()));
-                                        ui.close();
-                                    }
+                                    menu_act(ui, &mut todo, Do::Target(c, db.to_string()), |ui| ui.selectable_label(c == f.conn && db == f.db, text));
                                 }
                             }
                         });
@@ -220,7 +217,7 @@ impl App {
                 ui.add_space(16.0);
                 egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
                     ui.set_width(form_w - 56.0);
-                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| match &filled {
+                    egui::ScrollArea::vertical().max_height(PREVIEW_MAX_H).show(ui, |ui| match &filled {
                         Ok(t) => {
                             // Laid out once per text, not every frame the form is open.
                             ui.label(crate::ui::editor::memo_galley(ui, 9, t, ui.available_width(), || crate::ui::editor::sql_job_in(t, TXT_BODY, d)));
@@ -243,24 +240,25 @@ impl App {
             crate::app::palette::paint_band(&pnt, band, R_LG, fill, line);
             if bar == Bar::Unlock {
                 band_lines(&pnt, band, &format!("{cname} is read-only"), "Unlock it, then confirm here. The values stay filled.");
-                let b = egui::Rect::from_min_size(band.right_center() - egui::vec2(126.0, BUTTON_H / 2.0), egui::vec2(110.0, BUTTON_H));
-                if ui.put(b, primary_button(ui, "Unlock\u{2026}", WARNING())).clicked() || enter && ready {
+                if band_button(ui, band, "Unlock\u{2026}", WARNING()) || enter {
                     todo.push(Do::Unlock);
                 }
             } else if bar == Bar::Confirm {
                 let tag = if prod { ", a Production connection" } else { "" };
-                let sub = if ready { format!("{} runs as written. Undo can't reverse it.", verb(filled.as_deref().unwrap_or(""))) } else { format!("Waiting for {cname} to connect.") };
+                let verb = verb(filled.as_deref().unwrap_or(""), d);
+                let sub = if ready { format!("The {verb} runs as written. Undo can't reverse it.") } else { format!("Waiting for {cname} to connect.") };
                 band_lines(&pnt, band, &format!("Changes data on {cname}{tag}"), &sub);
-                let b = egui::Rect::from_min_size(band.right_center() - egui::vec2(146.0, BUTTON_H / 2.0), egui::vec2(130.0, BUTTON_H));
-                if (ui.put(b, primary_button(ui, &format!("Run {}", verb(filled.as_deref().unwrap_or(""))), ALERT())).clicked() || cmd_enter) && ready {
+                if (band_button(ui, band, &format!("Run {verb}"), ALERT()) || cmd_enter) && ready {
                     todo.push(Do::Run);
                 }
             } else {
-                let run = if ready { "run" } else if failed { "connection failed, retrying" } else { "connecting\u{2026}" };
+                let run = if ready { "run" } else if failed { "connection failed: try again" } else if self.conn(f.conn).is_none() { "pick a connection first" } else { "connecting\u{2026}" };
                 crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["tab"], "next value"), (&["\u{21b5}"], run)]);
                 crate::app::palette::key_hint_right(&pnt, band.right() - 16.0, band.center().y, "esc", "back to search");
                 if (enter || cmd_enter) && filled.is_ok() && ready {
                     todo.push(Do::Run);
+                } else if enter && failed {
+                    todo.push(Do::Retry);
                 }
             }
             if esc {
@@ -275,9 +273,12 @@ impl App {
             match t {
                 Do::Back if f.stage == Stage::Confirm => f.stage = Stage::Fill,
                 Do::Back => {
-                    self.modal = Some(Modal::Palette { query: std::mem::take(&mut f.query), sel: 0, cmds: false, new_tab: false });
+                    if let Some(query) = f.query.take() {
+                        self.modal = Some(Modal::Palette { query, sel: 0, cmds: false, new_tab: false });
+                    }
                     return;
                 }
+                Do::Retry => self.wake_conn(f.conn),
                 Do::Target(c, db) => {
                     if c != f.conn {
                         f.schema = self.library.scripts.iter().find(|s| s.id == f.id && s.conn == c).map(|s| s.schema.clone()).unwrap_or_default();
@@ -293,6 +294,8 @@ impl App {
                     self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here);
                 }
                 Do::Unlock => {
+                    // Kept now, so "Stay read-only", which drops the form, does not drop what was typed.
+                    self.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     let mut back = f;
                     back.stage = Stage::Confirm;
                     let conn = back.conn;
@@ -303,6 +306,14 @@ impl App {
                 Do::Run => {
                     let Ok(text) = filled.clone() else { continue };
                     self.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    // The database is worked out now that the connection is ready, as opening a script does.
+                    if f.db.is_empty() {
+                        f.db = self.default_db(f.conn);
+                    }
+                    if f.db.is_empty() && !self.is_pg(f.conn) {
+                        self.warn("Pick a database to run this snippet in.");
+                        continue;
+                    }
                     self.run_snippet(&f, text);
                     return;
                 }
@@ -325,7 +336,8 @@ impl App {
     /// person's on that connection and database, else a new one. The tab is not bound to the script: its text is the
     /// filled statement, and Cmd+S on it saves a new script.
     fn run_snippet(&mut self, f: &SnippetForm, text: String) {
-        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == f.conn && t.sel.db == f.db);
+        // Only a blank Query tab is taken: not one bound to a script, whose template would be lost, nor one still running.
+        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == f.conn && t.sel.db == f.db && t.script.is_none() && t.sql.as_ref().is_some_and(|s| s.run_req == 0));
         if !reuse {
             self.sql_new_query(f.conn, f.db.clone());
         }
@@ -352,10 +364,22 @@ fn band_lines(p: &egui::Painter, band: egui::Rect, title: &str, sub: &str) {
     }
 }
 
-/// The statement's first word, for "Run UPDATE".
-fn verb(text: &str) -> String {
-    let t = text.trim_start();
-    t.split(|c: char| !c.is_ascii_alphabetic()).next().filter(|w| !w.is_empty()).map(|w| w.to_ascii_uppercase()).unwrap_or_else(|| "it".into())
+/// The action button at the right end of a bar.
+fn band_button(ui: &mut egui::Ui, band: egui::Rect, label: &str, fill: Color32) -> bool {
+    let at = band.shrink2(egui::vec2(16.0, 0.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| primary(ui, label, fill).clicked()).inner
+}
+
+/// What a write does, for "Run UPDATE": the first keyword after comments, or after a WITH its first write.
+fn verb(text: &str, d: db::sql::Dialect) -> String {
+    let words: Vec<String> = db::sql::lex::tokens(text, d).into_iter().filter(|(t, _)| *t == db::sql::lex::Tok::Word).map(|(_, r)| text[r].to_ascii_uppercase()).collect();
+    let writes = ["INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE"];
+    match words.first().map(String::as_str) {
+        Some("WITH") => words.iter().find(|w| writes.contains(&w.as_str())).cloned(),
+        Some(w) => Some(w.to_string()),
+        None => None,
+    }
+    .unwrap_or_else(|| "statement".into())
 }
 
 impl App {
@@ -383,14 +407,14 @@ impl App {
         self.lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
         match state {
             "palette" => self.open_palette_with("orders".into()),
-            "form" => self.open_snippet_form(read, "orders".into()),
+            "form" => self.open_snippet_form(read, Some("orders".into())),
             "write" | "locked" => {
                 if state == "write"
                     && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3)
                 {
                     c.writable = true;
                 }
-                self.open_snippet_form(write, "orders".into());
+                self.open_snippet_form(write, Some("orders".into()));
                 if let Some(Modal::Snippet(f)) = self.modal.as_mut()
                     && state == "write"
                 {
@@ -413,5 +437,18 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verb;
+    use crate::db::sql::Dialect;
+
+    #[test]
+    fn the_confirm_names_the_write() {
+        assert_eq!(verb("-- nightly fix\nUPDATE orders SET a = 1", Dialect::MySql), "UPDATE");
+        assert_eq!(verb("WITH x AS (SELECT 1) DELETE FROM t", Dialect::Postgres), "DELETE");
+        assert_eq!(verb("", Dialect::MySql), "statement");
     }
 }

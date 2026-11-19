@@ -496,7 +496,7 @@ impl App {
                     self.open_script(&r, if run { How::Run } else if new { How::NewTab } else { How::Here })
                 }
                 Act::Snippet(id) if run => self.open_script(&crate::library::ScriptRef::Saved(id), crate::app::library::open::How::Here),
-                Act::Snippet(id) => self.open_snippet_form(id, query),
+                Act::Snippet(id) => self.open_snippet_form(id, Some(query)),
             }
         } else if !r.should_close() && self.modal.is_none() {
             self.modal = Some(Modal::Palette { query, sel, cmds, new_tab });
