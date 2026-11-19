@@ -932,9 +932,8 @@ impl App {
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
-        // `pk = x` (joined with AND) for one row, `pk IN (...)` for several, a row-value list for a key of several columns.
+        // `pk = x` for one row, `pk IN (...)` for several, row values for a composite key.
         let key_list = || -> String {
-            // One row reads as plain equality; IN would mean the same to the server.
             if let [one] = rows.as_slice() {
                 pk.iter().map(|p| format!("{} = {}", d.quote_ident(p), key_lit(one, p))).collect::<Vec<_>>().join(" AND ")
             } else if pk.len() == 1 {
@@ -959,8 +958,7 @@ impl App {
                 if pk.is_empty() {
                     return self.warn("This table has no primary key or unique key to address these rows.");
                 }
-                // Each column the rows agree on is set to its value, so the statement opens valid and runs as a no-op until
-                // edited. Keys and generated columns are left out, and so is a column the rows hold different values in.
+                // Columns the rows agree on keep their values, so the UPDATE parses and is a no-op until edited.
                 let free: Vec<&Col> = cols.iter().filter(|c| !c.generated && !pk.contains(&c.src)).collect();
                 let mut sets: Vec<String> = free
                     .iter()
@@ -969,7 +967,7 @@ impl App {
                         rows.iter().all(|r| r.get(&c.name) == Some(v)).then(|| format!("{} = {}", d.quote_ident(&c.src), copy::sql_literal(d, Some(v), is_numeric(c.kind), bs)))
                     })
                     .collect();
-                // With nothing in common, a column set to itself keeps the statement valid and shows the form to follow.
+                // Nothing in common: a column set to itself keeps the UPDATE valid.
                 if let (true, Some(c)) = (sets.is_empty(), free.first()) {
                     sets.push(format!("{0} = {0}", d.quote_ident(&c.src)));
                 }
@@ -1075,7 +1073,6 @@ impl App {
         };
         let keys = if pk.len() == 1 {
             let lits: Vec<String> = f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect();
-            // As Edit in Query writes it: one row with =, several with IN.
             if let [one] = lits.as_slice() { format!("{} = {one}", d.quote_ident(&pk[0])) } else { format!("{} IN ({})", d.quote_ident(&pk[0]), lits.join(", ")) }
         } else {
             format!("{} composite keys", n)
