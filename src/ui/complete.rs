@@ -584,7 +584,14 @@ pub(crate) fn ac_input_with(
     if ac.id == Some(id) && crate::ui::vim::normal(ui.ctx(), id) {
         ac.close();
     }
-    let open = ac.id == Some(id) && !ac.items.is_empty();
+    let mut open = ac.id == Some(id) && !ac.items.is_empty();
+    // egui drops the focus on a bare Esc before any widget runs, and the editor would surrender it too. With the list
+    // open, Esc only closes the list and the editor keeps the caret.
+    if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        ac.close();
+        open = false;
+        ui.memory_mut(|m| m.request_focus(id));
+    }
     let mut pick = None;
     let mut moved = false;
     let force = ui.memory(|m| m.has_focus(id)) && take_ctrl_space(ui);
@@ -600,9 +607,6 @@ pub(crate) fn ac_input_with(
             }
             if i.consume_key(egui::Modifiers::NONE, Key::Enter) || i.consume_key(egui::Modifiers::NONE, Key::Tab) {
                 pick = Some(ac.sel);
-            }
-            if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
-                ac.close();
             }
         });
     }
