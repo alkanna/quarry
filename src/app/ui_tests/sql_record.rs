@@ -1,7 +1,7 @@
 //! The record Tab opens under the selected SQL row, offline on the demo data.
 
 use super::*;
-use super::sql_view::{set_note, shown_text};
+use super::sql_view::{right_click, set_note, shown_text};
 
 #[test]
 fn tab_opens_the_record_where_values_edit_and_esc_closes_it() {
@@ -66,6 +66,13 @@ fn a_json_value_in_the_record_folds_out_as_a_tree_and_has_the_eye() {
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "the tree is open before it was asked for");
+    // A click on the value folds the tree too.
+    ui.click("note record");
+    ui.show("Expand all");
+    ui.click("note record");
+    // The fold waits out the double click window.
+    ui.run_for(std::time::Duration::from_millis(600));
+    assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "a click on the value did not fold the tree");
     ui.click("note tree");
     ui.show("Expand all");
     ui.show("door");
@@ -144,4 +151,50 @@ fn tab_leaves_the_record_closed_while_the_result_shows_as_text() {
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| !t.record), "Tab opened a record the Text result never draws");
+}
+
+#[test]
+fn the_record_menu_folds_a_json_value() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    set_note(&mut ui, r#"{"door":{"side":"back"}}"#);
+    ui.mouse_hold("note row 2", 0);
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    right_click(&mut ui, "note record");
+    ui.click("Expand all");
+    ui.show("side");
+    right_click(&mut ui, "note record");
+    // The open tree has its own Collapse all; the menu's is drawn after it.
+    ui.click_last("Collapse all");
+    ui.show("Expand all");
+    assert!(ui.h.query_all_by_label("side").next().is_none(), "Collapse all left a node open");
+    right_click(&mut ui, "note record");
+    ui.click("Collapse");
+    assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "Collapse did not fold the tree");
+}
+
+#[test]
+fn an_open_tree_stays_drawn_when_its_line_scrolls_past() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let keys: Vec<String> = (0..120).map(|i| format!(r#""key{i}":{i}"#)).collect();
+    set_note(&mut ui, &format!("{{{}}}", keys.join(",")));
+    ui.mouse_hold("note row 2", 0);
+    ui.h.key_press(egui::Key::Tab);
+    ui.settle();
+    ui.click("note tree");
+    ui.show("key10");
+    let at = ui.h.get_by_label("key10").rect().center();
+    ui.h.hover_at(at);
+    // The grid's first row starts where the scroll area shows its content, so a line above it is out of view.
+    let clip = ui.h.get_by_label("note row 1").rect().top();
+    let top = |ui: &UiApp| ui.h.get_by_label("note record").rect().bottom() - clip;
+    for _ in 0..20 {
+        if top(&ui) < 0.0 {
+            break;
+        }
+        ui.h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -200.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown, modifiers: egui::Modifiers::NONE });
+        ui.settle();
+    }
+    assert!(top(&ui) < 0.0, "the record line did not scroll off the top");
+    assert!((0..120).any(|i| ui.h.query_all_by_label(&format!("key{i}")).next().is_some()), "the open tree vanished once its line scrolled past");
 }

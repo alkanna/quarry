@@ -686,6 +686,32 @@ pub(crate) fn menu_list(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
 }
 
+/// A click on `r` that is not part of a double or triple click, for a widget whose double click does something else. It
+/// answers once the double click window has passed, so the first click of a double click never acts. Call it every frame
+/// the widget is drawn.
+pub(crate) fn single_click(ui: &egui::Ui, r: &egui::Response) -> bool {
+    let key = r.id.with("single-click");
+    if r.double_clicked() || r.triple_clicked() {
+        ui.data_mut(|d| d.remove::<f64>(key));
+        return false;
+    }
+    let now = ui.input(|i| i.time);
+    if r.clicked() {
+        ui.data_mut(|d| d.insert_temp(key, now));
+    }
+    let Some(t) = ui.data(|d| d.get_temp::<f64>(key)) else { return false };
+    let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+    let age = now - t;
+    if age < wait {
+        // Asked every frame for the time left: a wake that lands early or gets replaced by another frame would stall the click.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait - age));
+        return false;
+    }
+    ui.data_mut(|d| d.remove::<f64>(key));
+    // A widget that went undrawn past its window (closed, scrolled away, edited) drops the click instead of acting on it later.
+    age < wait + 0.5
+}
+
 /// A menu item that queues `act` and closes the menu when the item `add` draws is clicked.
 pub(crate) fn menu_act<T>(ui: &mut egui::Ui, acts: &mut Vec<T>, act: T, add: impl FnOnce(&mut egui::Ui) -> egui::Response) {
     if add(ui).clicked() {

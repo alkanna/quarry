@@ -41,10 +41,26 @@ fn json_under(ui: &mut egui::Ui, name_w: f32, c: &str, s: &str, room: egui::Id) 
 
 /// The room of the open tree last drawn under a line, for the frames that skip it. Without it the record shrinks as the
 /// line scrolls away or opens its editor, and the grid jumps back up.
-fn tree_room(ui: &mut egui::Ui, room: egui::Id) {
-    if let Some(h) = ui.data(|d| d.get_temp::<f32>(room)) {
+fn tree_room(ui: &mut egui::Ui, h: f32) {
+    if h > 0.0 {
         ui.allocate_exact_size(egui::vec2(0.0, h), Sense::hover());
     }
+}
+
+/// Opens or closes the tree of column `c`. A closed tree drops its parsed copy and its kept room.
+fn set_fold(ui: &egui::Ui, open_id: egui::Id, c: &str, open: bool) {
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    if !open {
+        json_tree::forget(ui.ctx(), tree_id(c));
+        ui.data_mut(|d| d.remove::<f32>(open_id.with("h")));
+    }
+}
+
+/// A fold asked for from the record menu.
+enum Fold {
+    Toggle,
+    /// Opens the tree with every node open or closed.
+    All(bool),
 }
 
 impl App {
@@ -76,16 +92,18 @@ impl App {
             }
             let open_id = rid.with(("json", c));
             let room = open_id.with("h");
-            // Lines scrolled out of view keep their space but skip the work, like the grid's rows.
-            if !ui.is_rect_visible(line) {
-                tree_room(ui, room);
+            // Lines scrolled out of view keep their space but skip the work, like the grid's rows. An open tree still in
+            // view counts, or it vanishes once its line scrolls past the top.
+            let tree_h = ui.data(|d| d.get_temp::<f32>(room)).unwrap_or(0.0);
+            if !ui.is_rect_visible(line.with_max_y(line.bottom() + tree_h)) {
+                tree_room(ui, tree_h);
                 continue;
             }
             let kind = col.as_ref().map_or(Kind::Text, |c| c.kind);
             let val = egui::Rect::from_min_max(egui::pos2(line.left() + name_w, line.top()), egui::pos2(line.right() - type_w, line.bottom()));
             if !agg && self.sql_cell.as_ref().is_some_and(|e| e.is_at(key.clone(), c)) {
                 self.sql_cell_editor(ui, val);
-                tree_room(ui, room);
+                tree_room(ui, tree_h);
                 continue;
             }
             let v = match &drafted {
@@ -125,11 +143,7 @@ impl App {
                 self.vnav.act = None;
                 if json && o != open {
                     open = o;
-                    ui.data_mut(|d| d.insert_temp(open_id, open));
-                    if !open {
-                        json_tree::forget(ui.ctx(), tree_id(c));
-                        ui.data_mut(|d| d.remove::<f32>(room));
-                    }
+                    set_fold(ui, open_id, c, o);
                 }
             }
             let fk = v.filter(|v| !v.is_null()).and_then(|_| fks.iter().position(|f| col.as_ref().is_some_and(|k| f.cols.contains(&k.src))));
@@ -146,7 +160,12 @@ impl App {
                     clip.text(egui::pos2(text_x, val.center().y), egui::Align2::LEFT_CENTER, "—", font.clone(), FAINT());
                 }
             }
-            let r = r.on_hover_text(if blocked { "Double-click to view, right-click for more" } else { "Double-click to edit, right-click for more" });
+            let r = r.on_hover_text(match (json, blocked) {
+                (true, true) => "Click to fold, double-click to view, right-click for more",
+                (true, false) => "Click to fold, double-click to edit, right-click for more",
+                (false, true) => "Double-click to view, right-click for more",
+                (false, false) => "Double-click to edit, right-click for more",
+            });
             if r.double_clicked() {
                 if blocked {
                     out.view = Some((c.to_string(), Val::owned(v)));
@@ -154,8 +173,17 @@ impl App {
                     out.edit = Some(c.to_string());
                 }
             }
+            let mut folds = Vec::new();
             r.context_menu(|ui| {
                 menu_look(ui);
+                if json {
+                    menu_act(ui, &mut folds, Fold::Toggle, |ui| ui.button(if open { "Collapse" } else { "Expand" }));
+                    menu_act(ui, &mut folds, Fold::All(true), |ui| ui.button("Expand all"));
+                    if open {
+                        menu_act(ui, &mut folds, Fold::All(false), |ui| ui.button("Collapse all"));
+                    }
+                    ui.separator();
+                }
                 if agg {
                     if read_menu(ui, v) {
                         out.view = Some((c.to_string(), Val::owned(v)));
@@ -177,13 +205,21 @@ impl App {
                 let state = state_of(&tr);
                 chevron(ui.painter(), egui::pos2(val.left() + 10.0, val.center().y), open, if state > 0 { BRIGHT() } else { MUTED() });
                 focus_ring(ui, &tr, tr.rect, R_SM as f32);
-                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() {
-                    open = !open;
-                    ui.data_mut(|d| d.insert_temp(open_id, open));
-                    if !open {
-                        json_tree::forget(ui.ctx(), tree_id(c));
-                        ui.data_mut(|d| d.remove::<f32>(room));
+                // A click on the value folds too, once the double click window has passed. Folding on the first click of a
+                // double click would shrink a tall tree, scroll the page and send the second click to another line.
+                let value_click = single_click(ui, &r);
+                let fold = if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || value_click { Some(Fold::Toggle) } else { folds.pop() };
+                match fold {
+                    Some(Fold::Toggle) => {
+                        open = !open;
+                        set_fold(ui, open_id, c, open);
                     }
+                    Some(Fold::All(o)) => {
+                        open = true;
+                        set_fold(ui, open_id, c, true);
+                        json_tree::fold_all(ui.ctx(), tree_id(c), o);
+                    }
+                    None => {}
                 }
             }
             if let Some(k) = fk && fk_link(ui, val, rid.with(("fk", c)), &fks[k]).clicked() {

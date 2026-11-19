@@ -167,12 +167,15 @@ pub(in crate::app) fn copy_as_menu(ui: &mut egui::Ui, sql: bool) -> Option<DocsA
     // A stable id: the copy action reads the switch back by it.
     let id = egui::Id::unique("copy-with-header");
     let on = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
-    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y), Sense::click());
+    // As wide as the items above: available_width is all the room left on screen, and the menu would grow to it.
+    let (box_x, text_x) = (14.0, 30.0);
+    let g = ui.fonts_mut(|f| f.layout_no_wrap("Include column names".into(), FontId::proportional(TXT_BODY), TEXT()));
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.min_rect().width().max(text_x + g.size().x + box_x), ui.spacing().interact_size.y), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(row, R_SM, MENU_HOVER());
     }
-    let boxed = check_box(ui, egui::pos2(row.left() + 14.0, row.center().y), id.with("box"), on, false);
-    ui.painter().text(egui::pos2(row.left() + 30.0, row.center().y), egui::Align2::LEFT_CENTER, "Include column names", FontId::proportional(TXT_BODY), TEXT());
+    let boxed = check_box(ui, egui::pos2(row.left() + box_x, row.center().y), id.with("box"), on, false);
+    ui.painter().galley(egui::pos2(row.left() + text_x, row.center().y - g.size().y / 2.0), g, TEXT());
     if boxed.clicked() || resp.clicked() {
         ui.data_mut(|d| d.insert_temp(id, !on));
     }

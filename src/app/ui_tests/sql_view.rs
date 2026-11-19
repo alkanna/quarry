@@ -25,7 +25,7 @@ pub(super) fn set_note(ui: &mut UiApp, note: &str) {
 }
 
 /// A right click on the middle of the widget named `label`, which opens its menu.
-fn right_click(ui: &mut UiApp, label: &str) {
+pub(super) fn right_click(ui: &mut UiApp, label: &str) {
     ui.show(label);
     let at = ui.h.get_by_label(label).rect().center();
     ui.press_at(at, egui::PointerButton::Secondary, 1);
