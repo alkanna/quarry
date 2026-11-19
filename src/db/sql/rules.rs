@@ -261,6 +261,72 @@ pub fn op_sql_hint(op: Op, kind: Kind, d: Dialect, case: bool) -> String {
     rule_sql(&r, d, true).replace(&d.quote_ident("x"), "x").replace(&d.quote_ident("y"), "y")
 }
 
+/// The keywords and functions of an `op_sql_hint`, without the stand-ins it writes for the column and the values.
+fn hint_words(hint: &str) -> String {
+    let mut out = String::new();
+    // Odd parts sit between quotes.
+    for part in hint.split('\'').step_by(2) {
+        out.push_str(part);
+        out.push(' ');
+    }
+    out.split(|c: char| c.is_whitespace() || "(),".contains(c)).filter(|w| !w.is_empty() && !matches!(*w, "x" | "y" | "a" | "b" | "7" | "days" | "…")).collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Other phrases an operator is found by in the operator menu, beyond its label and its SQL.
+pub fn op_aliases(op: Op) -> &'static [&'static str] {
+    use Op::*;
+    match op {
+        Eq => &["equals", "=="],
+        Ne => &["not equal", "!=", "<>"],
+        Gt => &["greater than", "more than", "after"],
+        Lt => &["less than", "fewer than", "before"],
+        Contains => &["includes"],
+        In => &["any of", "one of"],
+        IsNull => &["null", "missing"],
+        NotNull => &["not null", "present"],
+        Empty => &["blank"],
+        Regexp => &["regex", "~"],
+        _ => &[],
+    }
+}
+
+/// Where a search for an operator matched: its label, one of its aliases, or its SQL.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum OpMatch {
+    Label,
+    Alias,
+    Sql,
+}
+
+/// An operator a search found, how, and its SQL hint.
+pub struct OpHit {
+    pub op: Op,
+    pub by: OpMatch,
+    pub hint: String,
+}
+
+/// The operators of `ops` that `q` finds, ranked label prefix, label, alias, SQL, each rank in `ops` order. Hints carry
+/// the case a pick gives the rule.
+pub fn op_search(ops: impl Iterator<Item = Op>, kind: Kind, d: Dialect, q: &str) -> Vec<OpHit> {
+    let q = q.trim().to_lowercase();
+    let mut hits: Vec<(u8, OpHit)> = ops
+        .filter_map(|op| {
+            let hint = op_sql_hint(op, kind, d, default_case(op, d));
+            let (rank, by) = match label(op, kind).to_lowercase().find(&q) {
+                Some(0) => (0, OpMatch::Label),
+                Some(_) => (1, OpMatch::Label),
+                None if op_aliases(op).iter().any(|a| a.starts_with(&q)) => (2, OpMatch::Alias),
+                None if hint_words(&hint).contains(&q) => (3, OpMatch::Sql),
+                None => return None,
+            };
+            Some((rank, OpHit { op, by, hint }))
+        })
+        .collect();
+    // Stable, so each rank keeps the menu order.
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.into_iter().map(|(_, h)| h).collect()
+}
+
 /// The few menu entries drawn in the keyword color, as in the design.
 pub fn is_keyword(op: Op) -> bool {
     use Op::*;

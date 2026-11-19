@@ -4,6 +4,7 @@
 use super::*;
 use crate::app::run::query_dirty;
 use crate::db::sql::filter::{self, Item, Match};
+use crate::db::sql::rules::Op;
 
 fn bar(ui: &UiApp) -> &crate::app::sql::bar::Bar {
     ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| &s.bar).expect("a SQL tab")
@@ -213,4 +214,56 @@ fn a_row_dragged_onto_a_group_header_moves_into_the_group() {
     let group = b.tree.root.kids.iter().find_map(|n| matches!(n.item, Item::Group(_)).then_some(n.id)).expect("the group");
     assert_eq!(b.tree.parent_of(status), Some(group), "the row did not land in the group");
     assert_eq!(filter_txt(&ui), "`total` > 50 AND (`status` = 'paid')", "the new row of the group is not complete, so only the moved one writes SQL");
+}
+
+fn first_rule(ui: &UiApp) -> crate::db::sql::rules::Rule {
+    let b = bar(ui);
+    let id = b.tree.rows_in_order()[0];
+    match &b.tree.find(id).expect("the first row").item {
+        Item::Cond(c) => c.rule.clone(),
+        _ => panic!("the first row is a group"),
+    }
+}
+
+#[test]
+fn typing_in_the_operator_pill_finds_and_picks_an_operator() {
+    for pg in [false, true] {
+        let Some(mut ui) = demo_ui(|_| {}) else { return };
+        if pg {
+            ui.h.state_mut().pg_demo("filters-ops");
+        } else {
+            ui.h.state_mut().sql_demo("filters-ops");
+        }
+        ui.settle();
+        // The demo opens the picker of the note row, so typing goes to its field.
+        ui.type_text("starts");
+        ui.show("Writes");
+        ui.h.key_press(egui::Key::Enter);
+        ui.settle();
+        assert_eq!(first_rule(&ui).op, Op::StartsWith, "Enter did not pick the operator found by typing");
+        ui.click("Operator starts with");
+        ui.type_text("null");
+        // Down moves to the second match.
+        ui.h.key_press(egui::Key::ArrowDown);
+        ui.h.key_press(egui::Key::Enter);
+        ui.settle();
+        assert_eq!(first_rule(&ui).op, Op::IsNull, "null then down did not pick the second match, IS NULL");
+        ui.click("Operator IS NULL");
+        ui.type_text("contains");
+        ui.h.key_press(egui::Key::Escape);
+        ui.settle();
+        assert_eq!(first_rule(&ui).op, Op::IsNull, "Esc changed the operator");
+        assert!(bar(&ui).panel.open, "Esc in the picker closed the panel");
+    }
+}
+
+#[test]
+fn the_operator_footer_writes_the_rows_condition() {
+    let Some(mut ui) = demo_ui(|_| {}) else { return };
+    ui.h.state_mut().sql_demo("filters-ops");
+    ui.settle();
+    ui.type_text("ends");
+    ui.show("Writes");
+    assert!(ui.shows("`note`"), "the footer does not write the row's column");
+    assert!(ui.shows("gift"), "the footer does not keep the row's value");
 }

@@ -4,7 +4,7 @@
 use crate::app::*;
 use crate::db::sql::{
     facts::ColFacts,
-    rules::{self, Input, Op, Rule},
+    rules::{self, Input, Op, OpHit, OpMatch, Rule},
     value::Kind,
     Col, Dialect,
 };
@@ -57,11 +57,12 @@ pub(super) fn col_filter(cols: &[Col], q: &str) -> Vec<usize> {
     starts
 }
 
-/// What a column picker holds while its field is being typed in.
+/// What a search pill holds while its field is being typed in.
 #[derive(Clone, Default)]
-struct ColBox {
+struct PillBox {
     text: String,
-    sel: usize,
+    /// The keyboard row. None until the list picks its own start, and again after each edit of the text.
+    sel: Option<usize>,
     /// Where the list was drawn last frame, so a press on it is not read as leaving the field.
     list: Option<egui::Rect>,
     /// Frames shown, so the first ones can win the focus they asked for before losing it counts.
@@ -71,21 +72,18 @@ struct ColBox {
 /// Whether the column picker of `id` (as passed to `col_pick`) is open, its field and list on screen.
 #[cfg(test)]
 pub(in crate::app) fn col_pick_open(ctx: &egui::Context, id: egui::Id) -> bool {
-    ctx.data(|d| d.get_temp::<ColBox>(id.with("col-box")).is_some())
+    ctx.data(|d| d.get_temp::<PillBox>(id.with("col-box")).is_some())
 }
 
-/// A searchable column picker: a click turns the pill into a text field in place and typing filters
-/// the list. `id` keeps its open state with its row when rows move. Returns the picked name.
-pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col], min: f32, start_text: Option<String>) -> Option<String> {
-    let ty = cols.iter().find(|c| c.name == cur).map(type_name).unwrap_or_default();
-    let shown = if cur.is_empty() { "column" } else { cur };
-    let w = combo_w(ui, shown, &ty, min);
-    let key = id.with("col-box");
+/// A pill that becomes a search field with a filtered list under it. `list` moves the keyboard row through `clamp_sel`
+/// and returns the clicked row and the row Enter picks. `list_w` is measured only while open.
+#[allow(clippy::too_many_arguments)]
+fn search_pill<T>(ui: &mut egui::Ui, key: egui::Id, w: f32, hint: &str, start: Option<String>, list_w: impl FnOnce(&egui::Ui) -> f32, closed: impl FnOnce(&mut egui::Ui) -> egui::Response, list: impl FnOnce(&mut egui::Ui, &str, &mut Option<usize>, i64) -> (Option<T>, Option<T>)) -> Option<T> {
     let edit_id = key.with("edit");
-    let Some(mut st) = ui.data(|d| d.get_temp::<ColBox>(key)) else {
-        let r = pill_combo(ui, shown, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
-        if r.clicked() || start_text.is_some() {
-            ui.data_mut(|d| d.insert_temp(key, ColBox { text: start_text.unwrap_or_default(), ..Default::default() }));
+    let Some(mut st) = ui.data(|d| d.get_temp::<PillBox>(key)) else {
+        let r = closed(ui);
+        if r.clicked() || start.is_some() {
+            ui.data_mut(|d| d.insert_temp(key, PillBox { text: start.unwrap_or_default(), ..Default::default() }));
             ui.memory_mut(|m| m.request_focus(edit_id));
             ui.ctx().request_repaint();
         }
@@ -101,64 +99,87 @@ pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col],
     }
     let settled = st.age >= 3;
     let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    let te = inner.add(egui::TextEdit::singleline(&mut st.text).id(edit_id).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0))).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(shown).color(FAINT())).align(egui::Align2::LEFT_CENTER).desired_width(w));
-    let hits = col_filter(cols, &st.text);
+    let te = inner.add(egui::TextEdit::singleline(&mut st.text).id(edit_id).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0))).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(hint).color(FAINT())).align(egui::Align2::LEFT_CENTER).desired_width(w));
     if te.changed() {
-        st.sel = 0;
+        st.sel = None;
     }
-    if down {
-        st.sel += 1;
+    let step = i64::from(down) - i64::from(up);
+    let list_w = list_w(ui);
+    let mut open = true;
+    let text = st.text.clone();
+    let mut sel = st.sel;
+    let shown = egui::Popup::new(key.with("list"), ui.ctx().clone(), rect, ui.layer_id()).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(list_w).show(|ui| {
+        menu_look(ui);
+        list(ui, &text, &mut sel, step)
+    });
+    st.sel = sel;
+    let (pick, at_sel, list_rect) = match shown {
+        Some(r) => (r.inner.0, r.inner.1, Some(r.response.rect)),
+        None => (None, None, None),
+    };
+    // The list as drawn now or last frame: a press there is a pick, not leaving the field.
+    let on_list = |p: egui::Pos2| list_rect.is_some_and(|l| l.contains(p)) || st.list.is_some_and(|r| r.contains(p));
+    let in_list = ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(on_list);
+    // A press anywhere else leaves it, even where nothing takes the focus from the field (a panel's background).
+    let pressed_out = settled && ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|o| !rect.contains(o) && !on_list(o)));
+    if list_rect.is_some() {
+        st.list = list_rect;
     }
-    if up {
-        st.sel = st.sel.saturating_sub(1);
+    let keyed = enter || (tab && te.lost_focus());
+    let picked = if keyed { pick.or(at_sel) } else { pick };
+    // Leaving the field any other way, such as a click on the page, restores the previous value.
+    let gone = esc || keyed || picked.is_some() || pressed_out || (settled && !te.has_focus() && !in_list);
+    if gone {
+        ui.memory_mut(|m| m.surrender_focus(edit_id));
+        ui.data_mut(|d| d.remove::<PillBox>(key));
+    } else {
+        ui.data_mut(|d| d.insert_temp(key, st));
     }
-    st.sel = st.sel.min(hits.len().saturating_sub(1));
-    let mut pick = None;
-    // The list is cheap to draw whole: rows off screen are skipped before any text is laid out.
-    let width = {
+    picked
+}
+
+/// The keyboard row after `step`, from `start` when unset so an arrow in the same frame as an edit still counts, and
+/// whether to scroll to it.
+fn clamp_sel(sel: &mut Option<usize>, start: usize, n: usize, step: i64) -> (usize, bool) {
+    let fresh = sel.is_none();
+    let s = (sel.unwrap_or(start) as i64 + step).clamp(0, n.saturating_sub(1) as i64) as usize;
+    *sel = Some(s);
+    (s, fresh || step != 0)
+}
+
+/// A searchable column picker: a click turns the pill into a text field in place and typing filters
+/// the list. `id` keeps its open state with its row when rows move. Returns the picked name.
+pub(super) fn col_pick(ui: &mut egui::Ui, id: egui::Id, cur: &str, cols: &[Col], min: f32, start_text: Option<String>) -> Option<String> {
+    let ty = cols.iter().find(|c| c.name == cur).map(type_name).unwrap_or_default();
+    let shown = if cur.is_empty() { "column" } else { cur };
+    let w = combo_w(ui, shown, &ty, min);
+    let width = |ui: &egui::Ui| {
         let longest = cols.iter().map(|c| text_w(ui, &c.name, FontId::monospace(TXT_SMALL)) + text_w(ui, &type_name(c), FontId::monospace(TXT_CAPTION))).fold(0.0, f32::max);
         (longest + 60.0).clamp(220.0, 420.0)
     };
-    let mut open = true;
-    let list = egui::Popup::new(key.with("list"), ui.ctx().clone(), rect, ui.layer_id()).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(width).show(|ui| {
-        menu_look(ui);
+    let closed = |ui: &mut egui::Ui| pill_combo(ui, shown, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
+    search_pill(ui, id.with("col-box"), w, shown, start_text, width, closed, |ui, text, sel, step| {
+        let hits = col_filter(cols, text);
+        let (at, moved) = clamp_sel(sel, 0, hits.len(), step);
+        let mut clicked = None;
+        // The list is cheap to draw whole: rows off screen are skipped before any text is laid out.
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             if hits.is_empty() {
                 ui.label(RichText::new("No matching column").size(TXT_SMALL).color(FAINT()));
             }
             for (n, &i) in hits.iter().enumerate() {
                 let c = &cols[i];
-                let r = menu_row_in(ui, &c.name, TEXT(), c.name == cur, &type_name(c), &st.text, n == st.sel);
-                if (down || up) && n == st.sel {
+                let r = menu_row_in(ui, &c.name, TEXT(), c.name == cur, &type_name(c), text, n == at);
+                if moved && n == at {
                     ui.scroll_to_rect(r.rect, None);
                 }
                 if r.clicked() {
-                    pick = Some(c.name.clone());
+                    clicked = Some(c.name.clone());
                 }
             }
         });
-    });
-    // The list as drawn now or last frame: a press there is a pick, not leaving the field.
-    let on_list = |p: egui::Pos2| list.as_ref().is_some_and(|l| l.response.rect.contains(p)) || st.list.is_some_and(|r| r.contains(p));
-    let in_list = ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(on_list);
-    // A press anywhere else leaves it, even where nothing takes the focus from the field (a panel's background).
-    let pressed_out = settled && ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|o| !rect.contains(o) && !on_list(o)));
-    if let Some(l) = &list {
-        st.list = Some(l.response.rect);
-    }
-    let keyed = enter || (tab && te.lost_focus());
-    if keyed {
-        pick = pick.or_else(|| hits.get(st.sel).map(|&i| cols[i].name.clone()));
-    }
-    // Leaving the field any other way, such as a click on the page, restores the previous value.
-    let gone = esc || keyed || pick.is_some() || pressed_out || (settled && !te.has_focus() && !in_list);
-    if gone {
-        ui.memory_mut(|m| m.surrender_focus(edit_id));
-        ui.data_mut(|d| d.remove::<ColBox>(key));
-    } else {
-        ui.data_mut(|d| d.insert_temp(key, st));
-    }
-    pick
+        (clicked, hits.get(at).map(|&i| cols[i].name.clone()))
+    })
 }
 
 /// The menu group of an operator and its caption, so the menu reads by meaning.
@@ -179,38 +200,86 @@ pub(super) fn op_cat(op: Op) -> (u8, &'static str) {
     }
 }
 
-/// The operator picker for a column type, grouped by meaning with the SQL each one sends on the right. A text column
-/// reaches its regex operators through the cell's .* toggle instead.
-pub(super) fn op_pick(ui: &mut egui::Ui, kind: Kind, cur: Op, case: bool, min: f32, d: Dialect, open: bool) -> Option<Op> {
+/// The operators of a column type the picker offers, in menu order. A text column reaches its regex operators
+/// through the cell's .* toggle instead, unless the rule already uses one, which stays listed so it can be kept.
+fn picker_ops(kind: Kind, d: Dialect, cur: Op) -> impl Iterator<Item = Op> {
+    rules::ops_for(kind, d).iter().copied().filter(move |&o| kind != Kind::Text || !matches!(o, Op::Regexp | Op::NotRegexp) || o == cur)
+}
+
+fn op_filter(kind: Kind, d: Dialect, cur: Op, q: &str) -> Vec<OpHit> {
+    rules::op_search(picker_ops(kind, d, cur), kind, d, q)
+}
+
+/// The operator picker: typed search in the pill, a grouped list with each operator's SQL, and a footer with the whole
+/// condition the highlighted one sends. `open` opens it for the demo.
+pub(super) fn op_pick(ui: &mut egui::Ui, id: egui::Id, r: &Rule, min: f32, d: Dialect, bs: bool, open: bool) -> Option<Op> {
+    let (kind, cur) = (r.kind, r.op);
     let label = rules::label(cur, kind);
     let w = combo_w(ui, label, "", min);
-    let r = pill_combo(ui, label, "", w, if rules::is_keyword(cur) { C_KEYWORD() } else { TEXT() });
-    if open {
-        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
-    }
-    let mut pick = None;
-    egui::Popup::menu(&r).width(380.0).show(|ui| {
-        menu_look(ui);
-        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+    let color = |op: Op| if rules::is_keyword(op) { C_KEYWORD() } else { TEXT() };
+    let closed = |ui: &mut egui::Ui| {
+        let r = pill_combo(ui, label, "", w, color(cur));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Operator {label}")));
+        r
+    };
+    search_pill(ui, id.with("op-box"), w, label, open.then(String::new), |_| 380.0, closed, |ui, text, sel, step| {
+        let hits = op_filter(kind, d, cur, text);
+        // With nothing typed the highlight starts on the current operator, so Enter alone keeps it.
+        let start = if text.trim().is_empty() { hits.iter().position(|h| h.op == cur).unwrap_or(0) } else { 0 };
+        let (at, moved) = clamp_sel(sel, start, hits.len(), step);
+        // Captions only fit menu order, not ranked results.
+        let grouped = text.trim().is_empty();
+        let mut clicked = None;
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            if hits.is_empty() {
+                ui.label(RichText::new("No operator matches").size(TXT_SMALL).color(FAINT()));
+            }
             let mut last = None;
-            for &op in rules::ops_for(kind, d).iter().filter(|o| kind != Kind::Text || !matches!(o, Op::Regexp | Op::NotRegexp)) {
+            for (n, h) in hits.iter().enumerate() {
+                let op = h.op;
                 let (cat, name) = op_cat(op);
-                if last != Some(cat) {
+                if grouped && last != Some(cat) {
                     if last.is_some() {
                         ui.add_space(2.0);
                     }
                     caption(ui, name);
                     last = Some(cat);
                 }
-                let hint = rules::op_sql_hint(op, kind, d, if rules::has_case(kind, op) { case } else { rules::default_case(op, d) });
-                if menu_row(ui, rules::label(op, kind), if rules::is_keyword(op) { C_KEYWORD() } else { TEXT() }, op == cur, &hint).clicked() {
-                    pick = Some(op);
-                    ui.close();
+                let aliases = if h.by == OpMatch::Alias { rules::op_aliases(op).join("  ") } else { String::new() };
+                let note = if h.by == OpMatch::Alias { &aliases } else { &h.hint };
+                let hl = if h.by == OpMatch::Label { text.trim() } else { "" };
+                let row = menu_row_in(ui, rules::label(op, kind), color(op), op == cur, note, hl, n == at);
+                if moved && n == at {
+                    ui.scroll_to_rect(row.rect, None);
+                }
+                if row.clicked() {
+                    clicked = Some(op);
                 }
             }
         });
-    });
-    pick
+        let at_sel = hits.get(at).map(|h| h.op);
+        if let Some(op) = at_sel {
+            writes_footer(ui, r, op, d, bs);
+        }
+        (clicked, at_sel)
+    })
+}
+
+/// The whole condition `op` would send on rule `r`, as picking it would leave the rule.
+fn writes_footer(ui: &mut egui::Ui, r: &Rule, op: Op, d: Dialect, bs: bool) {
+    let mut probe = r.clone();
+    set_op(&mut probe, op, d);
+    ui.separator();
+    caption(ui, "Writes");
+    // A rule without its column or value is left out of the WHERE, so there is nothing to show yet.
+    if !probe.complete() {
+        ui.label(RichText::new("Nothing until it has a value").size(TXT_SMALL).color(FAINT()));
+        return;
+    }
+    let mut job = crate::ui::editor::sql_job_in(&rules::rule_sql(&probe, d, bs), TXT_SMALL, d);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+    let g = ui.painter().layout_job(job);
+    ui.add(egui::Label::new(g).selectable(false));
 }
 
 /// A removable value chip of an IN list.
@@ -615,14 +684,14 @@ pub(super) fn set_op(r: &mut Rule, op: Op, d: Dialect) {
 /// `pick` opens the column picker with that text typed, for a row just added.
 /// `ops` opens the operator menu, as the demo of the menu does.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, d: Dialect, pick: Option<String>, ops: bool, hints: &mut Hints) -> (bool, bool) {
+pub(super) fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id, d: Dialect, bs: bool, pick: Option<String>, ops: bool, hints: &mut Hints) -> (bool, bool) {
     let mut changed = false;
     if let Some(p) = col_pick(ui, salt.with("col"), &r.col, cols, 130.0, pick) && p != r.col {
         let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
         set_col(r, p, kind, d);
         changed = true;
     }
-    if let Some(op) = op_pick(ui, r.kind, r.op, r.case, 90.0, d, ops) && op != r.op {
+    if let Some(op) = op_pick(ui, salt.with("op"), r, 90.0, d, bs, ops) && op != r.op {
         set_op(r, op, d);
         changed = true;
     }
@@ -633,6 +702,34 @@ pub(super) fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_search_ranks_labels_then_aliases_then_sql() {
+        let pg = Dialect::Postgres;
+        let found = |kind: Kind, q: &str| op_filter(kind, pg, Op::Eq, q).into_iter().map(|h| (h.op, h.by)).collect::<Vec<_>>();
+        let ops = |q: &str| found(Kind::Text, q).into_iter().map(|(o, _)| o).collect::<Vec<_>>();
+        assert_eq!(ops(""), picker_ops(Kind::Text, pg, Op::Eq).collect::<Vec<_>>(), "nothing typed keeps the menu order");
+        assert_eq!(ops("starts")[0], Op::StartsWith);
+        // A label holding the text comes before an alias, and an alias before the SQL.
+        let not = found(Kind::Text, "not");
+        let at = |o: Op| not.iter().position(|&(x, _)| x == o).unwrap_or_else(|| panic!("not missed {o:?}: {not:?}"));
+        assert!(at(Op::NotContains) < at(Op::Ne), "{not:?}");
+        assert!(not.contains(&(Op::Ne, OpMatch::Alias)), "not did not find the not-equal operator by its alias: {not:?}");
+        assert_eq!(ops("!="), vec![Op::Ne]);
+        assert!(found(Kind::Int, "not equal").contains(&(Op::Ne, OpMatch::Alias)), "a phrase alias was not found");
+        assert!(found(Kind::Int, "one of").iter().any(|&(o, _)| o == Op::In), "a phrase alias was not found");
+        let null = ops("null");
+        for o in [Op::IsNull, Op::NotNull, Op::NotInOrNull] {
+            assert!(null.contains(&o), "null missed {o:?}: {null:?}");
+        }
+        // Hints use the case a pick gives: contains ignores case on PostgreSQL.
+        assert!(found(Kind::Text, "ilike").contains(&(Op::Contains, OpMatch::Sql)), "ILIKE did not find contains");
+        // The stand-ins for the column and the value are not searched.
+        assert!(ops("x").is_empty(), "x matched the placeholder column: {:?}", ops("x"));
+        assert!(ops("zzz").is_empty());
+        // A regex rule stays listed so Enter keeps it.
+        assert!(op_filter(Kind::Text, pg, Op::Regexp, "").iter().any(|h| h.op == Op::Regexp));
+    }
 
     #[test]
     fn column_filter_puts_prefixes_first() {

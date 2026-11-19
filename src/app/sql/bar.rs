@@ -504,6 +504,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     ui.add_space(6.0);
     caption(ui, "HAVING");
     let aliases: Vec<Col> = g.aggs.iter().filter(|a| !a.alias.trim().is_empty()).map(|a| Col::plain(a.alias.trim(), "DECIMAL", Kind::Decimal, true)).collect();
+    let bs = g.bs;
     ui.horizontal(|ui| {
         if g.having.is_none() {
             if quiet(ui, RichText::new("+ Condition").color(PRIMARY())).clicked() && let Some(a) = aliases.first() {
@@ -513,7 +514,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
             if !aliases.iter().any(|a| a.name == r.col) {
                 r.col = aliases.first().map(|a| a.name.clone()).unwrap_or_default();
             }
-            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, None, false, &mut Hints::default());
+            rule_editor(ui, r, &aliases, ui.scope_id().with("having"), d, bs, None, false, &mut Hints::default());
             if close_x(ui).on_hover_text("Remove condition").clicked() {
                 g.having = None;
             }
