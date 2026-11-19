@@ -22,6 +22,10 @@ impl App {
         let d = self.sql_dialect();
         let Some(t) = self.t() else { return false };
         let Some(s) = t.sql.as_ref() else { return false };
+        // Plain SQL, most tabs, costs one scan for `{{` per frame.
+        if !s.query.contains("{{") {
+            return false;
+        }
         let p = snippet::parse(&s.query, d);
         if !p.is_snippet() {
             return false;
@@ -41,6 +45,7 @@ impl App {
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                let digit = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(TXT_SMALL), '0'));
                 ui.label(RichText::new("Run on").color(MUTED()));
                 ui.label(RichText::new(&target).color(BRIGHT()));
                 if let Some(id) = make_default
@@ -68,8 +73,7 @@ impl App {
                         }
                         _ => {
                             // As wide as the value, in the editor's mono digits, between a short field and a long one.
-                            let digit = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(TXT_SMALL), '0'));
-                            let w = (val.chars().count().max(4) as f32 * digit + BUTTON_H / 2.0).min(PREVIEW_MAX_H);
+                            let w = (val.chars().count().max(4) as f32 * digit + BUTTON_H / 2.0).min(VALUE_FIELD_MAX_W);
                             ui.add(egui::TextEdit::singleline(val).font(FontId::monospace(TXT_SMALL)).desired_width(w).hint_text(RichText::new(v.ty.hint()).color(FAINT())));
                         }
                     }

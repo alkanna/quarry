@@ -240,7 +240,8 @@ impl App {
             ("sql", Some(s)) if t.view == View::Sql && t.sel.coll.is_empty() => s.query.as_str(),
             _ => return false,
         };
-        let staged = t.sql.as_ref().is_some_and(|s| !s.st.staged.is_empty());
+        // A tab still running is busy too, even with its text cleared: its answer would land under the new script.
+        let staged = t.sql.as_ref().is_some_and(|s| !s.st.staged.is_empty() || s.run_req != 0);
         let unchanged = match &t.script {
             Some(b) => b.view == View::Sql && b.base == text,
             None => text.trim().is_empty(),

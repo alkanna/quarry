@@ -19,13 +19,17 @@ pub(in crate::app) struct SnippetForm {
     pub id: u64,
     pub name: String,
     pub body: String,
-    pub conn: u64,
+    /// None while the snippet's own connection was removed and the person has not picked another.
+    pub conn: Option<u64>,
     pub db: String,
     pub schema: String,
     pub values: snippet::Values,
     pub stage: Stage,
     /// The palette's query, put back by Esc. None when the form was opened from elsewhere, where Esc just closes it.
     pub query: Option<String>,
+    /// The filled statement, whether it writes and its verb, kept until a value or the target changes: the read-only
+    /// check lexes the text several times, too much for every frame.
+    pub memo: Option<(u64, Result<String, String>, bool, String)>,
 }
 
 /// The bar at the bottom of the form: the keys, the confirm of a write, or Unlock on a locked connection.
@@ -58,9 +62,11 @@ impl App {
             values.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
         }
         // A removed connection is never swapped for another at random, since it could be production: the person picks one.
-        let conn = if self.conn(s.conn).is_some() { s.conn } else { 0 };
-        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query };
-        self.wake_conn(conn);
+        let conn = self.conn(s.conn).is_some().then_some(s.conn);
+        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query, memo: None };
+        if let Some(c) = conn {
+            self.wake_conn(c);
+        }
         self.modal = Some(Modal::Snippet(Box::new(form)));
     }
 
@@ -85,20 +91,35 @@ impl App {
         let top = ctx.content_rect().height() * 0.14;
         let id = egui::Id::unique(("quarry-layer", "snippet"));
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
-        let d = self.dialect_of(f.conn);
+        let c = f.conn.and_then(|id| self.conn(id));
+        let d = f.conn.map_or_else(Default::default, |id| self.dialect_of(id));
         let p = snippet::parse(&f.body, d);
-        let filled = snippet::fill(&f.body, &p, &f.values, d, self.sql_bs_of(f.conn));
-        let writes = filled.as_ref().is_ok_and(|t| db::sql::lex::read_only_check(t, d).is_err());
-        let bar = match (writes, self.conn_writable(f.conn), f.stage) {
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            f.conn.hash(&mut h);
+            for v in &p.vars {
+                (&v.name, f.values.get(&v.name)).hash(&mut h);
+            }
+            h.finish()
+        };
+        if f.memo.as_ref().is_none_or(|m| m.0 != key) {
+            let filled = snippet::fill(&f.body, &p, &f.values, d, f.conn.is_none_or(|id| self.sql_bs_of(id)));
+            let writes = filled.as_ref().is_ok_and(|t| db::sql::lex::read_only_check(t, d).is_err());
+            let what = filled.as_deref().map_or_else(|_| String::new(), |t| verb(t, d));
+            f.memo = Some((key, filled, writes, what));
+        }
+        let Some((_, filled, writes, what)) = f.memo.clone() else { return };
+        let bar = match (writes, f.conn.is_some_and(|id| self.conn_writable(id)), f.stage) {
             (true, false, _) => Bar::Unlock,
             (true, true, Stage::Confirm) => Bar::Confirm,
             _ => Bar::Keys,
         };
-        let ready = self.conn(f.conn).is_some_and(|c| c.status == Status::Ready) || self.demo;
-        let failed = self.conn(f.conn).is_some_and(|c| matches!(c.status, Status::Failed(_)));
-        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| s.conn == f.conn && (s.db == f.db || s.db.is_empty() && f.db == self.default_db(f.conn)));
-        let cname = if self.conn(f.conn).is_some() { self.conn_name(f.conn) } else { "Pick a connection".to_string() };
-        let prod = self.conn(f.conn).is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
+        let ready = c.is_some_and(|c| c.status == Status::Ready || self.demo);
+        let failed = c.is_some_and(|c| matches!(c.status, Status::Failed(_)));
+        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| Some(s.conn) == f.conn && s.db == f.db);
+        let cname = c.map_or_else(|| "Pick a connection".to_string(), |c| c.meta.name.clone());
+        let prod = c.is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
         let mut todo: Vec<Do> = Vec::new();
         let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
             let form_w = fit_width(ctx, FORM_W);
@@ -131,11 +152,11 @@ impl App {
                                     ui.add_space(10.0);
                                     caption(ui, conn.meta.name.to_uppercase());
                                 });
-                                let here = (c == f.conn).then_some(f.db.as_str()).unwrap_or_default();
+                                let here = if Some(c) == f.conn { f.db.as_str() } else { "" };
                                 let dbs: Vec<&str> = if conn.dbs.is_empty() { vec![here] } else { conn.dbs.iter().map(|d| d.0.as_str()).collect() };
                                 for db in dbs {
                                     let text = if db.is_empty() { conn.meta.name.as_str() } else { db };
-                                    menu_act(ui, &mut todo, Do::Target(c, db.to_string()), |ui| ui.selectable_label(c == f.conn && db == f.db, text));
+                                    menu_act(ui, &mut todo, Do::Target(c, db.to_string()), |ui| ui.selectable_label(Some(c) == f.conn && db == f.db, text));
                                 }
                             }
                         });
@@ -245,14 +266,13 @@ impl App {
                 }
             } else if bar == Bar::Confirm {
                 let tag = if prod { ", a Production connection" } else { "" };
-                let verb = verb(filled.as_deref().unwrap_or(""), d);
-                let sub = if ready { format!("The {verb} runs as written. Undo can't reverse it.") } else { format!("Waiting for {cname} to connect.") };
+                let sub = if ready { format!("The {what} runs as written. Undo can't reverse it.") } else { format!("Waiting for {cname} to connect.") };
                 band_lines(&pnt, band, &format!("Changes data on {cname}{tag}"), &sub);
-                if (band_button(ui, band, &format!("Run {verb}"), ALERT()) || cmd_enter) && ready {
+                if (band_button(ui, band, &format!("Run {what}"), ALERT()) || cmd_enter) && ready {
                     todo.push(Do::Run);
                 }
             } else {
-                let run = if ready { "run" } else if failed { "connection failed: try again" } else if self.conn(f.conn).is_none() { "pick a connection first" } else { "connecting\u{2026}" };
+                let run = if ready { "run" } else if failed { "connection failed: try again" } else if c.is_none() { "pick a connection first" } else { "connecting\u{2026}" };
                 crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["tab"], "next value"), (&["\u{21b5}"], run)]);
                 crate::app::palette::key_hint_right(&pnt, band.right() - 16.0, band.center().y, "esc", "back to search");
                 if (enter || cmd_enter) && filled.is_ok() && ready {
@@ -268,7 +288,10 @@ impl App {
                 todo.push(Do::Edit);
             }
         });
-        let mut keep = !r.should_close() || todo.iter().any(|t| matches!(t, Do::Back));
+        // A click outside closes the form; Esc is taken above and steps back instead.
+        if r.should_close() && !todo.iter().any(|t| matches!(t, Do::Back)) {
+            return;
+        }
         for t in todo {
             match t {
                 Do::Back if f.stage == Stage::Confirm => f.stage = Stage::Fill,
@@ -278,48 +301,53 @@ impl App {
                     }
                     return;
                 }
-                Do::Retry => self.wake_conn(f.conn),
+                Do::Retry => {
+                    if let Some(id) = f.conn {
+                        self.wake_conn(id);
+                    }
+                }
                 Do::Target(c, db) => {
-                    if c != f.conn {
+                    if Some(c) != f.conn {
                         f.schema = self.library.scripts.iter().find(|s| s.id == f.id && s.conn == c).map(|s| s.schema.clone()).unwrap_or_default();
                     }
-                    f.conn = c;
+                    f.conn = Some(c);
+                    f.memo = None;
                     f.db = db;
                     f.stage = Stage::Fill;
                     self.wake_conn(c);
                 }
-                Do::MakeDefault => self.set_snippet_default(f.id, f.conn, &f.db, &f.schema),
-                Do::Edit => {
-                    keep = false;
-                    self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here);
+                Do::MakeDefault => {
+                    if let Some(id) = f.conn {
+                        self.set_snippet_default(f.id, id, &f.db, &f.schema);
+                    }
                 }
+                Do::Edit => return self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here),
                 Do::Unlock => {
+                    let Some(conn) = f.conn else { continue };
                     // Kept now, so "Stay read-only", which drops the form, does not drop what was typed.
                     self.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     let mut back = f;
                     back.stage = Stage::Confirm;
-                    let conn = back.conn;
                     self.ask_unlock_on(conn, move |a| a.modal = Some(Modal::Snippet(back)));
                     return;
                 }
                 Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
                 Do::Run => {
-                    let Ok(text) = filled.clone() else { continue };
+                    let (Ok(text), Some(conn)) = (filled.clone(), f.conn) else { continue };
                     self.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     // The database is worked out now that the connection is ready, as opening a script does.
                     if f.db.is_empty() {
-                        f.db = self.default_db(f.conn);
+                        f.db = self.default_db(conn);
                     }
-                    if f.db.is_empty() && !self.is_pg(f.conn) {
+                    if f.db.is_empty() && !self.is_pg(conn) {
                         self.warn("Pick a database to run this snippet in.");
                         continue;
                     }
-                    self.run_snippet(&f, text);
-                    return;
+                    return self.run_snippet(&f, conn, text);
                 }
             }
         }
-        if keep && self.modal.is_none() {
+        if self.modal.is_none() {
             self.modal = Some(Modal::Snippet(f));
         }
     }
@@ -335,11 +363,11 @@ impl App {
     /// Runs the filled statement in a Query tab on the form's target: the current tab when it holds nothing of the
     /// person's on that connection and database, else a new one. The tab is not bound to the script: its text is the
     /// filled statement, and Cmd+S on it saves a new script.
-    fn run_snippet(&mut self, f: &SnippetForm, text: String) {
-        // Only a blank Query tab is taken: not one bound to a script, whose template would be lost, nor one still running.
-        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == f.conn && t.sel.db == f.db && t.script.is_none() && t.sql.as_ref().is_some_and(|s| s.run_req == 0));
+    fn run_snippet(&mut self, f: &SnippetForm, conn: u64, text: String) {
+        // Only a blank Query tab is taken, not one bound to a script, whose template would be lost.
+        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == conn && t.sel.db == f.db && t.script.is_none());
         if !reuse {
-            self.sql_new_query(f.conn, f.db.clone());
+            self.sql_new_query(conn, f.db.clone());
         }
         if let Some(t) = self.tm() {
             t.script = None;
@@ -370,16 +398,18 @@ fn band_button(ui: &mut egui::Ui, band: egui::Rect, label: &str, fill: Color32) 
     ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| primary(ui, label, fill).clicked()).inner
 }
 
-/// What a write does, for "Run UPDATE": the first keyword after comments, or after a WITH its first write.
+/// What a write does, for "Run UPDATE": the first keyword of the statement the read-only check refuses, after its comments,
+/// or after a WITH its first write.
 fn verb(text: &str, d: db::sql::Dialect) -> String {
-    let words: Vec<String> = db::sql::lex::tokens(text, d).into_iter().filter(|(t, _)| *t == db::sql::lex::Tok::Word).map(|(_, r)| text[r].to_ascii_uppercase()).collect();
-    let writes = ["INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE"];
-    match words.first().map(String::as_str) {
-        Some("WITH") => words.iter().find(|w| writes.contains(&w.as_str())).cloned(),
-        Some(w) => Some(w.to_string()),
-        None => None,
+    use db::sql::lex::{read_only_check, split_statements, tokens, Tok};
+    let stmt = split_statements(text, d).into_iter().map(|(_, s)| s).find(|s| read_only_check(s, d).is_err()).unwrap_or(text);
+    let mut words = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| &stmt[r]);
+    let is = |w: &str, k: &str| w.eq_ignore_ascii_case(k);
+    match words.next() {
+        Some(w) if is(w, "with") => words.find(|w| ["insert", "update", "delete", "merge"].iter().any(|k| is(w, k))),
+        first => first,
     }
-    .unwrap_or_else(|| "statement".into())
+    .map_or_else(|| "statement".into(), str::to_ascii_uppercase)
 }
 
 impl App {
@@ -450,5 +480,7 @@ mod tests {
         assert_eq!(verb("-- nightly fix\nUPDATE orders SET a = 1", Dialect::MySql), "UPDATE");
         assert_eq!(verb("WITH x AS (SELECT 1) DELETE FROM t", Dialect::Postgres), "DELETE");
         assert_eq!(verb("", Dialect::MySql), "statement");
+        // The button names the statement that writes, not the first one.
+        assert_eq!(verb("SELECT 1; DELETE FROM t", Dialect::MySql), "DELETE");
     }
 }

@@ -1165,6 +1165,8 @@ pub(crate) const PALETTE_FOOT_H: f32 = 36.0;
 pub(crate) const CONFIRM_BAR_H: f32 = 60.0;
 /// The tallest a filled statement's preview grows before it scrolls.
 pub(crate) const PREVIEW_MAX_H: f32 = 220.0;
+/// The widest a value field of a snippet's strip grows with its text.
+pub(crate) const VALUE_FIELD_MAX_W: f32 = 220.0;
 /// The message shown in a list with no matches.
 pub(crate) const EMPTY_LIST_H: f32 = 64.0;
 // The tab list behind the strip's "N tabs" button: width, filter row and connection header.

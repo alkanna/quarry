@@ -1069,7 +1069,7 @@ impl App {
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
-        let note = if new == text && f.special == 0 && f.refused == 0 && f.held == 0 { "Already formatted".to_string() } else { f.summary() };
+        let note = if new == text && f.untouched() == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }
     }
@@ -1148,7 +1148,9 @@ impl App {
                     } else {
                         ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number");
                     }
-                    make_value = acts.pop().or(make_value.take());
+                    if let Some(r) = acts.pop() {
+                        make_value = Some(r);
+                    }
                 });
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let info = s.caret_info(dialect);

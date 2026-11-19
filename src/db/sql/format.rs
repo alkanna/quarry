@@ -21,10 +21,15 @@ pub struct Formatted {
 }
 
 impl Formatted {
+    /// Statements left as they were, for any reason.
+    pub fn untouched(&self) -> usize {
+        self.special + self.refused + self.held
+    }
+
     /// The line the status shows after a format.
     pub fn summary(&self) -> String {
         let plural = |n: usize| if n == 1 { "statement" } else { "statements" };
-        let mut s = if self.formatted == 0 && self.special == 0 && self.refused == 0 && self.held == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
+        let mut s = if self.formatted == 0 && self.untouched() == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
         if self.special > 0 {
             s.push_str(&format!(", left {} {} with a DELIMITER, /*! */ or BEGIN ATOMIC as written", self.special, plural(self.special)));
         }
