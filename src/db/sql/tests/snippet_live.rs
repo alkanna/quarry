@@ -17,6 +17,9 @@ fn live_a_text_value_reads_back_unchanged_on_mysql_and_mariadb() {
     every_server(|l, var| {
         for v in EVIL {
             assert_eq!(l.one(&filled(TEXT, v, Dialect::MySql)), v, "{var}: {v}");
+            // Inside a string the statement already quotes, single or double.
+            assert_eq!(l.one(&filled("SELECT '<{{q}}>' AS v", v, Dialect::MySql)), format!("<{v}>"), "{var}: {v}");
+            assert_eq!(l.one(&filled("SELECT \"<{{q}}>\" AS v", v, Dialect::MySql)), format!("<{v}>"), "{var}: {v}");
         }
         let t = "SELECT {{d:date}} AS d, {{n:int}} + 1 AS n, {{c:identifier}} FROM (SELECT 7 AS `odd``name`) x WHERE 7 IN ({{ids:int list}})";
         let p = parse(t, Dialect::MySql);
@@ -31,6 +34,10 @@ fn live_a_text_value_reads_back_unchanged_on_postgres() {
     every_pg(|l, var| {
         for v in EVIL {
             assert_eq!(l.one(&filled(TEXT, v, Dialect::Postgres)), v, "{var}: {v}");
+            assert_eq!(l.one(&filled("SELECT E'<{{q}}>'", v, Dialect::Postgres)), format!("<{v}>"), "{var}: {v}");
+            if !v.contains('\\') {
+                assert_eq!(l.one(&filled("SELECT '<{{q}}>'", v, Dialect::Postgres)), format!("<{v}>"), "{var}: {v}");
+            }
         }
         assert_eq!(l.one(&filled("SELECT {{q:date}}::date::text", "2026-11-03", Dialect::Postgres)), "2026-11-03", "{var}");
         assert_eq!(l.one(&filled("SELECT 1 FROM (SELECT 1 AS \"a\"\"b\") x WHERE {{q:identifier}} = 1", "a\"b", Dialect::Postgres)), "1", "{var}");
