@@ -519,8 +519,8 @@ mod tests {
         let neg = "SELECT a -{{n:int}} AND b = {{x:number}} AND id IN ({{ids:int list}})";
         assert_eq!(fill(neg, &parse(neg, PG), &vals_of(&parse(neg, PG), &["-5", "-1.5", "-1, 2"]), PG, true).unwrap(), "SELECT a -(-5) AND b = (-1.5) AND id IN ((-1), 2)");
         assert_eq!(literal(&Var { name: "id".into(), ty: Ty::Int, default: None }, "18446744073709551615", MY, true).unwrap(), "18446744073709551615");
-        // An empty text value takes its default; without one it is the empty string.
-        let t = "SELECT {{s=paid}}, {{q}}";
+        // An empty text value takes its default; `=` with nothing after it allows the empty string.
+        let t = "SELECT {{s=paid}}, {{q=}}";
         assert_eq!(fill(t, &parse(t, MY), &vals_of(&parse(t, MY), &["", ""]), MY, true).unwrap(), "SELECT 'paid', ''");
         // Under NO_BACKSLASH_ESCAPES a backslash is written once.
         assert_eq!(fill("SELECT {{q}}", &parse("SELECT {{q}}", MY), &vals_of(&parse("SELECT {{q}}", MY), &["C:\\data"]), MY, false).unwrap(), "SELECT 'C:\\data'");
