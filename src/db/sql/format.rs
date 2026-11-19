@@ -209,7 +209,24 @@ pub fn format_script(text: &str, d: Dialect) -> Formatted {
             res.special += 1;
             continue;
         }
-        match one(stmt, d) {
+        // A snippet's {{...}} values are not SQL: each stands in as one word while the rest is laid out, then goes back.
+        let holes = crate::library::snippet::parse(stmt, d).holes;
+        let mask = |i: usize| format!("__quarry_value_{i}__");
+        if !holes.is_empty() && stmt.contains("__quarry_value_") {
+            res.special += 1;
+            continue;
+        }
+        let mut masked = stmt.to_string();
+        for (i, h) in holes.iter().enumerate().rev() {
+            masked.replace_range(h.span.clone(), &mask(i));
+        }
+        let unmask = |mut s: String| {
+            for (i, h) in holes.iter().enumerate() {
+                s = s.replacen(&mask(i), &stmt[h.span.clone()], 1);
+            }
+            s
+        };
+        match one(&masked, d).map(unmask) {
             Some(new) => {
                 res.text.push_str(&text[last..r.start]);
                 res.text.push_str(&new);

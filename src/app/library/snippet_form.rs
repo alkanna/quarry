@@ -91,7 +91,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.set_height(PALETTE_HEAD_H);
                 ui.add_space(12.0);
-                if quiet(ui, "\u{2039}").on_hover_text("Back to the search (Esc)").clicked() {
+                if quiet(ui, "Back").on_hover_text("Back to the search (Esc)").clicked() {
                     todo.push(Do::Back);
                 }
                 ui.add_space(6.0);
@@ -99,7 +99,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(14.0);
                     let label = if f.db.is_empty() { cname.clone() } else { format!("{cname} \u{b7} {}", f.db) };
-                    ui.menu_button(RichText::new(format!("{label}  \u{25be}")).color(BRIGHT()), |ui| {
+                    ui.menu_button(RichText::new(label).color(BRIGHT()), |ui| {
                         menu_list(ui);
                         for (c, name, dbs) in &conns {
                             ui.horizontal(|ui| {
@@ -235,7 +235,7 @@ impl App {
                 pnt.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, RAISED().lerp_to_gamma(PANEL(), 0.5));
                 pnt.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
                 let run = if ready { "run" } else { "connecting\u{2026}" };
-                crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["\u{21e5}"], "next value"), (&["\u{21b5}"], run)]);
+                crate::app::palette::key_hints(&pnt, band.left() + 16.0, band.center().y, &[(&["tab"], "next value"), (&["\u{21b5}"], run)]);
                 crate::app::palette::key_hint_right(&pnt, band.right() - 16.0, band.center().y, "esc", "back to search");
                 if (enter || cmd_enter) && filled.is_ok() && ready {
                     todo.push(Do::Run);

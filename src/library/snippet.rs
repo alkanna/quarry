@@ -416,6 +416,18 @@ mod tests {
     }
 
     #[test]
+    fn format_keeps_placeholders_as_written() {
+        for d in [MY, PG] {
+            let f = crate::db::sql::format::format_script("select id from orders where status = {{status:paid|pending}} and id in ({{ids:int list}}) limit {{n:int=10}}", d);
+            assert_eq!(f.formatted, 1);
+            for ph in ["{{status:paid|pending}}", "{{ids:int list}}", "{{n:int=10}}"] {
+                assert!(f.text.contains(ph), "{ph} lost in {}", f.text);
+            }
+            assert!(f.text.contains("SELECT"));
+        }
+    }
+
+    #[test]
     fn a_statement_alone_takes_the_types_of_its_script() {
         let full = parse("SELECT {{day:date}};\nSELECT {{day}}", MY);
         let vals = std::collections::HashMap::from([("day".to_string(), "2026-11-03".to_string())]);

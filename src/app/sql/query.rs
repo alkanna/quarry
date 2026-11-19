@@ -956,7 +956,8 @@ impl App {
         let Some(t) = self.tabs.get(ti) else { return };
         let conn = t.sel.conn;
         let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
-        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX {
+        // A statement with {{...}} values is not SQL until Run fills it, so the server is not asked about it.
+        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || s.query[r.clone()].contains("{{") {
             return;
         }
         let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
