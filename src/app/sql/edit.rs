@@ -932,7 +932,7 @@ impl App {
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
-        // `pk IN (...)` for one key column, a row-value list for several.
+        // `pk = x` (joined with AND) for one row, `pk IN (...)` for several, a row-value list for a key of several columns.
         let key_list = || -> String {
             // One row reads as plain equality; IN would mean the same to the server.
             if let [one] = rows.as_slice() {
@@ -961,16 +961,18 @@ impl App {
                 }
                 // Each column the rows agree on is set to its value, so the statement opens valid and runs as a no-op until
                 // edited. Keys and generated columns are left out, and so is a column the rows hold different values in.
-                let sets: Vec<String> = cols
+                let free: Vec<&Col> = cols.iter().filter(|c| !c.generated && !pk.contains(&c.src)).collect();
+                let mut sets: Vec<String> = free
                     .iter()
-                    .filter(|c| !c.generated && !pk.contains(&c.src))
                     .filter_map(|c| {
                         let v = rows[0].get(&c.name)?;
                         rows.iter().all(|r| r.get(&c.name) == Some(v)).then(|| format!("{} = {}", d.quote_ident(&c.src), copy::sql_literal(d, Some(v), is_numeric(c.kind), bs)))
                     })
                     .collect();
                 // With nothing in common, a column set to itself keeps the statement valid and shows the form to follow.
-                let sets = if sets.is_empty() { cols.iter().find(|c| !c.generated && !pk.contains(&c.src)).map(|c| format!("{0} = {0}", d.quote_ident(&c.src))).into_iter().collect() } else { sets };
+                if let (true, Some(c)) = (sets.is_empty(), free.first()) {
+                    sets.push(format!("{0} = {0}", d.quote_ident(&c.src)));
+                }
                 let text = format!("UPDATE {}\nSET {}\nWHERE {};", d.qualified(sel.space(), &sel.coll), sets.join(",\n    "), key_list());
                 let t = self.tm().unwrap();
                 if let Some(s) = t.sql.as_mut() {
@@ -1071,7 +1073,13 @@ impl App {
             Ok(v) => copy::sql_literal(d, Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 {
+            let lits: Vec<String> = f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect();
+            // As Edit in Query writes it: one row with =, several with IN.
+            if let [one] = lits.as_slice() { format!("{} = {one}", d.quote_ident(&pk[0])) } else { format!("{} IN ({})", d.quote_ident(&pk[0]), lits.join(", ")) }
+        } else {
+            format!("{} composite keys", n)
+        };
         egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));
