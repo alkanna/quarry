@@ -113,7 +113,7 @@ pub(crate) fn show_text(ui: &mut egui::Ui, id: egui::Id, text: &str) {
         ui.data_mut(|d| d.remove::<bool>(key));
     }
     match parse(ui.ctx(), id, text) {
-        Ok(v) => show_folded(ui, id.with("tree"), &v, fold),
+        Ok(v) => show(ui, id.with("tree"), &v, fold),
         Err(e) => {
             ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
         }
@@ -140,12 +140,8 @@ pub(crate) fn mode_switch(ui: &mut egui::Ui, id: egui::Id) -> bool {
 }
 
 /// The tree with Expand all and Collapse all over it. The first two levels start open.
-pub(crate) fn show(ui: &mut egui::Ui, id: egui::Id, v: &Bson) {
-    show_folded(ui, id, v, None);
-}
-
-/// `show` with every node opened or closed this frame when `fold` says so.
-fn show_folded(ui: &mut egui::Ui, id: egui::Id, v: &Bson, mut fold: Option<bool>) {
+/// `fold` opens or closes every node this frame, as those buttons do.
+fn show(ui: &mut egui::Ui, id: egui::Id, v: &Bson, mut fold: Option<bool>) {
     ui.horizontal(|ui| {
         if quiet(ui, "Expand all").clicked() {
             fold = Some(true);
