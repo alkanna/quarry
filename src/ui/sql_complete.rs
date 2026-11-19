@@ -582,8 +582,6 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
     Out { from, sugs, foot, ..Default::default() }
 }
 
-/// The values of the column whose comparison the open string belongs to. `toks` are the tokens
-/// before the string.
 /// Where the operand of the comparison the caret is in ends: before `=`, `<>`, `!=`, `LIKE`, `NOT` or an `IN (` list.
 fn compared_end(toks: &[Tk]) -> Option<usize> {
     let mut end = toks.len();
@@ -612,6 +610,8 @@ fn compared_end(toks: &[Tk]) -> Option<usize> {
     Some(end)
 }
 
+/// The values of the column whose comparison the open string belongs to. `toks` are the tokens
+/// before the string.
 fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], values: &Fields) -> Option<Out> {
     let parts = operand(toks, compared_end(toks)?);
     let (table, col) = match parts.as_slice() {

@@ -159,6 +159,12 @@ impl App {
         self.default_db(conn)
     }
 
+    /// Whether a saved script already runs at this target, so Make default has nothing to change. A script saved without
+    /// a database or schema runs in the tab's own: `own_schema` is that schema.
+    pub(in crate::app) fn runs_at(&self, s: &crate::library::Script, conn: u64, db: &str, schema: &str, own_schema: &str) -> bool {
+        s.conn == conn && self.script_db(conn, &s.db) == db && (s.schema == schema || s.schema.is_empty() && schema == own_schema)
+    }
+
     /// The database a connection opens in when nothing names one: the one in its address, else the first that is not the
     /// server's own (information_schema, mysql, admin and the like), never simply the first in the list.
     pub(in crate::app) fn default_db(&self, conn: u64) -> String {

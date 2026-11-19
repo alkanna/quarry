@@ -118,7 +118,7 @@ impl App {
         };
         let ready = c.is_some_and(|c| c.status == Status::Ready || self.demo);
         let failed = c.is_some_and(|c| matches!(c.status, Status::Failed(_)));
-        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| Some(s.conn) == f.conn && f.conn.is_some_and(|c| self.script_db(c, &s.db) == f.db) && s.schema == f.schema);
+        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| f.conn.is_some_and(|c| self.runs_at(s, c, &f.db, &f.schema, "")));
         let cname = c.map_or_else(|| "Pick a connection".to_string(), |c| c.meta.name.clone());
         let prod = c.is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
         let mut todo: Vec<Do> = Vec::new();
@@ -373,8 +373,7 @@ impl App {
         if let Some(t) = self.tm() {
             t.script = None;
             if let Some(q) = t.sql.as_mut() {
-                (q.snip_vals, q.snip_filled) = Default::default();
-                q.snip_off = true;
+                (q.snip_vals, q.snip_filled, q.snip_off) = (Default::default(), false, true);
                 q.query = text;
                 q.caret = 0;
                 q.run_schema = f.schema.clone();

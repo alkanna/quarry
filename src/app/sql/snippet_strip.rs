@@ -39,8 +39,7 @@ impl App {
             crate::library::ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == id),
             _ => None,
         });
-        // A script saved without a database or schema runs in the tab's own, which is not a change to offer.
-        let make_default = saved.filter(|s| s.conn != conn || self.script_db(conn, &s.db) != db || s.schema != schema && !(s.schema.is_empty() && schema == t.sel.schema)).map(|s| s.id);
+        let make_default = saved.filter(|s| !self.runs_at(s, conn, &db, &schema, &t.sel.schema)).map(|s| s.id);
         let mut set_default = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return false };
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -228,9 +227,8 @@ pub(in crate::app) fn literal_at(text: &str, sel: Range<usize>, d: db::sql::Dial
         // A negative or decimal number is several tokens side by side: a minus, digits, a dot.
         let (first, last) = (picked.first()?, picked.last()?);
         let span = first.1.start..last.1.end;
-        let n = text[span.clone()].strip_prefix('-').unwrap_or(&text[span.clone()]);
         let joined = picked.windows(2).all(|w| w[0].1.end == w[1].1.start);
-        return (joined && n.starts_with(|c: char| c.is_ascii_digit()) && n.parse::<f64>().is_ok()).then_some(span);
+        return (joined && snippet::number(&text[span.clone()]).is_some()).then_some(span);
     };
     let lit = match t {
         Tok::Str => true,

@@ -9,8 +9,13 @@ use mongodb::bson::{spec::BinarySubtype, Binary, Bson};
 /// written as \0 and \Z like mysqldump does, since a raw NUL ends the text for C tools and a raw Ctrl-Z ends
 /// a file read in text mode on Windows. Under NO_BACKSLASH_ESCAPES there is no escape, so they stay raw.
 pub fn lit(s: &str, bs: bool) -> String {
-    let s = if bs { s.replace('\\', "\\\\").replace('\0', "\\0").replace('\u{1a}', "\\Z") } else { s.to_string() };
+    let s = if bs { mysql_escapes(s) } else { s.to_string() };
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The backslash escapes of a MySQL string, without its quotes: for text that goes inside a string already written.
+pub fn mysql_escapes(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\0', "\\0").replace('\u{1a}', "\\Z")
 }
 
 /// A PostgreSQL string literal that reads the same whatever standard_conforming_strings is: with a backslash in it the text goes

@@ -3,7 +3,7 @@
 //! type; inside a string, as in `LIKE '%{{name}}%'`, it joins that string with its quotes escaped. Never as SQL text. In
 //! a comment, a quoted name or a dollar-quoted body a placeholder is plain text.
 use crate::db::sql::lex::{tokens, Tok};
-use crate::db::sql::value::{lit, pg_lit};
+use crate::db::sql::value::{lit, mysql_escapes, pg_lit};
 use crate::db::sql::Dialect;
 use std::ops::Range;
 
@@ -177,8 +177,7 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
         return out;
     }
     let (code, strs) = code_mask(text, d);
-    // Whether each value's type was written, so two written types that differ are refused in either order.
-    let mut typed: Vec<bool> = Vec::new();
+    let mut typed = Vec::new();
     let mut i = 0;
     while let Some(off) = text[i..].find("{{") {
         let s = i + off;
@@ -200,76 +199,63 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
             return out;
         };
         let e = s + 2 + len + 2;
-        let span = s..e;
-        // In a string, braces that don't read as a placeholder are its text, such as a stored template: only code fails.
-        macro_rules! fail {
-            ($msg:expr) => {{
-                if at != At::Code {
-                    i = e;
-                    continue;
-                }
-                out.err = Some(VarErr { span: span.clone(), msg: $msg });
-                return out;
-            }};
-        }
         let clean = match at {
             At::Code => code[s..e].iter().all(|c| *c),
             _ => !text[s..e].contains(['\'', '"', '\\']),
         };
-        if !clean {
-            fail!("A value can't hold quotes or comments.".into());
-        }
-        let inner = text[s + 2..e - 2].trim();
-        let (head, default) = match inner.split_once('=') {
-            Some((h, v)) => (h.trim(), Some(v.trim().to_string())),
-            None => (inner, None),
-        };
-        let (name, ty) = match head.split_once(':') {
-            Some((n, t)) => (n.trim(), Some(t.trim())),
-            None => (head, None),
-        };
-        if !valid_name(name) {
-            fail!(format!("\"{name}\" is not a value name: use letters, digits and _."));
-        }
-        let ty = match ty {
-            Some(t) => match Ty::read(t) {
-                Some(ty) => Some(ty),
-                None => {
-                    let names: Vec<&str> = TYPES.iter().map(|t| t.0).collect();
-                    fail!(format!("\"{t}\" is not a type. Use {}.", names.join(", ")));
-                }
-            },
-            None => None,
-        };
-        let var = match out.vars.iter().position(|v| v.name == name) {
-            Some(k) => {
-                let v = &mut out.vars[k];
-                match ty {
-                    Some(t) if typed[k] && v.ty != t => {
-                        fail!(format!("{name} is already {}.", v.ty.spec()));
-                    }
-                    // The first mention without a type is text until a later one names it.
-                    Some(t) => {
-                        v.ty = t;
-                        typed[k] = true;
-                    }
-                    None => {}
-                }
-                if v.default.is_none() {
-                    v.default = default;
-                }
-                k
+        let read = if clean { read_hole(&text[s + 2..e - 2], &mut out.vars, &mut typed) } else { Err("A value can't hold quotes or comments.".into()) };
+        match read {
+            Ok(var) => out.holes.push(Hole { var, span: s..e, at }),
+            // In a string, braces that don't read as a placeholder are its text, such as a stored template: only code fails.
+            Err(_) if at != At::Code => {}
+            Err(msg) => {
+                out.err = Some(VarErr { span: s..e, msg });
+                return out;
             }
-            None => {
-                typed.push(ty.is_some());
-                out.vars.push(Var { name: name.into(), ty: ty.unwrap_or(Ty::Text), default });
-                out.vars.len() - 1
-            }
-        };
-        out.holes.push(Hole { var, span, at });
+        }
         i = e;
     }
     out
+}
+
+/// Reads the inside of one placeholder into `vars`: the index of its value, or why it does not read. `typed` says whether
+/// each value's type was written, so two written types that differ are refused in either order.
+fn read_hole(inner: &str, vars: &mut Vec<Var>, typed: &mut Vec<bool>) -> Result<usize, String> {
+    let inner = inner.trim();
+    let (head, default) = match inner.split_once('=') {
+        Some((h, v)) => (h.trim(), Some(v.trim().to_string())),
+        None => (inner, None),
+    };
+    let (name, ty) = match head.split_once(':') {
+        Some((n, t)) => (n.trim(), Some(t.trim())),
+        None => (head, None),
+    };
+    if !valid_name(name) {
+        return Err(format!("\"{name}\" is not a value name: use letters, digits and _."));
+    }
+    let ty = match ty {
+        Some(t) => Some(Ty::read(t).ok_or_else(|| format!("\"{t}\" is not a type. Use {}.", TYPES.map(|t| t.0).join(", ")))?),
+        None => None,
+    };
+    let Some(k) = vars.iter().position(|v| v.name == name) else {
+        typed.push(ty.is_some());
+        vars.push(Var { name: name.into(), ty: ty.unwrap_or(Ty::Text), default });
+        return Ok(vars.len() - 1);
+    };
+    let v = &mut vars[k];
+    match ty {
+        Some(t) if typed[k] && v.ty != t => return Err(format!("{name} is already {}.", v.ty.spec())),
+        // The first mention without a type is text until a later one names it.
+        Some(t) => {
+            v.ty = t;
+            typed[k] = true;
+        }
+        None => {}
+    }
+    if v.default.is_none() {
+        v.default = default;
+    }
+    Ok(k)
 }
 
 fn digits(s: &str, n: usize) -> Option<u32> {
@@ -308,7 +294,7 @@ fn signed(n: String) -> String {
     if n.starts_with('-') { format!("({n})") } else { n }
 }
 
-fn number(s: &str) -> Option<String> {
+pub fn number(s: &str) -> Option<String> {
     // Only plain decimals: Rust also reads inf and NaN, which no server takes as a number.
     let ok = !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E')) && s.parse::<f64>().is_ok_and(f64::is_finite);
     ok.then(|| s.to_string())
@@ -345,7 +331,7 @@ fn checked(v: &Var, value: &str) -> Result<String, String> {
 }
 
 /// The literal one value becomes, or why it can't.
-pub fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
+fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
     let c = checked(v, value)?;
     Ok(match &v.ty {
         Ty::Int | Ty::Number => signed(c),
@@ -372,19 +358,15 @@ fn in_string(v: &Var, value: &str, at: At, d: Dialect, bs: bool) -> Result<Strin
         At::EStr => ('\'', true),
         At::Code => return literal(v, value, d, bs),
     };
-    let c = if escapes && d == Dialect::Postgres {
-        c.replace('\\', "\\\\")
-    } else if escapes {
-        // The same escapes as a MySQL literal: `lit` without its quotes.
-        let l = lit(&c, true);
-        l[1..l.len() - 1].replace("''", "'")
-    } else {
-        c
+    let c = match escapes {
+        true if d == Dialect::Postgres => c.replace('\\', "\\\\"),
+        true => mysql_escapes(&c),
+        false => c,
     };
     Ok(c.replace(q, &format!("{q}{q}")))
 }
 
-/// The values of a text by name: an empty one takes the default when there is one.
+/// The values of a text by name: an empty one takes the default, and is refused when there is none.
 pub type Values = std::collections::HashMap<String, String>;
 
 /// The text with every placeholder replaced by the literal of its value. `bs` is the MySQL backslash reading, see `quote`.
