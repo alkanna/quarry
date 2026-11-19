@@ -932,9 +932,11 @@ impl App {
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
-        // `pk IN (...)` for one key column, a row-value list for several.
+        // `pk = x` for one row, `pk IN (...)` for several, row values for a composite key.
         let key_list = || -> String {
-            if pk.len() == 1 {
+            if let [one] = rows.as_slice() {
+                pk.iter().map(|p| format!("{} = {}", d.quote_ident(p), key_lit(one, p))).collect::<Vec<_>>().join(" AND ")
+            } else if pk.len() == 1 {
                 format!("{} IN ({})", d.quote_ident(&pk[0]), rows.iter().map(|r| key_lit(r, &pk[0])).collect::<Vec<_>>().join(", "))
             } else {
                 format!("({}) IN ({})", pk.iter().map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(", "), rows.iter().map(|r| format!("({})", pk.iter().map(|p| key_lit(r, p)).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join(", "))
@@ -956,7 +958,20 @@ impl App {
                 if pk.is_empty() {
                     return self.warn("This table has no primary key or unique key to address these rows.");
                 }
-                let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(sel.space(), &sel.coll), key_list());
+                // Columns the rows agree on keep their values, so the UPDATE parses and is a no-op until edited.
+                let free: Vec<&Col> = cols.iter().filter(|c| !c.generated && !pk.contains(&c.src)).collect();
+                let mut sets: Vec<String> = free
+                    .iter()
+                    .filter_map(|c| {
+                        let v = rows[0].get(&c.name)?;
+                        rows.iter().all(|r| r.get(&c.name) == Some(v)).then(|| format!("{} = {}", d.quote_ident(&c.src), copy::sql_literal(d, Some(v), is_numeric(c.kind), bs)))
+                    })
+                    .collect();
+                // Nothing in common: a column set to itself keeps the UPDATE valid.
+                if let (true, Some(c)) = (sets.is_empty(), free.first()) {
+                    sets.push(format!("{0} = {0}", d.quote_ident(&c.src)));
+                }
+                let text = format!("UPDATE {}\nSET {}\nWHERE {};", d.qualified(sel.space(), &sel.coll), sets.join(",\n    "), key_list());
                 let t = self.tm().unwrap();
                 if let Some(s) = t.sql.as_mut() {
                     s.query = text;
@@ -1056,7 +1071,12 @@ impl App {
             Ok(v) => copy::sql_literal(d, Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 {
+            let lits: Vec<String> = f.rows.iter().map(|r| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect();
+            if let [one] = lits.as_slice() { format!("{} = {one}", d.quote_ident(&pk[0])) } else { format!("{} IN ({})", d.quote_ident(&pk[0]), lits.join(", ")) }
+        } else {
+            format!("{} composite keys", n)
+        };
         egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));

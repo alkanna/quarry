@@ -64,6 +64,18 @@ fn view_value_in_the_cell_menu_opens_the_value() {
 }
 
 #[test]
+fn edit_in_query_opens_an_update_that_already_parses() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    right_click(&mut ui, "note row 2");
+    ui.click("Edit in Query");
+    let q = ui.query_text();
+    assert!(q.contains("`note` = 'Leave at the door'"), "the SET does not hold the row's values: {q}");
+    assert!(!q.contains("SET \n"), "the SET is empty: {q}");
+    let wh = q.lines().last().unwrap_or_default();
+    assert!(wh.starts_with("WHERE ") && wh.contains(" = ") && !wh.contains(" IN ("), "one row is not addressed with =: {q}");
+}
+
+#[test]
 fn the_large_editor_switches_between_text_and_tree() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let json = "{\n  \"door\": \"back\",\n  \"floors\": [1, 2]\n}";
