@@ -687,19 +687,19 @@ pub(crate) fn menu_list(ui: &mut egui::Ui) {
 }
 
 /// A click on `r` that is not part of a double or triple click, for a widget whose double click does something else. It
-/// answers once the double click window has passed, so the first click of a double click never acts. One click waits at a
-/// time, app wide.
+/// answers once the double click window has passed, so the first click of a double click never acts. Call it every frame
+/// the widget is drawn.
 pub(crate) fn single_click(ui: &egui::Ui, r: &egui::Response) -> bool {
-    let key = egui::Id::new("single-click-pending");
+    let key = r.id.with("single-click");
     if r.double_clicked() || r.triple_clicked() {
-        ui.data_mut(|d| d.remove::<(egui::Id, f64)>(key));
+        ui.data_mut(|d| d.remove::<f64>(key));
         return false;
     }
     let now = ui.input(|i| i.time);
     if r.clicked() {
-        ui.data_mut(|d| d.insert_temp(key, (r.id, now)));
+        ui.data_mut(|d| d.insert_temp(key, now));
     }
-    let Some((_, t)) = ui.data(|d| d.get_temp::<(egui::Id, f64)>(key)).filter(|(id, _)| *id == r.id) else { return false };
+    let Some(t) = ui.data(|d| d.get_temp::<f64>(key)) else { return false };
     let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
     let age = now - t;
     if age < wait {
@@ -707,7 +707,7 @@ pub(crate) fn single_click(ui: &egui::Ui, r: &egui::Response) -> bool {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait - age));
         return false;
     }
-    ui.data_mut(|d| d.remove::<(egui::Id, f64)>(key));
+    ui.data_mut(|d| d.remove::<f64>(key));
     // A widget that went undrawn past its window (closed, scrolled away, edited) drops the click instead of acting on it later.
     age < wait + 0.5
 }
