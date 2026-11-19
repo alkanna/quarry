@@ -161,19 +161,15 @@ impl App {
                     out.edit = Some(c.to_string());
                 }
             }
-            let (mut toggle, mut all) = (false, None);
+            // None folds or unfolds the tree, Some opens it with every node open or closed.
+            let mut folds: Vec<Option<bool>> = Vec::new();
             r.context_menu(|ui| {
                 menu_look(ui);
                 if json {
-                    toggle = ui.button(if open { "Collapse" } else { "Expand" }).clicked();
-                    if ui.button("Expand all").clicked() {
-                        all = Some(true);
-                    }
-                    if open && ui.button("Collapse all").clicked() {
-                        all = Some(false);
-                    }
-                    if toggle || all.is_some() {
-                        ui.close();
+                    menu_act(ui, &mut folds, None, |ui| ui.button(if open { "Collapse" } else { "Expand" }));
+                    menu_act(ui, &mut folds, Some(true), |ui| ui.button("Expand all"));
+                    if open {
+                        menu_act(ui, &mut folds, Some(false), |ui| ui.button("Collapse all"));
                     }
                     ui.separator();
                 }
@@ -200,20 +196,8 @@ impl App {
                 focus_ring(ui, &tr, tr.rect, R_SM as f32);
                 // A click on the value folds too, once the double click window has passed. Folding on the first click of a
                 // double click would shrink a tall tree, scroll the page and send the second click to another line.
-                let pend = rid.with(("pend", c));
-                let now = ui.input(|i| i.time);
-                let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
-                if r.double_clicked() {
-                    ui.data_mut(|d| d.remove::<f64>(pend));
-                } else if r.clicked() {
-                    ui.data_mut(|d| d.insert_temp(pend, now));
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
-                }
-                let due = ui.data(|d| d.get_temp::<f64>(pend)).is_some_and(|t| now - t >= wait);
-                if due {
-                    ui.data_mut(|d| d.remove::<f64>(pend));
-                }
-                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || due || toggle {
+                let toggle = single_click(ui, &r) || folds.contains(&None);
+                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || toggle {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {
@@ -221,7 +205,7 @@ impl App {
                         ui.data_mut(|d| d.remove::<f32>(room));
                     }
                 }
-                if let Some(o) = all {
+                if let Some(&Some(o)) = folds.iter().find(|f| f.is_some()) {
                     open = true;
                     ui.data_mut(|d| d.insert_temp(open_id, true));
                     json_tree::fold_all(ui.ctx(), tree_id(c), o);

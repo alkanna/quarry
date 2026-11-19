@@ -109,6 +109,8 @@ pub(crate) fn show_text(ui: &mut egui::Ui, id: egui::Id, text: &str) {
     match parse(ui.ctx(), id, text) {
         Ok(v) => show(ui, id.with("tree"), &v),
         Err(e) => {
+            // A fold asked for by fold_all is spent here too, or it would reach the next value of this id that parses.
+            ui.data_mut(|d| d.remove::<bool>(id.with("tree").with("fold-all")));
             ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
         }
     }

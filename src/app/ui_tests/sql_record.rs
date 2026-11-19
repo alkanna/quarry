@@ -196,5 +196,5 @@ fn an_open_tree_stays_drawn_when_its_line_scrolls_past() {
         ui.settle();
     }
     assert!(top(&ui) < 0.0, "the record line did not scroll off the top");
-    assert!(ui.h.query_all_by_label_contains("key").next().is_some(), "the open tree vanished once its line scrolled past");
+    assert!((0..120).any(|i| ui.h.query_all_by_label(&format!("key{i}")).next().is_some()), "the open tree vanished once its line scrolled past");
 }
