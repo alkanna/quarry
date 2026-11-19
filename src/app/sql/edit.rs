@@ -934,7 +934,10 @@ impl App {
         let key_lit = |r: &Document, p: &String| copy::sql_literal(d, r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
         // `pk IN (...)` for one key column, a row-value list for several.
         let key_list = || -> String {
-            if pk.len() == 1 {
+            // One row reads as plain equality; IN would mean the same to the server.
+            if let [one] = rows.as_slice() {
+                pk.iter().map(|p| format!("{} = {}", d.quote_ident(p), key_lit(one, p))).collect::<Vec<_>>().join(" AND ")
+            } else if pk.len() == 1 {
                 format!("{} IN ({})", d.quote_ident(&pk[0]), rows.iter().map(|r| key_lit(r, &pk[0])).collect::<Vec<_>>().join(", "))
             } else {
                 format!("({}) IN ({})", pk.iter().map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(", "), rows.iter().map(|r| format!("({})", pk.iter().map(|p| key_lit(r, p)).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join(", "))

@@ -71,6 +71,8 @@ fn edit_in_query_opens_an_update_that_already_parses() {
     let q = ui.query_text();
     assert!(q.contains("`note` = 'Leave at the door'"), "the SET does not hold the row's values: {q}");
     assert!(!q.contains("SET \n"), "the SET is empty: {q}");
+    let wh = q.lines().last().unwrap_or_default();
+    assert!(wh.starts_with("WHERE ") && wh.contains(" = ") && !wh.contains(" IN ("), "one row is not addressed with =: {q}");
 }
 
 #[test]
