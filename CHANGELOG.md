@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.57.0](https://github.com/alkanna/quarry/compare/v0.56.0...v0.57.0) (2026-11-19)
+
+
+### Features
+
+* explain dialog with a node panel, linked findings, self cost and time ([#290](https://github.com/alkanna/quarry/issues/290)) ([6b45321](https://github.com/alkanna/quarry/commit/6b45321ffb347011f101bca73acf609c698cc466))
+* explain finds what to fix, suggests indexes from the catalog, compares plans and tries indexes with HypoPG ([#292](https://github.com/alkanna/quarry/issues/292)) ([671a5ac](https://github.com/alkanna/quarry/commit/671a5ac94fabc1ca84f34de94539f9523625e075))
+
+
+### Bug Fixes
+
+* Move to folder shows no divider when there are no folders to list ([#288](https://github.com/alkanna/quarry/issues/288)) ([f23e0ce](https://github.com/alkanna/quarry/commit/f23e0ce49d8b8a66d709c77325b055e552229b40))
+* rail folders reopen the way they were left at the next launch ([#286](https://github.com/alkanna/quarry/issues/286)) ([2f5daad](https://github.com/alkanna/quarry/commit/2f5daadc96188402f76df3ae5e40c15accb7553f))
+* the Explain plan fills the dialog and long filters keep their indent when they wrap ([#289](https://github.com/alkanna/quarry/issues/289)) ([e86dc7a](https://github.com/alkanna/quarry/commit/e86dc7abca939db8f189b344f83d74e51087e687))
+* the vim mode badge stays in view when the editor scrolls ([#291](https://github.com/alkanna/quarry/issues/291)) ([1677e56](https://github.com/alkanna/quarry/commit/1677e5606e02aa3711b56c76d6a8380f547eefa8))
+
 ## [0.56.0](https://github.com/alkanna/quarry/compare/v0.55.0...v0.56.0) (2026-11-18)
 
 
