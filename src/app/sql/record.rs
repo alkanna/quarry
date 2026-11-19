@@ -201,7 +201,8 @@ impl App {
                 // A click on the value folds too, once the double click window has passed. Folding on the first click of a
                 // double click would shrink a tall tree, scroll the page and send the second click to another line.
                 let pend = rid.with(("pend", c));
-                let (now, wait) = ui.input(|i| (i.time, i.options.max_double_click_delay));
+                let now = ui.input(|i| i.time);
+                let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
                 if r.double_clicked() {
                     ui.data_mut(|d| d.remove::<f64>(pend));
                 } else if r.clicked() {
