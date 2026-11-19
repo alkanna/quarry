@@ -956,7 +956,19 @@ impl App {
                 if pk.is_empty() {
                     return self.warn("This table has no primary key or unique key to address these rows.");
                 }
-                let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(sel.space(), &sel.coll), key_list());
+                // Each column the rows agree on is set to its value, so the statement opens valid and runs as a no-op until
+                // edited. Keys and generated columns are left out, and so is a column the rows hold different values in.
+                let sets: Vec<String> = cols
+                    .iter()
+                    .filter(|c| !c.generated && !pk.contains(&c.src))
+                    .filter_map(|c| {
+                        let v = rows[0].get(&c.name)?;
+                        rows.iter().all(|r| r.get(&c.name) == Some(v)).then(|| format!("{} = {}", d.quote_ident(&c.src), copy::sql_literal(d, Some(v), is_numeric(c.kind), bs)))
+                    })
+                    .collect();
+                // With nothing in common, a column set to itself keeps the statement valid and shows the form to follow.
+                let sets = if sets.is_empty() { cols.iter().find(|c| !c.generated && !pk.contains(&c.src)).map(|c| format!("{0} = {0}", d.quote_ident(&c.src))).into_iter().collect() } else { sets };
+                let text = format!("UPDATE {}\nSET {}\nWHERE {};", d.qualified(sel.space(), &sel.coll), sets.join(",\n    "), key_list());
                 let t = self.tm().unwrap();
                 if let Some(s) = t.sql.as_mut() {
                     s.query = text;
