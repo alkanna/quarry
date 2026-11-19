@@ -118,6 +118,11 @@ impl App {
         if text.is_empty() {
             return self.warn("Put the caret in the SELECT to save as a view.");
         }
+        // A snippet's view is the statement with its values, as Run sends it.
+        let text = match self.snippet_fill_run(text) {
+            Ok(t) => t,
+            Err(e) => return self.warn(e),
+        };
         self.sql_new_view(conn, db, text);
     }
 

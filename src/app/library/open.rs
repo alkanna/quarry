@@ -149,7 +149,7 @@ impl App {
 
     /// The database a SQL or Shell script opens in: its own when it names one, else the current tab's on the same
     /// connection, else the connection's default.
-    fn script_db(&self, conn: u64, wanted: &str) -> String {
+    pub(in crate::app) fn script_db(&self, conn: u64, wanted: &str) -> String {
         if !wanted.is_empty() {
             return wanted.to_string();
         }
@@ -379,7 +379,7 @@ impl App {
                 }
                 if let Some(q) = self.tm().and_then(|t| t.sql.as_mut()) {
                     // The values of what the tab held before are not this script's.
-                    (q.snip_vals, q.snip_filled) = Default::default();
+                    (q.snip_vals, q.snip_filled, q.snip_off) = Default::default();
                     q.query = s.body.clone();
                     q.caret = 0;
                     q.run_schema = s.schema.clone();

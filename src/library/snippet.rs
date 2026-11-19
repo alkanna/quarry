@@ -143,24 +143,26 @@ fn code_mask(text: &str, d: Dialect) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
     for (t, r) in tokens(text, d) {
         if matches!(t, Tok::Word | Tok::Punct | Tok::Space | Tok::ExecOpen | Tok::ExecClose) {
             m[r].fill(true);
-        } else if t == Tok::Str && r.len() >= 2 {
-            let s = &text[r.clone()];
-            // Prefixed strings other than E'..', and dollar quotes, have no escape this could rely on: their placeholders
-            // stay text. So does a plain string with a backslash, which ends elsewhere when the server reads backslashes
-            // the other way, and would put the value in code.
-            let plain = !s.contains('\\');
-            let at = match s.as_bytes()[0] {
-                b'\'' if plain => Some((1, At::Str('\''))),
-                b'"' if plain && d != Dialect::Postgres => Some((1, At::Str('"'))),
-                b'E' | b'e' if d == Dialect::Postgres && s.as_bytes()[1] == b'\'' => Some((2, At::EStr)),
-                _ => None,
-            };
-            if let Some((open, at)) = at {
-                strs.push((r.start + open..r.end - 1, at));
-            }
+        } else if t == Tok::Str
+            && let Some((open, at)) = string_at(&text[r.clone()], d)
+        {
+            strs.push((r.start + open..r.end - 1, at));
         }
     }
     (m, strs)
+}
+
+/// Whether a string token can hold placeholders: how long its opening is and how it quotes. Prefixed strings other than
+/// E'..', and dollar quotes, have no escape a value could rely on, so their braces stay text. So does a plain string with
+/// a backslash, which ends elsewhere when the server reads backslashes the other way, and would put the value in code.
+pub fn string_at(s: &str, d: Dialect) -> Option<(usize, At)> {
+    let plain = !s.contains('\\');
+    match s.as_bytes() {
+        [b'\'', _, ..] if plain => Some((1, At::Str('\''))),
+        [b'"', _, ..] if plain && d != Dialect::Postgres => Some((1, At::Str('"'))),
+        [b'E' | b'e', b'\'', ..] if d == Dialect::Postgres => Some((2, At::EStr)),
+        _ => None,
+    }
 }
 
 /// A value name: letters, digits and _, not starting with a digit.
@@ -175,6 +177,8 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
         return out;
     }
     let (code, strs) = code_mask(text, d);
+    // Whether each value's type was written, so two written types that differ are refused in either order.
+    let mut typed: Vec<bool> = Vec::new();
     let mut i = 0;
     while let Some(off) = text[i..].find("{{") {
         let s = i + off;
@@ -241,11 +245,14 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
             Some(k) => {
                 let v = &mut out.vars[k];
                 match ty {
-                    Some(t) if v.ty != t && v.ty != Ty::Text => {
-                        fail!(format!("{name} is already a {}.", v.ty.spec()));
+                    Some(t) if typed[k] && v.ty != t => {
+                        fail!(format!("{name} is already {}.", v.ty.spec()));
                     }
                     // The first mention without a type is text until a later one names it.
-                    Some(t) => v.ty = t,
+                    Some(t) => {
+                        v.ty = t;
+                        typed[k] = true;
+                    }
                     None => {}
                 }
                 if v.default.is_none() {
@@ -254,6 +261,7 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
                 k
             }
             None => {
+                typed.push(ty.is_some());
                 out.vars.push(Var { name: name.into(), ty: ty.unwrap_or(Ty::Text), default });
                 out.vars.len() - 1
             }
@@ -384,17 +392,22 @@ pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Re
     if let Some(e) = &p.err {
         return Err(e.msg.clone());
     }
+    // An empty value with no default is refused, not sent as '': braces of a stored template would otherwise vanish.
+    // `{{name=}}` allows an empty one.
     let value = |v: &Var| {
         let given = values.get(&v.name).map(String::as_str).unwrap_or("");
-        let v = if given.trim().is_empty() { v.default.as_deref().unwrap_or(given) } else { given };
-        v.to_string()
+        match &v.default {
+            _ if !given.trim().is_empty() => Ok(given.to_string()),
+            Some(d) => Ok(d.clone()),
+            None => Err(format!("{} needs a value.", v.name)),
+        }
     };
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for h in &p.holes {
         let v = &p.vars[h.var];
         out.push_str(&text[last..h.span.start]);
-        out.push_str(&in_string(v, &value(v), h.at, d, bs)?);
+        out.push_str(&in_string(v, &value(v)?, h.at, d, bs)?);
         last = h.span.end;
     }
     out.push_str(&text[last..]);
@@ -501,6 +514,12 @@ mod tests {
         assert!(parse("x = {{9a}}", MY).err.unwrap().msg.contains("not a value name"));
         assert!(parse("x = {{day", MY).err.is_some());
         assert!(parse("x = {{a:int}} AND {{a:date}}", MY).err.unwrap().msg.contains("already"));
+        assert!(parse("x = {{a:text}} AND {{a:int}}", MY).err.unwrap().msg.contains("already text"));
+        assert_eq!(parse("x = {{a}} AND {{a:int}}", MY).vars[0].ty, Ty::Int);
+        // An empty value is refused unless the placeholder allows one.
+        let p = parse("x = {{a}} AND y = {{b=}}", MY);
+        assert!(fill("x = {{a}} AND y = {{b=}}", &p, &Values::new(), MY, true).unwrap_err().contains("a needs a value"));
+        assert_eq!(fill("x = {{a}} AND y = {{b=}}", &p, &vals_of(&p, &["1"]), MY, true).unwrap(), "x = '1' AND y = ''");
         assert!(parse("x = {{a:a||b}}", MY).err.is_some());
     }
 

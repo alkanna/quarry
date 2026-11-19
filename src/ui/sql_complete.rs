@@ -357,7 +357,7 @@ fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
         return None;
     }
     // Only a `{{` in code opens a placeholder, not one inside a string or a comment.
-    if !lex::tokens(before, dl).iter().any(|(t, r)| matches!(t, Tok::Punct | Tok::Str) && r.contains(&open)) {
+    if !lex::tokens(before, dl).iter().any(|(t, r)| r.contains(&open) && (*t == Tok::Punct || *t == Tok::Str && snippet::string_at(&before[r.clone()], dl).is_some())) {
         return None;
     }
     // A placeholder already closed after the caret gets no second `}}`.

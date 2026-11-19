@@ -97,7 +97,8 @@ impl App {
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            f.conn.hash(&mut h);
+            // The quoting depends on the dialect and backslash reading too, which change once the woken connection reads its sql_mode.
+            (f.conn, d == db::sql::Dialect::Postgres, f.conn.is_none_or(|id| self.sql_bs_of(id))).hash(&mut h);
             for v in &p.vars {
                 (&v.name, f.values.get(&v.name)).hash(&mut h);
             }
@@ -117,7 +118,7 @@ impl App {
         };
         let ready = c.is_some_and(|c| c.status == Status::Ready || self.demo);
         let failed = c.is_some_and(|c| matches!(c.status, Status::Failed(_)));
-        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| Some(s.conn) == f.conn && s.db == f.db);
+        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| Some(s.conn) == f.conn && f.conn.is_some_and(|c| self.script_db(c, &s.db) == f.db) && s.schema == f.schema);
         let cname = c.map_or_else(|| "Pick a connection".to_string(), |c| c.meta.name.clone());
         let prod = c.is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
         let mut todo: Vec<Do> = Vec::new();
@@ -373,6 +374,7 @@ impl App {
             t.script = None;
             if let Some(q) = t.sql.as_mut() {
                 (q.snip_vals, q.snip_filled) = Default::default();
+                q.snip_off = true;
                 q.query = text;
                 q.caret = 0;
                 q.run_schema = f.schema.clone();

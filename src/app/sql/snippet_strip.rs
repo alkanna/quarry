@@ -23,7 +23,7 @@ impl App {
         let Some(t) = self.t() else { return false };
         let Some(s) = t.sql.as_ref() else { return false };
         // Plain SQL, most tabs, costs one scan for `{{` per frame.
-        if !s.query.contains("{{") {
+        if s.snip_off || !s.query.contains("{{") {
             return false;
         }
         let p = snippet::parse(&s.query, d);
@@ -39,7 +39,8 @@ impl App {
             crate::library::ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == id),
             _ => None,
         });
-        let make_default = saved.filter(|s| s.conn != conn || s.db != db).map(|s| s.id);
+        // A script saved without a database or schema runs in the tab's own, which is not a change to offer.
+        let make_default = saved.filter(|s| s.conn != conn || self.script_db(conn, &s.db) != db || s.schema != schema && !(s.schema.is_empty() && schema == t.sel.schema)).map(|s| s.id);
         let mut set_default = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return false };
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -135,7 +136,7 @@ impl App {
         }
         let d = self.sql_dialect();
         let Some(t) = self.t() else { return Ok(text) };
-        let Some(s) = t.sql.as_ref() else { return Ok(text) };
+        let Some(s) = t.sql.as_ref().filter(|s| !s.snip_off) else { return Ok(text) };
         snippet::fill_named(&text, &snippet::parse(&s.query, d), &s.snip_vals, d, self.sql_bs_of(t.sel.conn))
     }
 
@@ -224,11 +225,12 @@ pub(in crate::app) fn literal_at(text: &str, sel: Range<usize>, d: db::sql::Dial
     use db::sql::lex::{tokens, Tok};
     let picked: Vec<(Tok, Range<usize>)> = tokens(text, d).into_iter().filter(|(t, r)| *t != Tok::Space && r.start < sel.end && r.end > sel.start).collect();
     let [(t, r)] = &picked[..] else {
-        // A negative number is a minus and a word.
-        return match &picked[..] {
-            [(Tok::Punct, m), (Tok::Word, n)] if &text[m.clone()] == "-" && m.end == n.start && text[n.clone()].starts_with(|c: char| c.is_ascii_digit()) => Some(m.start..n.end),
-            _ => None,
-        };
+        // A negative or decimal number is several tokens side by side: a minus, digits, a dot.
+        let (first, last) = (picked.first()?, picked.last()?);
+        let span = first.1.start..last.1.end;
+        let n = text[span.clone()].strip_prefix('-').unwrap_or(&text[span.clone()]);
+        let joined = picked.windows(2).all(|w| w[0].1.end == w[1].1.start);
+        return (joined && n.starts_with(|c: char| c.is_ascii_digit()) && n.parse::<f64>().is_ok()).then_some(span);
     };
     let lit = match t {
         Tok::Str => true,
@@ -244,6 +246,13 @@ mod tests {
 
     #[test]
     fn only_a_single_literal_is_picked() {
+        for d in [db::sql::Dialect::MySql, db::sql::Dialect::Postgres] {
+            let t = "SELECT 1 WHERE a > 2.5 AND b < -0.25 AND c = t.x";
+            let at = |s: &str| t.find(s).map(|i| i..i + s.len()).unwrap();
+            assert_eq!(literal_at(t, at("2.5"), d), Some(at("2.5")));
+            assert_eq!(literal_at(t, at("-0.25"), d), Some(at("-0.25")));
+            assert_eq!(literal_at(t, at("t.x"), d), None);
+        }
         let t = "SELECT * FROM o WHERE d = '2026-11-03' AND n = -5 AND x = y";
         let d = db::sql::Dialect::MySql;
         let at = |s: &str| t.find(s).map(|i| i..i + s.len()).unwrap();

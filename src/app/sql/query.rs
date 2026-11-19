@@ -1133,6 +1133,9 @@ impl App {
                 if let Some(r) = out.cursor_range {
                     s.caret = usize::from(r.primary.index);
                 }
+                if out.response.changed() {
+                    s.snip_off = false;
+                }
                 // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
                 // from the editor's stored state when the menu draws, as Run selection does.
                 out.response.context_menu(|ui| {
@@ -1146,7 +1149,7 @@ impl App {
                     if let Some(r) = picked {
                         menu_act(ui, &mut acts, r, |ui| ui.button("Make it a value\u{2026}"));
                     } else {
-                        ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number");
+                        menu_act(ui, &mut acts, 0..0, |ui| ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number"));
                     }
                     if let Some(r) = acts.pop() {
                         make_value = Some(r);

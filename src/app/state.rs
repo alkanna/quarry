@@ -561,6 +561,9 @@ pub(super) struct SqlTab {
     /// Values of the `{{...}}` placeholders of the Query text, by name, and whether the editor shows the statement filled in.
     pub(in crate::app) snip_vals: HashMap<String, String>,
     pub(in crate::app) snip_filled: bool,
+    /// The text is a snippet already filled by the Cmd+K form: braces a value brought in are text, not placeholders, until
+    /// the person edits it.
+    pub(in crate::app) snip_off: bool,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
