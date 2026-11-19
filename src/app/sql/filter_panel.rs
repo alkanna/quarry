@@ -588,7 +588,7 @@ fn row(ui: &mut egui::Ui, id: u32, c: &mut Cond, at: Target, p: &mut Panel, cx: 
         if !c.on {
             ui.multiply_opacity(0.5);
         }
-        let (changed, enter) = rule_editor(ui, &mut c.rule, cx.cols, row_salt(id), cx.d, pick, ops, hints);
+        let (changed, enter) = rule_editor(ui, &mut c.rule, cx.cols, row_salt(id), cx.d, cx.bs, pick, ops, hints);
         out.changed |= changed;
         out.run |= enter;
     });
