@@ -42,10 +42,13 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool, g
         act = Some(a);
         ui.close();
     }
+    // Names the rows, so it is not mistaken for the cell's "Filter to this value".
+    let what = if sql { "row" } else { "document" };
+    let filter = if n == 1 { format!("Filter to this {what}") } else { format!("Filter to these {n} {what}s") };
     let items: Vec<(&str, DocsAct)> = if sql {
-        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Set value…", DocsAct::SetValue), ("Edit in Query", DocsAct::EditQuery), ("Delete…", DocsAct::Delete)]
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), (&filter, DocsAct::Filter), ("Set value…", DocsAct::SetValue), ("Edit in Query", DocsAct::EditQuery), ("Delete…", DocsAct::Delete)]
     } else {
-        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Update in shell", DocsAct::Update), ("Delete…", DocsAct::Delete)]
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), (&filter, DocsAct::Filter), ("Update in shell", DocsAct::Update), ("Delete…", DocsAct::Delete)]
     };
     for (label, a) in items {
         let is_delete = matches!(a, DocsAct::Delete);
