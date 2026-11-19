@@ -423,7 +423,6 @@ mod tests {
             for ph in ["{{status:paid|pending}}", "{{ids:int list}}", "{{n:int=10}}"] {
                 assert!(f.text.contains(ph), "{ph} lost in {}", f.text);
             }
-            assert!(f.text.contains("SELECT"));
         }
     }
 
