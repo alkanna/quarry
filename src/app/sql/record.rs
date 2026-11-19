@@ -198,8 +198,21 @@ impl App {
                 let state = state_of(&tr);
                 chevron(ui.painter(), egui::pos2(val.left() + 10.0, val.center().y), open, if state > 0 { BRIGHT() } else { MUTED() });
                 focus_ring(ui, &tr, tr.rect, R_SM as f32);
-                // A click on the value folds too. A double click folds twice, so the tree ends as it was.
-                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || r.clicked() || toggle {
+                // A click on the value folds too, once the double click window has passed. Folding on the first click of a
+                // double click would shrink a tall tree, scroll the page and send the second click to another line.
+                let pend = rid.with(("pend", c));
+                let (now, wait) = ui.input(|i| (i.time, i.options.max_double_click_delay));
+                if r.double_clicked() {
+                    ui.data_mut(|d| d.remove::<f64>(pend));
+                } else if r.clicked() {
+                    ui.data_mut(|d| d.insert_temp(pend, now));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
+                }
+                let due = ui.data(|d| d.get_temp::<f64>(pend)).is_some_and(|t| now - t >= wait);
+                if due {
+                    ui.data_mut(|d| d.remove::<f64>(pend));
+                }
+                if tr.on_hover_text(if open { "Hide the tree" } else { "Show as a tree" }).clicked() || due || toggle {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(open_id, open));
                     if !open {

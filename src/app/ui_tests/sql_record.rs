@@ -70,6 +70,8 @@ fn a_json_value_in_the_record_folds_out_as_a_tree_and_has_the_eye() {
     ui.click("note record");
     ui.show("Expand all");
     ui.click("note record");
+    // The fold waits out the double click window.
+    ui.run_for(std::time::Duration::from_millis(600));
     assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "a click on the value did not fold the tree");
     ui.click("note tree");
     ui.show("Expand all");
@@ -162,7 +164,8 @@ fn the_record_menu_folds_a_json_value() {
     ui.click("Expand all");
     ui.show("side");
     right_click(&mut ui, "note record");
-    ui.click("Collapse all");
+    // The open tree has its own Collapse all; the menu's is drawn after it.
+    ui.click_last("Collapse all");
     ui.show("Expand all");
     assert!(ui.h.query_all_by_label("side").next().is_none(), "Collapse all left a node open");
     right_click(&mut ui, "note record");
