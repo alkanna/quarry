@@ -585,8 +585,7 @@ pub(crate) fn ac_input_with(
         ac.close();
     }
     let mut open = ac.id == Some(id) && !ac.items.is_empty();
-    // egui drops the focus on a bare Esc before any widget runs, and the editor would surrender it too. With the list
-    // open, Esc only closes the list and the editor keeps the caret.
+    // egui drops focus on a bare Esc before widgets run, so an open list takes Esc and gives the focus back.
     if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         ac.close();
         open = false;
