@@ -356,18 +356,24 @@ fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
     if before[open..].contains("}}") || before[open + 2..].contains('\n') {
         return None;
     }
+    // Only a `{{` in code opens a placeholder, not one inside a string or a comment.
+    if !lex::tokens(before, dl).iter().any(|(t, r)| *t == Tok::Punct && r.contains(&open)) {
+        return None;
+    }
+    // A placeholder already closed after the caret gets no second `}}`.
+    let close = if full_stmt.get(before.len()..).is_some_and(|rest| rest.split("{{").next().is_some_and(|r| r.contains("}}"))) { "" } else { "}}" };
     let inner = &before[open + 2..];
     let sugs: Vec<Sug>;
     let from;
     if let Some(colon) = inner.find(':') {
         let typed = inner[colon + 1..].trim_start();
         from = before.len() - typed.len();
-        sugs = snippet::TYPES.iter().filter(|(t, _)| starts_ci(t, typed) && *t != typed).map(|(t, d)| sug((*t).to_string(), "type", format!("{t}}}}}"), (*d).to_string(), String::new())).collect();
+        sugs = snippet::TYPES.iter().filter(|(t, _)| starts_ci(t, typed) && *t != typed).map(|(t, d)| sug((*t).to_string(), "type", format!("{t}{close}"), (*d).to_string(), String::new())).collect();
     } else {
         let typed = inner.trim_start();
         from = before.len() - typed.len();
         let names = snippet::parse(full_stmt, dl).vars;
-        sugs = names.iter().filter(|v| starts_ci(&v.name, typed) && v.name != typed).map(|v| sug(v.name.clone(), "column", format!("{}}}}}", v.name), v.ty.spec(), String::new())).collect();
+        sugs = names.iter().filter(|v| starts_ci(&v.name, typed) && v.name != typed).map(|v| sug(v.name.clone(), "column", format!("{}{close}", v.name), v.ty.spec(), String::new())).collect();
     }
     (!sugs.is_empty()).then_some(Out { from, sugs, ..Default::default() })
 }

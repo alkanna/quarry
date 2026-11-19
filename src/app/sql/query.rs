@@ -1133,14 +1133,15 @@ impl App {
                 if let Some(r) = out.cursor_range {
                     s.caret = usize::from(r.primary.index);
                 }
-                // Make it a value... turns the literal under the selection into a {{...}} placeholder.
-                let picked = out.cursor_range.and_then(|r| {
-                    let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
-                    let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
-                    super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
-                });
+                // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
+                // from the editor's stored state when the menu draws, as Run selection does.
                 out.response.context_menu(|ui| {
                     menu_list(ui);
+                    let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
+                        let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
+                        let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
+                        super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
+                    });
                     if ui.add_enabled(picked.is_some(), egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number").clicked() {
                         make_value = picked.clone();
                         ui.close();

@@ -56,6 +56,34 @@ fn enter_on_a_snippet_asks_for_its_values_and_enter_runs_the_filled_read() {
 }
 
 #[test]
+fn run_all_on_a_snippet_from_anywhere_asks_for_its_values() {
+    let Some(mut ui) = demo_ui(with_snippets) else { return };
+    let id = id_of(ui.app(), "Orders on a day");
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Run);
+    assert!(matches!(ui.app().modal, Some(Modal::Snippet(_))), "Run all ran a snippet without its values");
+    assert!(!query(ui.app()).contains("orders"));
+}
+
+#[test]
+fn a_tab_reused_for_another_snippet_drops_the_old_values() {
+    let Some(mut ui) = demo_ui(with_snippets) else { return };
+    let id = id_of(ui.app(), "Orders on a day");
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
+    ui.h.run_steps(2);
+    let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
+    s.snip_vals.insert("day".into(), "2025-01-01".into());
+    s.snip_filled = true;
+    let cur = ui.app().cur;
+    // Back to the saved text, so the tab is clean and the next script takes it.
+    ui.h.state_mut().tabs[cur].sql.as_mut().unwrap().query = READ.into();
+    let other = id_of(ui.app(), "Mark orders shipped");
+    ui.h.state_mut().open_script(&ScriptRef::Saved(other), crate::app::library::open::How::Here);
+    let s = ui.app().t().and_then(|t| t.sql.as_ref()).unwrap();
+    assert_eq!(s.query, WRITE);
+    assert!(s.snip_vals.is_empty() && !s.snip_filled);
+}
+
+#[test]
 fn a_bad_value_keeps_the_form_open() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Orders on a day");

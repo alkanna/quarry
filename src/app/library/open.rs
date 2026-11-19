@@ -271,6 +271,13 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
+        // Run on a snippet asks for its values first, whether from Cmd+K, the Library panel or a picker.
+        if how == How::Run
+            && let ScriptRef::Saved(id) = r
+            && self.library.scripts.iter().any(|s| s.id == *id && s.kind == "sql" && crate::library::snippet::parse(&s.body, self.dialect_of(s.conn)).is_snippet())
+        {
+            return self.open_snippet_form(*id, String::new());
+        }
         // A script already open in another tab is switched to: a second copy comes only from New tab or a duplicated tab.
         // Opened again on the tab it is in, it takes its saved text back, and Undo keeps the edits it replaced.
         if how == How::Here
@@ -365,14 +372,18 @@ impl App {
                     self.sql_new_query(s.conn, db);
                 }
                 if let Some(q) = self.tm().and_then(|t| t.sql.as_mut()) {
+                    // The values of what the tab held before are not this script's.
+                    (q.snip_vals, q.snip_filled) = Default::default();
                     q.query = s.body.clone();
                     q.caret = 0;
                     q.run_schema = s.schema.clone();
                     // A reused tab may have been switched to another database; the script runs in its own.
                     q.run_db = String::new();
                 }
+                // A linked file with {{...}} values opens to be filled in; it never runs with them empty.
+                let snippet = crate::library::snippet::parse(&s.body, self.dialect_of(s.conn)).is_snippet();
                 self.bind_script(r.clone(), View::Sql, s.body);
-                if run {
+                if run && !snippet {
                     self.sql_run(true, false);
                 }
             }

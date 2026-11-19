@@ -104,7 +104,8 @@ impl App {
         let d = self.sql_dialect();
         let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
         let p = snippet::parse(&s.query, d);
-        let out = snippet::fill_named(&s.query, &p, &s.snip_vals, d);
+        let bs = self.t().is_none_or(|t| self.sql_bs_of(t.sel.conn));
+        let out = snippet::fill_named(&s.query, &p, &s.snip_vals, d, bs);
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().id_salt("snip-filled").max_height((ui.available_height() * 0.5).max(96.0)).show(ui, |ui| match out {
@@ -124,8 +125,9 @@ impl App {
             return Ok(text);
         }
         let d = self.sql_dialect();
-        let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return Ok(text) };
-        snippet::fill_named(&text, &snippet::parse(&s.query, d), &s.snip_vals, d)
+        let Some(t) = self.t() else { return Ok(text) };
+        let Some(s) = t.sql.as_ref() else { return Ok(text) };
+        snippet::fill_named(&text, &snippet::parse(&s.query, d), &s.snip_vals, d, self.sql_bs_of(t.sel.conn))
     }
 
     /// Make it a value... on the selected literal of the Query editor, from its context menu.
@@ -153,7 +155,11 @@ impl App {
         let name_ok = !f.name.is_empty() && f.name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && f.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         dialog_body(ui, |ui| {
             stacked_field(ui, "Name", "Letters, digits and _", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut f.name).font(FontId::monospace(TXT_BODY)).desired_width(f32::INFINITY)).request_focus();
+                let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(FontId::monospace(TXT_BODY)).desired_width(f32::INFINITY));
+                // Only while nothing has focus, so a click into Type keeps it there.
+                if !ui.memory(|m| m.focused().is_some()) {
+                    r.request_focus();
+                }
             });
             ui.add_space(10.0);
             stacked_field(ui, "Type", "date, datetime, text, int, number, int list, identifier, or choices like paid|pending", |ui| {

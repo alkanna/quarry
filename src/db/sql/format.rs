@@ -210,9 +210,11 @@ pub fn format_script(text: &str, d: Dialect) -> Formatted {
             continue;
         }
         // A snippet's {{...}} values are not SQL: each stands in as one word while the rest is laid out, then goes back.
-        let holes = crate::library::snippet::parse(stmt, d).holes;
+        let vals = crate::library::snippet::parse(stmt, d);
+        let holes = vals.holes;
         let mask = |i: usize| format!("__quarry_value_{i}__");
-        if !holes.is_empty() && stmt.contains("__quarry_value_") {
+        // A placeholder that does not read is left as typed, with the rest of its statement.
+        if vals.err.is_some() || !holes.is_empty() && stmt.contains("__quarry_value_") {
             res.special += 1;
             continue;
         }

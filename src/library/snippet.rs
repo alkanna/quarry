@@ -228,7 +228,13 @@ fn is_datetime(s: &str) -> bool {
 }
 
 fn int(s: &str) -> Option<String> {
-    s.parse::<i64>().ok().map(|v| v.to_string())
+    // Unsigned too, for BIGINT UNSIGNED ids past i64.
+    s.parse::<i64>().map(|v| v.to_string()).or_else(|_| s.parse::<u64>().map(|v| v.to_string())).ok()
+}
+
+/// A negative number in parentheses: after a minus in the statement, a bare one would make `--`, a comment.
+fn signed(n: String) -> String {
+    if n.starts_with('-') { format!("({n})") } else { n }
 }
 
 fn number(s: &str) -> Option<String> {
@@ -237,27 +243,27 @@ fn number(s: &str) -> Option<String> {
     ok.then(|| s.to_string())
 }
 
-fn quote(s: &str, d: Dialect) -> String {
-    // MySQL's backslash escapes are on by default. Written for them, a value still ends where it should under
-    // NO_BACKSLASH_ESCAPES, since quotes are doubled, not escaped: at worst a backslash reads twice.
-    if d == Dialect::Postgres { pg_lit(s) } else { lit(s, true) }
+/// `bs` is whether a MySQL server reads backslashes as escapes, false under NO_BACKSLASH_ESCAPES. Quotes are doubled, not
+/// escaped, so the literal ends where it should either way; `bs` keeps a backslash in the value as one backslash.
+fn quote(s: &str, d: Dialect, bs: bool) -> String {
+    if d == Dialect::Postgres { pg_lit(s) } else { lit(s, bs) }
 }
 
 /// The literal one value becomes, or why it can't.
-pub fn literal(v: &Var, value: &str, d: Dialect) -> Result<String, String> {
+pub fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
     let s = value.trim();
     let bad = |what: &str| Err(format!("{} needs {what}.", v.name));
     match &v.ty {
-        Ty::Text => Ok(quote(value, d)),
-        Ty::Int => int(s).ok_or(()).or_else(|_| bad("a whole number")),
-        Ty::Number => number(s).ok_or(()).or_else(|_| bad("a number")),
-        Ty::Date if is_date(s) => Ok(quote(s, d)),
+        Ty::Text => Ok(quote(value, d, bs)),
+        Ty::Int => int(s).map(signed).ok_or(()).or_else(|_| bad("a whole number")),
+        Ty::Number => number(s).map(signed).ok_or(()).or_else(|_| bad("a number")),
+        Ty::Date if is_date(s) => Ok(quote(s, d, bs)),
         Ty::Date => bad("a date like 2026-11-03"),
-        Ty::DateTime if is_datetime(s) => Ok(quote(s, d)),
+        Ty::DateTime if is_datetime(s) => Ok(quote(s, d, bs)),
         Ty::DateTime => bad("a date and time like 2026-11-03 14:30"),
         Ty::IntList => {
             let parts: Vec<&str> = s.split([',', ' ', '\n', '\t', ';']).filter(|p| !p.is_empty()).collect();
-            let ints: Option<Vec<String>> = parts.iter().map(|p| int(p)).collect();
+            let ints: Option<Vec<String>> = parts.iter().map(|p| int(p).map(signed)).collect();
             match ints {
                 Some(i) if !i.is_empty() => Ok(i.join(", ")),
                 _ => bad("whole numbers separated by commas"),
@@ -265,14 +271,14 @@ pub fn literal(v: &Var, value: &str, d: Dialect) -> Result<String, String> {
         }
         Ty::Ident if s.is_empty() || s.contains('\0') => bad("a name"),
         Ty::Ident => Ok(s.split('.').map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(".")),
-        Ty::Choice(c) if c.iter().any(|c| c == s) => Ok(quote(s, d)),
+        Ty::Choice(c) if c.iter().any(|c| c == s) => Ok(quote(s, d, bs)),
         Ty::Choice(c) => bad(&format!("one of {}", c.join(", "))),
     }
 }
 
 /// The text with every placeholder replaced by the literal of its value. `values` follow `p.vars`; an empty one takes
-/// the default when there is one.
-pub fn fill(text: &str, p: &Parsed, values: &[String], d: Dialect) -> Result<String, String> {
+/// the default when there is one. `bs` is the MySQL backslash reading, see `quote`.
+pub fn fill(text: &str, p: &Parsed, values: &[String], d: Dialect, bs: bool) -> Result<String, String> {
     if let Some(e) = &p.err {
         return Err(e.msg.clone());
     }
@@ -282,8 +288,8 @@ pub fn fill(text: &str, p: &Parsed, values: &[String], d: Dialect) -> Result<Str
         .enumerate()
         .map(|(i, v)| {
             let given = values.get(i).map(String::as_str).unwrap_or("");
-            let value = if given.trim().is_empty() && v.ty != Ty::Text { v.default.as_deref().unwrap_or("") } else { given };
-            literal(v, value, d)
+            let value = if given.trim().is_empty() { v.default.as_deref().unwrap_or(given) } else { given };
+            literal(v, value, d, bs)
         })
         .collect::<Result<_, _>>()?;
     let mut out = String::with_capacity(text.len());
@@ -299,7 +305,7 @@ pub fn fill(text: &str, p: &Parsed, values: &[String], d: Dialect) -> Result<Str
 
 /// `text`, all or part of a script whose values `full` read, filled with the values by name. Each placeholder takes the
 /// type the whole script gives its name, so a statement that only says `{{day}}` still gets a date.
-pub fn fill_named(text: &str, full: &Parsed, values: &std::collections::HashMap<String, String>, d: Dialect) -> Result<String, String> {
+pub fn fill_named(text: &str, full: &Parsed, values: &std::collections::HashMap<String, String>, d: Dialect, bs: bool) -> Result<String, String> {
     if let Some(e) = &full.err {
         return Err(e.msg.clone());
     }
@@ -307,14 +313,14 @@ pub fn fill_named(text: &str, full: &Parsed, values: &std::collections::HashMap<
     if !p.is_snippet() {
         return Ok(text.to_string());
     }
-    p.err = None;
+    // A selection that cuts a placeholder in half keeps its error, so a raw {{ never reaches the server.
     for v in &mut p.vars {
         if let Some(f) = full.vars.iter().find(|f| f.name == v.name) {
             *v = f.clone();
         }
     }
     let vals: Vec<String> = p.vars.iter().map(|v| values.get(&v.name).cloned().unwrap_or_default()).collect();
-    fill(text, &p, &vals, d)
+    fill(text, &p, &vals, d, bs)
 }
 
 /// The placeholder that replaces a literal: its type read from the literal and the literal kept as the default when it
@@ -325,8 +331,9 @@ pub fn infer(token: &str) -> (Ty, Option<String>) {
     if let Some(inner) = quoted.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
         let v = inner.replace("''", "'");
         let ty = if is_date(&v) { Ty::Date } else if is_datetime(&v) { Ty::DateTime } else { Ty::Text };
-        // A default can't hold what ends or splits a placeholder.
-        let keep = !v.contains(['\'', '"', '=', '|']) && !v.contains("}}") && !v.contains("--") && !v.contains("/*");
+        // A default can't hold what ends, splits or comments out a placeholder, or a backslash, whose reading depends on
+        // the server and would be escaped again when filled.
+        let keep = !v.contains(['\'', '"', '=', '|', '#', '`', ';', '$', '\\', '{', '}']) && !v.contains("--") && !v.contains("/*") && !t.starts_with(['E', 'e']);
         return (ty, keep.then_some(v));
     }
     if int(t).is_some() {
@@ -384,12 +391,21 @@ mod tests {
     fn values_become_literals_of_their_type() {
         let t = "SELECT * FROM {{t:identifier}} WHERE d = {{day:date}} AND s = {{s:paid|pending}} AND id IN ({{ids:int list}}) LIMIT {{n:int=100}}";
         let p = parse(t, MY);
-        let out = fill(t, &p, &vals(&["shop.orders", "2026-11-03", "paid", "4405, 4407 4412", ""]), MY).unwrap();
+        let out = fill(t, &p, &vals(&["shop.orders", "2026-11-03", "paid", "4405, 4407 4412", ""]), MY, true).unwrap();
         assert_eq!(out, "SELECT * FROM `shop`.`orders` WHERE d = '2026-11-03' AND s = 'paid' AND id IN (4405, 4407, 4412) LIMIT 100");
-        assert!(fill(t, &p, &vals(&["x", "2026-02-30", "paid", "1", ""]), MY).unwrap_err().contains("day needs a date"));
-        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "shipped", "1", ""]), MY).unwrap_err().contains("one of paid, pending"));
-        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "paid", "1, a", ""]), MY).is_err());
-        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "paid", "1", "1; DROP"]), MY).is_err());
+        assert!(fill(t, &p, &vals(&["x", "2026-02-30", "paid", "1", ""]), MY, true).unwrap_err().contains("day needs a date"));
+        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "shipped", "1", ""]), MY, true).unwrap_err().contains("one of paid, pending"));
+        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "paid", "1, a", ""]), MY, true).is_err());
+        assert!(fill(t, &p, &vals(&["x", "2026-11-03", "paid", "1", "1; DROP"]), MY, true).is_err());
+        // A negative number goes in parentheses, so a minus before the placeholder never makes a comment.
+        let neg = "SELECT a -{{n:int}} AND b = {{x:number}} AND id IN ({{ids:int list}})";
+        assert_eq!(fill(neg, &parse(neg, PG), &vals(&["-5", "-1.5", "-1, 2"]), PG, true).unwrap(), "SELECT a -(-5) AND b = (-1.5) AND id IN ((-1), 2)");
+        assert_eq!(literal(&Var { name: "id".into(), ty: Ty::Int, default: None }, "18446744073709551615", MY, true).unwrap(), "18446744073709551615");
+        // An empty text value takes its default; without one it is the empty string.
+        let t = "SELECT {{s=paid}}, {{q}}";
+        assert_eq!(fill(t, &parse(t, MY), &vals(&["", ""]), MY, true).unwrap(), "SELECT 'paid', ''");
+        // Under NO_BACKSLASH_ESCAPES a backslash is written once.
+        assert_eq!(fill("SELECT {{q}}", &parse("SELECT {{q}}", MY), &vals(&["C:\\data"]), MY, false).unwrap(), "SELECT 'C:\\data'");
     }
 
     #[test]
@@ -397,22 +413,22 @@ mod tests {
         let t = "SELECT {{q}}";
         let p = parse(t, MY);
         let evil = "x' OR 1=1 -- \\";
-        assert_eq!(fill(t, &p, &vals(&[evil]), MY).unwrap(), "SELECT 'x'' OR 1=1 -- \\\\'");
-        assert_eq!(fill(t, &p, &vals(&[evil]), PG).unwrap(), "SELECT E'x'' OR 1=1 -- \\\\'");
-        assert_eq!(fill("SELECT {{c:identifier}}", &parse("SELECT {{c:identifier}}", PG), &vals(&["a\"b"]), PG).unwrap(), "SELECT \"a\"\"b\"");
+        assert_eq!(fill(t, &p, &vals(&[evil]), MY, true).unwrap(), "SELECT 'x'' OR 1=1 -- \\\\'");
+        assert_eq!(fill(t, &p, &vals(&[evil]), PG, true).unwrap(), "SELECT E'x'' OR 1=1 -- \\\\'");
+        assert_eq!(fill("SELECT {{c:identifier}}", &parse("SELECT {{c:identifier}}", PG), &vals(&["a\"b"]), PG, true).unwrap(), "SELECT \"a\"\"b\"");
         // The filled text is one statement whatever the value.
-        let out = fill(t, &p, &vals(&["'; DELETE FROM t; --"]), MY).unwrap();
+        let out = fill(t, &p, &vals(&["'; DELETE FROM t; --"]), MY, true).unwrap();
         assert_eq!(crate::db::sql::lex::split_statements(&out, MY).len(), 1);
     }
 
     #[test]
     fn numbers_and_datetimes() {
-        assert_eq!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, " 12.5 ", MY).unwrap(), "12.5");
-        assert!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, "inf", MY).is_err());
+        assert_eq!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, " 12.5 ", MY, true).unwrap(), "12.5");
+        assert!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, "inf", MY, true).is_err());
         let dt = Var { name: "at".into(), ty: Ty::DateTime, default: None };
-        assert_eq!(literal(&dt, "2026-11-03 14:30", PG).unwrap(), "'2026-11-03 14:30'");
-        assert_eq!(literal(&dt, "2026-11-03T14:30:05.123", PG).unwrap(), "'2026-11-03T14:30:05.123'");
-        assert!(literal(&dt, "2026-11-03 25:00", PG).is_err());
+        assert_eq!(literal(&dt, "2026-11-03 14:30", PG, true).unwrap(), "'2026-11-03 14:30'");
+        assert_eq!(literal(&dt, "2026-11-03T14:30:05.123", PG, true).unwrap(), "'2026-11-03T14:30:05.123'");
+        assert!(literal(&dt, "2026-11-03 25:00", PG, true).is_err());
     }
 
     #[test]
@@ -430,10 +446,10 @@ mod tests {
     fn a_statement_alone_takes_the_types_of_its_script() {
         let full = parse("SELECT {{day:date}};\nSELECT {{day}}", MY);
         let vals = std::collections::HashMap::from([("day".to_string(), "2026-11-03".to_string())]);
-        assert_eq!(fill_named("SELECT {{day}}", &full, &vals, MY).unwrap(), "SELECT '2026-11-03'");
+        assert_eq!(fill_named("SELECT {{day}}", &full, &vals, MY, true).unwrap(), "SELECT '2026-11-03'");
         let bad = std::collections::HashMap::from([("day".to_string(), "soon".to_string())]);
-        assert!(fill_named("SELECT {{day}}", &full, &bad, MY).is_err());
-        assert_eq!(fill_named("SELECT 1", &full, &vals, MY).unwrap(), "SELECT 1");
+        assert!(fill_named("SELECT {{day}}", &full, &bad, MY, true).is_err());
+        assert_eq!(fill_named("SELECT 1", &full, &vals, MY, true).unwrap(), "SELECT 1");
     }
 
     #[test]
@@ -443,11 +459,14 @@ mod tests {
         assert_eq!(infer("2.5"), (Ty::Number, Some("2.5".into())));
         assert_eq!(infer("'it''s'"), (Ty::Text, None));
         assert_eq!(infer("'paid'"), (Ty::Text, Some("paid".into())));
+        for unsafe_default in ["'#ff0000'", "'a;b'", "'a\\\\b'", "E'x'", "'a}'", "'`x`'"] {
+            assert_eq!(infer(unsafe_default).1, None, "{unsafe_default}");
+        }
         let (ty, def) = infer("'2026-11-03'");
         let ph = placeholder("day", &ty, def.as_deref());
         assert_eq!(ph, "{{day:date=2026-11-03}}");
         let t = format!("SELECT * FROM o WHERE d = {ph}");
         let p = parse(&t, MY);
-        assert_eq!(fill(&t, &p, &vals(&[""]), MY).unwrap(), "SELECT * FROM o WHERE d = '2026-11-03'");
+        assert_eq!(fill(&t, &p, &vals(&[""]), MY, true).unwrap(), "SELECT * FROM o WHERE d = '2026-11-03'");
     }
 }
