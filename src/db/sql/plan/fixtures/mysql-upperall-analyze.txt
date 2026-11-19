@@ -1,0 +1,3 @@
+-> Filter: (upper(orders.email) = 'USER42@EXAMPLE.COM')  (cost=20163 rows=199143) (actual time=0.0347..32.7 rows=5 loops=1)
+    -> Table scan on orders  (cost=20163 rows=199143) (actual time=0.028..20.9 rows=200000 loops=1)
+

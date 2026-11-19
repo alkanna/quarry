@@ -2,14 +2,45 @@
 //! seen, with the numbers that show it, and offers a fix only when the plan is enough to back it; the rest is left to
 //! the evidence the catalog adds later. Precision over recall: a finding that is wrong teaches people to ignore them all.
 
-use super::{count, Access, Dialect, Plan, PlanNode, BIG_SCAN};
+use super::evidence::{Evidence, TableEv};
+use super::index::{self, Advice};
+use super::tree::{self, below, SubAt, SubRun};
+use super::{count, Access, Dialect, Op, Plan, PlanNode, BIG_SCAN};
 
-/// A node below this share of the plan's cost or time is not worth a finding about its scan.
-pub const SHARE_MIN: f64 = 0.20;
+/// A node below this share of the plan's cost is not worth a finding about its scan, unless its time says otherwise.
+pub(super) const SHARE_MIN: f64 = 0.20;
+/// A node that took this share of the time is worth a finding about its scan whatever its cost. Half SHARE_MIN, so a
+/// scan the user's runs put at 21 to 31% of the time stays well clear of it when the noise between runs moves it.
+pub(super) const TIME_MIN: f64 = SHARE_MIN / 2.0;
 /// An estimate this many times off is worth a finding.
 pub const OFF_WARN: f64 = 5.0;
 /// A sort or temporary table over fewer rows than this costs too little to mention.
 const BIG_SORT: f64 = 10_000.0;
+/// Below this share of the time a node's share of the cost does not count for it. Far under SHARE_MIN, so noise between
+/// runs moves a node across it only when the node costs too little time to matter.
+const TIME_FLOOR: f64 = 0.05;
+/// A node with this share of the plan is what the plan's cost or time is, so it always gets a finding.
+pub(super) const SHARE_MOST: f64 = 0.5;
+/// A plan this slow, or this costly when it did not run, explains its largest node even below SHARE_MOST, so it never
+/// reads as if nothing stood out.
+const SLOW_MS: f64 = 100.0;
+const SLOW_COST: f64 = 10_000.0;
+/// Microseconds per row read above which a scan of pages already in memory is slow. Plain scans in the captured plans
+/// take 0.03 to 0.07 us a row; a function on every row took 2.9, and JIT counted in the scan 3 to 8.
+const SLOW_US: f64 = 1.0;
+/// Microseconds per 8 kB page read from memory above which a scan is slow. Per row alone misjudges wide rows: 13,895
+/// rows of 2 kB in 3,316 pages take 1 us a row at a normal 4.4 us a page. Plain Seq Scans in the captured plans take
+/// 2.4 to 8.2 us a page (pg18-scan bookings 4.1, pg18-join si 6.8, pg18-stale events 8.2) and the user's wide tables
+/// 3.3 to 7 across runs, while md5 on every row took 456 and JIT counted in the scan 476. 50 is twice 25, itself three
+/// times the slowest plain scan, so a plain scan would need to run six times slower than any captured one: half again
+/// either way between runs of one plan cannot cross it.
+const SLOW_PAGE_US: f64 = 50.0;
+/// A row this many bytes wide is wide enough that unpacking it is the likely cost of a slow scan.
+const WIDE_ROW_BYTES: f64 = 1024.0;
+/// Below this, a slow scan or a JIT compile is too short to be worth a finding.
+const SLOW_MIN_MS: f64 = 10.0;
+/// A subquery run fewer times than this costs too little to mention.
+const MANY_CALLS: f64 = 100.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -25,6 +56,15 @@ pub enum Kind {
     JoinBuffer,
     DependentSubquery,
     UnusedIndex,
+    /// The node that takes most of the plan, said in the plan's own numbers when nothing else explains it.
+    Dominant,
+    /// A PostgreSQL SubPlan that runs again for every row its parent tests.
+    SubPlanPerRow,
+    /// A scan that spends far longer per row and per page than reading them takes. On a filtered full scan it is a line
+    /// of the FullScan finding instead, so one read never carries two warnings.
+    SlowRows,
+    /// JIT compilation that took a large part of the run.
+    Jit,
 }
 
 /// A warning is something to fix; a note explains something that looks bad and is not.
@@ -38,6 +78,12 @@ pub enum Severity {
 pub enum FixKind {
     /// A session setting run before the statement, so the draft holds both.
     Setting,
+    /// An index to create, from the filter and the catalog.
+    Index,
+    /// ANALYZE of a table whose statistics are stale.
+    Analyze,
+    /// The same filter written so an existing index can serve it. `sql` is the condition, not a statement.
+    Rewrite,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +93,9 @@ pub struct Fix {
     pub label: String,
     pub sql: String,
     pub note: String,
+    /// The bare CREATE INDEX a HypoPG trial of an index fix takes, set by the one index builder. None when HypoPG cannot
+    /// simulate it (GIN, several indexes) or the fix is no index.
+    pub trial: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +110,10 @@ pub struct Finding {
     pub share: f64,
     pub body: Vec<String>,
     pub fix: Option<Fix>,
+    /// What the catalog showed, one fact a line: the table's size, how much the filter keeps, the indexes it has.
+    pub evidence: Vec<String>,
+    /// Why no fix is offered where one could be expected, as "No index suggested: ...".
+    pub no_fix: Option<String>,
 }
 
 impl Finding {
@@ -76,35 +129,61 @@ impl Finding {
     }
 }
 
-/// The findings of a parsed plan, most important first.
-pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
+/// The findings of a parsed plan, most important first. With the catalog's `ev`, filtered full scans also get an index
+/// suggestion or the reason there is none; `pooler` says the connection goes through one, which changes how an index is built.
+pub fn find(p: &Plan, d: Dialect, ev: Option<&Evidence>, pooler: bool) -> Vec<Finding> {
     let mut out: Vec<Finding> = Vec::new();
     let by_time = p.analyzed && p.nodes.iter().any(|n| n.self_ms.is_some());
+    let jit_node = jit(p, &mut out);
+    // What the catalog says of each filtered scan, worked out at most once and only where it is read: in the verdict of
+    // a plain filtered full scan, then in with_evidence.
+    let mut advice: Vec<Advised> = p.nodes.iter().map(|n| Advised::Later(ev.and_then(|ev| ev.table(n)).filter(|_| n.access == Access::Scan && !n.filter.is_empty()))).collect();
     for (i, n) in p.nodes.iter().enumerate() {
         let share = n.share.unwrap_or(0.0);
+        // MariaDB before 11 gives no cost per table, so no share either: size alone decides there.
+        let weighty = weighs(p, i);
         let weight = weight_of(n, by_time);
-        let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix });
+        let mut push = |kind, severity, title: String, weight: String, body: Vec<String>, fix: Option<Fix>| out.push(Finding { kind, severity, node: Some(i), title, weight, share, body, fix, evidence: Vec::new(), no_fix: None });
         let name = n.name();
         let read = rows_read(n);
         // PostgreSQL's estimate gives only the rows a scan returns, so its own cost stands in for its size.
         let big = read.is_some_and(|r| r >= BIG_SCAN) || n.removed.is_some_and(|r| r >= BIG_SCAN) || (d == Dialect::Postgres && n.self_cost.is_some_and(|c| c >= BIG_SCAN));
-        let filtered = !n.filter.is_empty();
-        if n.access == Access::Scan && big && share >= SHARE_MIN {
-            if filtered {
-                push(Kind::FullScan, Severity::Warn, format!("Full scan of {name}"), weight.clone(), vec![scan_body(n)], None);
-            } else if n.join_cond.is_empty() {
+        let full = n.access == Access::Scan && big && weighty;
+        // Only a plain filtered full scan can be called reasonable, so no other scan needs its advice yet.
+        let plain = full && !n.filter.is_empty() && jit_node != Some(i) && slow_per_row(p, i).is_none();
+        let adv = if plain { advice[i].get(p, i, d, pooler) } else { None };
+        let reasonable = match adv {
+            Some((_, Advice::Reasonable { kept, .. })) => Some(*kept),
+            _ => None,
+        };
+        match verdict(p, i, full, weighty, jit_node == Some(i), reasonable) {
+            Verdict::Slow(s) => push(Kind::SlowRows, Severity::Warn, format!("Reading {name} is slow per row"), weight.clone(), slow_body(p, i, &s), None),
+            Verdict::Full { slow, reasonable } => {
+                let mut body = vec![scan_body(n)];
+                body.extend(slow.map(|s| slow_body(p, i, &s)).unwrap_or_default());
+                let severity = match reasonable {
+                    Some(kept) => {
+                        body.push(format!("A full scan is reasonable here: {}.", index::too_many(kept)));
+                        Severity::Note
+                    }
+                    None => Severity::Warn,
+                };
+                push(Kind::FullScan, severity, format!("Full scan of {name}"), weight.clone(), body, None);
+            }
+            Verdict::Right => {
                 let rows = read.map(count).unwrap_or_default();
                 push(Kind::ScanIsRight, Severity::Note, format!("{name} is read in full"), weight.clone(), vec![format!("Every one of its {rows} rows is used and nothing filters them, so a full scan is the right plan here.")], None);
             }
-        } else if n.label == "index" && n.access == Access::Other && big && share >= SHARE_MIN {
+            Verdict::None => {}
+        }
+        // A full scan's verdict says all there is about how it reads.
+        if !full && n.op == Op::FullIndexScan && big && weighty {
             push(Kind::FullIndexScan, Severity::Warn, format!("Full index scan of {name}"), weight.clone(), vec![format!("Reads every entry of {}, about {} of them, instead of searching it.", if n.index.is_empty() { "the index" } else { &n.index }, count(read.unwrap_or(0.0)))], None);
-        } else if let (Some(r), Some(k)) = (n.removed, n.actual_rows) {
-            if r >= BIG_SCAN && r >= 10.0 * k && share >= SHARE_MIN {
-                push(Kind::Discards, Severity::Warn, format!("{name} discards most rows it reads"), weight.clone(), vec![kept_line(r, k)], None);
-            }
+        } else if !full && let (Some(r), Some(k)) = (n.removed, n.kept_rows()) && r >= BIG_SCAN && r >= 10.0 * k && weighty {
+            push(Kind::Discards, Severity::Warn, format!("{name} discards most rows it reads"), weight.clone(), vec![kept_line(r, k)], None);
         }
         if n.access == Access::Scan && n.index.is_empty() && !n.possible_keys.is_empty() && big {
-            push(Kind::UnusedIndex, Severity::Warn, format!("{name} has an index the server did not use"), weight.clone(), vec![format!("Possible keys: {}. The server judged a full scan cheaper, or the filter cannot use them.", n.possible_keys.join(", "))], None);
+            push(Kind::UnusedIndex, Severity::Warn, format!("{name} has an index the server did not use"), weight.clone(), unused_body(n), None);
         }
         if let Some(off) = n.off().filter(|&o| o >= OFF_WARN) {
             let (est, act) = (n.rows.unwrap_or(0.0), n.actual_rows.unwrap_or(0.0));
@@ -145,6 +224,23 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
         if n.dependent {
             push(Kind::DependentSubquery, Severity::Warn, "Dependent subquery".into(), String::new(), vec!["The subquery runs once for every row of the outer query.".into()], None);
         }
+        if let (Some((calls, ran)), Some(j)) = (tree::sub_calls(p, i), n.parent) {
+            if calls >= MANY_CALLS {
+                let parent = kind_of(&p.nodes[j].label);
+                let what = format!("{} ({}{})", n.role, kind_of(&n.label), below_name(p, i).map(|s| format!(" on {s}")).unwrap_or_default());
+                let first = if ran { format!("{what} ran {} times, once for every row {parent} tested.", count(calls)) } else { format!("{what} runs again for every row {parent} tests, at least {} times, once for each row it returns.", count(calls)) };
+                let body = vec![first, "It is neither hashed nor turned into a join, so each call reads it again. MySQL calls this a dependent subquery.".into()];
+                push(Kind::SubPlanPerRow, Severity::Warn, "A subquery runs once per row".into(), weight.clone(), body, None);
+            }
+        }
+    }
+    if let Some(ev) = ev {
+        with_evidence(p, d, ev, by_time, pooler, advice, &mut out);
+        super::rewrite::add(p, d, ev, pooler, by_time, &mut out);
+    }
+    // MySQL's tree text labels a node with its whole line, which does not read as a node type.
+    if d == Dialect::Postgres {
+        dominant(p, by_time, &mut out);
     }
     out.sort_by(|a, b| a.severity.cmp(&b.severity).then(b.share.total_cmp(&a.share)));
     let mut seen = Vec::new();
@@ -157,25 +253,431 @@ pub fn find(p: &Plan, d: Dialect) -> Vec<Finding> {
     out
 }
 
-/// Every node below `i`.
-pub fn below(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
-    let mut stack = p.nodes[i].kids.clone();
+/// The index advice on one filtered scan: its matched table until the advice is needed, then the advice.
+enum Advised<'a> {
+    Later(Option<&'a TableEv>),
+    Done(Option<(&'a TableEv, Advice)>),
+}
+
+impl<'a> Advised<'a> {
+    fn get(&mut self, p: &Plan, i: usize, d: Dialect, pooler: bool) -> Option<&(&'a TableEv, Advice)> {
+        if let Advised::Later(t) = *self {
+            *self = Advised::Done(t.map(|t| (t, index::advise(p, i, d, t, pooler))));
+        }
+        match self {
+            Advised::Done(a) => a.as_ref(),
+            Advised::Later(_) => None,
+        }
+    }
+
+    fn take(self, p: &Plan, i: usize, d: Dialect, pooler: bool) -> Option<(&'a TableEv, Advice)> {
+        match self {
+            Advised::Later(t) => t.map(|t| (t, index::advise(p, i, d, t, pooler))),
+            Advised::Done(a) => a,
+        }
+    }
+}
+
+/// What the catalog adds: on each filtered full scan an index to create, the index that already serves it, stale
+/// statistics to refresh, or why none of that is offered. A scan with no finding of its own gets one only when it runs
+/// many times inside a nested loop and an index is the fix. `advice` is what `find` matched or worked out for each node.
+fn with_evidence(p: &Plan, d: Dialect, ev: &Evidence, by_time: bool, pooler: bool, advice: Vec<Advised>, out: &mut Vec<Finding>) {
+    for ((i, n), advice) in p.nodes.iter().enumerate().zip(advice) {
+        if n.access != Access::Scan || n.filter.is_empty() {
+            continue;
+        }
+        let at = |out: &Vec<Finding>, k: Kind| out.iter().position(|f| f.node == Some(i) && f.kind == k);
+        let (scan, mis) = (at(out, Kind::FullScan), at(out, Kind::Misestimate));
+        let repeated = index::repeated(p, i);
+        if scan.is_none() && mis.is_none() && !repeated {
+            continue;
+        }
+        let Some((t, advice)) = advice.take(p, i, d, pooler) else {
+            if let Some(k) = scan {
+                out[k].no_fix = Some(if ev.failed { "No suggestion: the catalog could not be read." } else { "No index suggested: the table could not be matched to one table of the statement." }.into());
+            }
+            continue;
+        };
+        if let (Some(k), false) = (mis, matches!(advice, Advice::Stale { .. })) {
+            if d == Dialect::Postgres && index::fresh(t) {
+                out[k].body.push("Statistics are recent, so the estimate is off for another reason.".into());
+            }
+        }
+        let name = n.name();
+        match advice {
+            Advice::Stale { why, fix, lines } => {
+                if let Some(k) = mis {
+                    out[k].body.push(format!("Its statistics are stale: {why}."));
+                    (out[k].fix, out[k].evidence) = (Some(fix.clone()), lines.clone());
+                }
+                if let Some(k) = scan {
+                    out[k].no_fix = Some(format!("No index suggested: {why}. Refresh the statistics first."));
+                    out[k].evidence = lines;
+                    if mis.is_none() {
+                        out[k].fix = Some(fix);
+                    }
+                }
+            }
+            Advice::Create { fix, lines } => match scan {
+                Some(k) => (out[k].fix, out[k].evidence) = (Some(fix), lines),
+                None if repeated => {
+                    let loops = n.loops.map(|l| format!("Runs {} times", count(l))).unwrap_or_else(|| "Runs once per row of the side above".into());
+                    out.push(Finding { kind: Kind::FullScan, severity: Severity::Warn, node: Some(i), title: format!("Repeated full scan of {name}"), weight: weight_of(n, by_time), share: n.share.unwrap_or(0.0), body: vec![format!("{loops} and reads every row each time.")], fix: Some(fix), evidence: lines, no_fix: None });
+                }
+                None => {}
+            },
+            Advice::Unused { index: ix, cause, lines } => {
+                let Some(k) = scan else { continue };
+                out[k].no_fix = Some(format!("No index suggested: {ix} already serves this filter."));
+                out.retain(|f| !(f.node == Some(i) && f.kind == Kind::UnusedIndex));
+                let body = cause.unwrap_or_else(|| format!("{ix} serves this filter, yet the planner chose a full scan. Run with ANALYZE to see whether its row estimate is why."));
+                out.push(Finding { kind: Kind::UnusedIndex, severity: Severity::Warn, node: Some(i), title: format!("{name} has an index the planner did not use"), weight: weight_of(n, by_time), share: n.share.unwrap_or(0.0), body: vec![body], fix: None, evidence: lines, no_fix: None });
+            }
+            Advice::No { why, lines } => {
+                let Some(k) = scan else { continue };
+                (out[k].no_fix, out[k].evidence) = (Some(format!("No index suggested: {why}.")), lines);
+            }
+            // The verdict already made a plain scan a note that says why; a scan slow for another reason stays a warning
+            // and only learns why no index is offered.
+            Advice::Reasonable { kept, lines } => {
+                let Some(k) = scan else { continue };
+                out[k].evidence = lines;
+                if out[k].severity == Severity::Warn {
+                    out[k].no_fix = Some(format!("No index suggested: {}.", index::too_many(kept)));
+                }
+            }
+        }
+    }
+}
+
+/// What one scan's finding says, decided from the plan and the catalog before it is pushed, so its severity never
+/// changes afterwards.
+enum Verdict {
+    /// Slow per row, and not a filtered full scan, which says so itself.
+    Slow(Slow),
+    /// A filtered full scan, with its slowness when it was slow per row, and the share its filter keeps when the catalog
+    /// shows no index could read less and nothing else explains its time.
+    Full { slow: Option<Slow>, reasonable: Option<f64> },
+    /// Every row of it is used and nothing filters them.
+    Right,
+    None,
+}
+
+/// The verdict on node `i`, where `full` says it is a big full scan that weighs on the plan, `jit_here` that it holds
+/// the JIT compile, which the JIT finding explains, and `reasonable` the share the catalog showed its filter keeps,
+/// too many for an index. A scan that is most of the plan is called right too, which dominant() then leaves alone, so
+/// the note does not come and go with its share of the time.
+fn verdict(p: &Plan, i: usize, full: bool, weighty: bool, jit_here: bool, reasonable: Option<f64>) -> Verdict {
+    let n = &p.nodes[i];
+    if n.access != Access::Scan || !weighty {
+        return Verdict::None;
+    }
+    let slow = slow_per_row(p, i);
+    match (full && !n.filter.is_empty(), slow) {
+        (true, slow) => {
+            let plain = slow.is_none() && !jit_here;
+            Verdict::Full { slow: slow.filter(|_| !jit_here), reasonable: reasonable.filter(|_| plain) }
+        }
+        (false, Some(s)) if !jit_here => Verdict::Slow(s),
+        (false, None) if full && n.join_cond.is_empty() && !jit_here => Verdict::Right,
+        _ => Verdict::None,
+    }
+}
+
+/// A JIT compile that took a large part of the run, tied to the node that took the most time, where PostgreSQL counted
+/// it. Returns that node.
+fn jit(p: &Plan, out: &mut Vec<Finding>) -> Option<usize> {
+    let (j, exec) = (p.jit.as_ref()?, p.exec_ms?);
+    // Each parallel worker compiles its own copy and the plan prints the sum, so side by side it took about the sum
+    // over the processes.
+    let procs = p.nodes.iter().filter(|n| n.op == Op::Gather).map(tree::gather_procs).fold(1.0, f64::max);
+    let took = j.total_ms / procs;
+    if took < SLOW_MIN_MS || took < 0.2 * exec {
+        return None;
+    }
+    let ms = |i: usize| p.nodes[i].self_ms.unwrap_or(0.0);
+    let i = (0..p.nodes.len()).filter(|&i| p.nodes[i].self_ms.is_some()).max_by(|&a, &b| ms(a).total_cmp(&ms(b)))?;
+    let n = &p.nodes[i];
+    let how = match (j.inlining, j.optimization) {
+        (true, true) => " with inlining and optimization",
+        (true, false) => " with inlining",
+        (false, true) => " with optimization",
+        _ => "",
+    };
+    let mut body = vec![format!(
+        "PostgreSQL compiled {} functions{how} and counts that time inside the nodes that first ran them; {} took {} ms here.",
+        count(j.functions),
+        format!("{} {}", kind_of(&n.label), n.name()).trim(),
+        ms_text(n.self_ms.unwrap_or(0.0))
+    )];
+    if procs > 1.0 {
+        body.push(format!("Its {} ms are summed over the {} processes that ran the plan, each compiling its own copy, so side by side it took about {} ms.", ms_text(j.total_ms), count(procs), ms_text(took)));
+    }
+    let rest = exec - took;
+    if rest < took {
+        body.push(format!("The rest of the run took {} ms, so compiled code cannot win back what compiling it cost.", ms_text(rest.max(0.0))));
+    }
+    let fix = Fix {
+        kind: FixKind::Setting,
+        label: "SET jit".into(),
+        sql: "SET jit = off;".into(),
+        note: "For this session only. PostgreSQL compiles plans that cost more than jit_above_cost, 100,000 by default; raising it on the server keeps JIT for the statements it helps.".into(),
+        trial: None,
+    };
+    let share = (took / exec).min(1.0);
+    let about = if procs > 1.0 { "about " } else { "" };
+    out.push(Finding { kind: Kind::Jit, severity: Severity::Warn, node: Some(i), title: format!("JIT compilation took {about}{} ms of {}", ms_text(took), ms_text(exec)), weight: format!("{}% of the run", (share * 100.0).round()), share: n.share.unwrap_or(share).max(share), body, fix: Some(fix), evidence: Vec::new(), no_fix: None });
+    Some(i)
+}
+
+/// Whether node `i` weighs enough for a finding about its scan: SHARE_MIN of the planner's cost, or TIME_MIN of the
+/// time when the plan ran. The cost is the same on every run of a plan, and the time bound sits far below a scan worth
+/// a finding, so neither comes and goes with timing noise. A node that took under TIME_FLOOR of the time is judged by
+/// its time alone: the cost was wrong about it, as MySQL's is when it leaves a dependent subquery out. With no share at
+/// all, as in MariaDB before 11, it weighs.
+pub(super) fn weighs(p: &Plan, i: usize) -> bool {
+    let n = &p.nodes[i];
+    match (n.time_share, n.cost_share) {
+        (Some(t), Some(c)) => t >= TIME_MIN || (t >= TIME_FLOOR && c >= SHARE_MIN),
+        (Some(t), None) => t >= TIME_MIN,
+        (None, Some(c)) => c >= SHARE_MIN,
+        (None, None) => true,
+    }
+}
+
+/// How slow a scan was, per row and per page, in the time of the processes that ran it.
+struct Slow {
+    us_row: f64,
+    us_page: f64,
+    rows: f64,
+    pages: f64,
+    procs: f64,
+}
+
+/// A scan that spent far longer per row and per page of its own time than reading them takes, when it ran long enough
+/// to tell and its pages were in memory. A scan that read most of its pages from disk is waiting on the disk, which is
+/// not slow in this sense. Per row alone would flag wide rows read at a normal pace, so the page must be slow too.
+fn slow_per_row(p: &Plan, i: usize) -> Option<Slow> {
+    let n = &p.nodes[i];
+    let ms = n.self_ms.filter(|&m| m >= SLOW_MIN_MS)?;
+    let rows = ran_rows(n)?;
+    let (hit, read) = n.buffers?;
+    let pages = hit + read;
+    if rows < 1.0 || pages < 1.0 || read > 0.1 * pages {
+        return None;
+    }
+    // A scan under a Gather reports its time side by side while its rows and pages add up every process's, whether it
+    // split the table between them or each read all of it.
+    let procs = tree::parallel_procs(p, i).unwrap_or(1.0);
+    let busy_us = ms * 1000.0 * procs;
+    let s = Slow { us_row: busy_us / rows, us_page: busy_us / pages, rows, pages, procs };
+    (s.us_row >= SLOW_US && s.us_page >= SLOW_PAGE_US).then_some(s)
+}
+
+/// What a slow scan's finding says: the numbers, then the likely cause.
+fn slow_body(p: &Plan, i: usize, s: &Slow) -> Vec<String> {
+    let n = &p.nodes[i];
+    let over = if s.procs > 1.0 { format!(" side by side in {} processes", count(s.procs)) } else { String::new() };
+    let mut body = vec![format!(
+        "It took {} ms{over} for {} rows in {} pages already in memory: {} µs a row and {} µs a page. A plain scan takes well under 0.1 µs a row and 10 µs a page.",
+        ms_text(n.self_ms.unwrap_or(0.0)),
+        count(s.rows),
+        count(s.pages),
+        us_text(s.us_row),
+        us_text(s.us_page)
+    )];
+    let wide = n.width.is_some_and(|w| w >= WIDE_ROW_BYTES) || s.pages * 8192.0 / s.rows >= WIDE_ROW_BYTES;
+    body.push(match &p.jit {
+        Some(j) => format!("This run used JIT, which took {} ms to compile {} functions, and PostgreSQL counts that time in the nodes that first ran the compiled code.", ms_text(j.total_ms), count(j.functions)),
+        None if wide => format!("Its rows are wide, about {} each in {} pages, so unpacking wide or compressed columns is the likely cost; a function in the output or the filter, or a row-level security policy, would also run for every row.", size(s.pages * 8.0 / s.rows), count(s.pages)),
+        None => "Something runs for every row: a function in the output or the filter, a row-level security policy, or wide or compressed columns being unpacked.".into(),
+    });
+    body
+}
+
+/// The rows a scan read over every loop, from what ran: the rows it returned and those its filter removed.
+fn ran_rows(n: &PlanNode) -> Option<f64> {
+    Some((n.kept_rows()? + n.removed.unwrap_or(0.0)) * n.loops.unwrap_or(1.0))
+}
+
+fn us_text(us: f64) -> String {
+    if us >= 10.0 { format!("{us:.0}") } else { trim_zeros(&format!("{us:.1}")).to_string() }
+}
+
+/// "12.50" as "12.5" and "12.00" as "12". Only a number with a decimal point loses zeros, so "100" stays whole.
+pub fn trim_zeros(s: &str) -> &str {
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
+}
+
+/// "Hash Join" out of "Hash Join (Inner)".
+fn kind_of(label: &str) -> &str {
+    label.split(" (").next().unwrap_or(label)
+}
+
+/// The first table read at or below node `i`: what a join side or a subquery is about.
+fn below_name(p: &Plan, i: usize) -> Option<String> {
+    std::iter::once(i).chain(below_in_order(p, i)).map(|k| p.nodes[k].name()).find(|s| !s.is_empty())
+}
+
+/// Nodes below `i` in plan order, first child first.
+fn below_in_order(p: &Plan, i: usize) -> impl Iterator<Item = usize> + '_ {
+    let mut stack: Vec<usize> = p.nodes[i].kids.iter().rev().copied().collect();
     std::iter::from_fn(move || {
         let k = stack.pop()?;
-        stack.extend(p.nodes[k].kids.iter().copied());
+        stack.extend(p.nodes[k].kids.iter().rev().copied());
         Some(k)
     })
 }
 
+/// The rows node `k` hands up over every loop: what ran when it ran, else the estimate.
+fn rows_out(p: &Plan, k: usize) -> Option<f64> {
+    let n = &p.nodes[k];
+    match (p.analyzed, n.actual_rows) {
+        (true, Some(a)) => Some(a * n.loops.unwrap_or(1.0)),
+        _ => n.rows,
+    }
+}
+
+/// The node that is most of the plan gets a finding when no warning explains it already, so the largest cost is
+/// always said in the plan's own numbers. A slow plan explains its largest node even when no node is most of it.
+fn dominant(p: &Plan, by_time: bool, out: &mut Vec<Finding>) {
+    let slow = if p.analyzed { p.exec_ms.is_some_and(|m| m >= SLOW_MS) } else { p.cost.is_some_and(|c| c >= SLOW_COST) };
+    // A fast plan is mostly one node without anything being wrong, like a lookup by primary key.
+    if !slow {
+        return;
+    }
+    // A node already judged, even as a note, keeps that judgment: a full scan the catalog showed to be reasonable must
+    // not come back as a warning that it is most of the plan.
+    let judged = |out: &Vec<Finding>, i: usize| out.iter().any(|f| f.node == Some(i));
+    let mut picks: Vec<usize> = (0..p.nodes.len()).filter(|&i| p.nodes[i].share.is_some_and(|s| s >= SHARE_MOST)).collect();
+    if picks.is_empty() && !out.iter().any(|f| f.severity == Severity::Warn) {
+        let s = |i: usize| p.nodes[i].share.unwrap_or(0.0);
+        picks.extend((0..p.nodes.len()).filter(|&i| p.nodes[i].share.is_some()).max_by(|&a, &b| s(a).total_cmp(&s(b))));
+    }
+    for i in picks {
+        if judged(out, i) {
+            continue;
+        }
+        let n = &p.nodes[i];
+        let share = n.share.unwrap_or(0.0);
+        let what = kind_of(&n.label).to_string();
+        let most = if share >= SHARE_MOST { "does most of the work" } else { "takes the largest part" };
+        let kids: Vec<usize> = n.kids.iter().copied().filter(|&k| p.nodes[k].sub.is_none()).collect();
+        let fed = kids.iter().filter_map(|&k| rows_out(p, k)).sum::<f64>();
+        let (severity, title, mut body) = if n.op.is_join() || n.op == Op::NestedLoop {
+            (Severity::Warn, format!("{what} {most}"), join_body(p, i))
+        } else if n.op == Op::Sort {
+            let by = if n.sort_key.is_empty() { String::new() } else { format!(" by {}", n.sort_key.trim()) };
+            (Severity::Warn, format!("{what} {most}"), vec![format!("Sorts {} rows{by}.", count(fed))])
+        } else if matches!(n.op, Op::Aggregate | Op::Window) {
+            let line = if n.group_key.is_empty() { format!("Aggregates {} rows.", count(fed)) } else { format!("Groups {} rows by {}.", count(fed), n.group_key.trim()) };
+            (Severity::Warn, format!("{what} {most}"), vec![line])
+        } else if n.access == Access::Scan && n.filter.is_empty() {
+            let rows = rows_out(p, i).unwrap_or(0.0);
+            (Severity::Note, format!("Reading {} {most}", n.name()), vec![format!("Reads all {} rows of {} and nothing filters them, so a full scan is the right way to read them.", count(rows), n.name())])
+        } else if n.access != Access::Other {
+            let read = rows_read(n).unwrap_or(0.0) * if p.analyzed { n.loops.unwrap_or(1.0) } else { 1.0 };
+            let cols = n.filter.expr.as_ref().map(super::cond::columns).unwrap_or_default();
+            let how = if n.index.is_empty() { String::new() } else { format!(" through {}", n.index) };
+            let keep = if cols.is_empty() { String::new() } else { format!(" and keeps those matching {}", and_list(&cols)) };
+            let sev = if n.access == Access::Scan { Severity::Warn } else { Severity::Note };
+            (sev, format!("Reading {} {most}", n.name()), vec![format!("Reads {} rows{how}{keep}.", count(read))])
+        } else {
+            let line = if kids.is_empty() { format!("Returns {} rows.", count(rows_out(p, i).unwrap_or(0.0))) } else { format!("Takes {} rows from below and returns {}.", count(fed), count(rows_out(p, i).unwrap_or(0.0))) };
+            (Severity::Note, format!("{what} {most}"), vec![line])
+        };
+        if !by_time && p.analyzed {
+            body.push("Run times were not reported for it, so this share is of the planner's cost.".into());
+        }
+        out.push(Finding { kind: Kind::Dominant, severity, node: Some(i), title, weight: weight_of(n, by_time), share, body, fix: None, evidence: Vec::new(), no_fix: None });
+    }
+}
+
+/// What a join that is most of the plan does, with the numbers that say why.
+fn join_body(p: &Plan, i: usize) -> Vec<String> {
+    let n = &p.nodes[i];
+    let sides: Vec<usize> = n.kids.iter().copied().filter(|&k| p.nodes[k].sub.is_none()).collect();
+    let side = |k: usize| {
+        // A Hash Join's inner side is the Hash built from the node below it.
+        let k = if p.nodes[k].op == Op::Hash { p.nodes[k].kids.first().copied().unwrap_or(k) } else { k };
+        (rows_out(p, k).unwrap_or(0.0), below_name(p, k).unwrap_or_else(|| kind_of(&p.nodes[k].label).to_string()))
+    };
+    let cond = n.join_cond.expr.as_ref().map(|e| super::cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.text.trim_start_matches('(').trim_end_matches(')').to_string());
+    let mut body = Vec::new();
+    let mut sides_rows = 0.0;
+    if let [outer, inner, ..] = sides[..] {
+        let ((or, on), (ir, inn)) = (side(outer), side(inner));
+        sides_rows = or.max(ir);
+        let on_cond = if cond.is_empty() { String::new() } else { format!(" on {cond}") };
+        body.push(format!("Matches {} rows of {on} against {} rows of {inn}{on_cond}.", count(or), count(ir)));
+    }
+    let subs: Vec<String> = n.kids.iter().filter(|&&k| p.nodes[k].sub.is_some_and(|s| s.at == SubAt::JoinFilter)).map(|&k| p.nodes[k].role.clone()).collect();
+    if !n.join_filter.is_empty() {
+        let runs = if subs.is_empty() { String::new() } else { format!(", which runs {}", and_list(&subs)) };
+        body.push(format!("Each match is then checked again against the join filter{runs}."));
+    }
+    // A join whose pairs far outnumber the rows on either side pairs each row with many on the other: the join
+    // condition is on a column with few distinct values, which is worth checking against the intent.
+    let check = format!("Each row pairs with many on the other side; check that {} is the join condition you meant.", if cond.is_empty() { "the condition".to_string() } else { cond.clone() });
+    if p.analyzed {
+        let loops = n.loops.unwrap_or(1.0);
+        let kept = n.actual_rows.unwrap_or(0.0) * loops;
+        let pairs = kept + n.removed_join.unwrap_or(0.0) * loops;
+        if n.removed_join.is_some() {
+            let pct = if pairs > 0.0 { kept / pairs * 100.0 } else { 0.0 };
+            body.push(format!("It built {} pairs and kept {} ({}).", count(pairs), count(kept), pct_text(pct)));
+        }
+        if sides_rows > 0.0 && pairs >= 10.0 * sides_rows {
+            body.push(check);
+        }
+    } else {
+        let inc = tree::inclusive(p, false);
+        let reading: f64 = n.kids.iter().map(|&k| inc[k]).sum();
+        let own = n.self_cost.unwrap_or(0.0);
+        let heavy = own >= 2.0 * reading && reading > 0.0;
+        let out = n.rows.unwrap_or(0.0);
+        let fans = sides_rows > 0.0 && out >= 10.0 * sides_rows;
+        if fans {
+            body.push(format!("It expects {} rows out of it. {check}", count(out)));
+        }
+        if heavy {
+            let times = if own >= 20.0 * reading { "over 20 times".to_string() } else { factor(own / reading) };
+            body.push(format!("The planner charges {} for the join itself, {times} the cost of the nodes below it ({}).", count(own), count(reading)));
+        }
+        // A SubPlan the join does not name is in the columns it returns, which only VERBOSE prints. One that runs per row
+        // was charged apart from the join, so only one counted once can be in its cost.
+        let hidden = n.kids.iter().copied().find(|&k| p.nodes[k].role.starts_with("SubPlan") && p.nodes[k].sub.is_some_and(|s| s.at == SubAt::Output && s.run == SubRun::Once));
+        if let Some(k) = tree::dropped_alternative(p, i).filter(|_| heavy) {
+            let role = &p.nodes[k].role;
+            let place = p.nodes[k].sub.map(|s| s.at.place()).unwrap_or_default();
+            body.push(format!("The planner priced the subquery {place} as if it ran once per row, but PostgreSQL runs it once, hashed as {role}, so most of this cost is never spent. Run with ANALYZE to see the real time."));
+        } else if let Some(k) = hidden.filter(|_| heavy) {
+            body.push(format!("This cost likely includes {}, a subquery in the columns the join returns, which the plan shows only with VERBOSE. Run with ANALYZE to see the real time.", p.nodes[k].role));
+        } else if heavy && !fans {
+            body.push("It expects each row to match many on the other side, or a costly join filter. Run with ANALYZE to see the real time.".into());
+        }
+    }
+    body
+}
+
 /// The rows a scan reads per loop: what it returned and what its filter removed, or the estimate.
-pub fn rows_read(n: &PlanNode) -> Option<f64> {
-    match (n.actual_rows, n.removed) {
+pub(super) fn rows_read(n: &PlanNode) -> Option<f64> {
+    match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) => Some(k + r),
         _ => n.rows.map(|r| r + n.removed.unwrap_or(0.0)),
     }
 }
 
-fn weight_of(n: &PlanNode, by_time: bool) -> String {
+/// MySQL's possible keys without a key: the names and the server's guess at what the filter keeps, which is all the plan says.
+fn unused_body(n: &PlanNode) -> Vec<String> {
+    let mut body = vec![format!("Possible keys: {}. The server judged a full scan cheaper, or the filter cannot use them.", n.possible_keys.join(", "))];
+    if let Some(f) = n.filtered_pct {
+        body.push(format!("The server guesses the filter keeps {} of the rows it reads.", pct_text(f)));
+    }
+    body
+}
+
+pub(super) fn weight_of(n: &PlanNode, by_time: bool) -> String {
     match (by_time, n.self_ms, n.share) {
         (true, Some(ms), _) => format!("{} ms", ms_text(ms)),
         (_, _, Some(s)) => format!("{}% of cost", (s * 100.0).round()),
@@ -184,8 +686,8 @@ fn weight_of(n: &PlanNode, by_time: bool) -> String {
 }
 
 fn scan_body(n: &PlanNode) -> String {
-    let cols = n.filter_expr.as_ref().map(super::cond::columns).unwrap_or_default();
-    match (n.actual_rows, n.removed) {
+    let cols = n.filter.expr.as_ref().map(super::cond::columns).unwrap_or_default();
+    match (n.kept_rows(), n.removed) {
         (Some(k), Some(r)) if r > 0.0 => kept_line(r, k),
         _ if !cols.is_empty() => format!("Reads every row, then keeps those matching {}.", and_list(&cols)),
         _ => "Reads every row, then filters them.".into(),
@@ -199,7 +701,7 @@ fn kept_line(removed: f64, kept: f64) -> String {
 }
 
 /// "created_at, provider and status".
-pub fn and_list(xs: &[String]) -> String {
+pub(super) fn and_list(xs: &[String]) -> String {
     match xs {
         [] => String::new(),
         [a] => a.clone(),
@@ -209,7 +711,7 @@ pub fn and_list(xs: &[String]) -> String {
 
 /// 8.5x, 12x, 1,200x.
 pub fn factor(f: f64) -> String {
-    if f < 10.0 { format!("{:.1}x", f).replace(".0x", "x") } else { format!("{}x", count(f)) }
+    if f < 10.0 { format!("{}x", trim_zeros(&format!("{f:.1}"))) } else { format!("{}x", count(f)) }
 }
 
 pub fn pct_text(p: f64) -> String {
@@ -220,7 +722,7 @@ pub fn ms_text(ms: f64) -> String {
     if ms >= 100.0 {
         count(ms)
     } else if ms >= 1.0 {
-        format!("{ms:.1}").trim_end_matches(".0").to_string()
+        trim_zeros(&format!("{ms:.1}")).to_string()
     } else {
         format!("{ms:.2}")
     }
@@ -246,5 +748,6 @@ fn work_mem(kb: f64) -> Fix {
         label: "SET work_mem".into(),
         sql: format!("SET work_mem = '{mb}MB';"),
         note: "For this session only. A higher server-wide value multiplies by every sort and hash running at once.".into(),
+        trial: None,
     }
 }

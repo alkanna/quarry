@@ -9,6 +9,18 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 mod agent;
+
+/// "1234567" as "1,234,567".
+pub(crate) fn group(n: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in n.chars().enumerate() {
+        if i > 0 && (n.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 mod analysis;
 mod code;
 pub(crate) mod dates;
@@ -236,6 +248,10 @@ pub enum Msg {
     SqlRan { req: u64, sets: Vec<sql::ResultSet> },
     /// The plan of a statement: the sets of the run that explained it.
     SqlExplained { req: u64, sets: Vec<sql::ResultSet> },
+    /// The catalog's evidence for the index suggestions of the explain dialog's request `req`.
+    SqlExplainEvidence { req: u64, ev: sql::plan::Evidence },
+    /// The plan of the explain dialog's statement with a HypoPG hypothetical index in place, for its request `req`.
+    SqlExplainHypo { req: u64, res: Res<sql::pg::hypo::Trial> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
     /// What the live check of request `req` found in the statement under the Query editor's caret; see `sql::lint`.

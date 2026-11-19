@@ -105,6 +105,35 @@ pub const INDEXES: &str = "SELECT ic.relname::text AS name, (NOT i.indisunique):
      LEFT JOIN pg_attribute a ON a.attrelid = tc.oid AND a.attnum = i.indkey[k.n - 1] \
      WHERE n.nspname = $1 AND tc.relname = $2 ORDER BY NOT i.indisprimary, ic.relname, k.n";
 
+/// The table an explained plan scans, for the evidence behind an index suggestion. Params: [schema or empty, table]; an
+/// empty schema resolves the name on the search_path the read runs under, which is the run's. Columns: schema, name, kind
+/// (relkind), reltuples (NULL below zero, never analyzed on 14 and later), bytes (with indexes and TOAST), mods (rows
+/// written since the last ANALYZE), ago (seconds since it, manual or automatic), never (1 when no ANALYZE ever ran and no
+/// statistics exist). The last analyze times live in the statistics collector, which a stats reset clears, so `never`
+/// also asks pg_stats.
+pub const EXPLAIN_TABLE: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS kind, \
+     CASE WHEN c.reltuples >= 0 THEN c.reltuples::float8::text END AS reltuples, pg_total_relation_size(c.oid)::bigint AS bytes, \
+     pg_stat_get_mod_since_analyze(c.oid)::bigint AS mods, \
+     extract(epoch FROM now() - GREATEST(pg_stat_get_last_analyze_time(c.oid), pg_stat_get_last_autoanalyze_time(c.oid)))::bigint AS ago, \
+     (pg_stat_get_last_analyze_time(c.oid) IS NULL AND pg_stat_get_last_autoanalyze_time(c.oid) IS NULL \
+      AND NOT EXISTS (SELECT 1 FROM pg_stats s WHERE s.schemaname = n.nspname AND s.tablename = c.relname))::int AS never \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.oid = to_regclass(CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)";
+
+/// What the planner knows of some columns of a table. Params: [schema, table, the column names as a JSON array]. Columns:
+/// name, ty (format_type), null_frac, n_distinct, mcv and mcf (the most common values as text and their shares, JSON
+/// arrays), corr. The statistics columns are NULL for a column never analyzed or one the login may not read.
+pub const EXPLAIN_COLS: &str = "SELECT a.attname::text AS name, format_type(a.atttypid, a.atttypmod) AS ty, \
+     s.null_frac::float8::text AS null_frac, s.n_distinct::float8::text AS n_distinct, \
+     array_to_json(s.most_common_vals::text::text[])::text AS mcv, array_to_json(s.most_common_freqs)::text AS mcf, s.correlation::float8::text AS corr \
+     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_stats s ON s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = a.attname AND NOT s.inherited \
+     WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped AND a.attname = ANY (SELECT json_array_elements_text($3::json))";
+
+/// The extensions later explain suggestions use, when the login may use their schema. Columns: name.
+pub const EXTENSIONS: &str = "SELECT e.extname::text AS name FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
+     WHERE e.extname IN ('hypopg', 'pg_trgm') AND has_schema_privilege(n.oid, 'USAGE')";
+
 /// The columns of both key queries. A constraint that a partition inherited from its parent is left out, so the
 /// parent's own is not shown twice.
 macro_rules! fk_cols {

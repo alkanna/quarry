@@ -691,7 +691,7 @@ impl App {
             self.demo_lint(false);
         }
         if which == "explain" {
-            self.demo_explain(crate::db::sql::Dialect::MySql, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'", include_str!("../db/sql/plan/fixtures/mysql-join.json"));
+            self.demo_explain_offline(crate::db::sql::Dialect::MySql, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'", include_str!("../db/sql/plan/fixtures/mysql-join.json"));
         }
         if which == "log" {
             self.sql_log_demo();

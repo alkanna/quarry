@@ -1,0 +1,88 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 2678.88,
+      "Total Cost": 2703.94,
+      "Plan Rows": 10026,
+      "Plan Width": 24,
+      "Disabled": false,
+      "Sort Key": ["b.created_at"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Startup Cost": 331.81,
+          "Total Cost": 2012.58,
+          "Plan Rows": 10026,
+          "Plan Width": 24,
+          "Disabled": false,
+          "Inner Unique": true,
+          "Hash Cond": "(b.service_id = s.id)",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Heap Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "bookings",
+              "Alias": "b",
+              "Startup Cost": 274.81,
+              "Total Cost": 1929.20,
+              "Plan Rows": 10026,
+              "Plan Width": 16,
+              "Disabled": false,
+              "Recheck Cond": "((provider = 'ZEUS_AIR'::text) AND (status = 'DONE'::text))",
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Index Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Index Name": "<13640>btree_bookings_provider_status",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 272.31,
+                  "Plan Rows": 10026,
+                  "Plan Width": 0,
+                  "Disabled": false,
+                  "Index Cond": "((provider = 'ZEUS_AIR'::text) AND (status = 'DONE'::text))"
+                }
+              ]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 32.00,
+              "Total Cost": 32.00,
+              "Plan Rows": 2000,
+              "Plan Width": 16,
+              "Disabled": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "services",
+                  "Alias": "s",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 32.00,
+                  "Plan Rows": 2000,
+                  "Plan Width": 16,
+                  "Disabled": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

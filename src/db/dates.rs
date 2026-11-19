@@ -64,6 +64,13 @@ pub(crate) fn hms(secs: i64) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
+/// The local wall-clock time of a Unix time, "22:41:07".
+pub(crate) fn local_hms(secs: u64) -> String {
+    let s = secs as i64;
+    let off = crate::db::sql::advanced::local_offset_at(s).unwrap_or(0) as i64;
+    hms((s + off).rem_euclid(86_400))
+}
+
 pub(crate) fn ymd(day: i64) -> String {
     let (y, m, d) = civil_from_days(day);
     format!("{y:04}-{m:02}-{d:02}")

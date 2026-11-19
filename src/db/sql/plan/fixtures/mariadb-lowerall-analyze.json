@@ -1,0 +1,32 @@
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.047641889
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 33.3191254,
+    "r_loops": 1,
+    "r_total_time_ms": 23.5364133,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ALL",
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 199143,
+          "r_rows": 200000,
+          "cost": 33.3191254,
+          "r_table_time_ms": 15.34823349,
+          "r_other_time_ms": 8.184193754,
+          "r_engine_stats": {
+            "pages_accessed": 976
+          },
+          "filtered": 100,
+          "r_filtered": 0.0025,
+          "attached_condition": "lcase(orders.email) = 'user42@example.com'"
+        }
+      }
+    ]
+  }
+}

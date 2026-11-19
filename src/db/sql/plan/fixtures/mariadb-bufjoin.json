@@ -1,0 +1,35 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 1857677.391,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "i",
+          "access_type": "ALL",
+          "loops": 1,
+          "rows": 100415,
+          "cost": 16.6246822,
+          "filtered": 100
+        }
+      },
+      {
+        "block-nl-join": {
+          "table": {
+            "table_name": "o",
+            "access_type": "ALL",
+            "loops": 100415,
+            "rows": 199143,
+            "cost": 1857660.766,
+            "filtered": 100,
+            "attached_condition": "o.`status` = 'paid' and o.total > 899"
+          },
+          "buffer_type": "flat",
+          "buffer_size": "256KiB",
+          "join_type": "BNL",
+          "attached_condition": "o.ref = i.sku"
+        }
+      }
+    ]
+  }
+}

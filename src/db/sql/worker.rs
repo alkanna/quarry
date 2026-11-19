@@ -900,6 +900,18 @@ impl Worker {
         });
     }
 
+    /// What the catalog says about the tables an explained plan scans, for its index suggestions. Never fails: a part that
+    /// cannot be read is left empty and the dialog keeps the plan's own findings.
+    pub fn sql_explain_evidence(&self, req: u64, db: Db, schema: String, wants: Vec<super::plan::evidence::Want>) {
+        self.spawn(async move { Msg::SqlExplainEvidence { req, ev: super::plan::evidence::load(&db, &schema, &wants).await } });
+    }
+
+    /// Plans `stmt` again with the candidate index `create` as a HypoPG hypothetical index, on a connection of its own
+    /// that is closed afterwards. Nothing is created; see `pg::hypo`.
+    pub fn sql_explain_hypo(&self, req: u64, db: Db, schema: String, create: String, stmt: String, read_only: bool) {
+        self.spawn(async move { Msg::SqlExplainHypo { req, res: super::pg::hypo::trial(&db, &schema, &create, &stmt, read_only).await } });
+    }
+
     /// The row count of a paged statement, read in the background on a connection of its own under the
     /// statement timeout. `idx` is the result tab it belongs to.
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {

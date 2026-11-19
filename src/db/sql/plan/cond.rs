@@ -436,6 +436,10 @@ impl P<'_> {
             self.i += 2;
             s.push_str("[]");
         }
+        // MySQL prints `cast(id as char charset latin1)`; the character set does not change which rows match.
+        if self.eat("charset") || (self.is("character") && self.peek_at(1).is_some_and(|(_, t)| t.eq_ignore_ascii_case("set")) && self.eat("character") && self.eat("set")) {
+            self.i += 1;
+        }
         Some(s)
     }
 
@@ -592,7 +596,7 @@ impl P<'_> {
             if !matches!(k, K::Word | K::Quoted) {
                 return None;
             }
-            parts.push(unquote_ident(t));
+            parts.push(lex::unquote_ident(t));
             self.i += 1;
             if !(self.is(".") && self.peek_at(1).is_some_and(|(k, _)| matches!(k, K::Word | K::Quoted))) {
                 break;
@@ -617,19 +621,16 @@ fn flat(xs: Vec<Expr>, or: bool) -> Vec<Expr> {
     out
 }
 
-fn unquote_str(s: &str) -> String {
+/// A quoted string's text, the doubled quote inside undone.
+pub(super) fn unquote_str(s: &str) -> String {
     let q = s.chars().next().unwrap_or('\'');
     let inner = s.strip_prefix(q).and_then(|s| s.strip_suffix(q)).unwrap_or(s);
     inner.replace(&format!("{q}{q}"), &q.to_string())
 }
 
-fn unquote_ident(s: &str) -> String {
-    for q in ['`', '"'] {
-        if let Some(inner) = s.strip_prefix(q).and_then(|s| s.strip_suffix(q)) {
-            return inner.replace(&format!("{q}{q}"), &q.to_string());
-        }
-    }
-    s.to_string()
+/// PostgreSQL's names for text, which a varchar column is relabeled to without a real cast.
+pub(super) fn text_type(ty: &str) -> bool {
+    matches!(ty, "text" | "character varying" | "varchar")
 }
 
 /// The values of an array term: PostgreSQL's `'{A,B}'::type[]` or `ARRAY[..]`.
@@ -670,7 +671,7 @@ fn split_array(s: &str) -> Vec<String> {
 }
 
 /// The columns a term reads, through functions and casts.
-pub fn term_cols(t: &Term) -> Vec<&ColRef> {
+pub(super) fn term_cols(t: &Term) -> Vec<&ColRef> {
     match t {
         Term::Col(c) => vec![c],
         Term::Cast { inner, .. } => term_cols(inner),
@@ -680,7 +681,7 @@ pub fn term_cols(t: &Term) -> Vec<&ColRef> {
 }
 
 /// Calls `f` on every term at the top of each condition in `e`.
-pub fn walk_terms<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Term)) {
+pub(super) fn walk_terms<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Term)) {
     match e {
         Expr::And(xs) | Expr::Or(xs) => xs.iter().for_each(|x| walk_terms(x, f)),
         Expr::Not(x) => walk_terms(x, f),
@@ -703,6 +704,258 @@ pub fn walk_terms<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Term)) {
             f(pat);
         }
         Expr::Other(_) => {}
+    }
+}
+
+/// How a condition on a column can narrow an index search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SargKind {
+    /// `col = v`, `col IS NULL`, a boolean column.
+    Eq,
+    /// `col IN (..)`, PostgreSQL's `= ANY (..)`.
+    In,
+    /// `<`, `>`, BETWEEN.
+    Range,
+    /// `LIKE 'abc%'`, which only MySQL and MariaDB search an ordinary index with.
+    Prefix,
+}
+
+/// A value a condition compares a column with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Val {
+    Lit(String),
+    Null,
+    /// A parameter, an outer column or an expression: one value, not known here.
+    Unknown,
+}
+
+/// One top-level condition an index on `col` could serve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sarg {
+    pub col: String,
+    pub kind: SargKind,
+    pub values: Vec<Val>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A function around the column: `date(created_at)`, `lower(email)`.
+    Wrapped,
+    /// A cast on the column to another type.
+    Cast,
+    /// A LIKE pattern that starts with a wildcard.
+    LeadingWild,
+    /// The column is one side of an OR.
+    Or,
+}
+
+/// A condition on `col` written so an index on the column cannot serve it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blocker {
+    pub col: String,
+    pub kind: BlockKind,
+    /// The function or type, "date" or "text"; empty for the others.
+    pub what: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sargs {
+    pub sargs: Vec<Sarg>,
+    pub blockers: Vec<Blocker>,
+    /// Top-level conditions that are neither: `<>`, NOT IN, a comparison of two columns, text that did not read.
+    pub other: usize,
+}
+
+/// What an index could do with the top-level AND of a filter on one table. `own` says whether a column belongs to the
+/// table scanned; with `outer_const` a column of another table counts as a value, as on the inner side of a nested loop
+/// where it is fixed for each loop. `ty` gives a column's catalog type: PostgreSQL prints a varchar column compared with
+/// text as `(col)::text`, a cast that an index on the column still serves, and only the type tells that cast apart.
+pub(super) fn sargs(e: &Expr, d: Dialect, own: &dyn Fn(&ColRef) -> bool, outer_const: bool, ty: &dyn Fn(&str) -> Option<String>) -> Sargs {
+    let mut out = Sargs::default();
+    let parts = match e {
+        Expr::And(xs) => xs.iter().collect::<Vec<_>>(),
+        _ => vec![e],
+    };
+    let c = Cx { d, own, outer_const, ty };
+    for x in parts {
+        c.conjunct(x, &mut out);
+    }
+    out
+}
+
+/// How a term reaches its column.
+enum Reach<'a> {
+    Plain(&'a ColRef),
+    Cast(&'a ColRef, &'a str),
+    Wrapped(&'a ColRef, &'a str),
+}
+
+struct Cx<'a> {
+    d: Dialect,
+    own: &'a dyn Fn(&ColRef) -> bool,
+    outer_const: bool,
+    ty: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// SQL words PostgreSQL prints bare that are values, not columns.
+const VALUE_WORDS: &[&str] = &["current_date", "current_timestamp", "current_time", "localtimestamp", "localtime"];
+
+impl Cx<'_> {
+    fn conjunct(&self, x: &Expr, out: &mut Sargs) {
+        match x {
+            Expr::Cmp { l, op, r } => {
+                let (reach, other, op) = match (self.reach(l), self.reach(r)) {
+                    (Some(a), None) if self.constant(r) => (a, r, op.clone()),
+                    (None, Some(b)) if self.constant(l) => (b, l, flip(op)),
+                    _ => return out.other += 1,
+                };
+                let kind = match op.as_str() {
+                    "=" | "<=>" | "==" => SargKind::Eq,
+                    "<" | "<=" | ">" | ">=" => SargKind::Range,
+                    _ => return out.other += 1,
+                };
+                self.push(reach, kind, vec![val(other)], out);
+            }
+            Expr::In { l, list, not: false } if list.iter().all(|t| self.constant(t)) => match self.reach(l) {
+                Some(r) => {
+                    let kind = if list.len() == 1 { SargKind::Eq } else { SargKind::In };
+                    self.push(r, kind, list.iter().map(val).collect(), out);
+                }
+                None => out.other += 1,
+            },
+            Expr::Between { t, lo, hi, not: false } if self.constant(lo) && self.constant(hi) => match self.reach(t) {
+                Some(r) => self.push(r, SargKind::Range, Vec::new(), out),
+                None => out.other += 1,
+            },
+            Expr::IsNull { t, not: false } => match self.reach(t) {
+                Some(r) => self.push(r, SargKind::Eq, vec![Val::Null], out),
+                None => out.other += 1,
+            },
+            Expr::Like { t, pat, ci, not: false } => {
+                let Some(r) = self.reach(t) else { return out.other += 1 };
+                let p = match val(pat) {
+                    Val::Lit(p) => p,
+                    _ => return out.other += 1,
+                };
+                if p.starts_with(['%', '_']) {
+                    if let Reach::Plain(c) | Reach::Cast(c, _) = r {
+                        out.blockers.push(Blocker { col: c.name.clone(), kind: BlockKind::LeadingWild, what: String::new() });
+                        return;
+                    }
+                }
+                // PostgreSQL searches a B-tree with a LIKE prefix only under the C collation or a pattern operator class,
+                // which the catalog read here does not show, so there the prefix is no search.
+                match r {
+                    Reach::Plain(_) if *ci || self.d == Dialect::Postgres => out.other += 1,
+                    r => self.push(r, SargKind::Prefix, Vec::new(), out),
+                }
+            }
+            Expr::Bool(t) => match self.reach(t) {
+                Some(r) => self.push(r, SargKind::Eq, vec![Val::Lit("true".into())], out),
+                None => out.other += 1,
+            },
+            Expr::Not(inner) => match inner.as_ref() {
+                Expr::Bool(t) => match self.reach(t) {
+                    Some(r) => self.push(r, SargKind::Eq, vec![Val::Lit("false".into())], out),
+                    None => out.other += 1,
+                },
+                _ => out.other += 1,
+            },
+            Expr::Or(xs) => {
+                let mut seen: Vec<String> = Vec::new();
+                for x in xs {
+                    walk_terms(x, &mut |t| {
+                        for c in term_cols(t) {
+                            if (self.own)(c) && !self.value_word(c) && !seen.contains(&c.name) {
+                                seen.push(c.name.clone());
+                            }
+                        }
+                    });
+                }
+                if seen.is_empty() {
+                    out.other += 1;
+                }
+                out.blockers.extend(seen.into_iter().map(|col| Blocker { col, kind: BlockKind::Or, what: String::new() }));
+            }
+            _ => out.other += 1,
+        }
+    }
+
+    /// A sarg for a plain column; a blocker for a cast or a function around it.
+    fn push(&self, r: Reach, kind: SargKind, values: Vec<Val>, out: &mut Sargs) {
+        match r {
+            Reach::Plain(c) => out.sargs.push(Sarg { col: c.name.clone(), kind, values }),
+            Reach::Cast(c, t) => out.blockers.push(Blocker { col: c.name.clone(), kind: BlockKind::Cast, what: t.to_string() }),
+            Reach::Wrapped(c, f) => out.blockers.push(Blocker { col: c.name.clone(), kind: BlockKind::Wrapped, what: f.to_string() }),
+        }
+    }
+
+    fn value_word(&self, c: &ColRef) -> bool {
+        c.qual.is_none() && VALUE_WORDS.contains(&c.name.to_ascii_lowercase().as_str())
+    }
+
+    fn mine(&self, c: &ColRef) -> bool {
+        (self.own)(c) && !self.value_word(c)
+    }
+
+    /// The column of this table a term reads, and what is around it.
+    fn reach<'t>(&self, t: &'t Term) -> Option<Reach<'t>> {
+        match t {
+            Term::Col(c) if self.mine(c) => Some(Reach::Plain(c)),
+            Term::Cast { inner, ty } => match inner.as_ref() {
+                Term::Col(c) if self.mine(c) => Some(if self.relabel(c, ty) { Reach::Plain(c) } else { Reach::Cast(c, ty) }),
+                Term::Func { name, args } => args.iter().flat_map(term_cols).find(|c| self.mine(c)).map(|c| Reach::Wrapped(c, name.as_str())),
+                _ => None,
+            },
+            Term::Func { name, args } => args.iter().flat_map(term_cols).find(|c| self.mine(c)).map(|c| Reach::Wrapped(c, name.as_str())),
+            _ => None,
+        }
+    }
+
+    /// PostgreSQL's `(col)::text` on a varchar column: a relabel the index on the column still serves. char to text strips
+    /// the padding and citext to text changes the comparison, so those are real casts an index on the column cannot serve.
+    fn relabel(&self, c: &ColRef, ty: &str) -> bool {
+        if self.d != Dialect::Postgres || !text_type(ty) {
+            return false;
+        }
+        (self.ty)(&c.name).is_some_and(|t| {
+            let t = t.to_ascii_lowercase();
+            t.starts_with("character varying") || t.starts_with("varchar")
+        })
+    }
+
+    /// A value fixed for the scan: a literal, a parameter, a subplan's result, a function of those, and with
+    /// `outer_const` a column of another table.
+    fn constant(&self, t: &Term) -> bool {
+        match t {
+            Term::Str(_) | Term::Num(_) | Term::Param(_) | Term::Sub(_) => true,
+            Term::Cast { inner, .. } => self.constant(inner),
+            Term::Func { args, .. } => args.iter().all(|a| self.constant(a)),
+            Term::Col(c) => self.value_word(c) || (self.outer_const && !(self.own)(c)),
+            Term::Other(_) => false,
+        }
+    }
+}
+
+/// `5 < col` read as `col > 5`.
+pub(super) fn flip(op: &str) -> String {
+    match op {
+        "<" => ">",
+        ">" => "<",
+        "<=" => ">=",
+        ">=" => "<=",
+        o => o,
+    }
+    .to_string()
+}
+
+fn val(t: &Term) -> Val {
+    match t {
+        Term::Str(s) => Val::Lit(s.clone()),
+        Term::Num(n) if n == "null" => Val::Null,
+        Term::Num(n) => Val::Lit(n.clone()),
+        Term::Cast { inner, .. } => val(inner),
+        _ => Val::Unknown,
     }
 }
 
@@ -850,6 +1103,9 @@ mod tests {
         assert_eq!(columns(&e), ["status", "created_at"]);
         assert_eq!(one_line(&my("((`shop`.`orders`.`status` = 'failed') and (`shop`.`orders`.`total` > 800.00))"), 3), "orders.status = 'failed' AND orders.total > 800.00");
         assert!(matches!(my("(year(`shop`.`orders`.`created_at`) = 2026)"), Expr::Cmp { l: Term::Func { ref name, .. }, .. } if name == "year"));
+        // The character set of a cast to char is read past.
+        assert!(matches!(my("(cast(`shop`.`orders`.`id` as char charset latin1) = '4242')"), Expr::Cmp { l: Term::Cast { ref ty, .. }, .. } if ty == "char"));
+        assert!(matches!(parse("cast(orders.`id` as char character set utf8mb3) = '4242'", Dialect::MariaDb), Some(Expr::Cmp { l: Term::Cast { ref ty, .. }, .. }) if ty == "char"));
         assert!(matches!(my("(`shop`.`orders`.`email` like '%42@example.com')"), Expr::Like { ci: false, not: false, .. }));
         assert!(matches!(my("((`shop`.`orders`.`created_at` >= TIMESTAMP'2026-03-01 00:00:00') and (`shop`.`orders`.`created_at` < TIMESTAMP'2026-03-02 00:00:00'))"), Expr::And(_)));
         let maria = parse("orders.created_at between '2026-03-01 00:00:00' and '2026-03-01 23:59:59' and orders.`status` = 'refunded'", Dialect::MariaDb).unwrap();
@@ -867,6 +1123,47 @@ mod tests {
         let text = |l: &Line| l.parts.iter().map(|p| p.1.as_str()).collect::<String>();
         assert_eq!(text(&lines[0]), "provider IN ('A', 'B', 'C' +2)");
         assert_eq!((lines[1].indent, text(&lines[1])), (2, "AND total > '5'".to_string()));
+    }
+
+    fn kinds(s: &Sargs) -> Vec<(&str, SargKind)> {
+        s.sargs.iter().map(|g| (g.col.as_str(), g.kind)).collect()
+    }
+
+    fn blocks(s: &Sargs) -> Vec<(&str, BlockKind, &str)> {
+        s.blockers.iter().map(|b| (b.col.as_str(), b.kind, b.what.as_str())).collect()
+    }
+
+    #[test]
+    fn sargs_from_real_filters() {
+        let any = |_: &ColRef| true;
+        let varchar = |c: &str| (c == "email").then(|| "character varying(120)".to_string());
+        let pg_s = |t: &str| sargs(&pg(t), Dialect::Postgres, &any, false, &varchar);
+        let s = pg_s("((created_at >= '2026-10-12 22:00:00+00'::timestamp with time zone) AND (provider = ANY ('{ZEUS_TAXI,ZEUS_VLOC}'::provider[])) AND (status = 'DONE'::booking_status) AND (email IS NULL) AND (NOT flagged))");
+        assert_eq!(kinds(&s), [("created_at", SargKind::Range), ("provider", SargKind::In), ("status", SargKind::Eq), ("email", SargKind::Eq), ("flagged", SargKind::Eq)]);
+        assert_eq!(s.sargs[2].values, [Val::Lit("DONE".into())]);
+        assert_eq!((s.sargs[3].values.clone(), s.sargs[4].values.clone()), (vec![Val::Null], vec![Val::Lit("false".into())]));
+        // A varchar column relabeled to text is still the column; a real cast or a function is not.
+        assert_eq!(kinds(&pg_s("((email)::text = 'user42@example.com'::text)")), [("email", SargKind::Eq)]);
+        assert_eq!(blocks(&pg_s("((created_at)::date = '2026-03-01'::date)")), [("created_at", BlockKind::Cast, "date")]);
+        assert_eq!(blocks(&pg_s("(lower((email)::text) = 'user42@example.com'::text)")), [("email", BlockKind::Wrapped, "lower")]);
+        assert_eq!(blocks(&pg_s("((email)::text ~~ '%42@example.com'::text)")), [("email", BlockKind::LeadingWild, "")]);
+        // A prefix LIKE searches no ordinary PostgreSQL index; MySQL reads it as a range.
+        let s = pg_s("((email)::text ~~ 'user42%'::text)");
+        assert!(s.sargs.is_empty() && s.blockers.is_empty() && s.other == 1, "{s:?}");
+        let my_s = |t: &str| sargs(&my(t), Dialect::MySql, &any, false, &|_| None);
+        assert_eq!(kinds(&my_s("(`shop`.`orders`.`email` like 'user42%')")), [("email", SargKind::Prefix)]);
+        assert_eq!(blocks(&my_s("(year(`shop`.`orders`.`created_at`) = 2026)")), [("created_at", BlockKind::Wrapped, "year")]);
+        let s = pg_s("(((email)::text = 'user42@example.com'::text) OR (ref = 'R4242'::text))");
+        assert_eq!(blocks(&s), [("email", BlockKind::Or, ""), ("ref", BlockKind::Or, "")]);
+        // `<>`, NOT IN and a comparison of two columns are no search.
+        assert_eq!(pg_s("((ref <> 'R1'::text) AND (total > cap))").other, 2);
+        // Another table's column is a value only for the inner side of a nested loop.
+        let mine = |c: &ColRef| c.qual.as_deref() == Some("b");
+        let e = pg("(b.service_id = s.id)");
+        assert!(sargs(&e, Dialect::Postgres, &mine, false, &|_| None).sargs.is_empty());
+        assert_eq!(kinds(&sargs(&e, Dialect::Postgres, &mine, true, &|_| None)), [("service_id", SargKind::Eq)]);
+        // `5 < total` reads as `total > 5`.
+        assert_eq!(kinds(&pg_s("('5'::numeric < total)")), [("total", SargKind::Range)]);
     }
 
     #[test]

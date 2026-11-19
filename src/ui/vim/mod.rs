@@ -473,7 +473,7 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(300.0, 200.0)).with_accessibility_check(false).build_ui(|ui| {
             set_on(ui.ctx(), true);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let id = egui::Id::new("vim-badge-test");
+                let id = egui::Id::unique("vim-badge-test");
                 let out = wrap(ui, id, &mut text, |ui, t| egui::TextEdit::multiline(t).id(id).desired_width(f32::INFINITY).show(ui));
                 seen.set(Some((out.response.rect, out.text_clip_rect, ui.clip_rect())));
             });

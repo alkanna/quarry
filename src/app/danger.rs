@@ -26,6 +26,7 @@ impl App {
                 let _ = std::fs::remove_file(super::conn_icon::path(id));
             }
             self.conns.retain(|c| c.meta.id != id);
+            self.explain_prev.forget(id);
             self.remove_tabs(|t| t.sel.conn == id);
             if self.active == Some(id) {
                 self.active = self.conns.first().map(|c| c.meta.id);

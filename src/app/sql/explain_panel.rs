@@ -4,15 +4,76 @@
 
 use super::explain::{SqlExplain, XAct};
 use crate::app::*;
-use crate::db::sql::plan::{cond, findings, Access, Finding, FixKind, PlanNode, Severity};
+use crate::db::sql::plan::findings::{self, Fix};
+use crate::db::sql::plan::{cond, rewrite, Access, Finding, FixKind, Op, PlanNode, Severity};
 use crate::db::sql::Dialect;
 
 /// The findings shown before "N more".
 const SHOWN: usize = 2;
+/// A glyph's box beside a title, and a stat tile's height.
+const GLYPH_BOX: f32 = 16.0;
+const TILE_H: f32 = 54.0;
+/// The tags painted in the plan's rows: a node's type, a change, how far an estimate was off.
+const TAG_H: f32 = 20.0;
+/// The column captions above the tree and the Compare table.
+pub(super) const HEAD_H: f32 = 24.0;
+/// The bar of the rows a node read and kept.
+const READ_BAR_H: f32 = 10.0;
 
 /// A count or time for a cell: whole numbers grouped, small ones with two decimals.
 pub(super) fn figure(n: f64) -> String {
-    if n >= 100.0 { group(&format!("{n:.0}")) } else { format!("{n:.2}").trim_end_matches('0').trim_end_matches('.').to_string() }
+    if n >= 100.0 { group(&format!("{n:.0}")) } else { findings::trim_zeros(&format!("{n:.2}")).to_string() }
+}
+
+/// A node's weight as a cell shows it: milliseconds when `time`, else a cost.
+pub(super) fn amount(v: f64, time: bool) -> String {
+    if time { format!("{} ms", findings::ms_text(v)) } else { figure(v) }
+}
+
+/// A tag tinted in `col` with its left edge at `x`, centered on `cy`: a node's type, a change, an estimate's error.
+pub(super) fn tag_chip(p: &egui::Painter, x: f32, cy: f32, g: std::sync::Arc<egui::Galley>, col: Color32) -> egui::Rect {
+    let r = egui::Rect::from_min_size(egui::pos2(x, cy - TAG_H / 2.0), egui::vec2(g.size().x + 12.0, TAG_H));
+    paint_badge(p, r, g, col, 36);
+    r
+}
+
+/// A bar filled to `frac` of its track, at least `min` wide so a sliver still shows; only the track when there is no share.
+pub(super) fn meter(p: &egui::Painter, track: egui::Rect, frac: Option<f64>, min: f32, color: Color32) {
+    p.rect_filled(track, R_SM, TRACK());
+    if let Some(f) = frac {
+        p.rect_filled(egui::Rect::from_min_size(track.min, egui::vec2((track.width() * f as f32).max(min), track.height())), R_SM, color);
+    }
+}
+
+/// The glyph of a severity or an outcome.
+#[derive(Clone, Copy)]
+pub(super) enum Mark {
+    Check,
+    Warn,
+    Info,
+}
+
+impl From<Severity> for Mark {
+    fn from(s: Severity) -> Mark {
+        match s {
+            Severity::Warn => Mark::Warn,
+            Severity::Note => Mark::Info,
+        }
+    }
+}
+
+pub(super) fn paint_mark(p: &egui::Painter, c: egui::Pos2, m: Mark, color: Color32) {
+    match m {
+        Mark::Check => glyphs::check(p, c, color),
+        Mark::Warn => glyphs::warn(p, c, color),
+        Mark::Info => glyphs::info(p, c, color),
+    }
+}
+
+/// A mark in a glyph's box, beside a title or a line.
+pub(super) fn mark_box(ui: &mut egui::Ui, m: Mark, color: Color32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(GLYPH_BOX, GLYPH_BOX), Sense::hover());
+    paint_mark(ui.painter(), r.center(), m, color);
 }
 
 pub(super) fn access_color(a: Access) -> Color32 {
@@ -34,7 +95,7 @@ pub(super) fn share_color(s: f64) -> Color32 {
     }
 }
 
-fn severity_color(s: Severity) -> Color32 {
+pub(super) fn severity_color(s: Severity) -> Color32 {
     match s {
         Severity::Warn => WARNING(),
         Severity::Note => MUTED(),
@@ -45,8 +106,7 @@ pub(super) fn findings_strip(ui: &mut egui::Ui, x: &mut SqlExplain, acts: &mut V
     let Some(p) = &x.plan else { return };
     if p.findings.is_empty() {
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-            glyphs::check(ui.painter(), r.center(), SUCCESS());
+            mark_box(ui, Mark::Check, SUCCESS());
             ui.label(RichText::new("Nothing in this plan stands out.").color(MUTED()));
         });
         return;
@@ -86,11 +146,7 @@ fn finding_card(ui: &mut egui::Ui, f: &Finding, selected: bool, acts: &mut Vec<X
     let out = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, color)).corner_radius(R_LG).inner_margin(egui::Margin { left: 14, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-            match f.severity {
-                Severity::Warn => glyphs::warn(ui.painter(), r.center(), color),
-                Severity::Note => glyphs::info(ui.painter(), r.center(), color),
-            }
+            mark_box(ui, f.severity.into(), color);
             ui.label(semibold(RichText::new(&f.title).color(BRIGHT())));
             if !f.weight.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -104,13 +160,9 @@ fn finding_card(ui: &mut egui::Ui, f: &Finding, selected: bool, acts: &mut Vec<X
                 for b in &f.body {
                     ui.label(RichText::new(b).size(TXT_SMALL).color(MUTED()));
                 }
+                // The fix is beside the plan once the card is clicked; a button here would sit under the card's own click.
                 if let Some(fix) = &f.fix {
-                    ui.add_space(4.0);
-                    if ui.small_button(&fix.label).on_hover_text("Show the fix beside the plan").clicked() {
-                        if let Some(n) = f.node {
-                            acts.push(XAct::Select(n));
-                        }
-                    }
+                    ui.label(RichText::new(format!("Fix: {}", fix.label)).size(TXT_SMALL).color(C_LINK()));
                 }
             });
         });
@@ -134,8 +186,9 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
     let n = &p.nodes[i];
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(egui::Margin::same(16)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        // What the node is.
+        // What the node is. The panes zero the row spacing, so each row sets its own gap.
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             let col = access_color(n.access);
             let label = RichText::new(&n.label).font(egui::FontId::monospace(TXT_BODY));
             if col == TEXT() {
@@ -155,18 +208,14 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
         ui.add_space(8.0);
         tiles(ui, p, n);
         // How many rows the node read and kept, and from where.
-        if let (Some(kept), Some(removed)) = (n.actual_rows, n.removed) {
+        if let (Some(kept), Some(removed)) = (n.kept_rows(), n.removed) {
             let loops = n.loops.unwrap_or(1.0);
             let (kept, removed) = (kept * loops, removed * loops);
             let read = kept + removed;
             ui.add_space(10.0);
             ui.label(caption_text("ROWS READ"));
-            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), Sense::hover());
-            ui.painter().rect_filled(r, 5, TRACK());
-            if read > 0.0 {
-                let w = (r.width() * (kept / read) as f32).max(4.0);
-                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(w, r.height())), 5, SUCCESS());
-            }
+            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), READ_BAR_H), Sense::hover());
+            meter(ui.painter(), r, (read > 0.0).then(|| kept / read), 4.0, SUCCESS());
             let pct = if read > 0.0 { kept / read * 100.0 } else { 0.0 };
             ui.label(RichText::new(format!("{} read  ·  {} kept ({})  ·  {} removed by the filter", figure(read), figure(kept), findings::pct_text(pct), figure(removed))).size(TXT_SMALL).color(TEXT()));
         }
@@ -174,26 +223,24 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
             ui.label(RichText::new(format!("Buffers  {} hit  ·  {} read from disk", figure(hit), figure(read))).size(TXT_SMALL).color(if read > hit { WARNING() } else { MUTED() }));
         }
         // Conditions.
-        if !n.filter.is_empty() {
-            section(ui, "FILTER", Some(&n.filter), acts);
-            match &n.filter_expr {
+        for (title, c) in [("FILTER", &n.filter), ("INDEX CONDITION", &n.index_cond), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond), ("JOIN FILTER", &n.join_filter)] {
+            if c.is_empty() {
+                continue;
+            }
+            section(ui, title, Some(&c.text), acts);
+            match &c.expr {
                 Some(e) => condition_lines(ui, e),
                 None => {
-                    ui.label(crate::ui::editor::sql_job_in(&n.filter, TXT_SMALL, x.dialect));
+                    ui.label(crate::ui::editor::sql_job_in(&c.text, TXT_SMALL, x.dialect));
                 }
             }
         }
-        for (title, text) in [("INDEX CONDITION", &n.index_cond), (if x.dialect == Dialect::Postgres { "JOIN CONDITION" } else { "LOOKUP" }, &n.join_cond)] {
-            if text.is_empty() {
-                continue;
-            }
-            section(ui, title, Some(text), acts);
-            match cond::parse(text, x.dialect) {
-                Some(e) => condition_lines(ui, &e),
-                None => {
-                    ui.label(crate::ui::editor::sql_job_in(text, TXT_SMALL, x.dialect));
-                }
-            }
+        // How many pairs the join's condition matched and its filter threw away, after ANALYZE.
+        if let (Some(kept), Some(removed)) = (n.actual_rows, n.removed_join) {
+            let loops = n.loops.unwrap_or(1.0);
+            let (kept, removed) = (kept * loops, removed * loops);
+            let pct = if kept + removed > 0.0 { kept / (kept + removed) * 100.0 } else { 0.0 };
+            ui.label(RichText::new(format!("{} pairs matched  ·  {} kept ({})  ·  {} removed by the join filter", figure(kept + removed), figure(kept), findings::pct_text(pct), figure(removed))).size(TXT_SMALL).color(TEXT()));
         }
         let rest: Vec<&String> = n.detail.iter().filter(|d| !SHOWN_ELSEWHERE.iter().any(|k| d.starts_with(k))).collect();
         if !rest.is_empty() {
@@ -206,15 +253,42 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
         for f in p.findings.iter().filter(|f| f.node == Some(i)) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-                match f.severity {
-                    Severity::Warn => glyphs::warn(ui.painter(), r.center(), WARNING()),
-                    Severity::Note => glyphs::info(ui.painter(), r.center(), MUTED()),
-                }
+                ui.spacing_mut().item_spacing.x = 8.0;
+                mark_box(ui, f.severity.into(), severity_color(f.severity));
                 ui.label(semibold(RichText::new(&f.title).color(BRIGHT())));
             });
             for b in &f.body {
                 ui.label(RichText::new(b).size(TXT_SMALL).color(MUTED()));
+            }
+            if !f.evidence.is_empty() {
+                section(ui, "FROM THE CATALOG", None, acts);
+                for line in &f.evidence {
+                    ui.label(RichText::new(line).size(TXT_SMALL).color(TEXT()));
+                }
+            }
+            if let Some(why) = &f.no_fix {
+                ui.add_space(6.0);
+                ui.label(RichText::new(why).size(TXT_SMALL).color(MUTED()));
+            }
+            if x.ev_req.is_some() && f.fix.is_none() && f.no_fix.is_none() && n.access == Access::Scan && !n.filter.is_empty() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Reading the table's statistics and indexes").size(TXT_SMALL).color(MUTED()));
+                });
+            }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Rewrite) {
+                rewrite_box(ui, x, n, fix, acts);
+                continue;
+            }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Index) {
+                candidate_box(ui, x, fix, acts);
+                continue;
+            }
+            if let Some(fix) = f.fix.as_ref().filter(|fx| fx.kind == FixKind::Setting && x.db.pooler()) {
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Behind a connection pooler a session setting does not last to the next statement, so {} is not offered here. Set it on the role or the server instead.", fix.label)).size(TXT_SMALL).color(MUTED()));
+                continue;
             }
             if let Some(fix) = &f.fix {
                 let sql = if fix.kind == FixKind::Setting { format!("{}\n{};", fix.sql, x.stmt.trim().trim_end_matches(';')) } else { fix.sql.clone() };
@@ -232,7 +306,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
                     if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens it as a draft in a new Query tab. Nothing runs.").clicked() {
                         acts.push(XAct::Draft(sql.clone()));
                     }
-                    if ui.button("Copy").clicked() {
+                    if quiet(ui, "Copy").clicked() {
                         acts.push(XAct::Copy(sql));
                     }
                 });
@@ -241,8 +315,54 @@ pub(super) fn inspector(ui: &mut egui::Ui, x: &SqlExplain, acts: &mut Vec<XAct>)
     });
 }
 
+/// The index a finding suggests: why these columns in this order, the statement colored, and the two ways to take it.
+/// Nothing here runs it; the draft opens in a Query tab for the user to run.
+fn candidate_box(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut Vec<XAct>) {
+    let (note, sql) = (fix.note.as_str(), fix.sql.as_str());
+    section(ui, "CANDIDATE INDEX", None, acts);
+    well_frame().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(note).size(TXT_SMALL).color(MUTED()));
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(crate::ui::editor::sql_job_in(sql, TXT_SMALL, x.dialect)).wrap());
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens it as a draft in a new Query tab. Nothing runs.").clicked() {
+            acts.push(XAct::Draft(sql.to_string()));
+        }
+        if quiet(ui, "Copy").clicked() {
+            acts.push(XAct::Copy(sql.to_string()));
+        }
+        ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
+    });
+    super::explain_hypo::hypo_row(ui, x, fix, acts);
+}
+
+/// The filter written so an index serves it. The draft is the whole statement with the condition replaced when it can be
+/// found there for certain, else the condition alone; Copy takes the condition.
+fn rewrite_box(ui: &mut egui::Ui, x: &SqlExplain, n: &PlanNode, fix: &Fix, acts: &mut Vec<XAct>) {
+    section(ui, "REWRITTEN FILTER", None, acts);
+    well_frame().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(&fix.note).size(TXT_SMALL).color(MUTED()));
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(crate::ui::editor::sql_job_in(&fix.sql, TXT_SMALL, x.dialect)).wrap());
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if primary(ui, "Open in Query tab", PRIMARY()).on_hover_text("Opens the statement with this filter as a draft in a new Query tab. Nothing runs.").clicked() {
+            acts.push(XAct::Draft(rewrite::statement(&x.stmt, x.dialect, n, fix).unwrap_or_else(|| fix.sql.clone())));
+        }
+        if quiet(ui, "Copy").clicked() {
+            acts.push(XAct::Copy(fix.sql.clone()));
+        }
+        ui.label(RichText::new("Then Explain again to compare.").size(TXT_SMALL).color(MUTED()));
+    });
+}
+
 /// Detail lines the panel already shows in a better form.
-const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Join Filter:", "Rows removed by filter:", "Buffers:", "Index condition:", "Lookup:"];
+const SHOWN_ELSEWHERE: &[&str] = &["Filter:", "Index Cond:", "Recheck Cond:", "Hash Cond:", "Merge Cond:", "Join Filter:", "Rows removed by filter:", "Rows removed by join filter:", "Buffers:", "Index condition:", "Lookup:"];
 
 fn section(ui: &mut egui::Ui, title: &str, copy: Option<&String>, acts: &mut Vec<XAct>) {
     ui.add_space(10.0);
@@ -250,7 +370,7 @@ fn section(ui: &mut egui::Ui, title: &str, copy: Option<&String>, acts: &mut Vec
         ui.label(caption_text(title));
         if let Some(text) = copy {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("Copy").size(TXT_SMALL).color(C_LINK())).frame(false)).on_hover_text(format!("Copy the {} as the server wrote it", title.to_lowercase())).clicked() {
+                if quiet(ui, "Copy").on_hover_text(format!("Copy the {} as the server wrote it", title.to_lowercase())).clicked() {
                     acts.push(XAct::Copy(text.clone()));
                 }
             });
@@ -308,20 +428,52 @@ fn tiles(ui: &mut egui::Ui, p: &crate::db::sql::plan::Plan, n: &PlanNode) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (label, value, note, color) in items {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 54.0), Sense::hover());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, TILE_H), Sense::hover());
             let pt = ui.painter();
             pt.rect(rect, R_BAR, PANEL(), Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
-            let g = pt.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.6)));
-            galley_at(pt, rect.left() + 12.0, rect.top() + 16.0, g, FAINT());
-            let g = pt.layout_job(egui::text::LayoutJob::single_section(value, mono_fmt(TXT_SUBHEAD, color, 600.0)));
-            let vw = g.size().x;
-            galley_at(pt, rect.left() + 12.0, rect.top() + 37.0, g, color);
-            if !note.is_empty() {
-                let g = pt.layout_job(egui::text::LayoutJob::single_section(note, ui_fmt(TXT_SMALL, MUTED(), 400.0, 0.0)));
-                galley_at(pt, rect.left() + 18.0 + vw, rect.top() + 38.0, g, MUTED());
+            let lg = pt.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.6)));
+            let vg = pt.layout_job(egui::text::LayoutJob::single_section(value, mono_fmt(TXT_SUBHEAD, color, 600.0)));
+            let ng = (!note.is_empty()).then(|| pt.layout_job(egui::text::LayoutJob::single_section(note.clone(), ui_fmt(TXT_SMALL, MUTED(), 400.0, 0.0))));
+            let place = note_place(w, lg.size().x, vg.size().x, ng.as_ref().map_or(0.0, |g| g.size().x));
+            let vw = vg.size().x;
+            galley_at(pt, rect.left() + TILE_PAD, rect.top() + 16.0, lg, FAINT());
+            galley_at(pt, rect.left() + TILE_PAD, rect.top() + 37.0, vg, color);
+            match (ng, place) {
+                (Some(g), NotePlace::Beside) => galley_at(pt, rect.left() + TILE_PAD + vw + NOTE_GAP, rect.top() + 38.0, g, MUTED()),
+                (Some(g), NotePlace::OnLabel) => galley_at(pt, rect.right() - TILE_PAD - g.size().x, rect.top() + 16.0, g, MUTED()),
+                (Some(_), NotePlace::Hover) => {
+                    resp.on_hover_text(note);
+                }
+                _ => {}
             }
         }
     });
+}
+
+/// A tile's text starts this far from its sides, and a note sits this far after the value.
+const TILE_PAD: f32 = 12.0;
+const NOTE_GAP: f32 = 6.0;
+
+/// Where a tile's note goes so it never runs past the tile's edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotePlace {
+    /// After the value, as in the design.
+    Beside,
+    /// At the right of the label line, when the value leaves no room beside it.
+    OnLabel,
+    /// In the tile's hover text, when neither line has room.
+    Hover,
+}
+
+fn note_place(tile_w: f32, label_w: f32, value_w: f32, note_w: f32) -> NotePlace {
+    let room = tile_w - 2.0 * TILE_PAD;
+    if value_w + NOTE_GAP + note_w <= room {
+        NotePlace::Beside
+    } else if label_w + NOTE_GAP + note_w <= room {
+        NotePlace::OnLabel
+    } else {
+        NotePlace::Hover
+    }
 }
 
 /// "public.bookings  ·  under Hash, builds the join's hash table": where the node sits and what it is for.
@@ -333,28 +485,46 @@ fn context_line(p: &crate::db::sql::plan::Plan, i: usize) -> String {
     }
     if let Some(j) = n.parent {
         let parent = &p.nodes[j];
-        let pl = parent.label.as_str();
         let first = parent.kids.first() == Some(&i);
         let what = if n.role.starts_with("SubPlan") || n.role.starts_with("InitPlan") || n.role.starts_with("CTE") {
-            format!("{}, runs for {pl}", n.role)
-        } else if pl == "Hash" {
-            "builds the join's hash table".to_string()
-        } else if pl.starts_with("Nested Loop") || pl == "Nested loop" {
-            if first { "drives the nested loop".into() } else { "runs once per row of the side above".into() }
-        } else if pl.contains("Join") {
-            if first { "the join's outer side".into() } else { "the join's inner side".into() }
-        } else if pl.starts_with("Gather") {
-            "run by parallel workers".into()
-        } else if pl == "Limit" {
-            "read until the limit is reached".into()
-        } else if pl.starts_with("Sort") || pl == "Filesort" {
-            "feeds the sort".into()
-        } else if pl.starts_with("Aggregate") || pl == "Group" || pl.starts_with("Group") {
-            "feeds the aggregate".into()
+            format!("{}, runs for {}", n.role, parent.label)
         } else {
-            format!("under {pl}")
+            match parent.op {
+                Op::Hash => "builds the join's hash table".to_string(),
+                Op::NestedLoop if first => "drives the nested loop".into(),
+                Op::NestedLoop => "runs once per row of the side above".into(),
+                o if o.is_join() && first => "the join's outer side".into(),
+                o if o.is_join() => "the join's inner side".into(),
+                Op::Gather => "run by parallel workers".into(),
+                Op::Limit => "read until the limit is reached".into(),
+                Op::Sort => "feeds the sort".into(),
+                Op::Aggregate => "feeds the aggregate".into(),
+                _ => format!("under {}", parent.label),
+            }
         };
         parts.push(what);
     }
     parts.join("  ·  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tile_note_never_runs_past_the_tile() {
+        // A narrow panel: "13,885" and "est. 12,622" do not fit side by side, so the note moves up beside ROWS.
+        assert_eq!(note_place(120.0, 30.0, 58.0, 58.0), NotePlace::OnLabel);
+        assert_eq!(note_place(160.0, 30.0, 58.0, 58.0), NotePlace::Beside);
+        // A long label leaves no room on either line, so the note goes to the hover text.
+        assert_eq!(note_place(100.0, 60.0, 70.0, 58.0), NotePlace::Hover);
+        let (label, value, note) = (30.0, 58.0, 58.0);
+        for w in [80.0_f32, 116.0, 140.0, 200.0] {
+            match note_place(w, label, value, note) {
+                NotePlace::Beside => assert!(TILE_PAD + value + NOTE_GAP + note <= w - TILE_PAD, "{w}"),
+                NotePlace::OnLabel => assert!(TILE_PAD + label + NOTE_GAP <= w - TILE_PAD - note, "{w}"),
+                NotePlace::Hover => {}
+            }
+        }
+    }
 }

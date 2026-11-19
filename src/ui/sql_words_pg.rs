@@ -18,13 +18,6 @@ pub(crate) const KEYWORDS_PG: &[&str] = &[
 ];
 
 /// Words PostgreSQL will not take as a bare name: the "reserved" and "reserved (can be function or type)" columns of the SQL Key Words appendix. A table or column called this gets double quotes.
-pub(crate) const RESERVED_PG: &[&str] = &[
-    "ALL", "ANALYSE", "ANALYZE", "AND", "ANY", "ARRAY", "AS", "ASC", "ASYMMETRIC", "AUTHORIZATION", "BINARY", "BOTH", "CASE", "CAST", "CHECK", "COLLATE", "COLLATION", "COLUMN", "CONCURRENTLY", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_CATALOG",
-    "CURRENT_DATE", "CURRENT_ROLE", "CURRENT_SCHEMA", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DEFAULT", "DEFERRABLE", "DESC", "DISTINCT", "DO", "ELSE", "END", "EXCEPT", "FALSE", "FETCH", "FOR", "FOREIGN", "FREEZE", "FROM", "FULL", "GRANT",
-    "GROUP", "HAVING", "ILIKE", "IN", "INITIALLY", "INNER", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "LATERAL", "LEADING", "LEFT", "LIKE", "LIMIT", "LOCALTIME", "LOCALTIMESTAMP", "NATURAL", "NOT", "NOTNULL", "NULL", "OFFSET", "ON", "ONLY", "OR", "ORDER",
-    "OUTER", "OVERLAPS", "PLACING", "PRIMARY", "REFERENCES", "RETURNING", "RIGHT", "SELECT", "SESSION_USER", "SIMILAR", "SOME", "SYMMETRIC", "SYSTEM_USER", "TABLE", "TABLESAMPLE", "THEN", "TO", "TRAILING", "TRUE", "UNION", "UNIQUE", "USER", "USING", "VARIADIC",
-    "VERBOSE", "WHEN", "WHERE", "WINDOW", "WITH",
-];
 
 /// Built-in functions as (name, signature), in the same shape as `db::sql::FUNCTIONS`. A signature with no parenthesis is a keyword form that is written without a call. Nothing the read-only check refuses is listed.
 pub(crate) const FUNCTIONS_PG: &[(&str, &str)] = &[
@@ -85,6 +78,5 @@ mod tests {
         assert!(FUNCTIONS_PG.iter().all(|(n, _)| seen.insert(*n)));
         let mut seen = std::collections::HashSet::new();
         assert!(KEYWORDS_PG.iter().all(|k| seen.insert(*k)), "duplicate keyword");
-        assert!(RESERVED_PG.iter().all(|w| w.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')));
     }
 }

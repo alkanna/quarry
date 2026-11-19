@@ -3,13 +3,13 @@
 //! for its own share, rows and cost. After ANALYZE the columns turn to time and the estimate against what ran.
 
 use super::explain::{SqlExplain, XAct};
-use super::explain_panel::{access_color, figure, share_color};
+use super::explain_panel::{access_color, amount, figure, meter, paint_mark, severity_color, share_color, tag_chip, HEAD_H};
 use crate::app::*;
-use crate::db::sql::plan::{cond, findings, Plan, PlanNode, Severity};
-use crate::db::sql::Dialect;
+use crate::db::sql::plan::{cond, findings, Op, Plan, PlanNode, Severity};
 
-const ROW: f32 = 32.0;
-const ROW_SUB: f32 = 46.0;
+/// A row's height, with a second line, and the indent of one level.
+pub(super) const ROW: f32 = 32.0;
+pub(super) const ROW_SUB: f32 = 46.0;
 const STEP: f32 = 18.0;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -72,19 +72,40 @@ fn columns(p: &Plan, w: f32) -> Vec<Col> {
     cols
 }
 
+/// What a row shows beside its numbers: the name screen readers and tests find it by, its second line and the mark of
+/// its most severe finding.
+pub(super) struct TreeRow {
+    name: String,
+    sub: Option<String>,
+    mark: Option<Severity>,
+}
+
+fn tree_rows(p: &Plan) -> Vec<TreeRow> {
+    let mut marks: Vec<Option<Severity>> = vec![None; p.nodes.len()];
+    for f in &p.findings {
+        if let Some(m) = f.node.and_then(|i| marks.get_mut(i)) {
+            *m = Some(m.map_or(f.severity, |s| s.min(f.severity)));
+        }
+    }
+    p.nodes.iter().zip(marks).map(|(n, mark)| TreeRow { name: format!("{} {}", n.label, n.name()).trim().to_string(), sub: node_sub(n), mark }).collect()
+}
+
 pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
-    let Some(p) = &x.plan else { return };
+    if x.tree_rows.is_none() {
+        x.tree_rows = x.plan.as_deref().map(tree_rows);
+    }
+    let (Some(p), Some(rows)) = (&x.plan, &x.tree_rows) else { return };
     if p.nodes.is_empty() {
         ui.label(RichText::new("The server returned no plan nodes. See Raw.").color(MUTED()));
         return;
     }
     let cols = columns(p, ui.available_width());
-    let marks: Vec<Option<Severity>> = (0..p.nodes.len()).map(|i| p.findings.iter().filter(|f| f.node == Some(i)).map(|f| f.severity).min()).collect();
     // Header.
-    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEAD_H), Sense::hover());
     // Labels rather than painted text, so screen readers and tests find the columns.
     let head = |ui: &mut egui::Ui, text: &str, r: egui::Rect, right: bool| {
-        let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_align(if right { egui::Align::Max } else { egui::Align::Min });
+        // A main align of Max does not move a single label in a horizontal layout; right to left does.
+        let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
         ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| ui.label(RichText::new(text).size(TXT_SECTION).color(FAINT()).extra_letter_spacing(0.6))).inner
     };
     head(ui, "NODE", egui::Rect::from_min_max(hr.min + egui::vec2(8.0, 0.0), egui::pos2(hr.center().x, hr.bottom())), false);
@@ -100,12 +121,11 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
     }
     ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, LINE()));
     let scroll_to = x.scroll_to.take();
-    egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - 24.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("sql-explain-tree").max_height((body_h - HEAD_H).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        for (i, n) in p.nodes.iter().enumerate() {
-            let sub = node_sub(n, x.dialect);
-            let name = format!("{} {}", n.label, n.name()).trim().to_string();
-            let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &name, |pt, rect| paint_row(pt, rect, n, sub.as_deref(), marks[i], &cols));
+        for (i, (n, row)) in p.nodes.iter().zip(rows).enumerate() {
+            let sub = row.sub.as_deref();
+            let r = side_row(ui, if sub.is_some() { ROW_SUB } else { ROW }, 0.0, x.sel == Some(i), &row.name, |pt, rect| paint_row(pt, rect, n, sub, row.mark, &cols));
             if scroll_to == Some(i) {
                 r.scroll_to_me(Some(egui::Align::Center));
             }
@@ -117,9 +137,8 @@ pub(super) fn plan_tree(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts
 }
 
 /// The second line of a row: the columns its filter tests, or the condition it searches or joins on.
-fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
-    let cols = |text: &str| cond::parse(text, d).map(|e| cond::columns(&e)).filter(|c| !c.is_empty());
-    if let Some(e) = &n.filter_expr {
+fn node_sub(n: &PlanNode) -> Option<String> {
+    if let Some(e) = &n.filter.expr {
         let c = cond::columns(e);
         if !c.is_empty() {
             return Some(format!("Filter: {}", c.join(", ")));
@@ -128,15 +147,18 @@ fn node_sub(n: &PlanNode, d: Dialect) -> Option<String> {
     if !n.filter.is_empty() {
         return Some("Filter".into());
     }
-    if let Some(c) = cols(&n.index_cond) {
+    if let Some(c) = n.index_cond.expr.as_ref().map(cond::columns).filter(|c| !c.is_empty()) {
         return Some(format!("Index Cond: {}", c.join(", ")));
     }
     if !n.join_cond.is_empty() {
-        let line = cond::parse(&n.join_cond, d).map(|e| cond::one_line(&e, 3)).unwrap_or_else(|| n.join_cond.trim_start_matches('(').trim_end_matches(')').to_string());
+        let line = n.join_cond.expr.as_ref().map(|e| cond::one_line(e, 3)).unwrap_or_else(|| n.join_cond.text.trim_start_matches('(').trim_end_matches(')').to_string());
         let short: String = line.chars().take(60).collect();
-        return Some(if n.label.contains("Join") || n.label == "Hash" { short } else { format!("Lookup: {short}") });
+        return Some(if n.op.is_join() || n.op == Op::Hash { short } else { format!("Lookup: {short}") });
     }
-    n.detail.iter().find(|d| d.starts_with("Sort Key") || d.starts_with("Group Key")).cloned()
+    if !n.sort_key.is_empty() {
+        return Some(format!("Sort Key: {}", n.sort_key));
+    }
+    (!n.group_key.is_empty()).then(|| format!("Group Key: {}", n.group_key))
 }
 
 fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str>, mark: Option<Severity>, cols: &[Col]) {
@@ -144,41 +166,9 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
     let cols_w: f32 = cols.iter().map(|c| c.width()).sum();
     let node_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - cols_w - 8.0, rect.bottom()));
     let np = p.with_clip_rect(node_area.intersect(p.clip_rect()));
-    // Indent guides, one per level above the node.
-    for l in 0..n.depth {
-        let gx = rect.left() + l as f32 * STEP + 5.5;
-        np.vline(gx, rect.y_range(), Stroke::new(1.0, LINE()));
-    }
-    let mut x = rect.left() + n.depth as f32 * STEP;
-    let col = access_color(n.access);
-    let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
-    if col != TEXT() {
-        let chip = egui::Rect::from_min_size(egui::pos2(x, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
-        np.rect_filled(chip, R_SM, tint(col, 36));
-        galley_at(&np, x + 6.0, top, g.clone(), col);
-        x = chip.right() + 8.0;
-    } else {
-        let w = g.size().x;
-        galley_at(&np, x, top, g, BRIGHT());
-        x += w + 8.0;
-    }
-    let target = n.name();
-    if !target.is_empty() {
-        let g = np.layout_job(egui::text::LayoutJob::single_section(target, mono_fmt(TXT_BODY, TEXT(), 400.0)));
-        let w = g.size().x;
-        galley_at(&np, x, top, g, TEXT());
-        x += w + 8.0;
-    }
+    let x = paint_node(&np, rect, top, n.depth, n, sub, false);
     if let Some(sev) = mark {
-        let c = egui::pos2(x + 6.0, top);
-        match sev {
-            Severity::Warn => glyphs::warn(&np, c, WARNING()),
-            Severity::Note => glyphs::info(&np, c, MUTED()),
-        }
-    }
-    if let Some(s) = sub {
-        let g = np.layout_job(egui::text::LayoutJob::single_section(s.to_string(), mono_fmt(TXT_SMALL, FAINT(), 400.0)));
-        galley_at(&np, rect.left() + n.depth as f32 * STEP + 2.0, rect.top() + 34.0, g, FAINT());
+        paint_mark(&np, egui::pos2(x + 6.0, top), sev.into(), severity_color(sev));
     }
     // Columns, right to left.
     let mut cx = rect.right();
@@ -191,7 +181,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
         match c {
             Col::SelfCost | Col::Time => {
                 let (share, text) = match c {
-                    Col::Time => (n.share, n.self_ms.map(|m| format!("{} ms", findings::ms_text(m)))),
+                    Col::Time => (n.share, n.self_ms.map(|m| amount(m, true))),
                     _ => (n.share, n.share.map(|s| format!("{}%", (s * 100.0).round()))),
                 };
                 if let (Some(s), Some(t)) = (share, text) {
@@ -201,9 +191,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
                     galley_at(p, cx - tw, top, g, color);
                     let track = egui::Rect::from_min_max(egui::pos2(left + 4.0, top - 3.0), egui::pos2(cx - tw - 10.0, top + 3.0));
                     if track.width() > 12.0 {
-                        p.rect_filled(track, 3, TRACK());
-                        let fill = egui::Rect::from_min_size(track.min, egui::vec2((track.width() * s as f32).max(3.0), track.height()));
-                        p.rect_filled(fill, 3, color);
+                        meter(p, track, Some(s), 3.0, color);
                     }
                 }
             }
@@ -227,15 +215,46 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, n: &PlanNode, sub: Option<&str
                     if off >= 2.0 {
                         let color = if off >= findings::OFF_WARN { WARNING() } else { MUTED() };
                         let g = p.layout_job(egui::text::LayoutJob::single_section(findings::factor(off), mono_fmt(TXT_SMALL, color, 500.0)));
-                        let chip = egui::Rect::from_min_size(egui::pos2(cx - g.size().x - 12.0, top - 10.0), egui::vec2(g.size().x + 12.0, 20.0));
-                        p.rect_filled(chip, R_SM, tint(color, 36));
-                        galley_at(p, chip.left() + 6.0, top, g, color);
+                        tag_chip(p, cx - g.size().x - 12.0, top, g, color);
                     } else {
-                        glyphs::check(p, egui::pos2(cx - 8.0, top), SUCCESS());
+                        // The check's ink ends 4.5 px right of its center; keep it on the column's right edge like the chips.
+                        glyphs::check(p, egui::pos2(cx - 4.5, top), SUCCESS());
                     }
                 }
             }
         }
         cx = left;
     }
+}
+
+/// The left part of a plan row, shared with Compare: indent guides, the node's type in a chip tinted by how it reads,
+/// what it reads, and the second line. A node `gone` from the new plan is drawn faint, without its chip. Returns where a
+/// mark after the name goes.
+pub(super) fn paint_node(np: &egui::Painter, rect: egui::Rect, top: f32, depth: usize, n: &PlanNode, sub: Option<&str>, gone: bool) -> f32 {
+    // Indent guides, one per level above the node.
+    for l in 0..depth {
+        np.vline(rect.left() + l as f32 * STEP + 5.5, rect.y_range(), Stroke::new(1.0, LINE()));
+    }
+    let mut x = rect.left() + depth as f32 * STEP;
+    let col = if gone { FAINT() } else { access_color(n.access) };
+    let g = np.layout_job(egui::text::LayoutJob::single_section(n.label.clone(), mono_fmt(TXT_BODY, if col == TEXT() { BRIGHT() } else { col }, 500.0)));
+    if col != TEXT() && !gone {
+        x = tag_chip(np, x, top, g, col).right() + 8.0;
+    } else {
+        let w = g.size().x;
+        galley_at(np, x, top, g, col);
+        x += w + 8.0;
+    }
+    let name = n.name();
+    if !name.is_empty() {
+        let g = np.layout_job(egui::text::LayoutJob::single_section(name, mono_fmt(TXT_BODY, if gone { FAINT() } else { TEXT() }, 400.0)));
+        let w = g.size().x;
+        galley_at(np, x, top, g, TEXT());
+        x += w + 8.0;
+    }
+    if let Some(s) = sub {
+        let g = np.layout_job(egui::text::LayoutJob::single_section(s.to_string(), mono_fmt(TXT_SMALL, FAINT(), 400.0)));
+        galley_at(np, rect.left() + depth as f32 * STEP + 2.0, rect.top() + 34.0, g, FAINT());
+    }
+    x
 }

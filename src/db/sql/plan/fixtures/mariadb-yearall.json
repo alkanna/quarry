@@ -1,0 +1,20 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 33.3191254,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ALL",
+          "possible_keys": ["idx_orders_created_at"],
+          "loops": 1,
+          "rows": 199143,
+          "cost": 33.3191254,
+          "filtered": 100,
+          "attached_condition": "orders.created_at between '2026-01-01 00:00:00' and '2026-12-31 23:59:59' and orders.`status` = 'refunded'"
+        }
+      }
+    ]
+  }
+}

@@ -3,7 +3,7 @@
 //! server. The popup itself is the one the Mongo inputs use.
 
 use super::complete::{ac_input_with, fuzzy, Ac, Fields, SqlInfo, Sug};
-use super::sql_words_pg::{FUNCTIONS_PG, KEYWORDS_PG, RESERVED_PG, TYPES_PG};
+use super::sql_words_pg::{FUNCTIONS_PG, KEYWORDS_PG, TYPES_PG};
 use super::theme::*;
 use crate::db::sql::{
     lex::{self, Tok},
@@ -18,12 +18,6 @@ use std::sync::Arc;
 const MAX_SUGGESTIONS: usize = 50;
 
 /// Words MySQL will not take as a bare name, so a table or column called this gets backticks.
-const RESERVED: &[&str] = &[
-    "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "BETWEEN", "BY", "CASE", "CHANGE", "CHECK", "COLLATE", "COLUMN", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
-    "DATABASE", "DEFAULT", "DELETE", "DESC", "DESCRIBE", "DISTINCT", "DROP", "ELSE", "EXISTS", "EXPLAIN", "FALSE", "FOR", "FOREIGN", "FROM", "GRANT", "GROUP", "HAVING", "IF", "IGNORE", "IN", "INDEX", "INNER", "INSERT",
-    "INTERVAL", "INTO", "IS", "JOIN", "KEY", "KEYS", "KILL", "LEFT", "LIKE", "LIMIT", "LOCK", "MATCH", "NOT", "NULL", "ON", "OPTION", "OR", "ORDER", "OUTER", "PRIMARY", "RANGE", "RANK", "READ", "REFERENCES", "REGEXP",
-    "RENAME", "REPLACE", "RIGHT", "ROW", "ROWS", "SCHEMA", "SELECT", "SET", "SHOW", "SYSTEM", "TABLE", "THEN", "TO", "TRIGGER", "TRUE", "UNION", "UNIQUE", "UPDATE", "USE", "USING", "VALUES", "WHEN", "WHERE", "WITH",
-];
 
 fn keywords(dl: Dialect) -> &'static [&'static str] {
     if dl == Dialect::Postgres { KEYWORDS_PG } else { KEYWORDS }
@@ -118,11 +112,7 @@ impl Tk<'_> {
 }
 
 fn needs_quote(dl: Dialect, name: &str) -> bool {
-    // PostgreSQL folds a bare name to lower case, so anything else has to be quoted to keep its spelling.
-    if dl == Dialect::Postgres {
-        return name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') || RESERVED_PG.contains(&name.to_ascii_uppercase().as_str());
-    }
-    name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') || RESERVED.contains(&name.to_ascii_uppercase().as_str())
+    dl.needs_quote(name)
 }
 
 /// A name as it is inserted. A backtick already typed is closed instead of added.
