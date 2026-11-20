@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.59.0](https://github.com/alkanna/quarry/compare/v0.58.0...v0.59.0) (2026-11-20)
+
+
+### Features
+
+* agents open scripts in Shell tabs with attached connections, and reach every database of a PostgreSQL connection ([#302](https://github.com/alkanna/quarry/issues/302)) ([0cf402f](https://github.com/alkanna/quarry/commit/0cf402fa04f505e1309bbb14d8bc79842abefe37))
+
 ## [0.58.0](https://github.com/alkanna/quarry/compare/v0.57.0...v0.58.0) (2026-11-20)
 
 
