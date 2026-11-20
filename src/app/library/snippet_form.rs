@@ -168,7 +168,9 @@ impl App {
                         let tok = crate::app::sidebar::tokens(&f.target_q);
                         let hit = |n: &str| tok.iter().all(|w| n.to_lowercase().contains(w.as_str()));
                         let mut top = None;
-                        egui::ScrollArea::vertical().max_height(LIST_MAX_H).show(ui, |ui| {
+                        // The popup offers only its last height, so a list shrunk by a filter would stay short.
+                        let list_h = (ui.ctx().content_rect().bottom() - DIALOG_MARGIN - ui.cursor().top()).clamp(FIT_MIN_H, LIST_MAX_H);
+                        egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).show(ui, |ui| {
                             for c in self.snippet_conns(f.id) {
                                 let Some(conn) = self.conn(c) else { continue };
                                 // A connection whose name matches keeps all its databases.

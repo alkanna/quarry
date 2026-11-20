@@ -14,11 +14,8 @@ pub(crate) fn banded(id: egui::Id) -> Dialog {
 
 /// `banded` raised above everything else every frame, for windows opened from another window. Not while a popup is open:
 /// a menu opened inside the window would land under it and its items could not be clicked.
-pub(crate) fn top_banded(ctx: &egui::Context, id: egui::Id) -> Dialog {
-    if !egui::Popup::is_any_open(ctx) {
-        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
-    }
-    banded(id)
+pub(crate) fn top_banded(id: egui::Id) -> Dialog {
+    Dialog { raise: Some(id), ..banded(id) }
 }
 
 /// A modal that never grows past the window: egui cannot draw outside it, so a taller dialog lost its footer. Its content
@@ -28,18 +25,26 @@ pub(crate) struct Dialog {
     modal: egui::Modal,
     /// The frame's border and padding, both sides together.
     chrome: f32,
+    raise: Option<egui::Id>,
 }
 
 impl Dialog {
     /// A modal `id` drawn in `frame`, whose border and padding the room it fits in leaves out.
     pub(crate) fn new(id: egui::Id, frame: egui::Frame) -> Self {
         let m = frame.total_margin();
-        Self { modal: egui::Modal::new(id).frame(frame), chrome: m.left + m.right }
+        Self { modal: egui::Modal::new(id).frame(frame), chrome: m.left + m.right, raise: None }
     }
 
     pub(crate) fn show<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::ModalResponse<R> {
-        let chrome = self.chrome;
-        self.modal.show(ctx, |ui| fit(ui, chrome, add))
+        let (chrome, raise) = (self.chrome, self.raise);
+        let r = self.modal.show(ctx, |ui| fit(ui, chrome, add));
+        // After the content: egui keeps the old order of layers that both ask to go on top, so a reopened popup would land under the window.
+        if let Some(id) = raise
+            && !egui::Popup::is_any_open(ctx)
+        {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+        }
+        r
     }
 }
 

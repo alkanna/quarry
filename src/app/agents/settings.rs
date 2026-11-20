@@ -97,12 +97,25 @@ pub(super) fn had_input(ctx: &egui::Context) -> bool {
 
 /// A small tinted label painted in its own color, for engine marks and environment tags.
 pub(super) fn chip(ui: &mut egui::Ui, text: &str, color: Color32, mono: bool) {
-    let fmt = if mono { mono_fmt(10.0, color, W_SEMIBOLD) } else { ui_fmt(TXT_CAPTION, color, W_MEDIUM, 0.0) };
-    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), fmt));
-    let (rect, _) = ui.allocate_exact_size(egui::vec2((g.size().x + 12.0).max(22.0), 18.0), Sense::hover());
+    let g = chip_text(ui, text, color, mono);
+    paint_chip(ui, g, color);
+}
+
+/// `chip` from a galley the caller already laid out to measure it.
+fn paint_chip(ui: &mut egui::Ui, g: std::sync::Arc<egui::Galley>, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(chip_w(&g), 18.0), Sense::hover());
     ui.painter().rect_filled(rect, R_SM, tint(color, 40));
     let dy = optical_dy(&g);
     ui.painter().galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, color);
+}
+
+fn chip_text(ui: &egui::Ui, text: &str, color: Color32, mono: bool) -> std::sync::Arc<egui::Galley> {
+    let fmt = if mono { mono_fmt(10.0, color, W_SEMIBOLD) } else { ui_fmt(TXT_CAPTION, color, W_MEDIUM, 0.0) };
+    ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), fmt))
+}
+
+fn chip_w(g: &egui::Galley) -> f32 {
+    (g.size().x + 12.0).max(22.0)
 }
 
 /// The engine mark of a saved connection, as the rail shows it.
@@ -333,14 +346,26 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     engine_chip(ui, c);
                     ui.add_space(4.0);
+                    // The combo and open button are laid out after this column, so reserve their width plus 12 px of air.
+                    let text_w = (ui.available_width() - ACCESS_W - OPEN_W - 2.0 * ui.spacing().item_spacing.x - 12.0).max(120.0);
                     ui.vertical(|ui| {
+                        ui.set_max_width(text_w);
                         ui.horizontal(|ui| {
-                            ui.label(medium(RichText::new(&c.meta.name).size(TXT_TITLE).color(BRIGHT())));
-                            if !c.meta.tag.is_empty() {
-                                chip(ui, &c.meta.tag, super::super::sidebar::tag_color(&c.meta.tag), false);
+                            let tag = (!c.meta.tag.is_empty()).then(|| {
+                                let col = super::super::sidebar::tag_color(&c.meta.tag);
+                                (chip_text(ui, &c.meta.tag, col, false), col)
+                            });
+                            let tag_w = tag.as_ref().map_or(0.0, |(g, _)| chip_w(g) + ui.spacing().item_spacing.x);
+                            // Truncated so the tag still fits; egui shows the full name on hover.
+                            ui.scope(|ui| {
+                                ui.set_max_width(text_w - tag_w);
+                                ui.add(egui::Label::new(medium(RichText::new(&c.meta.name).size(TXT_TITLE).color(BRIGHT()))).truncate());
+                            });
+                            if let Some((g, col)) = tag {
+                                paint_chip(ui, g, col);
                             }
                         });
-                        ui.label(RichText::new(summary(p)).size(TXT_SMALL).color(MUTED()));
+                        ui.add(egui::Label::new(RichText::new(summary(p)).size(TXT_SMALL).color(MUTED())).wrap());
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if open_button(ui, &format!("Open {}", c.meta.name)).on_hover_text("What agents may do on this connection").clicked() {

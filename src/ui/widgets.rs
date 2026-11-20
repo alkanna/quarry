@@ -589,7 +589,8 @@ pub(crate) fn dialog_frame() -> egui::Frame {
 pub(crate) fn form_label(ui: &mut egui::Ui, text: &str) {
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.add_space(4.0);
-        ui.label(medium(RichText::new(text).size(TXT_BODY).color(BRIGHT())));
+        // A Grid cell starts narrow, so a wrapping label breaks mid word
+        ui.add(egui::Label::new(medium(RichText::new(text).size(TXT_BODY).color(BRIGHT()))).extend());
     });
 }
 

@@ -150,7 +150,7 @@ impl App {
             s => Some(format!("{} agents connected", s.len())),
         };
         let layer = egui::Id::unique(("quarry-layer", "agents-activity"));
-        let r = top_banded(ctx, layer).show(ctx, |ui| {
+        let r = top_banded(layer).show(ctx, |ui| {
             ui.set_width(width + 40.0);
             dialog_head_with(ui, &Head::new("Agent activity").sub("Every call an AI agent made through Quarry").glyph(glyphs::list), |ui| {
                 if let Some(t) = &connected {
