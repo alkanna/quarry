@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.60.0](https://github.com/alkanna/quarry/compare/v0.59.0...v0.60.0) (2026-11-20)
+
+
+### Features
+
+* code editors outline matching brackets, and Format lays out Shell scripts, pipelines and JSON (Shift+Alt+F) ([#307](https://github.com/alkanna/quarry/issues/307)) ([42ba990](https://github.com/alkanna/quarry/commit/42ba9901613322738213f69f010f3a82fb5860d7))
+* snippet values in Mongo Shell scripts and Documents queries, from Cmd+K or in their tab ([#305](https://github.com/alkanna/quarry/issues/305)) ([6bf8ce5](https://github.com/alkanna/quarry/commit/6bf8ce52da624620a2bfe5d504211f2fd9343360))
+
 ## [0.59.0](https://github.com/alkanna/quarry/compare/v0.58.0...v0.59.0) (2026-11-20)
 
 
