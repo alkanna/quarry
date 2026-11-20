@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.60.1](https://github.com/alkanna/quarry/compare/v0.60.0...v0.60.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* form labels no longer wrap mid word, agent connection rows stay clear of their access picker, and dropdowns in raised windows reopen on top ([#308](https://github.com/alkanna/quarry/issues/308)) ([36177cf](https://github.com/alkanna/quarry/commit/36177cf9f2dea5bfe9f90417a83670c680648f2f))
+
 ## [0.60.0](https://github.com/alkanna/quarry/compare/v0.59.0...v0.60.0) (2026-11-20)
 
 
