@@ -477,7 +477,7 @@ impl App {
                 }
                 ui.end_row();
                 form_label(ui, "Where");
-                if ui.add(egui::TextEdit::singleline(&mut w.globs.1).id(egui::Id::unique("agents-rule-scope")).font(egui::TextStyle::Monospace).hint_text("Everywhere, or shop.*, *.users").desired_width(300.0)).changed() {
+                if ui.add(egui::TextEdit::singleline(&mut w.globs.1).id(egui::Id::unique("agents-rule-scope")).font(egui::TextStyle::Monospace).hint_text("Everywhere, or shop.*, *.users, a PostgreSQL db.schema.table").desired_width(300.0)).changed() {
                     r.scope = w.globs.1.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
                 }
                 ui.end_row();

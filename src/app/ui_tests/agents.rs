@@ -149,3 +149,55 @@ fn structure_changes_always_ask_and_run_once_allowed() {
     assert!(rx.try_recv().unwrap().unwrap_err().message.contains("already exists"));
     rt.block_on(async { d.collection::<Document>("agent_ui_made").drop().await.unwrap() });
 }
+
+/// On PostgreSQL `database` names a database of the server, read through its own pool; a schema there is refused with
+/// how to name it, and a two-part scope pattern covers only the database the connection opens.
+#[test]
+fn an_agent_reads_another_postgres_database() {
+    let Ok(uri) = std::env::var("QUARRY_TEST_POSTGRES") else { return };
+    let name = "agent_ui_other";
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let on = |db: Option<&str>, s: String| {
+        rt.block_on(async {
+            let mut o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&uri).unwrap();
+            if let Some(d) = db {
+                o = o.database(d);
+            }
+            let p = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(o).await.unwrap();
+            let r = sqlx::raw_sql(sqlx::AssertSqlSafe(s)).execute(&p).await.map(|_| ());
+            p.close().await;
+            r
+        })
+    };
+    let _ = on(None, format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"));
+    {
+        let _turn = crate::db::sql::testing::db_turn();
+        on(None, format!("CREATE DATABASE \"{name}\" TEMPLATE template0")).unwrap();
+    }
+    on(Some(name), "CREATE TABLE events (id int PRIMARY KEY, kind text); INSERT INTO events VALUES (1, 'a'), (2, 'b');".into()).unwrap();
+    let Some(mut ui) = ui_app("QUARRY_TEST_POSTGRES") else { return };
+    let app = ui.h.state_mut();
+    app.agents.cfg.enabled = true;
+    app.agents.cfg.conns.insert(CONN, ConnPolicy { access: Access::Read, read: Mode::Allow, ..Default::default() });
+    let answer = |ui: &mut UiApp, link: u64, args: Value| {
+        let mut rx = inject(ui.app(), link, "select_rows", args);
+        ui.wait("the answer", |a| a.agents.activity.iter().filter(|x| x.tool == "select_rows" && x.outcome != Outcome::Running).count() as u64 == link);
+        rx.try_recv().expect("answered")
+    };
+    // Without a schema, the schemas of the database and no tables.
+    let mut rx = inject(ui.app(), 9, "list_collections", json!({ "connection": "test", "database": name }));
+    ui.wait("the schemas", |a| a.agents.activity.iter().any(|x| x.tool == "list_collections" && x.outcome != Outcome::Running));
+    let v = rx.try_recv().expect("answered").expect("listed");
+    assert!(v["schemas"].as_array().unwrap().contains(&json!("public")) && v["tables"] == json!([]), "{v}");
+    let v = answer(&mut ui, 1, json!({ "connection": "test", "database": name, "table": "events", "where": [{ "column": "kind", "value": "b" }] })).expect("read");
+    assert_eq!(v["rows"], json!([{ "id": 2, "kind": "b" }]));
+    let ns = ui.app().agents.activity.iter().find(|x| x.tool == "select_rows").map(|x| x.ns.clone()).unwrap_or_default();
+    assert!(ns.starts_with(&format!("{name}.public")), "{ns}");
+    let e = answer(&mut ui, 2, json!({ "connection": "test", "database": "public", "table": "events" })).unwrap_err();
+    assert!(e.message.contains("is not a database") && e.message.contains(name), "{}", e.message);
+    ui.h.state_mut().agents.cfg.conns.get_mut(&CONN).unwrap().scope = crate::agents::config::Scope { mode: crate::agents::config::ScopeMode::Only, globs: vec!["public.*".into()] };
+    ui.h.state_mut().agents.rev += 1;
+    let e = answer(&mut ui, 3, json!({ "connection": "test", "database": name, "table": "events" })).unwrap_err();
+    assert!(e.message.contains("not shared"), "{}", e.message);
+    let _ = on(None, format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"));
+}

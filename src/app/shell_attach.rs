@@ -199,7 +199,11 @@ impl App {
     /// Names already in use as globals of the current Shell tab, each with what uses it. `engines` are the
     pub(super) fn shell_taken(&self) -> Vec<(String, String)> {
         let Some(t) = self.t() else { return Vec::new() };
-        let main_sql = t.sql.is_some();
+        self.globals_taken(&t.sel, t.sql.is_some(), &t.shell.attached)
+    }
+
+    /// `shell_taken` for a Shell tab on `sel` with these attachments, which need not be the current one or exist yet.
+    pub(super) fn globals_taken(&self, sel: &Sel, main_sql: bool, attached: &[Attached]) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         let mut add = |n: &str, why: String| {
             if !out.iter().any(|o| o.0 == n) {
@@ -214,13 +218,13 @@ impl App {
             add(&package_ident(p), format!("the name of the package {}", db::package_spec(p).0));
         }
         // The runner tells this tab's own connection apart from an attachment by its name.
-        if let Some(c) = self.conn(t.sel.conn) {
+        if let Some(c) = self.conn(sel.conn) {
             add(&c.meta.name, "the name of this tab's connection".into());
         }
-        for n in self.conn(t.sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == t.sel.db)).and_then(|d| d.1.as_ref()).into_iter().flatten() {
-            add(n, format!("{} of {}", if main_sql { "a table" } else { "a collection" }, t.sel.db));
+        for n in self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.as_ref()).into_iter().flatten() {
+            add(n, format!("{} of {}", if main_sql { "a table" } else { "a collection" }, sel.db));
         }
-        for a in &t.shell.attached {
+        for a in attached {
             add(&a.name, "used by another attached connection".into());
         }
         out
@@ -277,10 +281,12 @@ async function run() {
             return;
         }
         if sql.dialect == db::sql::Dialect::Postgres {
-            // The schema is the attachment's own, so each PostgreSQL attachment of this tab on `db` asks for its tables.
-            let schemas: Vec<String> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.conn == conn && a.db == db).map(|a| a.schema.clone()).collect()).unwrap_or_default();
+            // The schema is the attachment's own, so each PostgreSQL attachment on `db` asks for its tables. Every tab, since
+            // an agent may fill one in the background.
+            let mut schemas: Vec<String> = self.tabs.iter().flat_map(|t| &t.shell.attached).filter(|a| a.conn == conn && a.db == db).map(|a| pg_schema(&a.schema).to_string()).collect();
+            schemas.sort();
+            schemas.dedup();
             for s in schemas {
-                let s = pg_schema(&s).to_string();
                 // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
                 self.ask_sql_schema(conn, sql.at(db), ns_key(db, &s), s.clone());
                 self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);

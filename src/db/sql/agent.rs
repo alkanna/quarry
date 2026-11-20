@@ -8,7 +8,7 @@ use super::value::{self, Kind};
 use super::worker::{pg_columns, text, to_row};
 use super::{Col, Db, Dialect};
 use crate::agents::config::{Limits, Scope};
-use crate::agents::policy::visible;
+use crate::agents::policy::{pg_listed, visible};
 use crate::agents::scrub::Rules;
 use crate::agents::tools::{Call, Cond, CondOp, where_cols};
 use crate::db::agent::{failure, page_out, too_big, AgentJob, AgentUndo, Answer, Snapshot};
@@ -21,26 +21,32 @@ use std::sync::atomic::Ordering;
 /// names and types only, and the server limits it to what the login may see.
 const MY_HIDDEN: [&str; 3] = ["mysql", "performance_schema", "sys"];
 
-/// The databases of a MySQL server, or the schemas of the connected PostgreSQL database, that the scope shares.
+/// The databases of the server that the scope shares. On PostgreSQL `scope` is as written, naming databases, and
+/// `default` says which database its two-part patterns mean.
 pub(in crate::db) async fn databases(db: &Db, scope: &Scope) -> Res<Answer> {
-    let rows = if db.dialect == Dialect::Postgres {
-        db.meta("", db.dialect.schemas(), []).await?
-    } else {
-        db.meta("", "SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME", []).await?
-    };
-    let names: Vec<String> = rows.iter().filter_map(|r| text(r, "name")).filter(|n| db.dialect == Dialect::Postgres || !MY_HIDDEN.contains(&n.to_ascii_lowercase().as_str())).filter(|n| visible(scope, n, None).unwrap_or(false)).collect();
-    let key = if db.dialect == Dialect::Postgres { "schemas" } else { "databases" };
-    let n = names.len();
-    let mut v = json!({ key: names });
     if db.dialect == Dialect::Postgres {
-        v["database"] = json!(db.pg_database());
+        let home = db.pg_database();
+        // The databases the sidebar lists: those the login may connect to.
+        let rows = db.meta("", super::pg::DB_LIST, []).await?;
+        let names: Vec<String> = rows.iter().filter_map(|r| text(r, "datname")).filter(|n| pg_listed(scope, n, &home)).collect();
+        let n = names.len();
+        return Ok(Answer::new(json!({ "databases": names, "default": home }), format!("{n} databases")));
     }
-    Ok(Answer::new(v, format!("{n} {key}")))
+    let rows = db.meta("", "SELECT SCHEMA_NAME AS name FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME", []).await?;
+    let names: Vec<String> = rows.iter().filter_map(|r| text(r, "name")).filter(|n| !MY_HIDDEN.contains(&n.to_ascii_lowercase().as_str())).filter(|n| visible(scope, n, None).unwrap_or(false)).collect();
+    let n = names.len();
+    Ok(Answer::new(json!({ "databases": names }), format!("{n} databases")))
 }
 
-/// Tables and views of one database (MySQL) or schema (PostgreSQL) that the scope shares.
+/// Tables and views of one database (MySQL) or schema (PostgreSQL) that the scope shares. On PostgreSQL the schemas of
+/// the database come too, so one call shows where to look next.
 pub(in crate::db) async fn tables(db: &Db, schema: &str, scope: &Scope) -> Res<Answer> {
-    let rows = db.meta(schema, db.dialect.tables(), [schema]).await?;
+    let pg = db.dialect == Dialect::Postgres;
+    let schemas = async { if pg { db.meta("", db.dialect.schemas(), []).await.map(Some) } else { Ok(None) } };
+    // PostgreSQL without a schema: only the schemas.
+    let listed = async { if schema.is_empty() { Ok(Vec::new()) } else { db.meta(schema, db.dialect.tables(), [schema]).await } };
+    let (schemas, rows) = tokio::try_join!(schemas, listed)?;
+    let schemas: Option<Vec<String>> = schemas.map(|rows| rows.iter().filter_map(|r| text(r, "name")).filter(|n| visible(scope, n, None).unwrap_or(false)).collect());
     let mut tables = Vec::new();
     let mut views = Vec::new();
     for r in &rows {
@@ -55,7 +61,13 @@ pub(in crate::db) async fn tables(db: &Db, schema: &str, scope: &Scope) -> Res<A
         }
     }
     let n = tables.len() + views.len();
-    Ok(Answer::new(json!({ "tables": tables, "views": views }), format!("{n} tables and views")))
+    let mut v = json!({ "tables": tables, "views": views });
+    if let Some(s) = schemas {
+        v["database"] = json!(db.pg_database());
+        v["schema"] = json!(schema);
+        v["schemas"] = json!(s);
+    }
+    Ok(Answer::new(v, format!("{n} tables and views")))
 }
 
 /// Columns with their types and whether rules hide or mask them, the primary key, foreign keys, indexes and the row
@@ -733,7 +745,40 @@ mod tests {
             let d = rt.block_on(describe(&f.db, "agent_pg", "users", &r)).unwrap();
             assert_eq!(d.value["primary_key"], json!(["id"]), "{var}");
             let s = rt.block_on(databases(&f.db, &Scope::default())).unwrap();
-            assert!(s.value["schemas"].as_array().unwrap().contains(&json!("agent_pg")), "{var}");
+            assert!(s.value["databases"].as_array().unwrap().contains(&json!(f.db.pg_database())), "{var}");
+            let t = rt.block_on(tables(&f.db, "agent_pg", &Scope::default())).unwrap();
+            assert!(t.value["schemas"].as_array().unwrap().contains(&json!("agent_pg")), "{var}: {}", t.value);
+        });
+    }
+
+    /// Agents reach another database of a PostgreSQL connection through its own pool, and a scope that names databases
+    /// lists only those.
+    #[test]
+    fn live_pg_reads_another_database() {
+        every_pg(|l, var| {
+            let name = "agent_pg_other";
+            let drop = |l: &crate::db::sql::testing::LivePg| l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))).execute(&l.pool).await });
+            let _ = drop(l);
+            let turn = crate::db::sql::testing::db_turn();
+            l.w.rt.block_on(async { sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\" TEMPLATE template0"))).execute(&l.pool).await }).unwrap();
+            std::mem::drop(turn);
+            let other = l.db.at(name);
+            let rt = &l.w.rt;
+            let r = rules();
+            rt.block_on(async {
+                let o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&l.uri).unwrap().database(name);
+                let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(o).await.unwrap();
+                sqlx::raw_sql("CREATE TABLE events (id int PRIMARY KEY, kind text); INSERT INTO events VALUES (1, 'a'), (2, 'b');").execute(&pool).await.unwrap();
+                pool.close().await;
+            });
+            let t = rt.block_on(tables(&other, "public", &Scope::default())).unwrap();
+            assert_eq!((t.value["database"].as_str(), &t.value["tables"]), (Some(name), &json!(["events"])), "{var}");
+            let a = rt.block_on(select_rows(&other, "public", "events", &[], &[cond("kind", CondOp::Eq, json!("b"))], &[], None, 0, &r, &limits(200, 1 << 20))).unwrap();
+            assert_eq!(rows(&a), vec![json!({ "id": 2, "kind": "b" })], "{var}");
+            let only = Scope { mode: crate::agents::config::ScopeMode::Only, globs: vec![format!("{name}.public.*")] };
+            let listed = rt.block_on(databases(&l.db, &only)).unwrap();
+            assert_eq!(listed.value["databases"], json!([name]), "{var}");
+            drop(l).unwrap();
         });
     }
 
@@ -980,8 +1025,8 @@ mod tests {
     fn live_agent_sql_shell_my_read_only_blocks_every_write() {
         every_server(|l, var| {
             let db = crate::db::sql::testing::unique_name("agent_sh");
-            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.users (id INT PRIMARY KEY, email VARCHAR(80), password VARCHAR(40), age INT, code VARCHAR(20) UNIQUE); INSERT INTO {db}.users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE {db}.audit_log (what VARCHAR(20)); CREATE PROCEDURE {db}.agent_p() INSERT INTO {db}.audit_log VALUES ('proc')"));
-            l.sql(&format!("CREATE FUNCTION {db}.agent_ins() RETURNS INT DETERMINISTIC BEGIN INSERT INTO {db}.audit_log VALUES ('fn'); RETURN 1; END"));
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.users (id INT PRIMARY KEY, email VARCHAR(80), password VARCHAR(40), age INT, code VARCHAR(20) UNIQUE); INSERT INTO {db}.users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE {db}.events (what VARCHAR(20)); CREATE PROCEDURE {db}.agent_p() INSERT INTO {db}.events VALUES ('proc')"));
+            l.sql(&format!("CREATE FUNCTION {db}.agent_ins() RETURNS INT DETERMINISTIC BEGIN INSERT INTO {db}.events VALUES ('fn'); RETURN 1; END"));
             script_reads_are_scrubbed(&l.w, &l.db, &db, var);
             let mut paths: Vec<(&str, &str)> = SHARED_WRITES.to_vec();
             paths.extend([
@@ -1006,7 +1051,7 @@ mod tests {
             assert!(out["for_update"].as_str().unwrap().contains("locking read"), "{var}: {out}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "5", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users WHERE age = 0 OR email LIKE 'r@%'")), "0", "{var}");
-            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "0", "{var}");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.events")), "0", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{db}' AND table_name IN ('made', 'gone')")), "0", "{var}");
             // Unlocked with both classes allowed: every path reaches the server and runs.
             let Some(j) = shell_job(&l.db, &db, &tries(&UNLOCKED_RUNS), true, ALLOW_ALL) else { return };
@@ -1016,7 +1061,7 @@ mod tests {
             assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 5")), "61", "{var}");
             assert_eq!(l.one(&format!("SELECT age FROM {db}.users WHERE id = 4")), "56", "{var}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "6", "{var}: one inserted, one inserted and deleted");
-            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "2", "{var}: the procedure and the function both wrote");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.events")), "2", "{var}: the procedure and the function both wrote");
             // Unlocked with Change structure set to Never: nothing that wraps a DROP, switches the role or acts on the server
             // passes as a data change, and a duplicate key's value is gone from the error the script gets.
             let wrapped = [
@@ -1040,7 +1085,7 @@ mod tests {
             let dup = out["dup"].as_str().unwrap();
             assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
             assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.users")), "6", "{var}");
-            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.audit_log")), "2", "{var}: the refused CALL wrote nothing");
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.events")), "2", "{var}: the refused CALL wrote nothing");
             assert_ne!(l.one("SELECT @@global.max_connections"), "500", "{var}");
             l.sql(&format!("DROP DATABASE {db}"));
         });
@@ -1051,7 +1096,7 @@ mod tests {
     #[test]
     fn live_agent_sql_shell_pg_read_only_blocks_every_write() {
         every_pg(|l, var| {
-            let f = PgFixture::new(l, "agent_pgsh", "CREATE TABLE users (id int PRIMARY KEY, email text, password text, age int, code text UNIQUE); INSERT INTO users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE audit_log (what text); CREATE SEQUENCE agent_seq; CREATE FUNCTION agent_ins() RETURNS int LANGUAGE sql AS $$ INSERT INTO agent_pgsh.audit_log VALUES ('fn'); SELECT 1 $$; CREATE PROCEDURE agent_p() LANGUAGE sql AS $$ INSERT INTO agent_pgsh.audit_log VALUES ('proc') $$;");
+            let f = PgFixture::new(l, "agent_pgsh", "CREATE TABLE users (id int PRIMARY KEY, email text, password text, age int, code text UNIQUE); INSERT INTO users VALUES (1, 'ana@example.org', 's3cret', 31, 'k1'), (2, 'bob@example.org', 'pw', 40, 'zz-unique-17'), (3, 'cy@example.org', 'pw', 22, 'k3'), (4, 'di@example.org', 'pw', 55, 'k4'), (5, 'ed@example.org', 'pw', 60, 'k5'); CREATE TABLE events (what text); CREATE SEQUENCE agent_seq; CREATE FUNCTION agent_ins() RETURNS int LANGUAGE sql AS $$ INSERT INTO agent_pgsh.events VALUES ('fn'); SELECT 1 $$; CREATE PROCEDURE agent_p() LANGUAGE sql AS $$ INSERT INTO agent_pgsh.events VALUES ('proc') $$;");
             script_reads_are_scrubbed(&l.w, &f.db, "agent_pgsh", var);
             let mut paths: Vec<(&str, &str)> = SHARED_WRITES.to_vec();
             paths.extend([
@@ -1062,7 +1107,7 @@ mod tests {
                 ("nextval", "sql`SELECT nextval('agent_seq')`"),
                 ("setval", "sql`SELECT setval('agent_seq', 100)`"),
                 ("cte", "sql`WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d`"),
-                ("do", "sql.unsafe('DO $$ BEGIN INSERT INTO audit_log VALUES (1); END $$')"),
+                ("do", "sql.unsafe('DO $$ BEGIN INSERT INTO events VALUES (1); END $$')"),
                 ("read_write", "sql.unsafe(\"SELECT set_config('default_transaction_read_only', 'off', false)\")"),
                 ("begin", "sql.unsafe('BEGIN READ WRITE')"),
                 ("grant", "sql`GRANT SELECT ON users TO PUBLIC`"),
@@ -1074,7 +1119,7 @@ mod tests {
             assert!(out["function"].as_str().unwrap().contains("read-only transaction"), "{var}: the transaction refused it, not the lexer: {out}");
             assert_eq!(f.one("SELECT count(*)::text FROM users"), "5", "{var}");
             assert_eq!(f.one("SELECT count(*)::text FROM users WHERE age = 0"), "0", "{var}");
-            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "0", "{var}");
+            assert_eq!(f.one("SELECT count(*)::text FROM events"), "0", "{var}");
             assert_eq!(f.one("SELECT is_called::text FROM agent_seq"), "false", "{var}: the sequence never moved");
             assert_eq!(f.one("SELECT count(*)::text FROM pg_tables WHERE schemaname = 'agent_pgsh' AND tablename IN ('made', 'gone')"), "0", "{var}");
             let Some(j) = shell_job(&f.db, "agent_pgsh", &tries(&UNLOCKED_RUNS), true, ALLOW_ALL) else { return };
@@ -1084,7 +1129,7 @@ mod tests {
             assert_eq!(f.one("SELECT age::text FROM users WHERE id = 5"), "61", "{var}");
             assert_eq!(f.one("SELECT age::text FROM users WHERE id = 4"), "56", "{var}");
             assert_eq!(f.one("SELECT count(*)::text FROM users"), "6", "{var}: one inserted, one inserted and deleted");
-            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "2", "{var}: the procedure and the function both wrote");
+            assert_eq!(f.one("SELECT count(*)::text FROM events"), "2", "{var}: the procedure and the function both wrote");
             let wrapped = [
                 ("drop", "sql`DROP TABLE users`"),
                 ("call", "sql`CALL agent_p()`"),
@@ -1107,7 +1152,7 @@ mod tests {
             let dup = out["dup"].as_str().unwrap();
             assert!(dup.starts_with("refused") && !dup.contains("zz-unique-17"), "{var}: {dup}");
             assert_eq!(f.one("SELECT count(*)::text FROM users"), "6", "{var}");
-            assert_eq!(f.one("SELECT count(*)::text FROM audit_log"), "2", "{var}: the refused CALL wrote nothing");
+            assert_eq!(f.one("SELECT count(*)::text FROM events"), "2", "{var}: the refused CALL wrote nothing");
             assert_eq!(f.one("SELECT count(*)::text FROM pg_roles WHERE rolname = 'agent_shell_x'"), "0", "{var}");
         });
     }
