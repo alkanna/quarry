@@ -11,6 +11,7 @@ mod activity;
 mod approval;
 mod conn_sheet;
 mod demo;
+mod open_shell;
 mod rules;
 mod settings;
 pub(super) use activity::Filter;
@@ -69,8 +70,10 @@ pub(super) struct Activity {
     pub(super) client: String,
     pub(super) tool: String,
     pub(super) conn: Option<u64>,
-    /// "db.coll", "schema.table" or empty.
+    /// "db.coll", "schema.table" or empty, with the database in front for another database of a PostgreSQL connection.
     pub(super) ns: String,
+    /// The PostgreSQL database the call ran in; empty on other engines and for calls from earlier sessions.
+    pub(super) database: String,
     pub(super) outcome: Outcome,
     /// One line: "412 changed", "200 of 3,120 rows".
     pub(super) summary: String,
@@ -264,9 +267,9 @@ impl App {
 
     /// An Undo call finished. What it could not reach comes back so it can be tried again.
     pub(super) fn agent_undone(&mut self, id: u64, res: db::Res<String>, back: Option<db::AgentUndo>) {
-        let (conn, ns) = match self.agents.activity.iter().find(|a| a.id == id) {
-            Some(a) => (a.conn, back.as_ref().map(|u| u.ns())),
-            None => (None, None),
+        let (conn, database, ns) = match self.agents.activity.iter().find(|a| a.id == id) {
+            Some(a) => (a.conn, a.database.clone(), back.as_ref().map(|u| u.ns())),
+            None => (None, String::new(), None),
         };
         let done = res.is_ok();
         if let Some(a) = self.agents.activity.iter_mut().find(|a| a.id == id) {
@@ -283,17 +286,19 @@ impl App {
         if let Some(conn) = conn {
             let (db, coll) = ns.unwrap_or_else(|| {
                 let ns = self.agents.activity.iter().find(|a| a.id == id).map(|a| a.ns.clone()).unwrap_or_default();
+                let ns = ns.strip_prefix(&format!("{database}.")).filter(|_| !database.is_empty()).map(String::from).unwrap_or(ns);
                 let (d, c) = ns.split_once('.').unwrap_or((&ns, ""));
                 (d.to_string(), c.to_string())
             });
-            self.mark_agent_changed(conn, &db, (!coll.is_empty()).then_some(coll.as_str()));
+            self.mark_agent_changed(conn, &database, &db, (!coll.is_empty()).then_some(coll.as_str()));
         }
     }
 
     /// Marks the open tabs on what an agent changed, so they say "Changed by an agent" until reloaded. `coll` None marks
     /// every tab of the database.
-    pub(super) fn mark_agent_changed(&mut self, conn: u64, db: &str, coll: Option<&str>) {
-        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && t.sel.space() == db && coll.is_none_or(|c| t.sel.coll == c)) {
+    /// `database` narrows it to one PostgreSQL database; empty matches the schema in any.
+    pub(super) fn mark_agent_changed(&mut self, conn: u64, database: &str, db: &str, coll: Option<&str>) {
+        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && (database.is_empty() || t.sel.db == database) && t.sel.space() == db && coll.is_none_or(|c| t.sel.coll == c)) {
             t.agent_changed = true;
         }
     }

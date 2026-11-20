@@ -150,14 +150,20 @@ impl App {
             self.agents_open_rules(Some(id), tab);
         }
         let mut globs_changed = false;
+        let pg = self.is_pg(id);
         settings_section(ui, "DATABASES AND COLLECTIONS", |ui| {
             segmented(ui, &mut p.scope.mode, &SCOPES);
             if p.scope.mode != ScopeMode::All {
                 let w = ui.available_width();
-                let r = ui.add(egui::TextEdit::singleline(&mut self.agents.globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text("shop.audit_*, *.sessions, billing").desired_width(w));
+                let r = ui.add(egui::TextEdit::singleline(&mut self.agents.globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text(if pg { "public.orders_*, reporting, sales.public.*" } else { "shop.audit_*, *.sessions, billing" }).desired_width(w));
                 globs_changed = r.changed();
             }
-            ui.add(egui::Label::new(RichText::new("Globs, comma separated. System collections such as admin.system.users are never shared.").size(TXT_SMALL).color(FAINT())).wrap());
+            let help = if pg {
+                "Globs, comma separated. schema.table is in the database the connection opens; database.schema.table names any database of the server, and database.*.* all of one. System catalogs are never shared."
+            } else {
+                "Globs, comma separated. System collections such as admin.system.users are never shared."
+            };
+            ui.add(egui::Label::new(RichText::new(help).size(TXT_SMALL).color(FAINT())).wrap());
         });
         if globs_changed {
             p.scope.globs = self.agents.globs.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();

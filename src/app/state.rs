@@ -743,6 +743,9 @@ pub(super) struct ShellTab {
     pub(super) code: String,
     /// Other saved connections whose data is a global of the script, saved with the tab.
     pub(super) attached: Vec<Attached>,
+    /// The script an agent last put here through open_shell. Its next edit goes in only while `code` still matches,
+    /// so it never overwrites the user's changes.
+    pub(super) agent_code: Option<String>,
     pub(super) logs: Vec<(String, String)>,
     /// Older console lines let go by push_log, said in the console so a long log does not look complete.
     pub(super) logs_dropped: usize,

@@ -1,7 +1,7 @@
 //! What happens to a call: allowed, asked, or refused with a reason the agent and the activity list show. Pure,
 //! so the whole matrix is tested; the App re-runs it when the user clicks Allow, since state may have moved.
 
-use super::config::{Access, ConnPolicy, Mode, OpClass, Scope, ScopeMode};
+use super::config::{Access, ConnPolicy, Mode, OpClass, RuleSpec, Scope, ScopeMode};
 use super::scrub::{Rules, wild};
 use super::tools::{Call, Target, calls_procedure, changes_structure, each_stage, locks_rows, never_for_agents, touches_users};
 use crate::db::sql::Dialect;
@@ -272,6 +272,49 @@ pub fn visible(scope: &Scope, db: &str, coll: Option<&str>) -> Result<bool, Stri
     Ok(if scope.mode == ScopeMode::Only { hit } else { !hit })
 }
 
+/// PostgreSQL agents name a database of the server beside the schema. Scope and rule globs read `schema.table` (or a
+/// schema alone) for the connection's own database, `home`, and `database.schema.table` for any database. This rewrites
+/// one glob for `database` so the two-part matchers apply: None when it does not cover that database. A three-part glob
+/// with an empty part is kept as written, so it fails closed as before.
+fn pg_glob(g: &str, database: &str, home: &str) -> Option<String> {
+    let t = g.trim();
+    match t.splitn(3, '.').collect::<Vec<_>>()[..] {
+        [d, s, tb] if !d.is_empty() && !s.is_empty() && !tb.is_empty() => wild(d, database).then(|| format!("{s}.{tb}")),
+        [_, _, _] => Some(g.to_string()),
+        _ => (database == home).then(|| g.to_string()),
+    }
+}
+
+/// The globs of a scope or rule as they apply to `database`.
+pub fn pg_globs(globs: &[String], database: &str, home: &str) -> Vec<String> {
+    globs.iter().filter_map(|g| pg_glob(g, database, home)).collect()
+}
+
+/// A PostgreSQL connection's policy for one of its databases: scope and custom rules rewritten by `pg_globs`. A rule
+/// whose globs all name other databases is left out, since an empty scope would mean everywhere.
+pub fn pg_policy(p: &ConnPolicy, database: &str, home: &str) -> ConnPolicy {
+    ConnPolicy { scope: Scope { mode: p.scope.mode, globs: pg_globs(&p.scope.globs, database, home) }, rules: pg_rules(&p.rules, database, home), ..p.clone() }
+}
+
+/// `pg_policy` for a list of rules, the global ones too.
+pub fn pg_rules(rules: &[RuleSpec], database: &str, home: &str) -> Vec<RuleSpec> {
+    rules
+        .iter()
+        .filter_map(|r| {
+            if r.scope.is_empty() {
+                return Some(r.clone());
+            }
+            let scope = pg_globs(&r.scope, database, home);
+            (!scope.is_empty()).then(|| RuleSpec { scope, ..r.clone() })
+        })
+        .collect()
+}
+
+/// Whether list_databases shows `database`: everywhere unless the scope shares only some namespaces, none of them in it.
+pub fn pg_listed(scope: &Scope, database: &str, home: &str) -> bool {
+    scope.mode != ScopeMode::Only || !pg_globs(&scope.globs, database, home).is_empty()
+}
+
 const PG_SYSTEM: [&str; 10] = [
     "pg_authid",
     "pg_shadow",
@@ -333,6 +376,23 @@ fn system_in_sql(sql: &str, d: Dialect) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn postgres_globs_name_the_database_or_mean_the_connections_own() {
+        let globs: Vec<String> = ["public.orders", "audit", "sales-*.public.events", "crm-db.*.*", "a..b", "x.y.", "*.secrets.*"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pg_globs(&globs, "postgres", "postgres"), ["public.orders", "audit", "a..b", "x.y.", "secrets.*"]);
+        assert_eq!(pg_globs(&globs, "sales-db", "postgres"), ["public.events", "a..b", "x.y.", "secrets.*"]);
+        assert_eq!(pg_globs(&globs, "crm-db", "postgres"), ["*.*", "a..b", "x.y.", "secrets.*"]);
+        let only = Scope { mode: ScopeMode::Only, globs: vec!["public.orders".into(), "sales-db.public.*".into()] };
+        assert!(pg_listed(&only, "postgres", "postgres") && pg_listed(&only, "sales-db", "postgres") && !pg_listed(&only, "crm-db", "postgres"));
+        let p = ConnPolicy { scope: only, ..Default::default() };
+        let sales = pg_policy(&p, "sales-db", "postgres");
+        assert!(visible(&sales.scope, "public", Some("events")).unwrap() && !visible(&sales.scope, "reporting", Some("orders")).unwrap());
+        let rule = |scope: &[&str]| super::super::config::RuleSpec { on: true, matcher: super::super::config::Matcher::FieldName("^ssn$".into()), scope: scope.iter().map(|s| s.to_string()).collect(), action: super::super::config::Action::Remove, mode: Default::default() };
+        let rules = [rule(&[]), rule(&["public.users"]), rule(&["crm-db.public.contacts"])];
+        assert_eq!(pg_rules(&rules, "crm-db", "postgres").iter().map(|r| r.scope.clone()).collect::<Vec<_>>(), [vec![], vec!["public.contacts".to_string()]], "a rule on the own database only is left out elsewhere, never widened");
+        assert_eq!(pg_rules(&rules, "postgres", "postgres").len(), 2);
+    }
+
     use super::*;
     use crate::agents::config::{Action, Matcher, PresetMode, RuleSpec};
     use crate::agents::tools::{ConnRef, Ns};

@@ -519,6 +519,7 @@ impl App {
         *sh = ShellTab {
             code: old.code,
             attached: old.attached,
+            agent_code: old.agent_code,
             queries_tab: old.queries_tab,
             value: old.value,
             docs: old.docs,

@@ -98,6 +98,17 @@ pub enum Call {
     RunCommand { conn: ConnRef, db: String, command: Document },
     RunSql { conn: ConnRef, db: Option<String>, sql: String },
     RunShell { conn: ConnRef, db: Option<String>, script: String },
+    /// Puts a script in a Shell tab for the user to review and run. `tab` edits a tab an earlier call opened.
+    OpenShell { conn: ConnRef, db: String, schema: Option<String>, script: String, attach: Vec<ShellAttach>, tab: Option<u64> },
+}
+
+/// Another connection an open_shell script uses, as the global `name`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellAttach {
+    pub conn: ConnRef,
+    pub db: String,
+    pub schema: Option<String>,
+    pub name: Option<String>,
 }
 
 /// A namespace a call reads or writes. `coll` is None for calls on a whole database.
@@ -129,6 +140,7 @@ impl ToolDef {
 
 pub const REASON_MAX: usize = 300;
 const MAX_DOCS: usize = 1000;
+const MAX_ATTACH: usize = 16;
 
 fn props(extra: Value, required: &[&str]) -> Value {
     let mut p = json!({
@@ -144,7 +156,7 @@ fn conn_p() -> Value {
 
 fn ns_props(coll: &str) -> Value {
     let what = if coll == "table" { "Table name" } else { "Collection name" };
-    let db = if coll == "table" { "Database (MySQL) or schema (PostgreSQL)." } else { "Database name." };
+    let db = if coll == "table" { "Database name. On PostgreSQL a database of the server; pass the schema as `schema`." } else { "Database name." };
     json!({ "connection": conn_p(), "database": { "type": "string", "description": db }, coll: { "type": "string", "description": what } })
 }
 
@@ -175,10 +187,27 @@ fn where_p() -> Value {
 }
 
 fn sql_p() -> Value {
-    json!({ "connection": conn_p(), "database": { "type": "string", "description": "Database (MySQL) or schema (PostgreSQL) to run in." }, "sql": { "type": "string" } })
+    json!({ "connection": conn_p(), "database": { "type": "string", "description": "Database to run in. On PostgreSQL a database of the server, the connection's own when left out; pass the schema as `schema`." }, "sql": { "type": "string" } })
 }
 
-static TOOLS: LazyLock<Vec<ToolDef>> = LazyLock::new(build_tools);
+static TOOLS: LazyLock<Vec<ToolDef>> = LazyLock::new(|| {
+    let mut tools = build_tools();
+    for t in tools.iter_mut().filter(|t| SCHEMA_TOOLS.contains(&t.name)) {
+        t.input_schema["properties"]["schema"] = json!({ "type": "string", "description": "PostgreSQL only: the schema in `database`. public when left out." });
+    }
+    tools
+});
+
+/// Tools that reach SQL tables, which take a PostgreSQL schema beside the database.
+const SCHEMA_TOOLS: [&str; 14] = ["list_collections", "describe", "select_rows", "query_sql", "explain_sql", "sql_insert_rows", "sql_update_rows", "sql_delete_rows", "create_index", "drop_index", "create_table", "drop_table", "run_sql", "run_shell"];
+
+/// The `schema` argument, which `parse` leaves to the caller: whether it applies depends on the connection's engine.
+pub fn schema(args: &Value) -> Result<Option<String>, ArgErr> {
+    match args {
+        Value::Object(m) => Args { m }.opt_name("schema"),
+        _ => Ok(None),
+    }
+}
 
 pub fn tool_list() -> &'static [ToolDef] {
     &TOOLS
@@ -194,8 +223,8 @@ fn build_tools() -> Vec<ToolDef> {
     let table = |extra: Value, req: &[&str]| props(with(ns_props("table"), extra), &[&["connection", "database", "table"][..], req].concat());
     vec![
         t("list_connections", "Connections the user shared with agents, with engine and access. Never includes passwords or URIs.", props(json!({}), &[]), true, false),
-        t("list_databases", "Databases on a connection (schemas on PostgreSQL).", props(json!({ "connection": conn_p() }), &["connection"]), true, false),
-        t("list_collections", "Collections or tables in a database.", props(json!({ "connection": conn_p(), "database": { "type": "string" } }), &["connection", "database"]), true, false),
+        t("list_databases", "Databases on a connection. On PostgreSQL the databases of the server; list_collections gives the schemas of one.", props(json!({ "connection": conn_p() }), &["connection"]), true, false),
+        t("list_collections", "Collections or tables in a database. On PostgreSQL the schemas of the database, and the tables and views of `schema` when one is given.", props(json!({ "connection": conn_p(), "database": { "type": "string" } }), &["connection", "database"]), true, false),
         t("describe", "Fields from a sample (MongoDB) or columns (SQL), indexes and counts of one collection or table.", props(with(ns_props("collection"), json!({ "table": { "type": "string" } })), &["connection", "database"]), true, false),
         t("find", "Find documents in a MongoDB collection.", coll(json!({ "filter": query_t("Query filter"), "projection": query_t("Projection"), "sort": query_t("Sort"), "skip": { "type": "integer", "minimum": 0 }, "limit": limit_p() }), &[]), true, false),
         t("aggregate", "Run a read-only aggregation pipeline. $out and $merge are refused; use aggregate_into.", coll(json!({ "pipeline": { "type": ["array", "string"], "description": "Pipeline stages as relaxed Extended JSON." }, "limit": limit_p() }), &["pipeline"]), true, false),
@@ -220,13 +249,31 @@ fn build_tools() -> Vec<ToolDef> {
         t("run_command", "Run a MongoDB database command.", props(json!({ "connection": conn_p(), "database": { "type": "string" }, "command": query_t("Command document") }), &["connection", "database", "command"]), false, true),
         t("run_sql", "Run SQL that may change data or structure. Cannot be undone.", props(sql_p(), &["connection", "sql"]), false, true),
         t("run_shell", SHELL_DESCRIPTION, props(json!({ "connection": conn_p(), "database": { "type": "string", "description": "The database `db` stands for." }, "script": { "type": "string", "description": "A JavaScript function expression, such as async function run() { ... }." } }), &["connection", "script"]), false, true),
+        t("open_shell", OPEN_SHELL_DESCRIPTION, props(json!({
+            "connection": conn_p(),
+            "database": { "type": "string", "description": "The database of the tab: `db` on MongoDB, the table globals on SQL." },
+            "schema": { "type": "string", "description": "PostgreSQL only: the schema the script runs in. public when left out." },
+            "script": { "type": "string", "description": "A JavaScript function expression, such as async function run() { ... }." },
+            "attach": { "type": "array", "maxItems": MAX_ATTACH, "description": "Other shared connections the script uses, each as a global.", "items": { "type": "object", "required": ["connection", "database"], "additionalProperties": false, "properties": {
+                "connection": conn_p(),
+                "database": { "type": "string" },
+                "schema": { "type": "string", "description": "PostgreSQL only. public when left out." },
+                "name": { "type": "string", "description": "The global the script uses. The database name made a valid identifier when left out." },
+            } } },
+            "tab": { "type": "integer", "minimum": 1, "description": "Edit the Shell tab an earlier open_shell returned instead of opening a new one. Its script is replaced, and its attachments when `attach` is given." },
+        }), &["connection", "database", "script"]), false, false),
     ]
 }
 
 const SHELL_DESCRIPTION: &str = "Run JavaScript in Quarry's shell on a MongoDB, MySQL, MariaDB or PostgreSQL connection. `script` is a function expression that Quarry calls; its return value and its console.log output come back. \
 MongoDB: `db` is the current database (the `database` argument, a Node.js driver Db) and each of its collections is also a global by name, as in async function run() { return await db.collection(\"users\").find().limit(5).toArray() }. On a locked connection allowing it unlocks writes. \
-SQL: there is no `db`. `sql` is a tagged template whose ${values} are sent as values, never as SQL text: await sql`SELECT id, total FROM orders WHERE id = ${id}` returns the rows as an array, with .affected (and .insertId on MySQL) after a write. sql.unsafe(text, values) takes ? placeholders on MySQL and $1, $2 on PostgreSQL. `table(\"orders\")` and a global per table of the `database` argument (the MySQL database or PostgreSQL schema) have find(where, { select, orderBy, limit, offset }), findOne, count, insert, update(where, set) and delete(where). One statement per query. Each statement is checked by Quarry as it runs, and rows are scrubbed by the connection's data rules before the script sees them. On a locked connection the script runs read-only and every write is refused; it never unlocks it. \
+SQL: there is no `db`. `sql` is a tagged template whose ${values} are sent as values, never as SQL text: await sql`SELECT id, total FROM orders WHERE id = ${id}` returns the rows as an array, with .affected (and .insertId on MySQL) after a write. sql.unsafe(text, values) takes ? placeholders on MySQL and $1, $2 on PostgreSQL. `table(\"orders\")` and a global per table of the MySQL `database`, or on PostgreSQL of `schema` (public by default) in `database`, have find(where, { select, orderBy, limit, offset }), findOne, count, insert, update(where, set) and delete(where). One statement per query. Each statement is checked by Quarry as it runs, and rows are scrubbed by the connection's data rules before the script sees them. On a locked connection the script runs read-only and every write is refused; it never unlocks it. \
 The user approves every script, and it is refused where rules hide data.";
+
+const OPEN_SHELL_DESCRIPTION: &str = "Open a script in a Shell tab of Quarry for the user to review and run, with other connections attached as globals. \
+Nothing runs and nothing comes back but the tab id: the user runs it in Quarry and sees the result there. Pass that id as `tab` to replace the script of the same tab, and its attachments when `attach` is given; a tab the user has since edited is left alone. \
+The script is written as for run_shell. An attachment is a global named `name`: a Node.js driver Db on MongoDB (await travels.users.find().toArray()), and on SQL a tagged template with a table helper per table (await shop`SELECT 1`, shop.orders.find(where)). \
+Attachments start read-only; only the user can allow their writes.";
 
 /// The shell runs `return (<script>)` and calls what that gives, so a bare statement fails only after the user approved
 /// it. This cheap check refuses that before any approval, with the form that works.
@@ -615,6 +662,22 @@ pub fn parse(tool: &str, args: &Value) -> Result<Call, ArgErr> {
         }
         "run_sql" => Call::RunSql { conn: a.conn()?, db: a.opt_name("database")?, sql: a.str("sql")? },
         "run_shell" => Call::RunShell { conn: a.conn()?, db: a.opt_name("database")?, script: shell_fn(&a.str("script")?)? },
+        "open_shell" => {
+            let attach = match m.get("attach") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(v)) if v.len() <= MAX_ATTACH => v.iter().map(|x| {
+                    let Value::Object(am) = x else { return bad("every `attach` item must be {connection, database}") };
+                    if let Some(k) = am.keys().find(|k| !["connection", "database", "schema", "name"].contains(&k.as_str())) {
+                        return bad(format!("Unknown argument `{k}` in `attach`"));
+                    }
+                    let aa = Args { m: am };
+                    Ok(ShellAttach { conn: aa.conn()?, db: aa.name("database")?, schema: aa.opt_name("schema")?, name: aa.opt_str("name")?.filter(|n| !n.is_empty()) })
+                }).collect::<Result<_, _>>()?,
+                Some(Value::Array(_)) => return bad(format!("`attach` takes at most {MAX_ATTACH} connections")),
+                Some(_) => return bad("`attach` must be an array"),
+            };
+            Call::OpenShell { conn: a.conn()?, db: a.name("database")?, schema: a.opt_name("schema")?, script: shell_fn(&a.str("script")?)?, attach, tab: a.uint("tab")? }
+        }
         _ => unreachable!("every listed tool is parsed"),
     })
 }
@@ -635,7 +698,7 @@ pub fn classify(c: &Call, dialect: Option<Dialect>) -> OpClass {
         Call::CreateCollection { .. } | Call::DropCollection { .. } | Call::CreateIndex { .. } | Call::DropIndex { .. } | Call::CreateTable { .. } | Call::DropTable { .. } => OpClass::ChangeStructure,
         Call::RunCommand { command, .. } => command_class(command),
         Call::RunSql { sql, .. } if dialect.is_some_and(|d| touches_users(sql, d)) => OpClass::ServerUsers,
-        Call::RunSql { .. } | Call::RunShell { .. } => OpClass::RunScripts,
+        Call::RunSql { .. } | Call::RunShell { .. } | Call::OpenShell { .. } => OpClass::RunScripts,
     }
 }
 
@@ -783,12 +846,43 @@ impl Call {
     pub fn conn(&self) -> Option<&ConnRef> {
         match self {
             Call::ListConnections => None,
-            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::ExplainSql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } => Some(conn),
+            Call::ListDatabases { conn } | Call::ListCollections { conn, .. } | Call::QuerySql { conn, .. } | Call::ExplainSql { conn, .. } | Call::RunCommand { conn, .. } | Call::RunSql { conn, .. } | Call::RunShell { conn, .. } | Call::OpenShell { conn, .. } => Some(conn),
             _ => self.ns().map(|n| &n.conn),
         }
     }
 
     pub fn ns(&self) -> Option<&Ns> {
+        match self {
+            Call::Describe { ns } | Call::Find { ns, .. } | Call::Aggregate { ns, .. } | Call::Count { ns, .. } | Call::Explain { ns, .. } | Call::SelectRows { ns, .. } | Call::Insert { ns, .. } | Call::Update { ns, .. } | Call::Delete { ns, .. } | Call::AggregateInto { ns, .. } | Call::SqlInsertRows { ns, .. } | Call::SqlUpdateRows { ns, .. } | Call::SqlDeleteRows { ns, .. } | Call::CreateCollection { ns } | Call::DropCollection { ns } | Call::CreateIndex { ns, .. } | Call::DropIndex { ns, .. } | Call::CreateTable { ns, .. } | Call::DropTable { ns } => Some(ns),
+            _ => None,
+        }
+    }
+
+    /// The database the agent named: the `database` argument, as parsed.
+    pub fn space(&self) -> Option<&str> {
+        match self {
+            Call::ListCollections { db, .. } | Call::RunCommand { db, .. } => Some(db),
+            Call::QuerySql { db, .. } | Call::ExplainSql { db, .. } | Call::RunSql { db, .. } | Call::RunShell { db, .. } => db.as_deref(),
+            _ => self.ns().map(|n| n.db.as_str()),
+        }
+    }
+
+    /// On PostgreSQL the executors read `database` as the schema of the database the call runs on, so once that database
+    /// is picked this puts the schema there: public for calls on a table, the server's search path for free SQL without one.
+    pub fn set_schema(&mut self, schema: Option<String>) {
+        match self {
+            // No schema lists only the schemas of the database, so a scope without public still shows where to look.
+            Call::ListCollections { db, .. } => *db = schema.unwrap_or_default(),
+            Call::QuerySql { db, .. } | Call::ExplainSql { db, .. } | Call::RunSql { db, .. } | Call::RunShell { db, .. } => *db = schema,
+            c => {
+                if let Some(ns) = c.ns_mut() {
+                    ns.db = schema.unwrap_or_else(|| "public".into());
+                }
+            }
+        }
+    }
+
+    fn ns_mut(&mut self) -> Option<&mut Ns> {
         match self {
             Call::Describe { ns } | Call::Find { ns, .. } | Call::Aggregate { ns, .. } | Call::Count { ns, .. } | Call::Explain { ns, .. } | Call::SelectRows { ns, .. } | Call::Insert { ns, .. } | Call::Update { ns, .. } | Call::Delete { ns, .. } | Call::AggregateInto { ns, .. } | Call::SqlInsertRows { ns, .. } | Call::SqlUpdateRows { ns, .. } | Call::SqlDeleteRows { ns, .. } | Call::CreateCollection { ns } | Call::DropCollection { ns } | Call::CreateIndex { ns, .. } | Call::DropIndex { ns, .. } | Call::CreateTable { ns, .. } | Call::DropTable { ns } => Some(ns),
             _ => None,
@@ -809,7 +903,7 @@ impl Call {
             out.push(Target { db: ns.db.clone(), coll: Some(ns.coll.clone()) });
         }
         match self {
-            Call::ListCollections { db, .. } => out.push(Target { db: db.clone(), coll: None }),
+            Call::ListCollections { db, .. } if !db.is_empty() => out.push(Target { db: db.clone(), coll: None }),
             Call::QuerySql { db: Some(db), .. } | Call::ExplainSql { db: Some(db), .. } | Call::RunSql { db: Some(db), .. } | Call::RunShell { db: Some(db), .. } => out.push(Target { db: db.clone(), coll: None }),
             Call::RunCommand { db, command, .. } => {
                 out.push(Target { db: db.clone(), coll: None });
@@ -896,7 +990,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_and_parses() {
         let names: Vec<&str> = tool_list().iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 28);
         for t in tool_list() {
             let j = t.to_json();
             assert_eq!(j["annotations"]["openWorldHint"], false);

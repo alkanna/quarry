@@ -11,7 +11,7 @@ fn rule(matcher: Matcher, scope: &[&str], action: Action) -> RuleSpec {
 }
 
 fn act(id: u64, time: &str, tool: &str, conn: Option<u64>, ns: &str, outcome: Outcome, summary: &str) -> Activity {
-    Activity { id, time: time.into(), session: 1, client: "Claude Code".into(), tool: tool.into(), conn, ns: ns.into(), outcome, summary: summary.into(), args: String::new(), answer: String::new(), undo: None }
+    Activity { id, time: time.into(), session: 1, client: "Claude Code".into(), tool: tool.into(), conn, ns: ns.into(), database: String::new(), outcome, summary: summary.into(), args: String::new(), answer: String::new(), undo: None }
 }
 
 impl App {
