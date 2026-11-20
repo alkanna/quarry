@@ -348,6 +348,44 @@ pub(crate) fn split_statement(before: &str, tail: &str, dl: Dialect) -> (String,
     (all[start..before.len()].to_string(), all[start..end].to_string())
 }
 
+/// Inside a snippet's `{{` not yet closed: the names of the values the statement already has, and after the colon the
+/// types a value can take.
+fn placeholder_list(before: &str, full_stmt: &str, dl: Dialect) -> Option<Out> {
+    use crate::library::snippet;
+    let open = before.rfind("{{")?;
+    if before[open..].contains("}}") || before[open + 2..].contains('\n') {
+        return None;
+    }
+    // Only a `{{` in code opens a placeholder, not one inside a string or a comment.
+    if !lex::tokens(before, dl).iter().any(|(t, r)| r.contains(&open) && (*t == Tok::Punct || *t == Tok::Str && snippet::string_at(&before[r.clone()], dl).is_some())) {
+        return None;
+    }
+    // A placeholder already closed after the caret gets no second `}}`.
+    let close = if full_stmt.get(before.len()..).is_some_and(|rest| rest.split("{{").next().is_some_and(|r| r.contains("}}"))) { "" } else { "}}" };
+    let inner = &before[open + 2..];
+    let sugs: Vec<Sug>;
+    let from;
+    if let Some(colon) = inner.find(':') {
+        let typed = inner[colon + 1..].trim_start();
+        from = before.len() - typed.len();
+        sugs = snippet::TYPES.iter().filter(|(t, _)| starts_ci(t, typed) && *t != typed).map(|(t, d)| sug((*t).to_string(), "type", format!("{t}{close}"), (*d).to_string(), String::new())).collect();
+    } else {
+        let typed = inner.trim_start();
+        from = before.len() - typed.len();
+        // The statement without this placeholder: its unclosed `{{` would stop the parse before the values after it.
+        let rest = format!("{}{}", &before[..open], full_stmt.get(before.len()..).unwrap_or(""));
+        let mut names: Vec<(String, String)> = snippet::parse(&rest, dl).vars.into_iter().map(|v| (v.name, v.ty.spec())).collect();
+        // A first value has no name to reuse yet: the column it is compared with is the likely one.
+        let head = &before[..open];
+        let toks = sig(head, &lex::tokens(head, dl));
+        if let Some(col) = compared_end(&toks).and_then(|end| operand(&toks, end).pop()).filter(|c| snippet::valid_name(c) && !names.iter().any(|(n, _)| n == c)) {
+            names.push((col, "new value".into()));
+        }
+        sugs = names.into_iter().filter(|(n, _)| starts_ci(n, typed) && n != typed).map(|(n, d)| sug(n.clone(), "column", format!("{n}{close}"), d, String::new())).collect();
+    }
+    (!sugs.is_empty()).then_some(Out { from, sugs, ..Default::default() })
+}
+
 /// Suggestions for the text before the caret, with the heading, footer and lookups. None where nothing should pop up: in a comment, in a string
 /// that is not a value, in a closed identifier, or in an empty word where a list would only be noise. `force` is Ctrl+Space, which lists
 /// what fits even in an empty word.
@@ -370,8 +408,14 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     let full_toks = lex::tokens(full_stmt, scope.dialect);
     let full_sig = sig(full_stmt, &full_toks);
     let rts = resolve(&parse_refs(&full_sig, scope.dialect), scope);
+    if open == Some(Tok::Comment) {
+        return None;
+    }
+    // Before the string's values: `LIKE '%{{` is a placeholder being named, not text to complete.
+    if let Some(out) = placeholder_list(before, full_stmt, scope.dialect) {
+        return Some(out);
+    }
     match open {
-        Some(Tok::Comment) => return None,
         Some(Tok::Str) => {
             // A dollar quoted body is text, and a prefix such as E or B sits before the opening quote.
             let qoff = before[orng.start..].find(['\'', '"']).filter(|_| !before[orng.start..].starts_with('$'))?;
@@ -538,10 +582,8 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
     Out { from, sugs, foot, ..Default::default() }
 }
 
-/// The values of the column whose comparison the open string belongs to. `toks` are the tokens
-/// before the string.
-fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], values: &Fields) -> Option<Out> {
-    // The operand ends before `=`, `<>`, `!=`, `LIKE` or an `IN (` list.
+/// Where the operand of the comparison the caret is in ends: before `=`, `<>`, `!=`, `LIKE`, `NOT` or an `IN (` list.
+fn compared_end(toks: &[Tk]) -> Option<usize> {
     let mut end = toks.len();
     let ops = |t: &Tk| t.tok == Tok::Punct && matches!(t.s, "=" | "<" | ">" | "!");
     if end > 0 && toks[end - 1].tok == Tok::Word && ["LIKE", "REGEXP", "RLIKE"].iter().any(|k| toks[end - 1].is(k)) {
@@ -565,7 +607,13 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
     if end > 0 && toks[end - 1].is("NOT") {
         end -= 1;
     }
-    let parts = operand(toks, end);
+    Some(end)
+}
+
+/// The values of the column whose comparison the open string belongs to. `toks` are the tokens
+/// before the string.
+fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], values: &Fields) -> Option<Out> {
+    let parts = operand(toks, compared_end(toks)?);
     let (table, col) = match parts.as_slice() {
         [c] => rts.iter().find_map(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
         [q, c] | [_, q, c] => by_qualifier(rts, q).and_then(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
@@ -839,6 +887,14 @@ mod tests {
         let mut f = Fields::new();
         f.insert(value_key("orders", "currency"), super::super::complete::FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         f
+    }
+
+    #[test]
+    fn a_placeholder_offers_the_compared_column_and_the_names_after_it() {
+        let names = |b: &str, full: &str| suggest(b, full, &scope(), &Fields::new()).map(|(_, s)| s.into_iter().map(|s| s.insert).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(names("SELECT * FROM t WHERE `firstname` LIKE {{", "SELECT * FROM t WHERE `firstname` LIKE {{"), ["firstname}}"]);
+        assert_eq!(names("SELECT * FROM t WHERE a = {{", "SELECT * FROM t WHERE a = {{ AND b = {{day:date}}"), ["day}}", "a}}"]);
+        assert_eq!(names("SELECT * FROM t WHERE a = {{x:", "SELECT * FROM t WHERE a = {{x:").len(), crate::library::snippet::TYPES.len());
     }
 
     #[test]

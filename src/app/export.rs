@@ -222,7 +222,9 @@ impl App {
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
             let (db, schema) = super::sql::query::run_target(t, db);
-            let stmts = db::sql::export::check_script(&s.query, db.dialect);
+            // A snippet exports what Run sends, its values filled in, and nothing while one does not read.
+            let query = self.snippet_fill_run(s.query.clone()).ok()?;
+            let stmts = db::sql::export::check_script(&query, db.dialect);
             Some(Script { db, schema, stmts })
         });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });

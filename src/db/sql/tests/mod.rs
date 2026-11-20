@@ -13,6 +13,7 @@ mod pg_read;
 mod pg_roles;
 mod pg_shell;
 mod routines;
+mod snippet_live;
 mod socks;
 mod pg_write;
 mod table_ops;

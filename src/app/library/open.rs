@@ -149,7 +149,7 @@ impl App {
 
     /// The database a SQL or Shell script opens in: its own when it names one, else the current tab's on the same
     /// connection, else the connection's default.
-    fn script_db(&self, conn: u64, wanted: &str) -> String {
+    pub(in crate::app) fn script_db(&self, conn: u64, wanted: &str) -> String {
         if !wanted.is_empty() {
             return wanted.to_string();
         }
@@ -157,6 +157,12 @@ impl App {
             return t.sel.db.clone();
         }
         self.default_db(conn)
+    }
+
+    /// Whether a saved script already runs at this target, so Make default has nothing to change. A script saved without
+    /// a database or schema runs in the tab's own: `own_schema` is that schema.
+    pub(in crate::app) fn runs_at(&self, s: &crate::library::Script, conn: u64, db: &str, schema: &str, own_schema: &str) -> bool {
+        s.conn == conn && self.script_db(conn, &s.db) == db && (s.schema == schema || s.schema.is_empty() && schema == own_schema)
     }
 
     /// The database a connection opens in when nothing names one: the one in its address, else the first that is not the
@@ -215,6 +221,11 @@ impl App {
         }
     }
 
+    /// The `{{...}}` values of a SQL script, or None for one without any. Plain SQL costs one scan for `{{`.
+    pub(in crate::app) fn script_snippet(&self, s: &crate::library::Script) -> Option<crate::library::snippet::Parsed> {
+        (s.kind == "sql" && s.body.contains("{{")).then(|| crate::library::snippet::parse(&s.body, self.dialect_of(s.conn))).filter(|p| p.is_snippet())
+    }
+
     /// Whether running this script now could change data: a SQL statement that is not a read, a pipeline with a write stage,
     /// or any Shell script, whose code can do anything.
     fn script_writes(&self, s: &crate::library::Script) -> bool {
@@ -229,13 +240,14 @@ impl App {
 
     /// Whether tab `i` is one that opening a script can replace: it holds no text of the person's beyond the script it
     /// was opened from, and that is unchanged.
-    fn tab_clean(&self, i: usize, kind: &str) -> bool {
+    pub(in crate::app) fn tab_clean(&self, i: usize, kind: &str) -> bool {
         let Some(t) = self.tabs.get(i) else { return false };
         let text = match (kind, t.sql.as_ref()) {
             ("sql", Some(s)) if t.view == View::Sql && t.sel.coll.is_empty() => s.query.as_str(),
             _ => return false,
         };
-        let staged = t.sql.as_ref().is_some_and(|s| !s.st.staged.is_empty());
+        // A tab still running is busy too, even with its text cleared: its answer would land under the new script.
+        let staged = t.sql.as_ref().is_some_and(|s| !s.st.staged.is_empty() || s.run_req != 0);
         let unchanged = match &t.script {
             Some(b) => b.view == View::Sql && b.base == text,
             None => text.trim().is_empty(),
@@ -271,6 +283,13 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
+        // Run on a snippet asks for its values first, whether from Cmd+K, the Library panel or a picker.
+        if how == How::Run
+            && let ScriptRef::Saved(id) = r
+            && self.library.scripts.iter().any(|s| s.id == *id && self.script_snippet(s).is_some())
+        {
+            return self.open_snippet_form(*id, None);
+        }
         // A script already open in another tab is switched to: a second copy comes only from New tab or a duplicated tab.
         // Opened again on the tab it is in, it takes its saved text back, and Undo keeps the edits it replaced.
         if how == How::Here
@@ -365,14 +384,18 @@ impl App {
                     self.sql_new_query(s.conn, db);
                 }
                 if let Some(q) = self.tm().and_then(|t| t.sql.as_mut()) {
+                    // The values of what the tab held before are not this script's.
+                    (q.snip_vals, q.snip_filled, q.snip_off) = Default::default();
                     q.query = s.body.clone();
                     q.caret = 0;
                     q.run_schema = s.schema.clone();
                     // A reused tab may have been switched to another database; the script runs in its own.
                     q.run_db = String::new();
                 }
+                // A linked file with {{...}} values opens to be filled in; it never runs with them empty.
+                let snippet = self.script_snippet(&s).is_some();
                 self.bind_script(r.clone(), View::Sql, s.body);
-                if run {
+                if run && !snippet {
                     self.sql_run(true, false);
                 }
             }

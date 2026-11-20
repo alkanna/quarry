@@ -167,6 +167,8 @@ fn kind_glyph(kind: &str) -> (glyphs::Glyph, egui::Color32) {
         "filter" | "where" => (glyphs::funnel, C_LINK()),
         "pipeline" => (glyphs::stack, C_OID()),
         "sql" => (glyphs::file_sql, C_KEYWORD()),
+        // A SQL script with {{...}} values: Cmd+K asks for them before it runs.
+        "snippet" => (glyphs::code, PRIMARY()),
         _ => (glyphs::doc, MUTED()),
     }
 }
@@ -311,6 +313,13 @@ impl RowCx<'_> {
                         _ => s.db.clone(),
                     }
                 };
+                // The engine is looked up only for a script that may hold values: plain SQL costs one scan for `{{`.
+                let dialect = || if self.conns.iter().any(|c| c.meta.id == s.conn && c.meta.engine == db::sql::Engine::Postgres) { db::sql::Dialect::Postgres } else { db::sql::Dialect::MySql };
+                if s.kind == "sql" && s.body.contains("{{") && crate::library::snippet::is_snippet(&s.body, dialect()) {
+                    let mut look = Look::new(s.name.clone(), "snippet".into(), right);
+                    look.label = format!("{} (snippet)", s.name);
+                    return look;
+                }
                 Look::new(s.name.clone(), s.kind.clone(), right)
             }
             Node::Link(id) => {

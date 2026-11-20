@@ -52,6 +52,9 @@ impl App {
         if matches!(self.modal, Some(Modal::Palette { .. })) {
             return self.palette(ctx);
         }
+        if matches!(self.modal, Some(Modal::Snippet(_))) {
+            return self.snippet_form(ctx);
+        }
         if matches!(self.modal, Some(Modal::Settings)) {
             return self.settings(ctx);
         }
@@ -69,6 +72,7 @@ impl App {
                 Modal::SaveScript(f) => self.save_dialog(ui, f, &mut keep),
                 Modal::OpenOn(f) => self.open_on_dialog(ui, f, &mut keep),
                 Modal::LinkFolder(f) => self.link_dialog(ui, f, &mut keep),
+                Modal::MakeValue(f) => self.make_value_dialog(ui, f, &mut keep),
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
                     ui.set_width(460.0);
@@ -331,7 +335,7 @@ impl App {
                 Modal::SqlExplain(x) => self.sql_explain_dialog(ui, x, &mut keep),
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
                 // Drawn by their own functions before this dialog.
-                Modal::Palette { .. } | Modal::Settings => {}
+                Modal::Palette { .. } | Modal::Settings | Modal::Snippet(_) => {}
             }
         });
         if keep && !r.should_close() && self.modal.is_none() {

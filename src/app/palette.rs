@@ -5,7 +5,7 @@ use super::*;
 use super::rail::{engine_mark, logo, mark_color, search_icon};
 
 const PAL_W: f32 = 640.0;
-const LIST_MAX_H: f32 = 440.0;
+pub(in crate::app) const LIST_MAX_H: f32 = 440.0;
 
 pub(super) const MONGO_VIEWS: [(View, &str); 8] = [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")];
 pub(super) const SQL_VIEWS: [(View, &str); 7] = [(View::Documents, "Content"), (View::Structure, "Structure"), (View::Relations, "Relations"), (View::Triggers, "Triggers"), (View::Info, "Info"), (View::Sql, "Query"), (View::Shell, "Shell")];
@@ -46,6 +46,8 @@ enum Act {
     Cmd(Cmd),
     /// A script of the library or a linked file: Return opens it, Cmd+Enter runs it.
     Script(crate::library::ScriptRef),
+    /// A saved script with `{{...}}` values: Return asks for them and runs it, Cmd+Enter opens it to edit.
+    Snippet(u64),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -298,7 +300,12 @@ impl App {
                 let folder = crate::library::ops::folder_path(&self.library, s.folder);
                 let conn = self.conn(s.conn).map_or("removed connection", |c| c.meta.name.as_str());
                 let sub = if folder.is_empty() { conn.to_string() } else { format!("{conn} \u{203a} {folder}") };
-                scripts.push((score, Row { sub, meta: s.kind.clone(), ..Row { act: Act::Script(crate::library::ScriptRef::Saved(s.id)), ..Row::cmd(&s.name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
+                let (act, tag) = match self.script_snippet(s).map(|p| p.vars.len()) {
+                    None => (Act::Script(crate::library::ScriptRef::Saved(s.id)), String::new()),
+                    Some(1) => (Act::Snippet(s.id), "1 value".into()),
+                    Some(n) => (Act::Snippet(s.id), format!("{n} values")),
+                };
+                scripts.push((score, Row { sub, meta: s.kind.clone(), tag, ..Row { act, ..Row::cmd(&s.name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
             }
         }
         for l in &self.library.links {
@@ -472,7 +479,8 @@ impl App {
                     pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| (r.act.clone(), new_tab || cmd_enter));
                     run = cmd_enter;
                 }
-                palette_footer(ui, cmds, new_tab);
+                let snippet = secs.iter().flat_map(|s| &s.1).nth(sel).is_some_and(|r| matches!(r.act, Act::Snippet(_)));
+                palette_footer(ui, cmds, new_tab, snippet);
             });
         });
         if let Some((a, new)) = pick {
@@ -487,6 +495,8 @@ impl App {
                     use crate::app::library::open::How;
                     self.open_script(&r, if run { How::Run } else if new { How::NewTab } else { How::Here })
                 }
+                Act::Snippet(id) if run => self.open_script(&crate::library::ScriptRef::Saved(id), crate::app::library::open::How::Here),
+                Act::Snippet(id) => self.open_snippet_form(id, Some(query)),
             }
         } else if !r.should_close() && self.modal.is_none() {
             self.modal = Some(Modal::Palette { query, sel, cmds, new_tab });
@@ -683,12 +693,17 @@ impl App {
 
 /// The footer band of the palette and the tab list, `rect` widened to `band`, with its top line.
 fn paint_footer_band(p: &egui::Painter, band: egui::Rect, corner: u8) {
-    p.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, RAISED().lerp_to_gamma(PANEL(), 0.5));
-    p.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
+    paint_band(p, band, corner, RAISED().lerp_to_gamma(PANEL(), 0.5), RAISED_LINE());
+}
+
+/// A band along the bottom of a popup, its lower corners rounded by `corner`, with a line on top.
+pub(in crate::app) fn paint_band(p: &egui::Painter, band: egui::Rect, corner: u8, fill: Color32, line: Color32) {
+    p.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, fill);
+    p.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, line));
 }
 
 /// Key caps and their labels from `x` along a footer, the labels muted. Returns where they end.
-fn key_hints(p: &egui::Painter, mut x: f32, cy: f32, hints: &[(&[&str], &str)]) -> f32 {
+pub(in crate::app) fn key_hints(p: &egui::Painter, mut x: f32, cy: f32, hints: &[(&[&str], &str)]) -> f32 {
     for (ks, text) in hints {
         for k in *ks {
             let w = kbd_w(p, k);
@@ -704,7 +719,7 @@ fn key_hints(p: &egui::Painter, mut x: f32, cy: f32, hints: &[(&[&str], &str)]) 
 }
 
 /// One key cap and its label ending at `right`.
-fn key_hint_right(p: &egui::Painter, right: f32, cy: f32, key: &str, text: &str) {
+pub(in crate::app) fn key_hint_right(p: &egui::Painter, right: f32, cy: f32, key: &str, text: &str) {
     let g = p.layout_no_wrap(text.into(), FontId::proportional(TXT_SMALL), MUTED());
     let lx = right - g.size().x;
     p.galley(egui::pos2(lx, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
@@ -825,7 +840,11 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, sel: bool, tok: &[String]) -> egui::R
     let mut xr = rect.right() - 20.0;
     if sel {
         xr = kbd(p, xr, cy, "\u{21b5}") - 6.0;
-        let g = p.layout_job(LayoutJob::single_section(if matches!(row.act, Act::Cmd(_)) { "Run" } else { "Open" }.into(), ui_fmt(TXT_SMALL, MUTED(), W_MEDIUM, 0.0)));
+        let g = p.layout_job(LayoutJob::single_section(match row.act {
+            Act::Cmd(_) => "Run",
+            Act::Snippet(_) => "Fill in",
+            _ => "Open",
+        }.into(), ui_fmt(TXT_SMALL, MUTED(), W_MEDIUM, 0.0)));
         xr -= g.size().x;
         p.galley(egui::pos2(xr, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
         xr -= 12.0;
@@ -922,15 +941,17 @@ fn paint_tile(ui: &egui::Ui, rect: egui::Rect, glyph: Glyph, mark: Option<&'stat
     }
 }
 
-fn palette_footer(ui: &mut egui::Ui, cmds: bool, new_tab: bool) {
+fn palette_footer(ui: &mut egui::Ui, cmds: bool, new_tab: bool, snippet: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PALETTE_FOOT_H), Sense::hover());
     let p = ui.painter();
     paint_footer_band(p, rect, R_LG);
     let cy = rect.center().y;
     const CMD_ENTER: [&str; 2] = [if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" }, "\u{21b5}"];
-    let mut left: Vec<(&[&str], &str)> = vec![(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], if cmds { "run" } else if new_tab { "open in new tab" } else { "open" })];
+    let mut left: Vec<(&[&str], &str)> = vec![(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], if cmds { "run" } else if snippet { "fill in and run" } else if new_tab { "open in new tab" } else { "open" })];
     if cmds {
         left.push((&["\u{232b}"], "leave commands"));
+    } else if snippet {
+        left.push((&CMD_ENTER, "edit"));
     } else if !new_tab {
         left.push((&CMD_ENTER, "new tab"));
     }

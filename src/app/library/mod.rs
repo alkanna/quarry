@@ -10,6 +10,7 @@ pub(super) mod open;
 pub(super) mod panel;
 pub(super) mod picker;
 pub(super) mod save_dialog;
+pub(super) mod snippet_form;
 
 /// What the Library panel and its dialogs remember while the app runs.
 #[derive(Default)]
@@ -48,6 +49,8 @@ pub(super) struct LibUi {
     pub(in crate::app) open_picker: bool,
     /// Cmd+Shift+L asked for the tree: the panel selects its first row if none is selected and takes the keys.
     pub(in crate::app) focus_tree: bool,
+    /// The values each snippet last ran with, by script id, offered first the next time. Not saved.
+    pub(in crate::app) snippet_values: HashMap<u64, HashMap<String, String>>,
 }
 
 /// Whether the saved queries of ui.json come over at launch: the first run with a library, or a library.json so broken that

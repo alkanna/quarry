@@ -288,6 +288,10 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_CONNS") {
             self.demo_conns(&v);
         }
+        // QUARRY_TEST_SNIPPET=<state> shows a snippet in Cmd+K or in its tab, see library/snippet_form.rs.
+        if let Ok(v) = std::env::var("QUARRY_TEST_SNIPPET") {
+            self.demo_snippet(&v);
+        }
         // QUARRY_TEST_LIBRARY=<state> shows the script library, see library/panel.rs.
         if let Ok(v) = std::env::var("QUARRY_TEST_LIBRARY") {
             self.demo_library(&v);

@@ -626,6 +626,11 @@ impl App {
         if text.trim().is_empty() {
             return self.warn("Nothing to run.");
         }
+        // A snippet's values go in here, so Run, Run all, a picked statement and Explain all send the filled text.
+        let text = match self.snippet_fill_run(text) {
+            Ok(t) => t,
+            Err(e) => return self.warn(e),
+        };
         // The plan has a dialog of its own; the classic rows are one click away there.
         if explain {
             return self.sql_explain(text);
@@ -921,7 +926,11 @@ impl App {
         if format {
             self.sql_format(&ctx);
         }
-        self.sql_editor(ui);
+        if self.snippet_strip(ui) {
+            self.snippet_preview(ui);
+        } else {
+            self.sql_editor(ui);
+        }
         ui.add_space(4.0);
         self.sql_result_pane(ui, running);
         if stop {
@@ -947,7 +956,8 @@ impl App {
         let Some(t) = self.tabs.get(ti) else { return };
         let conn = t.sel.conn;
         let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
-        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX {
+        // A statement with {{...}} values is not SQL until Run fills it, so the server is not asked about it.
+        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || crate::library::snippet::is_snippet(&s.query[r.clone()], self.dialect_of(conn)) {
             return;
         }
         let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
@@ -1059,7 +1069,7 @@ impl App {
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
-        let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
+        let note = if new == text && f.untouched() == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }
     }
@@ -1079,6 +1089,7 @@ impl App {
         let saved_in = self.tabs.get(self.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
         let mut gutter_run = None;
         let mut lint_stmt = None;
+        let mut make_value = None;
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
@@ -1091,6 +1102,8 @@ impl App {
                 for sec in &mut job.sections {
                     sec.format.line_height = Some(LINE_H);
                 }
+                let holes: Vec<_> = crate::library::snippet::parse(buf.as_str(), dialect).holes.into_iter().map(|h| h.span).collect();
+                super::snippet_strip::tint_holes(&mut job, &holes);
                 job
             })
         };
@@ -1120,6 +1133,28 @@ impl App {
                 if let Some(r) = out.cursor_range {
                     s.caret = usize::from(r.primary.index);
                 }
+                if out.response.changed() {
+                    s.snip_off = false;
+                }
+                // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
+                // from the editor's stored state when the menu draws, as Run selection does.
+                out.response.context_menu(|ui| {
+                    menu_list(ui);
+                    let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
+                        let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
+                        let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
+                        super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
+                    });
+                    let mut acts = Vec::new();
+                    if let Some(r) = picked {
+                        menu_act(ui, &mut acts, r, |ui| ui.button("Make it a value\u{2026}"));
+                    } else {
+                        menu_act(ui, &mut acts, 0..0, |ui| ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string or a number"));
+                    }
+                    if let Some(r) = acts.pop() {
+                        make_value = Some(r);
+                    }
+                });
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let info = s.caret_info(dialect);
                 if let Some((r, _, _)) = info.stmt.as_ref().filter(|p| p.2 > 1) {
@@ -1159,6 +1194,9 @@ impl App {
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
         self.sql_serve(conn, &db, &schema, wants);
         self.sql_lint_tick(ui.ctx(), lint_stmt);
+        if let Some(r) = make_value {
+            self.ask_make_value(r);
+        }
         let bar = splitter(ui);
         if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.inner, lo, hi) {
             self.save_prefs();

@@ -16,18 +16,28 @@ pub struct Formatted {
     pub special: usize,
     /// Statements whose formatted text would not read the same, so the original stays.
     pub refused: usize,
+    /// Statements with a snippet's `{{...}}` that does not read yet, left as typed.
+    pub held: usize,
 }
 
 impl Formatted {
+    /// Statements left as they were, for any reason.
+    pub fn untouched(&self) -> usize {
+        self.special + self.refused + self.held
+    }
+
     /// The line the status shows after a format.
     pub fn summary(&self) -> String {
         let plural = |n: usize| if n == 1 { "statement" } else { "statements" };
-        let mut s = if self.formatted == 0 && self.special == 0 && self.refused == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
+        let mut s = if self.formatted == 0 && self.untouched() == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
         if self.special > 0 {
             s.push_str(&format!(", left {} {} with a DELIMITER, /*! */ or BEGIN ATOMIC as written", self.special, plural(self.special)));
         }
         if self.refused > 0 {
             s.push_str(&format!(", left {} {} as written because formatting would change how {} reads", self.refused, plural(self.refused), if self.refused == 1 { "it" } else { "they" }));
+        }
+        if self.held > 0 {
+            s.push_str(&format!(", left {} {} with a {{{{...}}}} value that does not read as written", self.held, plural(self.held)));
         }
         s
     }
@@ -209,7 +219,30 @@ pub fn format_script(text: &str, d: Dialect) -> Formatted {
             res.special += 1;
             continue;
         }
-        match one(stmt, d) {
+        // A snippet's {{...}} values are not SQL: each stands in as one word while the rest is laid out, then goes back.
+        let vals = crate::library::snippet::parse(stmt, d);
+        let holes = vals.holes;
+        let mask = |i: usize| format!("__quarry_value_{i}__");
+        // A placeholder that does not read is left as typed, with the rest of its statement.
+        if vals.err.is_some() {
+            res.held += 1;
+            continue;
+        }
+        if !holes.is_empty() && stmt.contains("__quarry_value_") {
+            res.special += 1;
+            continue;
+        }
+        let mut masked = stmt.to_string();
+        for (i, h) in holes.iter().enumerate().rev() {
+            masked.replace_range(h.span.clone(), &mask(i));
+        }
+        let unmask = |mut s: String| {
+            for (i, h) in holes.iter().enumerate() {
+                s = s.replacen(&mask(i), &stmt[h.span.clone()], 1);
+            }
+            s
+        };
+        match one(&masked, d).map(unmask) {
             Some(new) => {
                 res.text.push_str(&text[last..r.start]);
                 res.text.push_str(&new);
@@ -365,8 +398,8 @@ mod tests {
         assert!(!reads_the_same("select 'a' 'b'", "select 'a''b'", Dialect::MySql));
         assert!(!reads_the_same("select a -- x\nfrom t", "select a -- x from t", Dialect::MySql));
         assert!(reads_the_same("select  a ,b", "select a,\n  b", Dialect::MySql));
-        let s = Formatted { formatted: 2, special: 1, refused: 1, text: String::new() }.summary();
-        assert!(s.contains("Formatted 2 statements") && s.contains("DELIMITER") && s.contains("would change"), "{s}");
+        let s = Formatted { formatted: 2, special: 1, refused: 1, held: 1, text: String::new() }.summary();
+        assert!(s.contains("Formatted 2 statements") && s.contains("DELIMITER") && s.contains("would change") && s.contains("{{...}} value"), "{s}");
     }
 
     fn pg(t: &str) -> Formatted {
