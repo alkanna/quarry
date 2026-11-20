@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.58.0](https://github.com/alkanna/quarry/compare/v0.57.0...v0.58.0) (2026-11-20)
+
+
+### Features
+
+* snippets with variables in Cmd+K and Query tabs ([#300](https://github.com/alkanna/quarry/issues/300)) ([43faa9f](https://github.com/alkanna/quarry/commit/43faa9f171f729f1ec43984a8e92b87c74e4a8b4))
+* the filter operator picker searches by typing in its pill and writes the row's condition in its footer ([#299](https://github.com/alkanna/quarry/issues/299)) ([cfc852f](https://github.com/alkanna/quarry/commit/cfc852f1d75088dcdc7f3d7a3f0aae9ed6074bab))
+
+
+### Bug Fixes
+
+* Edit in Query opens a valid UPDATE, and one row is addressed with = ([#297](https://github.com/alkanna/quarry/issues/297)) ([57af67c](https://github.com/alkanna/quarry/commit/57af67cd920535d82c466cf76f7454d08e4f8ada))
+* Esc on the suggestion list closes only the list and keeps the editor focused ([#296](https://github.com/alkanna/quarry/issues/296)) ([b07a857](https://github.com/alkanna/quarry/commit/b07a857d5102ac1447550691feca37eae425996f))
+* SQL record JSON trees stay drawn when scrolled, fold on click and from the menu ([#293](https://github.com/alkanna/quarry/issues/293)) ([0791cfb](https://github.com/alkanna/quarry/commit/0791cfb66aa15069bd1c0d843208fb5477b304e9))
+* the row menu says Filter to this row, or these N rows, apart from the cell's Filter to this value ([#298](https://github.com/alkanna/quarry/issues/298)) ([3fded71](https://github.com/alkanna/quarry/commit/3fded7102e112c172024e416ef309954e46940fb))
+
 ## [0.57.0](https://github.com/alkanna/quarry/compare/v0.56.0...v0.57.0) (2026-11-19)
 
 
