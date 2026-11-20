@@ -3,6 +3,7 @@
 //! Unlock and comes back to that question.
 use super::*;
 use crate::library::snippet::{self, Ty};
+use super::snippet_strip::Src;
 use crate::library::ScriptRef;
 
 const FORM_W: f32 = 640.0;
@@ -18,7 +19,12 @@ pub(in crate::app) enum Stage {
 pub(in crate::app) struct SnippetForm {
     pub id: u64,
     pub name: String,
+    /// The script's kind (sql, shell or filter), its text, and for a filter its sort, projection and collection.
+    pub kind: String,
     pub body: String,
+    pub sort: String,
+    pub project: String,
+    pub coll: String,
     /// None while the snippet's own connection was removed and the person has not picked another.
     pub conn: Option<u64>,
     pub db: String,
@@ -57,7 +63,7 @@ impl App {
     /// Enter on a snippet in the palette: its values start from the last run's, else their defaults.
     pub(in crate::app) fn open_snippet_form(&mut self, id: u64, query: Option<String>) {
         let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
-        let p = snippet::parse(&s.body, self.dialect_of(s.conn));
+        let p = self.script_snippet(s).unwrap_or_default();
         // By name, so a value renamed or moved in the statement never takes another one's last value.
         let mut values = self.lib_ui.snippet_values.get(&id).cloned().unwrap_or_default();
         for v in &p.vars {
@@ -65,7 +71,7 @@ impl App {
         }
         // A removed connection is never swapped for another at random, since it could be production: the person picks one.
         let conn = self.conn(s.conn).is_some().then_some(s.conn);
-        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query, memo: None, target_q: String::new() };
+        let form = SnippetForm { id, name: s.name.clone(), kind: s.kind.clone(), body: s.body.clone(), sort: s.sort.clone(), project: s.project.clone(), coll: s.coll.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query, memo: None, target_q: String::new() };
         if let Some(c) = conn {
             self.wake_conn(c);
         }
@@ -81,10 +87,12 @@ impl App {
 
     /// The connections a snippet can run on: the ones of its own engine, since its SQL was written for that one.
     fn snippet_conns(&self, id: u64) -> Vec<u64> {
-        let engine = self.library.scripts.iter().find(|s| s.id == id).and_then(|s| self.conn(s.conn)).map(|c| c.meta.engine);
+        let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return Vec::new() };
+        let engine = self.conn(s.conn).map(|c| c.meta.engine);
         self.conns.iter().filter(|c| match engine {
             Some(e) => c.meta.engine == e,
-            None => c.meta.engine.is_sql(),
+            // Its connection is gone: any one its kind runs on, never a Mongo one for SQL or the reverse.
+            None => crate::library::format::kind_runs_on(&s.kind, c.meta.engine).unwrap_or(false),
         }).map(|c| c.meta.id).collect()
     }
 
@@ -95,21 +103,27 @@ impl App {
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
         let c = f.conn.and_then(|id| self.conn(id));
         let d = f.conn.map_or_else(Default::default, |id| self.dialect_of(id));
-        let p = snippet::parse(&f.body, d);
+        let l = form_lang(&f.kind, d);
+        let p = snippet::merge(f.parts().into_iter().map(|t| snippet::parse(t, l)));
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             // The quoting depends on the dialect and backslash reading too, which change once the woken connection reads its sql_mode.
-            (f.conn, d == db::sql::Dialect::Postgres, f.conn.is_none_or(|id| self.sql_bs_of(id))).hash(&mut h);
+            (f.conn, d == db::sql::Dialect::Postgres, f.conn.is_none_or(|id| self.sql_bs_of(id)), &f.kind).hash(&mut h);
             for v in &p.vars {
                 (&v.name, f.values.get(&v.name)).hash(&mut h);
             }
             h.finish()
         };
         if f.memo.as_ref().is_none_or(|m| m.0 != key) {
-            let filled = snippet::fill(&f.body, &p, &f.values, d, f.conn.is_none_or(|id| self.sql_bs_of(id)));
-            let writes = filled.as_ref().is_ok_and(|t| db::sql::lex::read_only_check(t, d).is_err());
-            let what = filled.as_deref().map_or_else(|_| String::new(), |t| verb(t, d));
+            let filled = self.form_filled(&f, &p, d);
+            let (writes, what) = match (f.kind.as_str(), filled.as_deref()) {
+                (_, Err(_)) => (false, String::new()),
+                ("sql", Ok(t)) => (db::sql::lex::read_only_check(t, d).is_err(), verb(t, d)),
+                // The Shell's own confirm, on what will run: a value is a literal, so it adds no write.
+                ("shell", Ok(t)) => (!crate::app::shell::shell_ops(t, f.conn.and_then(|c| self.conn(c)).is_some_and(|c| c.meta.engine.is_sql()), std::iter::empty()).is_empty(), "script".into()),
+                _ => (false, String::new()),
+            };
             f.memo = Some((key, filled, writes, what));
         }
         let Some((_, filled, writes, what)) = f.memo.clone() else { return };
@@ -268,7 +282,11 @@ impl App {
                     egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(PREVIEW_MAX_H).show(ui, |ui| match &filled {
                         Ok(t) => {
                             // Laid out once per text, not every frame the form is open.
-                            ui.label(crate::ui::editor::memo_galley(ui, 9, t, ui.available_width(), || crate::ui::editor::sql_job_in(t, TXT_BODY, d)));
+                            ui.label(match f.kind.as_str() {
+                                "shell" => crate::ui::editor::memo_galley(ui, 13, t, ui.available_width(), || crate::ui::editor::js_job(t)),
+                                "filter" => crate::ui::editor::memo_galley(ui, 14, t, ui.available_width(), || crate::ui::editor::json_job(t)),
+                                _ => crate::ui::editor::memo_galley(ui, 9, t, ui.available_width(), || crate::ui::editor::sql_job_in(t, TXT_BODY, d)),
+                            });
                         }
                         Err(e) => {
                             ui.label(RichText::new(e).color(ALERT()));
@@ -387,10 +405,60 @@ impl App {
         self.ok(format!("Runs on {at} by default"));
     }
 
+    /// What the form runs, filled in: the statement or script, or for a filter its filter, sort and projection one per line.
+    fn form_filled(&self, f: &SnippetForm, p: &snippet::Parsed, d: db::sql::Dialect) -> Result<String, String> {
+        let l = form_lang(&f.kind, d);
+        let bs = f.conn.is_none_or(|id| self.sql_bs_of(id));
+        if f.kind != "filter" {
+            return snippet::fill(&f.body, p, &f.values, l, bs);
+        }
+        let mut out = snippet::fill_named(&f.body, p, &f.values, l, bs)?;
+        for (label, part) in [("sort", &f.sort), ("projection", &f.project)] {
+            if !part.trim().is_empty() {
+                out.push_str(&format!("\n// {label}\n{}", snippet::fill_named(part, p, &f.values, l, bs)?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A Shell snippet runs in a new Shell tab on the form's target, a filter in the Documents view of its collection.
+    /// Neither tab is bound to the script, and its text is already filled.
+    fn run_mongo_snippet(&mut self, f: &SnippetForm, conn: u64, text: String) {
+        let l = form_lang(&f.kind, Default::default());
+        if f.kind == "shell" {
+            if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
+                self.sql_new_query(conn, f.db.clone());
+            } else {
+                self.open_tab(Sel { conn, db: f.db.clone(), schema: String::new(), coll: String::new() }, Open::NewTab);
+            }
+            self.open_in_shell(text);
+            if let Some(t) = self.tm() {
+                (t.script, t.snip) = (None, Snip { off: true, ..Default::default() });
+            }
+            return self.start_shell();
+        }
+        let p = snippet::merge(f.parts().into_iter().map(|t| snippet::parse(t, l)));
+        let fill = |s: &str| snippet::fill_named(s, &p, &f.values, l, true);
+        let (filter, sort, project) = match (fill(&f.body), fill(&f.sort), fill(&f.project)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => return self.warn(e),
+        };
+        self.open_tab(Sel { conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() }, Open::Link);
+        if let Some(t) = self.tm() {
+            t.clear_options();
+            (t.filter_txt, t.sort_txt, t.proj_txt, t.view) = (filter, sort, project, View::Documents);
+            (t.script, t.snip) = (None, Snip { off: true, ..Default::default() });
+        }
+        self.run_query();
+    }
+
     /// Runs the filled statement in a Query tab on the form's target: the current tab when it holds nothing of the
     /// person's on that connection and database, else a new one. The tab is not bound to the script: its text is the
     /// filled statement, and Cmd+S on it saves a new script.
     fn run_snippet(&mut self, f: &SnippetForm, conn: u64, text: String) {
+        if f.kind != "sql" {
+            return self.run_mongo_snippet(f, conn, text);
+        }
         // Only a blank Query tab is taken, not one bound to a script, whose template would be lost.
         let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == conn && t.sel.db == f.db && t.script.is_none());
         if !reuse {
@@ -398,8 +466,8 @@ impl App {
         }
         if let Some(t) = self.tm() {
             t.script = None;
+            t.snip = Snip { off: true, ..Default::default() };
             if let Some(q) = t.sql.as_mut() {
-                (q.snip_vals, q.snip_filled, q.snip_off) = (Default::default(), false, true);
                 q.query = text;
                 q.caret = 0;
                 q.run_schema = f.schema.clone();
@@ -407,6 +475,22 @@ impl App {
             }
         }
         self.sql_run(true, false);
+    }
+}
+
+impl SnippetForm {
+    /// The texts that hold values: a filter's sort and projection too.
+    fn parts(&self) -> Vec<&str> {
+        if self.kind == "filter" { vec![&self.body, &self.sort, &self.project] } else { vec![&self.body] }
+    }
+}
+
+/// The language of a snippet of `kind`, SQL ones in the dialect of their connection.
+fn form_lang(kind: &str, d: db::sql::Dialect) -> snippet::Lang {
+    match kind {
+        "shell" => snippet::Lang::Shell,
+        "filter" => snippet::Lang::Query,
+        _ => d.into(),
     }
 }
 
@@ -445,6 +529,21 @@ impl App {
     /// (the same on Filled) or make (Make it a value on a plain script).
     pub(in crate::app) fn demo_snippet(&mut self, state: &str) {
         use crate::library::Script;
+        // Over the Mongo demo: shell (a Shell script with values) and docs (the Documents bar with values).
+        if matches!(state, "shell" | "docs") {
+            let Some(t) = self.tabs.get_mut(1) else { return };
+            if state == "shell" {
+                t.view = View::Shell;
+                t.shell.code = "async function run() {\n  return await orders.find({\n    status: {{status:paid|shipped|refunded=paid}},\n    createdAt: { $gte: {{from:date}} },\n  }).limit({{n:int=20}}).toArray();\n}".into();
+            } else {
+                t.view = View::Documents;
+                t.filter_txt = "{ status: {{status:paid|shipped=paid}}, total: { $gte: {{min:number=50}} } }".into();
+                t.sort_txt = "{ createdAt: -1 }".into();
+            }
+            t.snip.vals.insert("from".into(), "2026-11-01".into());
+            self.cur = 1;
+            return;
+        }
         (self.conns, self.tabs) = (Vec::new(), Vec::new());
         self.open_dbs.clear();
         self.load_sql_demo();
@@ -480,16 +579,16 @@ impl App {
             }
             "tab" | "filled" => {
                 self.open_script(&ScriptRef::Saved(read), crate::app::library::open::How::Here);
-                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    s.snip_vals = [("day", "2026-11-03"), ("status", "paid"), ("limit", "100")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-                    s.snip_filled = state == "filled";
+                if let Some(t) = self.tm() {
+                    t.snip.vals = [("day", "2026-11-03"), ("status", "paid"), ("limit", "100")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                    t.snip.filled = state == "filled";
                 }
             }
             "make" => {
                 let plain = add(self, "Orders of one day", "SELECT o.id, o.total FROM orders o WHERE DATE(o.created_at) = '2026-11-03';", reports);
                 self.open_script(&ScriptRef::Saved(plain), crate::app::library::open::How::Here);
                 if let Some(at) = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.query.find("'2026-11-03'")) {
-                    self.ask_make_value(at..at + 12);
+                    self.ask_make_value(at..at + 12, Src::Query);
                 }
             }
             _ => {}

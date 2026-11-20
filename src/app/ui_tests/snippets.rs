@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::app::library::snippet_form::Stage;
+use crate::app::library::snippet_strip::Src;
 use crate::library::{Script, ScriptRef};
 
 const CMD: egui::Modifiers = egui::Modifiers::COMMAND;
@@ -70,17 +71,17 @@ fn a_tab_reused_for_another_snippet_drops_the_old_values() {
     let id = id_of(ui.app(), "Orders on a day");
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.h.run_steps(2);
-    let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
-    s.snip_vals.insert("day".into(), "2025-01-01".into());
-    s.snip_filled = true;
+    let t = ui.h.state_mut().tm().unwrap();
+    t.snip.vals.insert("day".into(), "2025-01-01".into());
+    t.snip.filled = true;
     let cur = ui.app().cur;
     // Back to the saved text, so the tab is clean and the next script takes it.
     ui.h.state_mut().tabs[cur].sql.as_mut().unwrap().query = READ.into();
     let other = id_of(ui.app(), "Mark orders shipped");
     ui.h.state_mut().open_script(&ScriptRef::Saved(other), crate::app::library::open::How::Here);
-    let s = ui.app().t().and_then(|t| t.sql.as_ref()).unwrap();
-    assert_eq!(s.query, WRITE);
-    assert!(s.snip_vals.is_empty() && !s.snip_filled);
+    let t = ui.app().t().unwrap();
+    assert_eq!(t.sql.as_ref().unwrap().query, WRITE);
+    assert!(t.snip.vals.is_empty() && !t.snip.filled);
 }
 
 #[test]
@@ -160,11 +161,9 @@ fn cmd_enter_on_a_snippet_opens_it_to_edit_and_make_default_moves_it() {
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.r == ScriptRef::Saved(id)));
     ui.show("Run on");
     // Run fills the tab's values, and refuses one that does not read.
-    let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
-    s.snip_vals.insert("day".into(), "2026-11-03".into());
+    ui.h.state_mut().tm().unwrap().snip.vals.insert("day".into(), "2026-11-03".into());
     assert_eq!(ui.app().snippet_fill_run(READ.into()).unwrap(), "SELECT id FROM orders WHERE DATE(created_at) = '2026-11-03' AND status = 'paid' LIMIT 10;");
-    let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
-    s.snip_vals.insert("n".into(), "ten".into());
+    ui.h.state_mut().tm().unwrap().snip.vals.insert("n".into(), "ten".into());
     assert!(ui.app().snippet_fill_run(READ.into()).unwrap_err().contains("n needs a whole number"));
     // The tab runs in another database: Make default puts that on the script.
     let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
@@ -180,7 +179,7 @@ fn make_it_a_value_turns_a_literal_into_a_placeholder() {
     let text = "SELECT id FROM orders WHERE DATE(created_at) = '2026-11-03';";
     ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap().query = text.into();
     let at = text.find('\'').unwrap();
-    ui.h.state_mut().ask_make_value(at..at + 12);
+    ui.h.state_mut().ask_make_value(at..at + 12, Src::Query);
     ui.click("Make value");
     assert_eq!(query(ui.app()), "SELECT id FROM orders WHERE DATE(created_at) = {{day:date=2026-11-03}};");
     ui.show("Run on");

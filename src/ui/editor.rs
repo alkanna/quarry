@@ -759,6 +759,28 @@ mod tests {
 
 /// Cuts the sections of `job` at the edges of `ranges` (sorted, not overlapping) and lets `style` restyle the pieces
 /// inside range `k`. One pass covers both lists. For find matches and a snippet's `{{...}}` placeholders.
+/// `job` with the bytes of `holes` in the accent on a tint, for the `{{...}}` placeholders of a snippet.
+pub(crate) fn tint_holes(job: &mut LayoutJob, holes: &[std::ops::Range<usize>]) {
+    mark_ranges(job, holes, |_, f| {
+        f.color = PRIMARY();
+        f.background = tint(PRIMARY(), 32);
+    });
+}
+
+/// The galley of query text (filter, sort, projection) with its placeholders tinted.
+pub(crate) fn query_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
+    let text = buf.as_str();
+    if !text.contains("{{") {
+        return code_layout(ui, buf, wrap);
+    }
+    memo_galley(ui, 12, text, wrap, || {
+        let mut job = json_job(text);
+        let holes: Vec<_> = crate::library::snippet::parse(text, crate::library::snippet::Lang::Query).holes.into_iter().map(|h| h.span).collect();
+        tint_holes(&mut job, &holes);
+        job
+    })
+}
+
 pub(crate) fn mark_ranges(job: &mut LayoutJob, ranges: &[std::ops::Range<usize>], style: impl Fn(usize, &mut egui::TextFormat)) {
     if ranges.is_empty() {
         return;

@@ -381,7 +381,8 @@ impl App {
         });
         (self.js.globals, self.js.typed, self.js.typed_sql) = (Some(key), known, sql_cols);
         self.js.typed_att = attached.into_iter().map(|a| a.typed).collect();
-        let code = self.tabs[self.cur].shell.code.clone();
+        // Placeholders swapped for text of their length, so {{day:date}} is no syntax error and positions still match.
+        let code = crate::library::snippet::mask(&self.tabs[self.cur].shell.code, crate::library::snippet::Lang::Shell);
         let (line, col) = db::lsp_pos(&code, at);
         self.req += 1;
         self.js.tx.as_ref()?.send(db::JsLsReq { req: self.req, ask, code, line, col, globals }).ok()?;

@@ -270,6 +270,7 @@ impl App {
             t.page = 0;
             self.reload();
         }
+        self.snippet_strip(ui, crate::app::library::snippet_strip::Src::Bar);
         let mut run = false;
         let (mut explain, mut help) = (false, false);
         let mut code_lang = None;
@@ -292,6 +293,8 @@ impl App {
         };
         let paths = std::mem::take(&mut t.paths);
         let fields = std::mem::take(&mut t.field_info);
+        // A filter the Cmd+K form filled reads its braces as placeholders again once the person edits it.
+        let was_filled = t.snip.off.then(|| [t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone()]);
         let mut typed = Typed::default();
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
@@ -406,6 +409,9 @@ impl App {
         }
         t.paths = paths;
         t.field_info = fields;
+        if was_filled.is_some_and(|w| w != [t.filter_txt.as_str(), t.sort_txt.as_str(), t.proj_txt.as_str()]) {
+            t.snip.off = false;
+        }
         // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
         // otherwise the next frame comes only with the answer.
         let mut sent = false;

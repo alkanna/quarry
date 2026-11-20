@@ -221,9 +221,10 @@ impl App {
         }
     }
 
-    /// The `{{...}}` values of a SQL script, or None for one without any. Plain SQL costs one scan for `{{`.
+    /// The `{{...}}` values of a SQL or Shell script, or of a filter with its sort and projection, or None for one without
+    /// any. A plain script costs one scan for `{{`.
     pub(in crate::app) fn script_snippet(&self, s: &crate::library::Script) -> Option<crate::library::snippet::Parsed> {
-        (s.kind == "sql" && s.body.contains("{{")).then(|| crate::library::snippet::parse(&s.body, self.dialect_of(s.conn))).filter(|p| p.is_snippet())
+        snippet_of(s, || self.dialect_of(s.conn))
     }
 
     /// Whether running this script now could change data: a SQL statement that is not a read, a pipeline with a write stage,
@@ -383,9 +384,11 @@ impl App {
                 if !reuse {
                     self.sql_new_query(s.conn, db);
                 }
+                // The values of what the tab held before are not this script's.
+                if let Some(t) = self.tm() {
+                    t.snip = Default::default();
+                }
                 if let Some(q) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    // The values of what the tab held before are not this script's.
-                    (q.snip_vals, q.snip_filled, q.snip_off) = Default::default();
                     q.query = s.body.clone();
                     q.caret = 0;
                     q.run_schema = s.schema.clone();
@@ -409,8 +412,14 @@ impl App {
                     self.open_tab(sel, Open::NewTab);
                 }
                 self.open_in_shell(s.body.clone());
+                // The values of what the tab held before are not this script's, and a linked file with values opens to
+                // be filled in.
+                let snippet = self.script_snippet(&s).is_some();
+                if let Some(t) = self.tm() {
+                    t.snip = Default::default();
+                }
                 self.bind_script(r.clone(), View::Shell, s.body);
-                if run {
+                if run && !snippet {
                     self.run_shell_script();
                 }
             }
@@ -421,6 +430,7 @@ impl App {
                     t.clear_options();
                     (t.filter_txt, t.sort_txt, t.proj_txt) = (s.body.clone(), s.sort.clone(), s.project.clone());
                     t.view = View::Documents;
+                    t.snip = Default::default();
                 }
                 self.bind_script(r.clone(), View::Documents, s.body);
                 // A filter only reads, so it runs on open, as a click on a collection does.
@@ -786,4 +796,21 @@ pub(in crate::app) fn bind(t: &mut Tab, b: Bound) {
         t.sel.coll.clear();
     }
     t.script = Some(b);
+}
+
+/// `App::script_snippet` where there is no App: `dialect` is the SQL dialect of the script's connection, looked up only for
+/// a SQL script that may hold values.
+pub(in crate::app) fn snippet_of(s: &crate::library::Script, dialect: impl FnOnce() -> db::sql::Dialect) -> Option<crate::library::snippet::Parsed> {
+    use crate::library::snippet::{self, Lang};
+    let parts: Vec<&str> = if s.kind == "filter" { vec![&s.body, &s.sort, &s.project] } else { vec![&s.body] };
+    if !parts.iter().any(|p| p.contains("{{")) {
+        return None;
+    }
+    let l = match s.kind.as_str() {
+        "sql" => dialect().into(),
+        "shell" => Lang::Shell,
+        "filter" => Lang::Query,
+        _ => return None,
+    };
+    Some(snippet::merge(parts.into_iter().map(|p| snippet::parse(p, l)))).filter(|p| p.is_snippet())
 }

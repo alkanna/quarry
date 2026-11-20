@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::ui::sql_complete::{Wants, analyze, split_statement};
+use crate::app::library::snippet_strip::{self as snip, Src};
+use crate::library::snippet::Lang;
 use std::cell::RefCell;
 
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
@@ -412,9 +414,19 @@ impl App {
         t.selected = None;
     }
 
+    /// The script that runs: the editor's text with its `{{...}}` values filled in, or why it can't be.
+    pub(super) fn shell_code(&self) -> Result<String, String> {
+        let Some(t) = self.t() else { return Ok(String::new()) };
+        snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true)
+    }
+
     pub(super) fn run_shell_script(&mut self) {
+        // The confirm judges what will run, and a value that does not read stops the run before it.
+        let code = match self.shell_code() {
+            Ok(c) => c,
+            Err(e) => return self.warn(e),
+        };
         let Some(t) = self.t() else { return };
-        let code = t.shell.code.clone();
         let ops = shell_ops(&code, t.sql.is_some(), t.shell.attached.iter().filter_map(|a| self.conn(a.conn)).map(|c| c.meta.engine.is_sql()));
         // Same check as the original; on a read-only connection the runner refuses writes anyway.
         if !ops.is_empty() && self.shell_writable() {
@@ -433,6 +445,11 @@ impl App {
         };
         let Some(t) = self.t() else { return };
         let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
+        // Every run passes here: the editor, the library and the write confirm. History keeps the text as written.
+        let filled = match self.shell_code() {
+            Ok(c) => c,
+            Err(e) => return self.warn(e),
+        };
         let collections: Vec<String> = self.tables_of(&sel);
         let schema = self.sel_schema(&sel);
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
@@ -474,7 +491,7 @@ impl App {
             mongo.insert(0, serde_json::json!({ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }));
         }
         let mut input = serde_json::json!({ "mongo": mongo, "sql": sql_entries });
-        input["code"] = code.clone().into();
+        input["code"] = filled.into();
         input["packages"] = packages.into();
         input["timeoutMs"] = self.prefs.timeout_ms.into();
         input["maxBytes"] = db::SHELL_MAX.into();
@@ -589,6 +606,8 @@ impl App {
         let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, s, None));
         let none = Fields::new();
         let values = sql_cx.as_ref().and_then(|(c, d, s)| self.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
+        let strip = self.strip_of(Src::Shell);
+        let (mut make_default, mut make_value) = (false, None);
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
         if t.shell.code.is_empty() {
             t.shell.code = default_script(&coll, sql);
@@ -656,6 +675,10 @@ impl App {
             });
             ui.add_space(8.0);
         }
+        if let Some(s) = &strip {
+            make_default = snip::strip_ui(ui, s, &mut t.snip, true);
+        }
+        let filled_view = strip.is_some() && t.snip.filled;
         // The editor: line numbers, token colors, and the same frame for both engines.
         let id = ui.make_persistent_id("shell-editor");
         let focused = ui.memory(|m| m.has_focus(id));
@@ -671,6 +694,10 @@ impl App {
                 let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
                 for sec in &mut job.sections {
                     sec.format.line_height = Some(LINE_H);
+                }
+                if buf.as_str().contains("{{") {
+                    let holes: Vec<_> = crate::library::snippet::parse(buf.as_str(), Lang::Shell).holes.into_iter().map(|h| h.span).collect();
+                    crate::ui::editor::tint_holes(&mut job, &holes);
                 }
                 job
             })
@@ -692,7 +719,11 @@ impl App {
         }
         shell_ls::shell_sig_demo(ui, id, &t.shell.code, ac, &mut self.js);
         let mut sql_need = None;
-        let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
+        if filled_view {
+            let out = snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true);
+            snip::preview_ui(ui, out, 11, |c| if sql { shell_ls::js_sql_job(c) } else { js_job(c) });
+        }
+        let framed = (!filled_view).then(|| egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 crate::ui::vim::demo(ui, id, &t.shell.code);
                 let (out, picked) = crate::ui::vim::wrap_with(ui, id, &mut t.shell.code, |ui, code| {
@@ -709,6 +740,25 @@ impl App {
                     })
                 });
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "Shell editor"));
+                // A script the Cmd+K form filled reads its braces as placeholders again once the person edits it.
+                if out.response.changed() {
+                    t.snip.off = false;
+                }
+                out.response.context_menu(|ui| {
+                    menu_list(ui);
+                    let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
+                        let (a, b) = (r.primary.index.0, r.secondary.index.0);
+                        let (a, b) = (crate::ui::editor::byte_at(&t.shell.code, a.min(b)), crate::ui::editor::byte_at(&t.shell.code, a.max(b)));
+                        snip::literal_at(&t.shell.code, a..b.max(a + 1), Lang::Shell)
+                    });
+                    let mut acts = Vec::new();
+                    if let Some(r) = picked {
+                        menu_act(ui, &mut acts, r, |ui| ui.button("Make it a value\u{2026}"));
+                    } else {
+                        menu_act(ui, &mut acts, 0..0, |ui| ui.add_enabled(false, egui::Button::new("Make it a value\u{2026}")).on_disabled_hover_text("Select a string, a number or an ISODate"));
+                    }
+                    make_value = acts.pop();
+                });
                 if ac.id == Some(id) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
                     (ac.title, ac.foot) = (title, foot);
                 }
@@ -736,9 +786,9 @@ impl App {
                     hover,
                 });
             });
-        });
+        }));
         let bar = splitter(ui);
-        let saved = resize_editor(&bar, &mut self.prefs.shell_editor_h, framed.response.rect.height(), lo, hi);
+        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut self.prefs.shell_editor_h, f.response.rect.height(), lo, hi));
         ui.add_space(2.0);
         if let Some(e) = &t.shell.error {
             egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
@@ -916,6 +966,12 @@ impl App {
         }
         if run {
             self.run_shell_script();
+        }
+        if let Some(s) = strip.as_ref().filter(|_| make_default) {
+            self.make_snippet_default(s);
+        }
+        if let Some(r) = make_value {
+            self.ask_make_value(r, Src::Shell);
         }
         if let Some(b) = demo_pick {
             self.demo_open_picker(ui.ctx(), &b, "picker-shell");

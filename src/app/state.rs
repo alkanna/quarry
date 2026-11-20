@@ -404,6 +404,17 @@ pub(super) enum Store<'a> {
 
 static NEXT_TAB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// The values of a tab's placeholders, by name, shared by its views, so a name typed once fills the Shell and the bar alike.
+#[derive(Default)]
+pub(in crate::app) struct Snip {
+    pub vals: HashMap<String, String>,
+    /// Whether the editor shows the text filled in.
+    pub filled: bool,
+    /// The text is a snippet already filled by the Cmd+K form: braces a value brought in are text, not placeholders, until
+    /// the person edits it.
+    pub off: bool,
+}
+
 /// Everything that belongs to one open tab.
 pub(super) struct Tab {
     /// Unique for the session. Back and forward history keys on it, since Query tabs and copies share a `Sel`.
@@ -413,6 +424,7 @@ pub(super) struct Tab {
     pub(super) filter_txt: String,
     pub(super) sort_txt: String,
     pub(super) proj_txt: String,
+    pub(in crate::app) snip: Snip,
     // ponytail: limit, skip, hint and collation are not saved with open tabs or the library; add them there if asked.
     pub(super) limit_txt: String,
     pub(super) skip_txt: String,
@@ -558,12 +570,6 @@ pub(super) struct SqlTab {
     /// `run_db` and `run_schema` as they were when the shown results ran. Paging and export read them, so a
     /// picker changed afterwards does not send the statement to another database.
     pub(super) ran_in: Option<(String, String)>,
-    /// Values of the `{{...}}` placeholders of the Query text, by name, and whether the editor shows the statement filled in.
-    pub(in crate::app) snip_vals: HashMap<String, String>,
-    pub(in crate::app) snip_filled: bool,
-    /// The text is a snippet already filled by the Cmd+K form: braces a value brought in are text, not placeholders, until
-    /// the person edits it.
-    pub(in crate::app) snip_off: bool,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
@@ -918,6 +924,7 @@ impl Tab {
             filter_txt: String::new(),
             sort_txt: String::new(),
             proj_txt: String::new(),
+            snip: Snip::default(),
             limit_txt: String::new(),
             skip_txt: String::new(),
             hint_txt: String::new(),
@@ -1126,7 +1133,7 @@ pub(super) enum Modal {
     /// The values of a snippet picked in Cmd+K, drawn in the palette's place.
     Snippet(Box<super::library::snippet_form::SnippetForm>),
     /// Turn the literal selected in a Query editor into a `{{...}}` value.
-    MakeValue(Box<super::sql::snippet_strip::MakeValue>),
+    MakeValue(Box<super::library::snippet_strip::MakeValue>),
 }
 
 impl Modal {

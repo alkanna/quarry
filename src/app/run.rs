@@ -6,8 +6,10 @@ impl App {
     pub(super) fn run_query(&mut self) {
         let Some(t) = self.t() else { return };
         if db::is_shell(&t.filter_txt) {
-            let text = t.filter_txt.clone();
-            return self.run_shell(&text);
+            return match bar_filled(t, &t.filter_txt, "Filter") {
+                Ok(text) => self.run_shell(&text),
+                Err(e) => self.tm().unwrap().bar_err = Some(e),
+            };
         }
         let q = find_query(t);
         match q {
@@ -37,7 +39,8 @@ impl App {
         let what = if find && !db::is_shell(&t.filter_txt) {
             find_query(t).map(|q| db::CodeOf::Find(Box::new(q)))
         } else if find {
-            from_shell(&t.filter_txt)
+            // What runs, or the text as written when a value does not read yet.
+            from_shell(&bar_filled(t, &t.filter_txt, "Filter").unwrap_or_else(|_| t.filter_txt.clone()))
         } else if db::is_shell(&t.agg_txt) {
             from_shell(&t.agg_txt)
         } else {
@@ -159,14 +162,20 @@ pub(super) fn query_dirty(t: &Tab) -> bool {
 }
 
 /// The Documents query from the tab's filter, sort, project, limit, skip, hint and collation boxes.
+/// One text of the bar with the tab's `{{...}}` values filled in, or why it can't be, named after its field.
+fn bar_filled(t: &Tab, text: &str, what: &str) -> db::Res<String> {
+    use crate::app::library::snippet_strip::{fill_tab, Src};
+    fill_tab(t, text, Src::Bar, crate::library::snippet::Lang::Query, true).map_err(|e| format!("{what}: {e}"))
+}
+
 pub(super) fn find_query(t: &Tab) -> db::Res<Query> {
     let doc = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some).map_err(|e| format!("{what}: {e}")) };
     // Read as i64, the server's type, so a value the server cannot take is refused here.
     let num = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { s.trim().parse::<i64>().ok().filter(|n| *n >= 0).map(|n| Some(n as u64)).ok_or(format!("{what}: enter a whole number")) };
     Ok(Query {
-        filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?,
-        sort: doc(&t.sort_txt, "Sort")?,
-        projection: doc(&t.proj_txt, "Projection")?,
+        filter: db::parse_doc(&bar_filled(t, &t.filter_txt, "Filter")?).map_err(|e| format!("Filter: {e}"))?,
+        sort: doc(&bar_filled(t, &t.sort_txt, "Sort")?, "Sort")?,
+        projection: doc(&bar_filled(t, &t.proj_txt, "Projection")?, "Projection")?,
         // A limit of 0 means none to the server, so it is treated as empty.
         limit: num(&t.limit_txt, "Limit")?.filter(|&l| l > 0),
         skip: num(&t.skip_txt, "Skip")?.unwrap_or(0),
