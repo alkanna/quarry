@@ -175,7 +175,7 @@ impl App {
                 .desired_rows(1)
                 .lock_focus(open)
                 .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter))
-                .layouter(&mut code_layout)
+                .layouter(&mut crate::ui::editor::query_layout)
                 .show(ui)
             })
         });

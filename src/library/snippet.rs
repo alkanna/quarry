@@ -2,10 +2,30 @@
 //! statement itself, so nothing about them is stored apart from the script. In code a value goes in as a literal of its
 //! type; inside a string, as in `LIKE '%{{name}}%'`, it joins that string with its quotes escaped. Never as SQL text. In
 //! a comment, a quoted name or a dollar-quoted body a placeholder is plain text.
+//!
+//! Mongo scripts take the same placeholders: Shell JavaScript and the Documents bar's query text, where a value goes in
+//! as a JavaScript literal (a JSON string, a number, an array, an ISODate).
 use crate::db::sql::lex::{tokens, Tok};
 use crate::db::sql::value::{lit, mysql_escapes, pg_lit};
 use crate::db::sql::Dialect;
 use std::ops::Range;
+
+/// The language a script is written in, which decides where placeholders can sit and how values are written.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lang {
+    Sql(Dialect),
+    /// Shell JavaScript. Values go in code or `${ }` only: a JS string there may be SQL text for an attached connection,
+    /// which JavaScript escaping can't keep a value inside.
+    Shell,
+    /// The Documents bar: JSON5 with shell helpers, as `db::parse_value` reads it. Values go in code and in strings.
+    Query,
+}
+
+impl From<Dialect> for Lang {
+    fn from(d: Dialect) -> Self {
+        Lang::Sql(d)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
@@ -131,13 +151,14 @@ impl Parsed {
 }
 
 /// Whether a script's SQL has `{{...}}` values. Plain SQL costs one scan for `{{`.
-pub fn is_snippet(body: &str, d: Dialect) -> bool {
-    body.contains("{{") && parse(body, d).is_snippet()
+pub fn is_snippet(body: &str, l: impl Into<Lang>) -> bool {
+    body.contains("{{") && parse(body, l).is_snippet()
 }
 
 /// Whether byte `i` is code, outside strings, quoted names and comments, and the strings a placeholder can sit in: their
 /// insides, between the quotes, and how they quote.
-fn code_mask(text: &str, d: Dialect) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
+fn code_mask(text: &str, l: Lang) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
+    let Lang::Sql(d) = l else { return js_mask(text, l == Lang::Shell) };
     let mut m = vec![false; text.len()];
     let mut strs = Vec::new();
     for (t, r) in tokens(text, d) {
@@ -147,6 +168,65 @@ fn code_mask(text: &str, d: Dialect) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
             && let Some((open, at)) = string_at(&text[r.clone()], d)
         {
             strs.push((r.start + open..r.end - 1, at));
+        }
+    }
+    (m, strs)
+}
+
+/// `code_mask` for JavaScript, or for query text when `shell` is false, which has no templates. A '...' or "..." string
+/// ends at its line's end as in JavaScript, so a regex this does not read can only throw off the line it is on.
+/// Templates are text with their `${ }` read as code.
+fn js_mask(text: &str, shell: bool) -> (Vec<bool>, Vec<(Range<usize>, At)>) {
+    let b = text.as_bytes();
+    let mut m = vec![false; b.len()];
+    let mut strs = Vec::new();
+    // The brace depth of each open `${`, innermost last, and the depth now.
+    let (mut tpl, mut depth) = (Vec::<usize>::new(), 0usize);
+    // A template's text from `from`, up to its closing backtick or next `${`: where code starts again after it.
+    let run = |from: usize, strs: &mut Vec<(Range<usize>, At)>, tpl: &mut Vec<usize>, depth: &mut usize| {
+        let mut j = from;
+        while j < b.len() && b[j] != b'`' && !(b[j] == b'$' && b.get(j + 1) == Some(&b'{')) {
+            j += if b[j] == b'\\' { 2 } else { 1 };
+        }
+        let j = j.min(b.len());
+        strs.push((from..j, At::Str('`')));
+        if b.get(j) == Some(&b'$') {
+            *depth += 1;
+            tpl.push(*depth);
+            j + 2
+        } else {
+            j + 1
+        }
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i = text[i..].find('\n').map_or(b.len(), |e| i + e),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = text[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2),
+            q @ (b'\'' | b'"') => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != q && b[j] != b'\n' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                let j = j.min(b.len());
+                strs.push((i + 1..j, At::Str(q as char)));
+                i = j + 1;
+            }
+            b'`' if shell => i = run(i + 1, &mut strs, &mut tpl, &mut depth),
+            b'}' if tpl.last() == Some(&depth) => {
+                tpl.pop();
+                depth -= 1;
+                i = run(i + 1, &mut strs, &mut tpl, &mut depth);
+            }
+            c => {
+                match c {
+                    b'{' => depth += 1,
+                    b'}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                m[i] = true;
+                i += 1;
+            }
         }
     }
     (m, strs)
@@ -171,12 +251,13 @@ pub fn valid_name(s: &str) -> bool {
     c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-pub fn parse(text: &str, d: Dialect) -> Parsed {
+pub fn parse(text: &str, l: impl Into<Lang>) -> Parsed {
+    let l = l.into();
     let mut out = Parsed::default();
     if !text.contains("{{") {
         return out;
     }
-    let (code, strs) = code_mask(text, d);
+    let (code, strs) = code_mask(text, l);
     let mut typed = Vec::new();
     let mut i = 0;
     while let Some(off) = text[i..].find("{{") {
@@ -201,10 +282,15 @@ pub fn parse(text: &str, d: Dialect) -> Parsed {
         let e = s + 2 + len + 2;
         let clean = match at {
             At::Code => code[s..e].iter().all(|c| *c),
-            _ => !text[s..e].contains(['\'', '"', '\\']),
+            _ => !text[s..e].contains(['\'', '"', '\\', '`']),
         };
         let read = if clean { read_hole(&text[s + 2..e - 2], &mut out.vars, &mut typed) } else { Err("A value can't hold quotes or comments.".into()) };
         match read {
+            Ok(var) if l == Lang::Shell && at != At::Code => {
+                let n = &out.vars[var].name;
+                out.err = Some(VarErr { span: s..e, msg: format!("In the Shell a value goes outside quotes: 'text' + {{{{{n}}}}}, or ${{ {{{{{n}}}}} }} in a template.") });
+                return out;
+            }
             Ok(var) => out.holes.push(Hole { var, span: s..e, at }),
             // In a string, braces that don't read as a placeholder are its text, such as a stored template: only code fails.
             Err(_) if at != At::Code => {}
@@ -330,9 +416,49 @@ fn checked(v: &Var, value: &str) -> Result<String, String> {
     }
 }
 
+/// A JavaScript and JSON string that no value can end, wherever it lands: quotes, backticks, `$`, `/` and line
+/// breaks are all escapes, so even text read as code by mistake stays inside the string, template, regex or comment
+/// around it.
+fn js_str(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '"' | '\'' | '`' | '$' | '/' | '\u{2028}' | '\u{2029}' => write!(out, "\\u{:04x}", c as u32).unwrap(),
+            c if c.is_control() => write!(out, "\\u{:04x}", c as u32).unwrap(),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A checked value as a JavaScript literal. Dates are ISODate with the time and a Z always written: the Shell's ISODate
+/// is `new Date`, which reads a time without a zone as local, where the Documents bar reads it as UTC.
+fn js_literal(ty: &Ty, c: String, shell: bool) -> String {
+    match ty {
+        // `a -{{n}}` would make `--` in JavaScript; JSON5 takes no parentheses and has no such operator.
+        Ty::Int | Ty::Number if shell => signed(c),
+        Ty::Int | Ty::Number => c,
+        Ty::IntList => format!("[{c}]"),
+        Ty::Date => format!("ISODate(\"{c}T00:00:00Z\")"),
+        Ty::DateTime => {
+            let t = c.replacen(' ', "T", 1);
+            let secs = if t.matches(':').count() == 1 { ":00" } else { "" };
+            format!("ISODate(\"{t}{secs}Z\")")
+        }
+        _ => js_str(&c),
+    }
+}
+
 /// The literal one value becomes, or why it can't.
-fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String> {
+fn literal(v: &Var, value: &str, l: Lang, bs: bool) -> Result<String, String> {
     let c = checked(v, value)?;
+    let Lang::Sql(d) = l else { return Ok(js_literal(&v.ty, c, l == Lang::Shell)) };
     Ok(match &v.ty {
         Ty::Int | Ty::Number => signed(c),
         Ty::IntList => c.split(", ").map(|n| signed(n.into())).collect::<Vec<_>>().join(", "),
@@ -343,7 +469,15 @@ fn literal(v: &Var, value: &str, d: Dialect, bs: bool) -> Result<String, String>
 
 /// The value written inside a string that the statement already quotes, so it can't end that string. `bs` is the MySQL
 /// backslash reading, see `quote`.
-fn in_string(v: &Var, value: &str, at: At, d: Dialect, bs: bool) -> Result<String, String> {
+fn in_string(v: &Var, value: &str, at: At, l: Lang, bs: bool) -> Result<String, String> {
+    let Lang::Sql(d) = l else {
+        if at == At::Code {
+            return literal(v, value, l, bs);
+        }
+        // Inside a query string: escaped as a JSON string, which has no quote left to end it, without its own quotes.
+        let s = js_str(&checked(v, value)?);
+        return Ok(s[1..s.len() - 1].to_string());
+    };
     let c = checked(v, value)?;
     let (q, escapes) = match at {
         At::Str(q) if d == Dialect::Postgres => {
@@ -356,7 +490,7 @@ fn in_string(v: &Var, value: &str, at: At, d: Dialect, bs: bool) -> Result<Strin
         }
         At::Str(q) => (q, bs),
         At::EStr => ('\'', true),
-        At::Code => return literal(v, value, d, bs),
+        At::Code => return literal(v, value, l, bs),
     };
     let c = match escapes {
         true if d == Dialect::Postgres => c.replace('\\', "\\\\"),
@@ -370,7 +504,8 @@ fn in_string(v: &Var, value: &str, at: At, d: Dialect, bs: bool) -> Result<Strin
 pub type Values = std::collections::HashMap<String, String>;
 
 /// The text with every placeholder replaced by the literal of its value. `bs` is the MySQL backslash reading, see `quote`.
-pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Result<String, String> {
+pub fn fill(text: &str, p: &Parsed, values: &Values, l: impl Into<Lang>, bs: bool) -> Result<String, String> {
+    let l = l.into();
     if let Some(e) = &p.err {
         return Err(e.msg.clone());
     }
@@ -389,7 +524,7 @@ pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Re
     for h in &p.holes {
         let v = &p.vars[h.var];
         out.push_str(&text[last..h.span.start]);
-        out.push_str(&in_string(v, &value(v)?, h.at, d, bs)?);
+        out.push_str(&in_string(v, &value(v)?, h.at, l, bs)?);
         last = h.span.end;
     }
     out.push_str(&text[last..]);
@@ -398,9 +533,10 @@ pub fn fill(text: &str, p: &Parsed, values: &Values, d: Dialect, bs: bool) -> Re
 
 /// `text`, all or part of a script whose values `full` read, filled with the values by name. Each placeholder takes the
 /// type the whole script gives its name, so a statement that only says `{{day}}` still gets a date.
-pub fn fill_named(text: &str, full: &Parsed, values: &Values, d: Dialect, bs: bool) -> Result<String, String> {
+pub fn fill_named(text: &str, full: &Parsed, values: &Values, l: impl Into<Lang>, bs: bool) -> Result<String, String> {
+    let l = l.into();
     // Only the text that runs must read: a placeholder still being typed in another statement does not stop this one.
-    let mut p = parse(text, d);
+    let mut p = parse(text, l);
     if !p.is_snippet() {
         return Ok(text.to_string());
     }
@@ -410,17 +546,56 @@ pub fn fill_named(text: &str, full: &Parsed, values: &Values, d: Dialect, bs: bo
             *v = f.clone();
         }
     }
-    fill(text, &p, values, d, bs)
+    fill(text, &p, values, l, bs)
+}
+
+/// The values of several texts read as one, such as a filter, its sort and its projection: by name, in order, with the
+/// first error.
+pub fn merge(parts: impl IntoIterator<Item = Parsed>) -> Parsed {
+    let mut out = Parsed::default();
+    for p in parts {
+        for v in p.vars {
+            if !out.vars.iter().any(|o| o.name == v.name) {
+                out.vars.push(v);
+            }
+        }
+        out.err = out.err.or(p.err);
+        out.holes.extend(p.holes);
+    }
+    out
+}
+
+/// The text a language server reads: each placeholder swapped for text of its length, `null` in code and `x` in a
+/// string, so positions still match and `{{day:date}}` is not a syntax error.
+pub fn mask(text: &str, l: impl Into<Lang>) -> String {
+    let mut out = text.to_string();
+    for h in parse(text, l).holes.iter().rev() {
+        let n = h.span.len();
+        let with = if h.at == At::Code { format!("{:<n$}", "null") } else { "x".repeat(n) };
+        out.replace_range(h.span.clone(), &with);
+    }
+    out
 }
 
 /// The placeholder that replaces a literal: its type read from the literal and the literal kept as the default when it
 /// can be written there.
 pub fn infer(token: &str) -> (Ty, Option<String>) {
     let t = token.trim();
+    // A Mongo date: date or datetime, kept as it would be typed.
+    if let Some(inner) = t.strip_prefix("ISODate(").and_then(|r| r.strip_suffix(')')) {
+        let (ty, v) = infer(inner);
+        let v = v.map(|v| v.trim_end_matches('Z').trim_end_matches("T00:00:00").replacen('T', " ", 1));
+        return match v {
+            Some(v) if is_date(&v) => (Ty::Date, Some(v)),
+            Some(v) if is_datetime(&v) => (Ty::DateTime, Some(v)),
+            _ => (ty, None),
+        };
+    }
     let quoted = t.strip_prefix(['E', 'e']).filter(|r| r.starts_with('\'')).unwrap_or(t);
-    if let Some(inner) = quoted.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+    let inner = quoted.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')).or_else(|| quoted.strip_prefix('"').and_then(|r| r.strip_suffix('"')));
+    if let Some(inner) = inner {
         let v = inner.replace("''", "'");
-        let ty = if is_date(&v) { Ty::Date } else if is_datetime(&v) { Ty::DateTime } else { Ty::Text };
+        let ty = if is_date(&v) { Ty::Date } else if is_datetime(&v) || is_datetime(v.trim_end_matches('Z')) { Ty::DateTime } else { Ty::Text };
         // A default can't hold what ends, splits or comments out a placeholder, or a backslash, whose reading depends on
         // the server and would be escaped again when filled.
         // Spaces at its ends would be trimmed when the placeholder is read back, so such a value is not kept either.
@@ -518,7 +693,7 @@ mod tests {
         // A negative number goes in parentheses, so a minus before the placeholder never makes a comment.
         let neg = "SELECT a -{{n:int}} AND b = {{x:number}} AND id IN ({{ids:int list}})";
         assert_eq!(fill(neg, &parse(neg, PG), &vals_of(&parse(neg, PG), &["-5", "-1.5", "-1, 2"]), PG, true).unwrap(), "SELECT a -(-5) AND b = (-1.5) AND id IN ((-1), 2)");
-        assert_eq!(literal(&Var { name: "id".into(), ty: Ty::Int, default: None }, "18446744073709551615", MY, true).unwrap(), "18446744073709551615");
+        assert_eq!(literal(&Var { name: "id".into(), ty: Ty::Int, default: None }, "18446744073709551615", MY.into(), true).unwrap(), "18446744073709551615");
         // An empty text value takes its default; `=` with nothing after it allows the empty string.
         let t = "SELECT {{s=paid}}, {{q=}}";
         assert_eq!(fill(t, &parse(t, MY), &vals_of(&parse(t, MY), &["", ""]), MY, true).unwrap(), "SELECT 'paid', ''");
@@ -541,12 +716,12 @@ mod tests {
 
     #[test]
     fn numbers_and_datetimes() {
-        assert_eq!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, " 12.5 ", MY, true).unwrap(), "12.5");
-        assert!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, "inf", MY, true).is_err());
+        assert_eq!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, " 12.5 ", MY.into(), true).unwrap(), "12.5");
+        assert!(literal(&Var { name: "n".into(), ty: Ty::Number, default: None }, "inf", MY.into(), true).is_err());
         let dt = Var { name: "at".into(), ty: Ty::DateTime, default: None };
-        assert_eq!(literal(&dt, "2026-11-03 14:30", PG, true).unwrap(), "'2026-11-03 14:30'");
-        assert_eq!(literal(&dt, "2026-11-03T14:30:05.123", PG, true).unwrap(), "'2026-11-03T14:30:05.123'");
-        assert!(literal(&dt, "2026-11-03 25:00", PG, true).is_err());
+        assert_eq!(literal(&dt, "2026-11-03 14:30", PG.into(), true).unwrap(), "'2026-11-03 14:30'");
+        assert_eq!(literal(&dt, "2026-11-03T14:30:05.123", PG.into(), true).unwrap(), "'2026-11-03T14:30:05.123'");
+        assert!(literal(&dt, "2026-11-03 25:00", PG.into(), true).is_err());
     }
 
     #[test]
@@ -586,5 +761,77 @@ mod tests {
         let t = format!("SELECT * FROM o WHERE d = {ph}");
         let p = parse(&t, MY);
         assert_eq!(fill(&t, &p, &vals_of(&p, &[""]), MY, true).unwrap(), "SELECT * FROM o WHERE d = '2026-11-03'");
+    }
+
+    const SH: Lang = Lang::Shell;
+    const Q: Lang = Lang::Query;
+
+    #[test]
+    fn shell_values_go_in_code_and_never_in_strings() {
+        let t = "// {{a}}\nconst s = '{{b}}', u = `x ${ {{c:int}} } {{d}}`; /* {{e}} */ find({ day: {{day:date}} })";
+        let p = parse(t, SH);
+        // A placeholder in a string is refused, and the error names it.
+        assert!(p.err.as_ref().unwrap().msg.contains("{{b}}"), "{:?}", p.err);
+        let t = "// {{a}}\nconst u = `x ${ {{c:int}} } {{ not one }}`; /* {{e}} */ find({ day: {{day:date}} })";
+        let p = parse(t, SH);
+        assert_eq!(p.err, None);
+        assert_eq!(p.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["c", "day"]);
+        let out = fill(t, &p, &vals_of(&p, &["-4", "2026-11-03"]), SH, true).unwrap();
+        assert_eq!(out, "// {{a}}\nconst u = `x ${ (-4) } {{ not one }}`; /* {{e}} */ find({ day: ISODate(\"2026-11-03T00:00:00Z\") })");
+        // A stored template in a string stays text.
+        assert!(!parse("print('Hello {{ user.name }}')", SH).is_snippet());
+    }
+
+    #[test]
+    fn a_misread_line_can_only_refuse_never_inject() {
+        // A regex is not read, so its quote opens a string to the end of the line: the value is refused there...
+        assert!(parse("const r = /it's/; f({{x}})", SH).err.is_some());
+        // ...and the next line reads again.
+        let t = "const r = /it's/;\nf({{x}})";
+        let p = parse(t, SH);
+        assert_eq!(p.err, None);
+        // Whatever the value, a Shell literal holds no quote, backtick, $, / or line break that could end what it is in.
+        let evil = "a'b\"c`d${e}/f\ng\u{2028}h\\";
+        let out = fill(t, &p, &vals_of(&p, &[evil]), SH, true).unwrap();
+        let lit = &out["const r = /it's/;\nf(".len()..out.len() - 1];
+        assert!(!lit[1..lit.len() - 1].contains(['\'', '"', '`', '$', '/', '\n', '\u{2028}']), "{lit}");
+        assert_eq!(serde_json::from_str::<String>(lit).unwrap(), evil);
+    }
+
+    #[test]
+    fn query_values_fill_code_and_strings_and_parse() {
+        let t = "{ status: {{s:paid|shipped}}, name: { $regex: '^{{prefix}}' }, at: { $gte: {{from:datetime}} }, id: { $in: {{ids:int list}} }, n: {{n:int}} }";
+        let p = parse(t, Q);
+        assert_eq!(p.err, None);
+        let out = fill(t, &p, &vals_of(&p, &["paid", "O'Ne\"il", "2026-11-03 14:30", "1, -2", "-5"]), Q, true).unwrap();
+        let d = crate::db::parse_doc(&out).unwrap();
+        assert_eq!(d.get_str("status").unwrap(), "paid");
+        assert_eq!(d.get_document("name").unwrap().get_str("$regex").unwrap(), "^O'Ne\"il");
+        assert_eq!(d.get_document("at").unwrap().get_datetime("$gte").unwrap().timestamp_millis(), 1_793_716_200_000);
+        assert_eq!(d.get_document("id").unwrap().get_array("$in").unwrap().len(), 2);
+        assert_eq!(d.get_i32("n").or_else(|_| d.get_i64("n").map(|n| n as i32)).unwrap(), -5);
+        // A date is midnight UTC.
+        let t = "{ d: {{d:date}} }";
+        let out = fill(t, &parse(t, Q), &vals_of(&parse(t, Q), &["2024-01-02"]), Q, true).unwrap();
+        assert_eq!(crate::db::parse_doc(&out).unwrap().get_datetime("d").unwrap().timestamp_millis(), 1_704_153_600_000);
+        // Comments hold no values.
+        assert!(!parse("{ a: 1 } // {{x}}", Q).is_snippet());
+    }
+
+    #[test]
+    fn several_parts_read_as_one_and_a_mask_keeps_positions() {
+        let m = merge([parse("{ a: {{x:int}} }", Q), parse("{ {{f:identifier}}: 1 }", Q), parse("{ b: {{x}} }", Q)]);
+        assert_eq!(m.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["x", "f"]);
+        let t = "f({{day:date}}, `${ {{n}} }`)";
+        let masked = mask(t, SH);
+        assert_eq!(masked.len(), t.len());
+        assert_eq!(masked, "f(null        , `${ null  }`)");
+    }
+
+    #[test]
+    fn mongo_literals_turn_into_placeholders() {
+        assert_eq!(infer("\"paid\""), (Ty::Text, Some("paid".into())));
+        assert_eq!(infer("ISODate(\"2026-11-03T00:00:00Z\")"), (Ty::Date, Some("2026-11-03".into())));
+        assert_eq!(infer("ISODate('2026-11-03T14:30:00Z')"), (Ty::DateTime, Some("2026-11-03 14:30:00".into())));
     }
 }

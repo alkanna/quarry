@@ -3,6 +3,7 @@
 use crate::app::*;
 use crate::app::column_menu::{query_col_popover, HeadAct};
 use crate::app::sql::edit::CellAct;
+use crate::app::library::snippet_strip::{literal_at, Src};
 use crate::ui::dnd;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
@@ -926,7 +927,7 @@ impl App {
         if format {
             self.sql_format(&ctx);
         }
-        if self.snippet_strip(ui) {
+        if self.snippet_strip(ui, Src::Query) {
             self.snippet_preview(ui);
         } else {
             self.sql_editor(ui);
@@ -1090,7 +1091,9 @@ impl App {
         let mut gutter_run = None;
         let mut lint_stmt = None;
         let mut make_value = None;
-        let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
+        let Some(t) = self.tabs.get_mut(self.cur) else { return };
+        let snip = &mut t.snip;
+        let Some(s) = t.sql.as_mut() else { return };
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, avail - 3.0 * ROW_H - TABLE_HEAD_H - 110.0);
@@ -1103,7 +1106,7 @@ impl App {
                     sec.format.line_height = Some(LINE_H);
                 }
                 let holes: Vec<_> = crate::library::snippet::parse(buf.as_str(), dialect).holes.into_iter().map(|h| h.span).collect();
-                super::snippet_strip::tint_holes(&mut job, &holes);
+                crate::ui::editor::tint_holes(&mut job, &holes);
                 job
             })
         };
@@ -1134,7 +1137,7 @@ impl App {
                     s.caret = usize::from(r.primary.index);
                 }
                 if out.response.changed() {
-                    s.snip_off = false;
+                    snip.off = false;
                 }
                 // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
                 // from the editor's stored state when the menu draws, as Run selection does.
@@ -1143,7 +1146,7 @@ impl App {
                     let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
                         let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
                         let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
-                        super::snippet_strip::literal_at(&s.query, a..b.max(a + 1), dialect)
+                        literal_at(&s.query, a..b.max(a + 1), dialect.into())
                     });
                     let mut acts = Vec::new();
                     if let Some(r) = picked {
@@ -1195,7 +1198,7 @@ impl App {
         self.sql_serve(conn, &db, &schema, wants);
         self.sql_lint_tick(ui.ctx(), lint_stmt);
         if let Some(r) = make_value {
-            self.ask_make_value(r);
+            self.ask_make_value(r, Src::Query);
         }
         let bar = splitter(ui);
         if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.inner, lo, hi) {

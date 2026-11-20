@@ -28,6 +28,7 @@ mod library_open;
 mod library_panel;
 mod library_picker;
 mod snippets;
+mod mongo_snippets;
 mod library_save;
 mod mongo_create;
 mod mongo_edit;

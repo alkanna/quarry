@@ -11,6 +11,7 @@ pub(super) mod panel;
 pub(super) mod picker;
 pub(super) mod save_dialog;
 pub(super) mod snippet_form;
+pub(in crate::app) mod snippet_strip;
 
 /// What the Library panel and its dialogs remember while the app runs.
 #[derive(Default)]
