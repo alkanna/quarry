@@ -365,7 +365,7 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
             ui.fonts_mut(|f| f.layout_job(job))
         };
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut f.adv.init).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8))).desired_rows(3).desired_width(f32::INFINITY).lock_focus(true).hint_text(RichText::new("SET SESSION group_concat_max_len = 1048576;").font(FontId::monospace(TXT_SMALL)).color(FAINT())).layouter(&mut layout));
+            crate::ui::editor::show_paired(ui, egui::TextEdit::multiline(&mut f.adv.init).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8))).desired_rows(3).desired_width(f32::INFINITY).lock_focus(true).hint_text(RichText::new("SET SESSION group_concat_max_len = 1048576;").font(FontId::monospace(TXT_SMALL)).color(FAINT())).layouter(&mut layout));
         });
         ui.add_space(4.0);
         note(ui, "Runs on every pooled connection. Writes are refused while the connection is read-only.");

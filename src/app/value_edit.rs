@@ -50,6 +50,9 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
                 let te = egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows);
                 if custom { te.layouter(&mut layouter).show(ui) } else { te.show(ui) }
             };
+            if code {
+                crate::ui::editor::format_on_key(ui, id, text);
+            }
             // Pairing quotes and brackets helps JSON but gets in the way of plain text.
             let out = if code { crate::ui::vim::wrap(ui, id, text, |ui, text| with_autopair(ui, id, text, edit)) } else { edit(ui, text) };
             find.reveal(ui, text, &out);

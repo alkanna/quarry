@@ -173,6 +173,8 @@ pub(crate) fn wrap_with<R>(ui: &mut egui::Ui, id: egui::Id, text: &mut String, s
     begin(ui, id, text);
     let (mut out, r) = show(ui, text);
     end(ui, id, &mut out);
+    // Every code editor comes through here, so the bracket at the caret and its pair are outlined in all of them.
+    crate::ui::editor::paint_pair(ui, &out);
     (out, r)
 }
 

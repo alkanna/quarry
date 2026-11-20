@@ -148,6 +148,7 @@ pub(in crate::app) struct Preset {
 fn sql_input(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, wants: &mut Wants, scope: &Scope, values: &Fields, hint: impl Into<egui::WidgetText>, w: f32) -> bool {
     let mono = FontId::monospace(TXT_SMALL);
     let (out, _) = sql_ac_field(ui, id, text, ac, scope, values, wants, |ui, text, _| egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono).hint_text(hint).desired_width(w).layouter(&mut sql_layout).show(ui));
+    crate::ui::editor::paint_pair(ui, &out);
     out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
 }
 
@@ -293,8 +294,7 @@ fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect,
     ui.add_space(4.0);
     let Some(mut keys) = parse_order(text, Some(d)) else {
         // Free text (expressions) cannot be shown as keys.
-        let r = ui.add(mono_edit(text, 300.0, "created_at DESC").layouter(&mut sql_layout));
-        return r.changed();
+        return crate::ui::editor::show_paired(ui, mono_edit(text, 300.0, "created_at DESC").layouter(&mut sql_layout)).response.changed();
     };
     let mut changed = false;
     let mut remove = None;
@@ -367,7 +367,7 @@ fn columns_popover(ui: &mut egui::Ui, select: &mut String, cols: &[Col], d: Dial
         let mut remove = None;
         for (i, e) in exprs.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                let r = ui.add(mono_edit(e, 250.0, "total * 1.2 AS gross").layouter(&mut sql_layout));
+                let r = crate::ui::editor::show_paired(ui, mono_edit(e, 250.0, "total * 1.2 AS gross").layouter(&mut sql_layout)).response;
                 enter |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if close_x(ui).on_hover_text("Remove expression").clicked() {
                     remove = Some(i);
