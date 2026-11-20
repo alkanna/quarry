@@ -30,6 +30,8 @@ pub(in crate::app) struct SnippetForm {
     /// The filled statement, whether it writes and its verb, kept until a value or the target changes: the read-only
     /// check lexes the text several times, too much for every frame.
     pub memo: Option<(u64, Result<String, String>, bool, String)>,
+    /// The target menu's filter, None while the menu is closed so it opens empty and focused.
+    pub target_q: Option<String>,
 }
 
 /// The bar at the bottom of the form: the keys, the confirm of a write, or Unlock on a locked connection.
@@ -63,7 +65,7 @@ impl App {
         }
         // A removed connection is never swapped for another at random, since it could be production: the person picks one.
         let conn = self.conn(s.conn).is_some().then_some(s.conn);
-        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query, memo: None };
+        let form = SnippetForm { id, name: s.name.clone(), body: s.body.clone(), conn, db: s.db.clone(), schema: s.schema.clone(), values, stage: Stage::Fill, query, memo: None, target_q: None };
         if let Some(c) = conn {
             self.wake_conn(c);
         }
@@ -130,6 +132,9 @@ impl App {
                 let cmd_enter = i.consume_key(egui::Modifiers::COMMAND, Key::Enter);
                 (i.consume_key(egui::Modifiers::NONE, Key::Escape), i.consume_key(egui::Modifiers::NONE, Key::Enter), cmd_enter, i.consume_key(egui::Modifiers::COMMAND, Key::E))
             });
+            // While the target menu is open, Enter picks its first match and Esc closes it.
+            let menu_open = f.target_q.is_some();
+            let (menu_esc, menu_enter, esc, enter) = (esc && menu_open, enter && menu_open, esc && !menu_open, enter && !menu_open);
             // Header: back, the name, Edit and where it runs.
             ui.horizontal(|ui| {
                 ui.set_height(PALETTE_HEAD_H);
@@ -144,24 +149,52 @@ impl App {
                     // An empty database is the connection's default, worked out when it runs.
                     let label = if f.db.is_empty() { cname.clone() } else { format!("{cname} \u{b7} {}", f.db) };
                     // Built only while the menu is open, and scrolled, since a server can hold hundreds of databases.
-                    ui.menu_button(RichText::new(label).color(BRIGHT()), |ui| {
+                    let menu = ui.menu_button(RichText::new(label).color(BRIGHT()), |ui| {
                         menu_list(ui);
+                        let first = f.target_q.is_none();
+                        let q = f.target_q.get_or_insert_default();
+                        let r = ui.add(egui::TextEdit::singleline(q).hint_text("Filter databases").desired_width(240.0));
+                        if first {
+                            r.request_focus();
+                        }
+                        let q = q.trim().to_lowercase();
+                        let mut top = None;
                         egui::ScrollArea::vertical().max_height(LIST_MAX_H).show(ui, |ui| {
                             for c in self.snippet_conns(f.id) {
                                 let Some(conn) = self.conn(c) else { continue };
+                                // A connection whose name matches keeps all its databases.
+                                let all = conn.meta.name.to_lowercase().contains(&q);
+                                let here = if Some(c) == f.conn { f.db.as_str() } else { "" };
+                                let dbs: Vec<&str> = if conn.dbs.is_empty() { vec![here] } else { conn.dbs.iter().map(|d| d.0.as_str()).collect() };
+                                let dbs: Vec<&str> = dbs.into_iter().filter(|db| all || db.to_lowercase().contains(&q)).collect();
+                                if dbs.is_empty() {
+                                    continue;
+                                }
                                 ui.horizontal(|ui| {
                                     ui.add_space(10.0);
                                     caption(ui, conn.meta.name.to_uppercase());
                                 });
-                                let here = if Some(c) == f.conn { f.db.as_str() } else { "" };
-                                let dbs: Vec<&str> = if conn.dbs.is_empty() { vec![here] } else { conn.dbs.iter().map(|d| d.0.as_str()).collect() };
                                 for db in dbs {
+                                    top.get_or_insert((c, db.to_string()));
                                     let text = if db.is_empty() { conn.meta.name.as_str() } else { db };
                                     menu_act(ui, &mut todo, Do::Target(c, db.to_string()), |ui| ui.selectable_label(Some(c) == f.conn && db == f.db, text));
                                 }
                             }
+                            if top.is_none() {
+                                ui.label(RichText::new("No database matches").color(FAINT()));
+                            }
                         });
+                        if menu_enter && let Some((c, db)) = top {
+                            todo.push(Do::Target(c, db));
+                            ui.close();
+                        }
+                        if menu_esc {
+                            ui.close();
+                        }
                     });
+                    if menu.inner.is_none() {
+                        f.target_q = None;
+                    }
                     if !saved_default && quiet(ui, "Make default").on_hover_text("Run this snippet here from now on").clicked() {
                         todo.push(Do::MakeDefault);
                     }
