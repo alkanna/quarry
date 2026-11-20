@@ -73,7 +73,7 @@ impl App {
         let large_change = p.map_or(0, |p| p.large_change);
         let undo_docs = self.agents.cfg.limits.undo_docs;
         let client = if ask.client.is_empty() { "An agent".to_string() } else { ask.client.clone() };
-        let r = top_banded(ctx, id).show(ctx, |ui| {
+        let r = top_banded(id).show(ctx, |ui| {
             ui.set_width(w + 40.0);
             let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
             let sub = if total > 1 { format!("AI agent  ·  1 of {total} waiting") } else { "AI agent  ·  asks before it acts".to_string() };

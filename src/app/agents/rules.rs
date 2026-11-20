@@ -179,7 +179,7 @@ impl App {
         let body_h = (screen.height() - 200.0).clamp(300.0, 520.0);
         let scopes: Vec<(Option<u64>, String)> = std::iter::once((None, "All connections".to_string())).chain(self.conns.iter().filter(|c| self.agents.cfg.conn(c.meta.id).is_some() || w.scope == Some(c.meta.id)).map(|c| (Some(c.meta.id), c.meta.name.clone()))).collect();
         let layer = egui::Id::unique(("quarry-layer", "agents-rules"));
-        let r = top_banded(ctx, layer).show(ctx, |ui| {
+        let r = top_banded(layer).show(ctx, |ui| {
             ui.set_width(width);
             dialog_head_with(ui, &Head::new("Data protection").sub("What AI agents may read, and what they see masked").glyph(glyphs::shield), |ui| {
                 let opts: Vec<(Option<u64>, &str)> = scopes.iter().map(|(id, n)| (*id, n.as_str())).collect();
