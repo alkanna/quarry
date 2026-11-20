@@ -69,7 +69,7 @@ fn view_editor(ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer, d: db::sql::D
     let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| crate::ui::editor::memo_galley(ui, 2, buf.as_str(), wrap, || crate::ui::editor::sql_job_in(buf.as_str(), TXT_SMALL, d));
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).show(ui, |ui| {
         egui::ScrollArea::vertical().id_salt("view-sql").max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
-            let r = egui::TextEdit::multiline(text).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::NONE.inner_margin(egui::Margin::same(10))).desired_width(f32::INFINITY).desired_rows(9).lock_focus(true).interactive(!readonly).hint_text(RichText::new("SELECT * FROM orders").font(FontId::monospace(TXT_SMALL)).color(FAINT())).layouter(&mut layout).show(ui);
+            let r = crate::ui::editor::show_paired(ui, egui::TextEdit::multiline(text).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::NONE.inner_margin(egui::Margin::same(10))).desired_width(f32::INFINITY).desired_rows(9).lock_focus(true).interactive(!readonly).hint_text(RichText::new("SELECT * FROM orders").font(FontId::monospace(TXT_SMALL)).color(FAINT())).layouter(&mut layout));
             r.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "View SELECT"));
         });
     });

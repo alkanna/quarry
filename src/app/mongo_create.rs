@@ -197,6 +197,7 @@ fn options_form(ui: &mut egui::Ui, f: &mut CollForm, ver: collopts::Ver) {
         if f.validate {
             rows.stacked("Validator", |ui| {
                 let id = ui.make_persistent_id("mongo-coll-validator");
+                crate::ui::editor::format_on_key(ui, id, &mut f.validator);
                 crate::ui::vim::wrap(ui, id, &mut f.validator, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui)));
             });
             rows.row("Level", "which writes are checked", |ui| {

@@ -28,6 +28,7 @@ pub(crate) use dates::civil_from_days;
 mod errors;
 mod explain;
 mod import;
+pub mod js_format;
 mod js_ls;
 mod log;
 pub mod mongo_uri;

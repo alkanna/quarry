@@ -661,6 +661,146 @@ impl Find {
     }
 }
 
+pub(crate) const FORMAT_W: usize = 80;
+
+/// Shift+Alt+F while the code editor `id` has focus, taken once. The character Alt types on macOS goes with it.
+pub(crate) fn format_key(ui: &egui::Ui, id: egui::Id) -> bool {
+    ui.memory(|m| m.has_focus(id))
+        && ui.input_mut(|i| {
+            let Some(k) = i.events.iter().position(|e| matches!(e, egui::Event::Key { key: Key::F, pressed: true, modifiers, .. } if modifiers.alt && modifiers.shift && !modifiers.command)) else { return false };
+            i.events.remove(k);
+            // Only the character that key typed, the next text after it, so a key typed in the same frame stays.
+            if let Some(t) = i.events[k..].iter().position(|e| matches!(e, egui::Event::Text(_))) {
+                i.events.remove(k + t);
+            }
+            true
+        })
+}
+
+/// Formats the JavaScript or query text of editor `id` in place, so its Undo brings the old text back. False when it was
+/// already formatted.
+pub(crate) fn format_in(ctx: &egui::Context, id: egui::Id, text: &mut String) -> bool {
+    use egui::text::{CCursor, CCursorRange};
+    let new = crate::db::js_format::format(text, FORMAT_W);
+    if new == *text {
+        return false;
+    }
+    replace_with_undo(ctx, id, text, new, |before, old, new| CCursorRange::one(CCursor::new(caret_after_format(old, before.primary.index.0, new))));
+    true
+}
+
+/// Shift+Alt+F in editor `id` formats its text. True when that changed it.
+pub(crate) fn format_on_key(ui: &egui::Ui, id: egui::Id, text: &mut String) -> bool {
+    format_key(ui, id) && format_in(ui.ctx(), id, text)
+}
+
+/// Replaces the text of editor `id` with `new` as one step its Undo takes back, and puts the caret where `place` says
+/// from the old caret, the old text and the new one. Returns where it put it.
+pub(crate) fn replace_with_undo(ctx: &egui::Context, id: egui::Id, text: &mut String, new: String, place: impl FnOnce(egui::text::CCursorRange, &str, &str) -> egui::text::CCursorRange) -> egui::text::CCursorRange {
+    use egui::text::{CCursor, CCursorRange};
+    let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    let before = st.cursor.char_range().unwrap_or_else(|| CCursorRange::one(CCursor::new(text.chars().count())));
+    let mut undoer = st.undoer();
+    let old = std::mem::replace(text, new);
+    let range = place(before, &old, text);
+    undoer.add_undo(&(before, old));
+    st.set_undoer(undoer);
+    st.cursor.set_char_range(Some(range));
+    st.store(ctx, id);
+    ctx.request_repaint();
+    range
+}
+
+/// Where caret `at` (a char index in `old`) lands in `new`, the same text with other spaces and line breaks: before the
+/// same non-space character.
+fn caret_after_format(old: &str, at: usize, new: &str) -> usize {
+    let ink = old.chars().take(at).filter(|c| !c.is_whitespace()).count();
+    new.chars().enumerate().filter(|(_, c)| !c.is_whitespace()).nth(ink).map_or(new.chars().count(), |(i, _)| i)
+}
+
+fn is_bracket(c: u8) -> bool {
+    matches!(c, b'(' | b')' | b'[' | b']' | b'{' | b'}')
+}
+
+/// The brackets of a highlighted job that are code, with their byte index. The highlighter already read the editor's
+/// language, so a bracket it coloured as a string or a comment (SQL `--`, JS `//`, a quoted name) is not one.
+fn code_brackets(job: &LayoutJob) -> Vec<(usize, u8)> {
+    let (string, faint) = (C_STRING(), FAINT());
+    let mut out = Vec::new();
+    for sec in job.sections.iter().filter(|s| s.format.color != string && s.format.color != faint) {
+        let (start, end): (usize, usize) = (sec.byte_range.start.into(), sec.byte_range.end.into());
+        out.extend(job.text[start..end].bytes().enumerate().filter(|(_, c)| is_bracket(*c)).map(|(i, c)| (start + i, c)));
+    }
+    out
+}
+
+/// The partner of the bracket at byte `at`, read from the start so a stray closer pairs with nothing. Vim `%` has its own
+/// matcher, which ignores strings and comments.
+fn bracket_pair(brackets: &[(usize, u8)], at: usize) -> Option<usize> {
+    let mut open: Vec<(usize, u8)> = Vec::new();
+    for &(i, c) in brackets {
+        if matches!(c, b'(' | b'[' | b'{') {
+            open.push((i, c));
+            continue;
+        }
+        let want = match c {
+            b')' => b'(',
+            b']' => b'[',
+            _ => b'{',
+        };
+        match open.last() {
+            Some(&(o, oc)) if oc == want => {
+                open.pop();
+                if i == at || o == at {
+                    return Some(if i == at { o } else { i });
+                }
+            }
+            _ if i == at => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Outlines the bracket beside the caret and the one it pairs with, or only it, in the alert colour, when it has none.
+/// Reads the galley's own text, which is what was laid out even when a key changed the text after.
+pub(crate) fn paint_pair(ui: &egui::Ui, out: &egui::text_edit::TextEditOutput) {
+    let Some(r) = out.cursor_range.filter(|r| r.is_empty() && out.response.has_focus()) else { return };
+    let text = out.galley.text();
+    let c = r.primary.index.0;
+    let at = byte_at(text, c);
+    // Before the caret first, then after it. Only a caret beside a bracket pays for the scan.
+    let beside: Vec<usize> = [at.checked_sub(1), Some(at)].into_iter().flatten().filter(|&b| text.as_bytes().get(b).is_some_and(|c| is_bracket(*c))).collect();
+    if beside.is_empty() {
+        return;
+    }
+    let brackets = code_brackets(&out.galley.job);
+    let Some(b) = beside.into_iter().find(|b| brackets.iter().any(|(i, _)| i == b)) else { return };
+    let pair = bracket_pair(&brackets, b);
+    let cell = |ci: usize| {
+        let a = out.galley.pos_from_cursor(egui::text::CCursor::new(ci));
+        let z = out.galley.pos_from_cursor(egui::text::CCursor::new(ci + 1));
+        // The next character wrapped to another row: one glyph wide, about.
+        let w = if (z.min.y - a.min.y).abs() < 1.0 && z.min.x > a.min.x { z.min.x - a.min.x } else { a.height() * 0.6 };
+        egui::Rect::from_min_size(a.min, egui::vec2(w, a.height())).translate(out.galley_pos.to_vec2())
+    };
+    let color = if pair.is_some() { MUTED() } else { ALERT() };
+    let p = ui.painter();
+    let here = if b < at { c - 1 } else { c };
+    for ci in std::iter::once(here).chain(pair.map(|o| text[..o].chars().count())) {
+        let r = cell(ci).expand(0.5);
+        p.rect_filled(r, R_CARET, tint(color, 36));
+        p.rect_stroke(r, R_CARET, egui::Stroke::new(1.0, tint(color, 160)), egui::StrokeKind::Inside);
+    }
+}
+
+/// `te` shown, with the bracket pair at its caret outlined: for code fields that do not go through `vim::wrap`.
+pub(crate) fn show_paired(ui: &mut egui::Ui, te: egui::TextEdit) -> egui::text_edit::TextEditOutput {
+    let out = te.show(ui);
+    paint_pair(ui, &out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +894,38 @@ mod tests {
         let (out, c) = closer_dedent("{\n    }", 7).unwrap();
         assert_eq!((out.as_str(), c), ("{\n  }", 5));
         assert!(closer_dedent("{ a }", 5).is_none());
+    }
+
+    #[test]
+    fn brackets_pair_where_the_highlighter_reads_code() {
+        // None when the byte is not a bracket of code, else its partner, None when it has none.
+        let pair = |job: LayoutJob, at: usize| {
+            let b = code_brackets(&job);
+            b.iter().any(|(i, _)| *i == at).then(|| bracket_pair(&b, at))
+        };
+        // JavaScript: a decrement is code, a bracket in a string or a comment is not.
+        let t = "while (n-- > 0) { f(')') } // (";
+        let at = |s: &str| t.find(s).unwrap();
+        assert_eq!(pair(js_job(t), at("(")), Some(Some(at(")"))));
+        assert_eq!(pair(js_job(t), at("{")), Some(Some(at("}"))));
+        assert_eq!(pair(js_job(t), at("')'") + 1), None);
+        assert_eq!(pair(js_job(t), t.len() - 1), None);
+        // SQL: a -- comment hides its brackets.
+        let q = "SELECT (a) -- (\nFROM t";
+        assert_eq!(pair(sql_job_in(q, TXT_SMALL, crate::db::sql::Dialect::Postgres), q.find("-- (").unwrap() + 3), None);
+        // Mustache braces pair one by one, and a stray closer pairs with nothing.
+        let m = "{{name}}";
+        assert_eq!((pair(json_job(m), 0), pair(json_job(m), 1)), (Some(Some(7)), Some(Some(6))));
+        assert_eq!(pair(json_job("(]"), 0), Some(None));
+    }
+
+    #[test]
+    fn the_caret_keeps_its_place_through_format() {
+        let old = "f({\na: 1, b: 2 })";
+        let new = "f({\n  a: 1, b: 2\n})";
+        let at = old.find('b').unwrap();
+        assert_eq!(new.chars().nth(caret_after_format(old, at, new)), Some('b'));
+        assert_eq!(caret_after_format(old, old.len(), new), new.len());
     }
 }
 

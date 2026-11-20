@@ -914,7 +914,7 @@ impl App {
                         run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("\u{21e7}\u{2318}\u{21b5}").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
                     });
                     explain |= quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-                    format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+                    format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected (Shift+Alt+F). A statement that would read differently stays as it is.").clicked();
                     save_view = quiet_enabled(ui, !running, "Save as view\u{2026}").on_hover_text("Create a view from the statement under the caret").clicked();
                 });
             });
@@ -924,7 +924,8 @@ impl App {
         if let Some(text) = load {
             self.sql_replace(&ctx, text, None);
         }
-        if format {
+        // Not while a run is on, as the button: the statement ranges it reports point into the text it ran.
+        if format || !running && crate::ui::editor::format_key(ui, Self::sql_editor_id(self.cur)) {
             self.sql_format(&ctx);
         }
         if self.snippet_strip(ui, Src::Query) {
@@ -1030,20 +1031,14 @@ impl App {
         if s.query == new {
             return;
         }
-        let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-        let before = st.cursor.char_range().unwrap_or_else(|| CCursorRange::one(CCursor::new(s.query.chars().count())));
-        let mut undoer = st.undoer();
-        undoer.add_undo(&(before, std::mem::replace(&mut s.query, new)));
-        st.set_undoer(undoer);
-        let end = s.query.chars().count();
-        let range = match select {
-            Some(r) => CCursorRange::two(CCursor::new(r.start.min(end)), CCursor::new(r.end.min(end))),
-            None => CCursorRange::one(CCursor::new(usize::from(before.primary.index).min(end))),
-        };
-        st.cursor.set_char_range(Some(range));
+        let range = crate::ui::editor::replace_with_undo(ctx, id, &mut s.query, new, |before, _, new| {
+            let end = new.chars().count();
+            match select {
+                Some(r) => CCursorRange::two(CCursor::new(r.start.min(end)), CCursor::new(r.end.min(end))),
+                None => CCursorRange::one(CCursor::new(usize::from(before.primary.index).min(end))),
+            }
+        });
         s.caret = usize::from(range.primary.index);
-        st.store(ctx, id);
-        ctx.request_repaint();
     }
 
     /// Format: the selection, or the whole script when nothing is selected.

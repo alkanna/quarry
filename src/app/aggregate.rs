@@ -58,6 +58,10 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                 ui.set_width(w);
                 let id = egui::Id::unique(("stage-editor", s.uid));
                 let rows = s.text.lines().count().clamp(2, 16);
+                // A formatted stage goes back into the pipeline text, as an edit does.
+                if crate::ui::editor::format_on_key(ui, id, &mut s.text) {
+                    acts.push(StageAct::Edited(i));
+                }
                 let out = crate::ui::vim::wrap(ui, id, &mut s.text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, format!("Stage {} editor", i + 1)));
                 if out.response.changed() {
@@ -158,6 +162,7 @@ impl App {
         let covered = self.window_open();
         let mut run = false;
         let mut explain = false;
+        let mut text_id = None;
         let pick = self.pick_data(ui.ctx(), PickKind::Pipeline);
         let mut pick_acts = Vec::new();
         let mut demo_pick = None;
@@ -270,6 +275,8 @@ impl App {
                 }
             } else {
                 let id = ui.make_persistent_id("agg-editor");
+                text_id = Some(id);
+                crate::ui::editor::format_on_key(ui, id, &mut t.agg_txt);
                 crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
@@ -280,6 +287,12 @@ impl App {
                     menu_look(ui);
                     if ui.button("Explain").on_hover_text("Cmd+E").clicked() {
                         explain = true;
+                        ui.close();
+                    }
+                    if let Some(id) = text_id
+                        && ui.button("Format").on_hover_text("Indent the pipeline by its brackets and break long lines (Shift+Alt+F)").clicked()
+                    {
+                        crate::ui::editor::format_in(ui.ctx(), id, &mut t.agg_txt);
                         ui.close();
                     }
                     code_menu(ui, &mut code_lang);

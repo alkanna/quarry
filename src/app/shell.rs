@@ -613,7 +613,7 @@ impl App {
             t.shell.code = default_script(&coll, sql);
         }
         let running = t.shell.started;
-        let (mut run, mut stop, mut editor) = (false, false, None);
+        let (mut run, mut stop, mut editor, mut fmt) = (false, false, None, false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let r = run_stop(ui, "⌘↵", running);
@@ -630,7 +630,7 @@ impl App {
             // The pills share what the Attach button and the Packages, History and Help buttons on the right leave.
             let text_w = |t: &str| ui.painter().layout_no_wrap(t.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
             let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
-            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + text_w(&format!("Library {}", pick.count)) + 4.0 * pad + 110.0;
+            let right = text_w("Format") + text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + text_w(&format!("Library {}", pick.count)) + 5.0 * pad + 110.0;
             let n = 1 + att_pills.len();
             let pill_w = ((ui.available_width() - right) / n as f32 - ui.spacing().item_spacing.x).max(120.0);
             conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false, pill_w);
@@ -641,6 +641,7 @@ impl App {
             }
             open_attach = attach_button(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                fmt = quiet(ui, "Format").on_hover_text("Indent the script by its brackets and break long lines (Shift+Alt+F)").clicked();
                 if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
                     t.shell.help = !t.shell.help;
                 }
@@ -719,6 +720,9 @@ impl App {
         }
         shell_ls::shell_sig_demo(ui, id, &t.shell.code, ac, &mut self.js);
         let mut sql_need = None;
+        if fmt || crate::ui::editor::format_key(ui, id) {
+            crate::ui::editor::format_in(ui.ctx(), id, &mut t.shell.code);
+        }
         if filled_view {
             let out = snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true);
             snip::preview_ui(ui, out, 11, |c| if sql { shell_ls::js_sql_job(c) } else { js_job(c) });

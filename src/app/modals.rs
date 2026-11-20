@@ -19,6 +19,7 @@ impl App {
                     let id = egui::Id::unique("insert-editor-text");
                     let find = Find::bar(ui, id, text);
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        crate::ui::editor::format_on_key(ui, id, text);
                         let out = crate::ui::vim::wrap(ui, id, text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut find.layouter(true)).show(ui)));
                         find.reveal(ui, text, &out);
                     });
@@ -420,6 +421,7 @@ impl App {
             });
             card_caption(ui, "Pipeline", "runs on every read of the view");
             let id = ui.make_persistent_id("view-pipeline");
+            crate::ui::editor::format_on_key(ui, id, pipeline);
             crate::ui::vim::wrap(ui, id, pipeline, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui)));
         });
         // Parsed once a frame, for both the footer note and Create.
@@ -626,6 +628,7 @@ impl App {
                 rows.stacked("Set fields", |ui| {
                     ui.label(RichText::new("Values starting with $ are read as field paths.").size(TXT_SMALL).color(MUTED()));
                     let id = ui.make_persistent_id("um-set");
+                    crate::ui::editor::format_on_key(ui, id, set_txt);
                     changed |= crate::ui::vim::wrap(ui, id, set_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui))).response.changed();
                 });
                 rows.stacked("Remove fields", |ui| {

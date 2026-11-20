@@ -375,7 +375,7 @@ impl App {
                             if let Some(kind) = kind {
                                 return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
                             }
-                            let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
+                            let r = crate::ui::editor::show_paired(ui, egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout)).response;
                             if r.changed() && matches!(name, "limit" | "skip") {
                                 text.retain(|c| c.is_ascii_digit());
                             }
