@@ -9,16 +9,6 @@ impl App {
         self.core.sql_mode(conn)
     }
 
-    pub(in crate::app) fn adopt_sql_mode(&mut self, conn: u64, mode: Option<String>) {
-        self.core.adopt_sql_mode(conn, mode)
-    }
-
-    /// The SQL session of a connection for a statement about to run. The offline demo has no server, so it says so
-    /// and gives none. `missing` is what to say when the connection has no session, or nothing when None.
-    pub(in crate::app) fn sql_db_for(&mut self, conn: u64, missing: Option<&str>) -> Option<db::sql::Db> {
-        self.core.sql_db_for(conn, missing)
-    }
-
     pub(in crate::app) fn sql_dialect(&self) -> db::sql::Dialect {
         self.core.sql_dialect()
     }

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ui::fold;
+use quarry_core::action::DdlA;
 
 /// A connection with more databases than this lists its recently opened ones above them.
 const RECENT_MIN_DBS: usize = 8;
@@ -996,23 +997,9 @@ impl App {
         pick
     }
 
-    /// Refresh on a database: its collections or tables listed again, and on SQL what autocomplete knew of it dropped.
-    /// `db` is the sidebar's database, on PostgreSQL never a schema. Agents that change structure use it too. False
-    /// when the connection is not open.
+    /// Refresh on a database; see `Core::refresh_db`. False when the connection is not open.
     pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
-        let Some(c) = self.conn(conn) else { return false };
-        let (sql, client) = (c.sql.clone(), c.client.clone());
-        self.routines_forget(conn, db);
-        match (sql, client) {
-            (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
-            (Some(sql), _) => {
-                self.sql_refresh_schema(conn, db, "");
-                self.core.worker.sql_tables(conn, sql, db.to_string());
-            }
-            (None, Some(client)) => self.core.worker.collections(conn, client, db.to_string()),
-            (None, None) => return false,
-        }
-        true
+        self.core.refresh_db(conn, db)
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
@@ -1024,19 +1011,17 @@ impl App {
             }
             SideAct::Server if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) => return self.open_server(conn),
             SideAct::NewDb if self.conn(conn).is_some_and(|c| !c.meta.engine.is_sql()) => return self.mongo_new_db(conn),
-            SideAct::NewDb => return self.sql_new_db(conn),
+            SideAct::NewDb => return self.exec(Action::Ddl(DdlA::NewDb { conn })),
             SideAct::SqlUsers => return self.open_sql_users(conn),
-            SideAct::NewTable(db) if self.is_pg(conn) => return self.pg_new_table(conn, db),
-            SideAct::NewTable(db) => return self.sql_new_table(conn, db),
-            SideAct::SqlRename(db, name, kind) => return self.sql_rename_ask(conn, db, name, kind),
-            SideAct::SqlDuplicate(db, name) => return self.sql_duplicate_ask(conn, db, name),
-            SideAct::PgTruncate(db, table) => return self.pg_truncate_ask(conn, db, table),
-            SideAct::SqlDrop(db, table, kind) if self.is_pg(conn) => return self.pg_drop_ask(conn, db, table, kind),
-            SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
-            SideAct::NewView(db) => return self.sql_new_view(conn, db, String::new()),
-            SideAct::EditView(db, name) => return self.sql_edit_view(conn, db, name),
-            SideAct::NewSchema(db) => return self.pg_new_schema(conn, db),
-            SideAct::DropSchema(db, schema) => return self.pg_drop_ask(conn, db, schema, DropKind::Schema),
+            SideAct::NewTable(db) => return self.exec(Action::Ddl(DdlA::NewTable { conn, db })),
+            SideAct::SqlRename(db, name, kind) => return self.exec(Action::Ddl(DdlA::Rename { conn, db, name, kind })),
+            SideAct::SqlDuplicate(db, name) => return self.exec(Action::Ddl(DdlA::Duplicate { conn, db, name })),
+            SideAct::PgTruncate(db, table) => return self.exec(Action::Ddl(DdlA::Truncate { conn, db, table })),
+            SideAct::SqlDrop(db, name, kind) => return self.exec(Action::Ddl(DdlA::Drop { conn, db, name, kind })),
+            SideAct::NewView(db) => return self.exec(Action::Ddl(DdlA::NewView { conn, db, body: String::new() })),
+            SideAct::EditView(db, name) => return self.exec(Action::Ddl(DdlA::EditView { conn, db, name })),
+            SideAct::NewSchema(db) => return self.exec(Action::Ddl(DdlA::NewSchema { conn, db })),
+            SideAct::DropSchema(db, name) => return self.exec(Action::Ddl(DdlA::Drop { conn, db, name, kind: DropKind::Schema })),
             SideAct::SqlImport(db, table) => {
                 // The schema the sidebar shows is the one the menu was opened on.
                 let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });

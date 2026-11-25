@@ -30,14 +30,14 @@ pub enum Ddl {
     Emptied,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Charset {
     pub name: String,
     pub desc: String,
     pub default_collation: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Collation {
     pub name: String,
     pub charset: String,
@@ -45,7 +45,7 @@ pub struct Collation {
 }
 
 /// What the server offers for new databases and tables, read from information_schema.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
     pub charsets: Vec<Charset>,
     pub collations: Vec<Collation>,

@@ -3,9 +3,10 @@
 
 use crate::app::*;
 use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
-use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TYPES};
+use db::sql::create::{self, ColumnSpec, DefaultKind, DropInfo, Meta, TYPES};
 use db::sql::pg::create::{Check, NewIndex, Unique};
 use db::sql::Dialect;
+use quarry_core::action::DdlA;
 pub(crate) use quarry_core::state::sql::create::*;
 
 pub(in crate::app) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
@@ -49,45 +50,9 @@ impl App {
         self.conn(conn).is_some_and(|c| c.writable)
     }
 
-    /// Asks the server for what the dialogs list. The offline demo has no server, so its dialogs are filled directly.
-    pub(in crate::app) fn ask_meta(&mut self, conn: u64, schema: &str) {
-        if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.core.worker.sql_create_meta(conn, sql, schema.to_string());
-        }
-    }
-
     /// A create or drop on a locked connection asks to allow writes first, then goes on with what was asked.
     pub(in crate::app) fn ask_unlock_on(&mut self, conn: u64, then: impl FnOnce(&mut App) + 'static) {
         self.modal = Some(Modal::Unlock(conn, Some(Box::new(then))));
-    }
-
-    pub(in crate::app) fn sql_new_db(&mut self, conn: u64) {
-        if self.is_pg(conn) {
-            return self.pg_new_db(conn);
-        }
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.sql_new_db(conn));
-        }
-        self.ask_meta(conn, "");
-        self.modal = Some(Modal::SqlNewDb(Box::new(NewDb { conn, name: String::new(), charset: String::new(), collation: String::new(), meta: None, load_err: None })));
-    }
-
-    pub(in crate::app) fn sql_new_table(&mut self, conn: u64, schema: String) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.sql_new_table(conn, schema));
-        }
-        self.ask_meta(conn, &schema);
-        self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], keys: NewKeys::default(), comment: String::new(), meta: None, load_err: None, show_sql: false, built: None })));
-    }
-
-    pub(in crate::app) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.sql_drop_ask(conn, schema, table, kind));
-        }
-        if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.core.worker.sql_drop_info(conn, sql, schema.clone(), table.clone());
-        }
-        self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database: String::new(), schema, table, kind, typed: String::new(), opt: false, info: None })));
     }
 
     /// The lists arrived: fill the open dialog and pick the server's defaults.
@@ -121,83 +86,6 @@ impl App {
         if let Some(Modal::SqlDrop(f)) = &mut self.modal && f.conn == conn && f.database == database && f.schema == schema && f.table == table {
             f.info = Some(res);
         }
-    }
-
-    /// A create or drop finished: refresh what the sidebar and the tabs show of it.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::app) fn sql_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
-        // The create was built for the session's mode, which changed since connecting; the previews follow it now.
-        self.adopt_sql_mode(conn, sql_mode);
-        // A refused undo hands its entry back, so it is kept whether or not the write went through.
-        if let Some(u) = undo {
-            self.push_undo(u);
-        }
-        if self.is_pg(conn) {
-            return self.pg_ddl_done(conn, database, schema, table, what, res, dbs);
-        }
-        match res {
-            Ok(s) => self.ok(s),
-            Err(e) => return self.err(e),
-        }
-        if let (Some(dbs), Some(c)) = (dbs, self.core.conns.iter_mut().find(|c| c.meta.id == conn)) {
-            let old = std::mem::take(&mut c.dbs);
-            c.dbs = dbs.into_iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == d).and_then(|o| o.1.clone()))).collect();
-            // A database just created is known to be empty, so it shows 0 instead of a spinner.
-            if what == Ddl::CreatedDb && let Some(d) = c.dbs.iter_mut().find(|d| d.0 == schema) {
-                d.1 = Some(Vec::new());
-            }
-        }
-        let gone = |t: &Tab| t.sel.conn == conn && t.sel.db == schema && (table.is_empty() || t.sel.coll == table);
-        match what {
-            Ddl::CreatedDb => {
-                self.core.sql_asked.insert((conn, schema.clone()));
-                self.core.open_dbs.insert((conn, schema.clone()));
-                self.core.reveal = Some((conn, schema, None));
-            }
-            Ddl::CreatedTable => {
-                self.side_act(conn, SideAct::Refresh(schema.clone()));
-                self.open_collection(Sel { conn, db: schema, coll: table, ..Default::default() }, Open::Here);
-                if let Some(t) = self.tm() {
-                    t.view = View::Structure;
-                }
-            }
-            Ddl::DroppedDb => {
-                self.purge_undo(conn, "", &schema, "");
-                self.remove_tabs(gone);
-                self.core.open_dbs.remove(&(conn, schema.clone()));
-                self.core.sql_asked.remove(&(conn, schema.clone()));
-                self.forget_schema(conn, &schema);
-            }
-            Ddl::DroppedTable => {
-                self.purge_undo(conn, "", &schema, &table);
-                self.remove_tabs(gone);
-                self.side_act(conn, SideAct::Refresh(schema));
-            }
-            Ddl::CreatedSchema | Ddl::DroppedSchema => {}
-            Ddl::Emptied => {
-                let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| gone(&self.core.tabs[i])).collect();
-                for i in open {
-                    self.reload_of(i);
-                }
-                self.side_act(conn, SideAct::Refresh(schema));
-            }
-        }
-    }
-
-    /// Runs a confirmed drop. Tabs close and the sidebar updates when the server says it worked.
-    pub(in crate::app) fn sql_drop_run(&mut self, conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
-        if c.meta.engine == db::sql::Engine::Postgres {
-            return self.pg_drop_run(conn, sql, database, schema, table, kind, opt);
-        }
-        self.core.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
     }
 
     pub(in crate::app) fn sql_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewDb, keep: &mut bool) {
@@ -270,7 +158,9 @@ impl App {
         let ok = writable && matches!(built, Some(Ok(_)));
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
-                self.sql_create_db_run(f);
+                if let Some(meta) = f.meta.clone() {
+                    self.exec(Action::Ddl(DdlA::CreateDb { conn: f.conn, name: f.name.clone(), charset: f.charset.clone(), collation: f.collation.clone(), meta }));
+                }
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -280,12 +170,6 @@ impl App {
                 foot_note(ui, NOTE_DB);
             }
         });
-    }
-
-    fn sql_create_db_run(&mut self, f: &NewDb) {
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        let Some(meta) = f.meta.clone() else { return };
-        self.core.worker.sql_create_db(f.conn, sql, f.name.clone(), f.charset.clone(), f.collation.clone(), meta, !self.conn_writable(f.conn));
     }
 
     pub(in crate::app) fn sql_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewTable, keep: &mut bool) {
@@ -406,7 +290,7 @@ impl App {
         let summary = format!("{}{}", plural(f.cols.len() as u64, "column"), if keys.is_empty() { String::new() } else { format!("  ·  primary key {}", keys.join(", ")) });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
-                self.sql_create_table_run(f);
+                self.core.sql_create_table(f);
                 *keep = false;
             }
             if ui.button("Preview SQL").clicked() {
@@ -417,12 +301,6 @@ impl App {
             }
             foot_note(ui, if writable { &summary } else { NOTE_TABLE });
         });
-    }
-
-    fn sql_create_table_run(&mut self, f: &NewTable) {
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        let Some(meta) = f.meta.clone() else { return };
-        self.core.worker.sql_create_table(f.conn, sql, f.spec(), meta, !self.conn_writable(f.conn));
     }
 
     /// The editable column list: name with a key toggle, type with its length, Null, and an Extra menu.

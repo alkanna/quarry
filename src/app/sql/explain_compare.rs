@@ -8,7 +8,6 @@ use super::explain_tree::{paint_node, ROW, ROW_SUB};
 use crate::app::*;
 use crate::db::sql::plan::compare::{Delta, Diff, State};
 use crate::db::sql::plan::PlanNode;
-pub(crate) use quarry_core::state::sql::explain_compare::*;
 
 const NUM_W: f32 = 120.0;
 const CHANGE_W: f32 = 90.0;

@@ -13,6 +13,9 @@ pub mod edit;
 pub mod filter;
 pub mod ns;
 pub mod query;
+pub mod ddl;
+pub mod explain;
+pub mod ops;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SqlA {

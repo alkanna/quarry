@@ -43,8 +43,4 @@ impl App {
         self.core.forget_schema(conn, db)
     }
 
-    pub(in crate::app) fn sql_refresh_schema(&mut self, conn: u64, db: &str, schema: &str) {
-        self.core.sql_refresh_schema(conn, db, schema)
-    }
-
 }

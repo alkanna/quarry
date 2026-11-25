@@ -51,6 +51,7 @@ impl App {
                         Dialog::TableOpts(f) => Modal::TableOpts(f),
                         Dialog::FkEdit(f) => Modal::FkEdit(f),
                         Dialog::SqlMaintain { what, stmt } => Modal::SqlMaintain { what, stmt },
+                        Dialog::SqlForm(f) => f.modal(),
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {

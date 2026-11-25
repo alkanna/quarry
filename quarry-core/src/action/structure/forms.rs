@@ -206,8 +206,8 @@ impl Core {
         let Some((conn, schema)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone())) else { return };
         let pg = self.alter_env().0 == Dialect::Postgres;
         // The engines and collations the dialog lists; the offline demo has no server and fills them itself.
-        if !pg && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_create_meta(conn, sql, schema.clone());
+        if !pg {
+            self.ask_meta(conn, &schema);
         }
         let mut auto = was.3.map(|n| n.to_string()).unwrap_or_default();
         let (mut comment, mut engine, mut collation) = (was.0.clone(), was.1.clone(), was.2.clone());

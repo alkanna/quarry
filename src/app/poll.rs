@@ -37,6 +37,7 @@ impl App {
                     }
                     self.core.structure_loaded(req, res);
                 }
+                // The Explain dialog's state is in the Modal; Core works the answers out on it.
                 Msg::SqlExplained { req, sets } => self.sql_explained(req, sets),
                 Msg::SqlExplainEvidence { req, ev } => self.sql_explain_evidence(req, ev),
                 Msg::SqlExplainHypo { req, res } => self.sql_explain_hypo(req, res),
@@ -69,19 +70,18 @@ impl App {
                 Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => {}
                 Msg::SqlAltered { .. } => {}
                 Msg::SqlRoutine { .. } => {}
-                Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
                     self.sql_drop_info_done(conn, database, schema, table, res)
                 }
                 Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
-                Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
                 Msg::Command { tag, res } => self.on_command(tag, res),
                 Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
                 Msg::Docs { req, res, approx } => self.core.docs_loaded(req, res, approx, &page_info),
                 // Core::handles took these above.
                 Msg::IndexInfo { .. } | Msg::Indexes { .. } | Msg::Written { .. } | Msg::Saved { .. } | Msg::Aggregated { .. } | Msg::StagePreview { .. } => {}
+                Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => {}
                 Msg::Explained { req, res } if req == self.core.explain_req => match res {
                     Ok(raw) => {
                         self.show_late(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false });

@@ -133,7 +133,7 @@ impl App {
             Act::Maintain(what) => self.exec(Action::Structure(StructA::Maintain { tab, what })),
             Act::Truncate => {
                 let sel = self.core.tabs[self.core.cur].sel.clone();
-                self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
+                self.exec(Action::Ddl(quarry_core::action::DdlA::Drop { conn: sel.conn, db: sel.db, name: sel.coll, kind: super::create::DropKind::Truncate }));
             }
             Act::NewColumn => self.exec(Action::Structure(StructA::EditColumn { tab, col: None })),
             Act::EditColumn(i) => {

@@ -68,6 +68,8 @@ mod docs_tests;
 mod mongo_tests;
 #[cfg(test)]
 mod structure_tests;
+#[cfg(test)]
+mod ddl_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -92,6 +94,8 @@ pub use indexes::IdxA;
 pub use mongo::{CmpA, FieldA, ImportA, MongoA, SchemaA};
 pub use grid::GridA;
 pub use routines::RoutineA;
+pub use sql::ddl::{DdlA, SqlForm};
+pub use sql::ops::SqlOpsA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -117,6 +121,8 @@ pub enum Action {
     Mongo(MongoA),
     Grid(GridA),
     Routines(RoutineA),
+    Ddl(DdlA),
+    SqlOps(SqlOpsA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -210,6 +216,8 @@ pub enum Dialog {
     FkEdit(Box<crate::state::sql::rel::FkForm>),
     /// A maintenance statement of the Info page that locks or rebuilds the table.
     SqlMaintain { what: crate::db::sql::Maint, stmt: String },
+    /// A SQL create, drop, rename, duplicate, empty, view or bulk dialog.
+    SqlForm(SqlForm),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -285,6 +293,8 @@ impl Core {
             Action::Mongo(a) => self.mongo(a),
             Action::Grid(a) => self.grid(a),
             Action::Routines(a) => self.routine_act(a),
+            Action::Ddl(a) => self.ddl(a),
+            Action::SqlOps(a) => self.sql_ops(a),
         }
     }
 
@@ -350,6 +360,8 @@ impl Core {
             Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
             Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => true,
             Msg::SqlRoutine { .. } => true,
+            // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved does too, and hands the rest to `sql_view_saved`.
+            Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => true,
             _ => false,
         }
     }
@@ -407,6 +419,8 @@ impl Core {
             Msg::Related { req, res } => self.related_done(req, res),
             Msg::RefFound { conn, db, coll, path, value, res } => self.ref_found(conn, db, coll, path, value, res),
             Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
+            Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
+            Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
             _ => {}
         }
     }

@@ -9,10 +9,6 @@ impl App {
         self.core.push_undo(a)
     }
 
-    pub(super) fn purge_undo(&mut self, conn: u64, database: &str, schema: &str, table: &str) {
-        self.core.purge_undo(conn, database, schema, table)
-    }
-
     pub(super) fn purge_mongo_undo(&mut self, conn: u64, db: &str, coll: &str) {
         self.core.purge_mongo_undo(conn, db, coll)
     }

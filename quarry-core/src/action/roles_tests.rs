@@ -351,6 +351,8 @@ fn all_actions() -> Vec<Action> {
     all.extend(super::sql_tests::struct_actions().into_iter().map(Action::Structure));
     all.extend(super::structure_tests::routine_actions().into_iter().map(Action::Routines));
     all.extend(tab_and_docs_actions());
+    all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
+    all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
     all
 }
 
@@ -493,6 +495,8 @@ fn variant(a: &Action) -> String {
         Action::Routines(r) => match r {
             RoutineA::Load { .. } | RoutineA::Reload { .. } | RoutineA::Fold { .. } | RoutineA::Open { .. } | RoutineA::New { .. } | RoutineA::Pane(_) | RoutineA::Save { .. } | RoutineA::Drop | RoutineA::Run => {}
         },
+        Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
+        Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

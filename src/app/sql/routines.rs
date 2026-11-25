@@ -36,12 +36,6 @@ impl App {
         }
     }
 
-    /// Forgets the lists of a database, so the next frame reads them again. Refresh on a database calls it.
-    pub(in crate::app) fn routines_forget(&mut self, conn: u64, db: &str) {
-        let pre = format!("{db}\u{1f}");
-        self.core.routines.lists.retain(|k, _| k.0 != conn || (k.1 != db && !k.1.starts_with(&pre)));
-    }
-
     /// The items of the database menu and the group's menu that start a new routine. PostgreSQL's stay enabled on a locked
     /// connection and ask to unlock when saving, like the structure editor; MySQL's wait for the unlock.
     pub(in crate::app) fn routines_new_items(ui: &mut egui::Ui, db_name: &str, schema: &str, pg: bool, writable: bool, system: bool, acts: &mut Vec<RAct>) {

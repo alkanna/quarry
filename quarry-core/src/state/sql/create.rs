@@ -6,7 +6,7 @@ use crate::db::sql::ddl::{IdxCol, IndexDef, IndexKind};
 use crate::db::sql::structure::{CheckConstraint, ForeignKey};
 use crate::db;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DropKind {
     Database,
     Table,

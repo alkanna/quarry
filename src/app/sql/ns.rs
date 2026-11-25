@@ -61,14 +61,6 @@ impl App {
         self.core.table_listed(sel, name)
     }
 
-    pub(in crate::app) fn form_ns(&self, conn: u64, db: String) -> (String, String) {
-        self.core.form_ns(conn, db)
-    }
-
-    pub(in crate::app) fn live_sql(&self, conn: u64) -> Option<db::sql::Db> {
-        self.core.live_sql(conn)
-    }
-
     pub(in crate::app) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
         self.core.pg_ask_schemas(conn, db)
     }
@@ -81,43 +73,14 @@ impl App {
     /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
     /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.
     pub(in crate::app) fn pg_refresh(&mut self, conn: u64, db: &str) {
-        let held = self.core.pg_tables_asked.held(conn, db);
-        self.core.pg_tables_asked.forget(conn, Some(db), None);
-        for s in &held {
-            self.sql_refresh_schema(conn, db, s);
-        }
-        self.pg_ask_schemas(conn, db);
-        let picked = self.ns_of(conn, db).to_string();
-        for s in schemas_to_reload(&held, &picked) {
-            self.pg_load_tables(conn, db, &s);
-        }
+        self.core.pg_refresh(conn, db)
     }
-}
-
-/// The schemas a refresh reads the tables of: every one that was loaded plus the picked one, each once.
-fn schemas_to_reload(held: &[String], picked: &str) -> Vec<String> {
-    let mut out: Vec<String> = held.to_vec();
-    out.sort();
-    out.dedup();
-    if !picked.is_empty() && !out.iter().any(|s| s == picked) {
-        out.push(picked.to_string());
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use db::sql::{Dialect, PgSchema};
-
-    #[test]
-    fn a_refresh_reloads_every_loaded_schema_and_the_picked_one_once() {
-        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(schemas_to_reload(&v(&["public", "audit"]), "public"), v(&["audit", "public"]));
-        assert_eq!(schemas_to_reload(&v(&["audit"]), "public"), v(&["audit", "public"]));
-        assert_eq!(schemas_to_reload(&v(&["audit"]), ""), v(&["audit"]));
-        assert!(schemas_to_reload(&[], "").is_empty());
-    }
 
     fn sel(db: &str, schema: &str) -> Sel {
         Sel { conn: 1, db: db.into(), schema: schema.into(), coll: "t".into() }

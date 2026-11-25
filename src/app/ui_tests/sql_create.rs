@@ -156,8 +156,8 @@ fn a_drop_that_slips_past_the_dialog_on_a_locked_connection_is_refused_by_the_wo
         fx.open(ui, &table);
         ui.quiet();
         assert!(!ui.app().conn(CONN).unwrap().writable);
-        let sql = ui.app().pg_session(CONN).expect("a session");
-        ui.h.state_mut().pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
+        let sql = ui.app().core.pg_session(CONN).expect("a session");
+        ui.h.state_mut().core.pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
         ui.wait("the refusal", |a| !a.core.errors.is_empty());
         assert!(table_exists(fx, &table), "the worker dropped a table on a locked connection");
     });
@@ -291,7 +291,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.clone(), String::new(), DropKind::Database));
         ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
         ui.settle();
-        assert_eq!(ui.app().pg_unsaved_in(CONN, &db), (0, 0, 1), "the confirmation counts the query text");
+        assert_eq!(ui.app().core.pg_unsaved_in(CONN, &db), (0, 0, 1), "the confirmation counts the query text");
         ui.h.get_by_label_contains("1 query with text in its editor");
         replace(ui, "Confirmation", &db);
         ui.settle();

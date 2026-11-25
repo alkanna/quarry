@@ -7,41 +7,12 @@ use super::explain_panel::{mark_box, Mark};
 use crate::app::*;
 use crate::db::sql::pg::hypo;
 use crate::db::sql::plan::findings::Fix;
-use crate::db::sql::plan::{self, compare, Plan};
+use crate::db::sql::plan::{compare, Plan};
+#[cfg(test)]
+use crate::db::sql::plan;
 use crate::db::sql::Dialect;
 pub(crate) use quarry_core::state::sql::explain_hypo::*;
-
-/// Why the trial cannot run, shown beside the disabled button. None when it can.
-fn blocked(x: &SqlExplain, fix: &Fix) -> Option<String> {
-    if x.demo {
-        return Some("The offline demo has no server to try the index on.".into());
-    }
-    if x.db.pooler() {
-        return Some(hypo::POOLER.into());
-    }
-    if let Some(why) = extension_gate(x.ev.as_ref(), x.ev_req.is_some()) {
-        return Some(why.into());
-    }
-    if hypo::create_sql(fix).is_none() {
-        return Some("This candidate is not a CREATE INDEX HypoPG can take.".into());
-    }
-    // Checked once per lock state as the dialog draws; the worker checks the statement again before the trial runs.
-    match &x.hypo_refused {
-        Some((locked, why)) if *locked == x.locked => why.clone(),
-        _ => hypo::refused(&x.stmt, x.locked),
-    }
-}
-
-/// Why the catalog's answer does not show HypoPG as installed. A failed read says nothing either way, unless it still saw
-/// the extension.
-fn extension_gate(ev: Option<&plan::Evidence>, busy: bool) -> Option<&'static str> {
-    match ev {
-        Some(ev) if ev.hypopg => None,
-        _ if busy => Some("Checking whether HypoPG is installed."),
-        Some(ev) if !ev.failed => Some("Needs the HypoPG extension in this database, usable by this login."),
-        _ => Some("The catalog could not be read to check for HypoPG."),
-    }
-}
+use quarry_core::action::sql::explain::hypo_blocked as blocked;
 
 /// The button and the trial's answer, under the candidate `fix`. PostgreSQL only.
 pub(super) fn hypo_row(ui: &mut egui::Ui, x: &SqlExplain, fix: &Fix, acts: &mut Vec<XAct>) {
@@ -92,35 +63,11 @@ fn result_line(h: &HypoRun, before: Option<&Plan>) -> String {
 }
 
 impl App {
-    /// Asks the server for the plan with the candidate `fix` as a hypothetical index. Only a click gets here.
-    pub(super) fn sql_explain_hypo_try(&mut self, x: &mut SqlExplain, fix: Fix) {
-        if x.dialect != Dialect::Postgres || blocked(x, &fix).is_some() {
-            return;
-        }
-        let Some(create) = hypo::create_sql(&fix).map(str::to_string) else { return };
-        self.core.req += 1;
-        (x.hypo_wait, x.hypo, x.hypo_cmp) = (Some((self.core.req, fix.sql)), None, false);
-        x.leave_empty_compare();
-        self.core.worker.sql_explain_hypo(self.core.req, x.db.clone(), x.schema.clone(), create, x.stmt.clone(), x.locked);
-    }
-
     /// The answer of a trial of the open dialog.
     pub(in crate::app) fn sql_explain_hypo(&mut self, req: u64, res: db::Res<hypo::Trial>) {
-        let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        let Some(fix) = x.hypo_wait.take_if(|(r, _)| *r == req).map(|(_, f)| f) else { return };
-        let t = match res {
-            Ok(t) => t,
-            Err(e) => return self.err(e),
-        };
-        let mut p = match plan::parse(Dialect::Postgres, &t.plan) {
-            Ok(p) => p,
-            Err(e) => return self.err(e),
-        };
-        // The same evidence as the dialog's plan, so Compare sets like findings against like.
-        p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
-        let Some(before) = &x.plan else { return };
-        let diff = compare::diff(before, &p);
-        x.hypo = Some(HypoRun { fix, used: hypo::uses(&p, &t.index), plan: p, diff });
+        if let Some(Modal::SqlExplain(x)) = &mut self.modal {
+            self.core.sql_explain_hypo(x, req, res);
+        }
     }
 
     /// Opens the trial's plan in Compare, against the dialog's own.
@@ -145,6 +92,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarry_core::action::sql::explain::extension_gate;
 
     #[test]
     fn a_failed_catalog_read_is_not_taken_for_a_missing_extension() {

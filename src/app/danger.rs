@@ -58,7 +58,7 @@ impl App {
             };
         }
         if let Danger::SqlDrop { conn, database, schema, table, kind, opt } = action {
-            return self.sql_drop_run(conn, database, schema, table, kind, opt);
+            return self.exec(Action::Ddl(quarry_core::action::DdlA::DropRun { conn, database, schema, table, kind, opt }));
         }
         if let Danger::SqlDropUser { conn, acct } = action {
             return self.exec(quarry_core::action::Action::Users(quarry_core::action::UsersA::Sql(quarry_core::action::SqlUsersA::DropRun { conn, user: acct.user, host: acct.host, is_role: acct.is_role })));

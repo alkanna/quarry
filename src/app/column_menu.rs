@@ -324,7 +324,7 @@ impl App {
                 let code = update_script(&t.sel.coll, db::Scope { filter: with_exists(t.query.filter.clone(), c), ..t.query.scope() }, Bson::Array(vec![Bson::Document(stage)]), &note);
                 self.open_in_shell(code);
             }
-            HeadAct::Update if t.sql.is_some() => self.open_bulk_with(true, Some(c.into())),
+            HeadAct::Update if t.sql.is_some() => self.exec(Action::SqlOps(quarry_core::action::SqlOpsA::Bulk { tab: t.uid, update: true, col: Some(c.into()) })),
             HeadAct::Update => {
                 let note = format!("Replace null with the new value of {c}, then run.");
                 let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
@@ -416,12 +416,8 @@ impl App {
             };
         }
         if is_sql {
-            let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
-            // The query the grid shows, not bar text typed since.
-            let q = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.ran.clone()).unwrap_or_default();
-            self.ok(format!("Reading {c} from every matching row…"));
-            let src = col.map_or_else(|| c.to_string(), |x| x.src);
-            return self.core.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
+            let tab = self.core.tabs[self.core.cur].uid;
+            return self.exec(Action::SqlOps(quarry_core::action::SqlOpsA::ReadColumn { tab, col: c.into(), op }));
         }
         let tab = self.t().unwrap().uid;
         self.exec(Action::Grid(GridA::Values { tab, col: c.into(), op }));

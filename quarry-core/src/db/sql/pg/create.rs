@@ -167,7 +167,7 @@ pub const DEFAULT_TEMPLATE: &str = "template1";
 pub const PRISTINE: &str = "template0";
 
 /// The options of a new database. None is the template's own setting (or the connected role, for the owner).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DbOpts {
     pub template: Option<String>,
     pub encoding: Option<String>,

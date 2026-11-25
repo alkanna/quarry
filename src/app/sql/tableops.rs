@@ -7,6 +7,7 @@ use crate::app::sql::ns::sel_of;
 use crate::app::*;
 use db::sql::create::DropInfo;
 use db::sql::pg::tableops as pgops;
+use quarry_core::action::DdlA;
 pub(crate) use quarry_core::state::sql::tableops::*;
 
 const NOTE_WRITE: &str = "Read-only: unlock writes to change tables";
@@ -23,72 +24,6 @@ fn trunc_lead(table: &str, conn: &str, info: &DropInfo) -> String {
 }
 
 impl App {
-    /// The tabs open on `table` of `schema` (every table of it when `table` is empty). On PostgreSQL a tab without a schema of its own
-    /// belongs to the one the sidebar shows.
-    fn tabs_on(&self, conn: u64, database: &str, schema: &str, table: &str) -> Vec<usize> {
-        let on = |t: &Tab| t.sel.conn == conn && (if database.is_empty() { t.sel.db == schema } else { t.sel.db == database && self.sel_schema(&t.sel) == schema }) && (table.is_empty() || t.sel.coll == table);
-        (0..self.core.tabs.len()).filter(|&i| on(&self.core.tabs[i])).collect()
-    }
-
-    /// Staged edits in a tab on the table are keyed by its name, so a rename under them would lose or misplace them.
-    fn staged_on(&self, tabs: &[usize], conn: u64, table: &str) -> bool {
-        let staged = tabs.iter().any(|&i| self.core.tabs[i].sql.as_ref().is_some_and(|s| !s.st.staged.is_empty()));
-        staged || self.core.drafts.values().any(|d| d.conn == conn && (table.is_empty() || d.coll == table) && tabs.iter().any(|&i| self.core.tabs[i].sel.db == d.db && self.core.tabs[i].sel.schema == d.schema))
-    }
-
-    fn session_of(&self, conn: u64, database: &str) -> Option<db::sql::Db> {
-        let sql = self.live_sql(conn)?;
-        Some(if database.is_empty() { sql } else { sql.at(database) })
-    }
-
-    /// What a change needs to run: the session and whether the connection is read-only. Says why and answers None in the demo, on a
-    /// locked connection (which asks to unlock) and while not connected.
-    fn write_session(&mut self, conn: u64, database: &str) -> Option<(db::sql::Db, bool)> {
-        if self.core.demo {
-            self.ok("Offline demo: no database is connected.");
-            return None;
-        }
-        if !self.conn_writable(conn) {
-            if self.conn(conn).is_some() {
-                self.modal = Some(Modal::Unlock(conn, None));
-            }
-            return None;
-        }
-        let Some(sql) = self.session_of(conn, database) else {
-            self.warn_offline();
-            return None;
-        };
-        Some((sql, !self.conn_writable(conn)))
-    }
-
-    /// `db` is the database the sidebar menu was opened on and `name` the table, view or schema.
-    pub(in crate::app) fn sql_rename_ask(&mut self, conn: u64, db: String, name: String, kind: DropKind) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.sql_rename_ask(conn, db, name, kind));
-        }
-        let (database, schema) = if self.is_pg(conn) && kind == DropKind::Schema { (db, name.clone()) } else { self.form_ns(conn, db) };
-        self.modal = Some(Modal::SqlRename(Box::new(RenameForm { conn, database, schema, kind, to: name.clone(), from: name, focused: false, preview: None })));
-    }
-
-    pub(in crate::app) fn sql_duplicate_ask(&mut self, conn: u64, db: String, name: String) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.sql_duplicate_ask(conn, db, name));
-        }
-        let (database, schema) = self.form_ns(conn, db);
-        self.modal = Some(Modal::SqlDuplicate(Box::new(DupForm { conn, database, schema, to: format!("{name}_copy"), from: name, data: true, focused: false, preview: None })));
-    }
-
-    pub(in crate::app) fn pg_truncate_ask(&mut self, conn: u64, db: String, table: String) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.pg_truncate_ask(conn, db, table));
-        }
-        let schema = self.sel_schema(&Sel { conn, db: db.clone(), ..Default::default() });
-        if let Some(sql) = self.session_of(conn, &db) {
-            self.core.worker.pg_truncate_info(conn, sql, db.clone(), schema.clone(), table.clone());
-        }
-        self.modal = Some(Modal::PgTruncate(Box::new(TruncForm { conn, database: db, schema, table, typed: String::new(), restart: false, cascade: false, info: None })));
-    }
-
     /// What emptying a table reaches arrived: the open dialog shows it.
     pub(in crate::app) fn truncate_info_done(&mut self, conn: u64, database: &str, schema: &str, table: &str, res: &db::Res<DropInfo>) {
         if let Some(Modal::PgTruncate(f)) = &mut self.modal && f.conn == conn && f.database == database && f.schema == schema && f.table == table {
@@ -143,9 +78,9 @@ impl App {
             } else {
                 format!("Views, routines, triggers and events that name {} are not updated and fail until they are edited. Foreign keys follow.", f.from)
             };
-            let tabs = self.tabs_on(f.conn, &f.database, &f.schema, if f.kind == DropKind::Schema { "" } else { &f.from });
+            let tabs = self.core.tabs_on(f.conn, &f.database, &f.schema, if f.kind == DropKind::Schema { "" } else { &f.from });
             banner(ui, Notice::Warn, "", &dependents, None);
-            if self.staged_on(&tabs, f.conn, if f.kind == DropKind::Schema { "" } else { &f.from }) {
+            if self.core.staged_on(&tabs, f.conn, if f.kind == DropKind::Schema { "" } else { &f.from }) {
                 ui.add_space(8.0);
                 banner(ui, Notice::Warn, "", "A tab on it holds staged changes. Save or discard them first, then rename.", None);
                 return (built, true);
@@ -157,7 +92,7 @@ impl App {
             let ok = writable && built.is_ok() && f.to != f.from && !taken && !staged;
             if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
                 *keep = false;
-                self.sql_rename_run(f);
+                self.exec(Action::Ddl(DdlA::RenameRun { conn: f.conn, database: f.database.clone(), schema: f.schema.clone(), from: f.from.clone(), to: f.to.clone(), kind: f.kind }));
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -166,61 +101,6 @@ impl App {
                 foot_note(ui, NOTE_WRITE);
             }
         });
-    }
-
-    fn sql_rename_run(&mut self, f: &RenameForm) {
-        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
-        self.core.worker.sql_rename(f.conn, sql, f.schema.clone(), f.from.clone(), f.to.clone(), f.kind == DropKind::Schema, ro);
-    }
-
-    /// A rename or its undo finished: the tabs on the old name take the new one, what the sidebar lists is read again, and the undo is kept.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::app) fn sql_renamed(&mut self, conn: u64, database: String, schema: String, from: String, to: String, whole: bool, res: db::Res<String>, undo: Option<UndoAction>) {
-        match res {
-            Ok(s) => self.ok(s),
-            Err(e) => {
-                // A refused undo hands its entry back, so it stays in the list with the reason.
-                if let Some(u) = undo {
-                    self.push_undo(u);
-                }
-                return self.err(e);
-            }
-        }
-        // Row edits recorded under the old name would act on whatever is made under it next.
-        self.purge_undo(conn, &database, &schema, if whole { "" } else { &from });
-        if let Some(u) = undo {
-            self.push_undo(u);
-        }
-        let tabs = self.tabs_on(conn, &database, &schema, if whole { "" } else { &from });
-        for &i in &tabs {
-            if whole {
-                if !self.core.tabs[i].sel.schema.is_empty() {
-                    self.core.tabs[i].sel.schema = to.clone();
-                }
-            } else {
-                self.core.tabs[i].sel.coll = to.clone();
-            }
-        }
-        if whole && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
-            if let Some(p) = c.pg.get_mut(&database).filter(|p| p.picked == schema) {
-                p.picked = to.clone();
-            }
-            if let Some(t) = c.tables.get_mut(&database) {
-                t.remove(&schema);
-            }
-        }
-        if whole {
-            self.forget_schema(conn, &ns_key(&database, &schema));
-            self.core.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
-        }
-        for i in tabs {
-            self.reload_of(i);
-        }
-        if self.is_pg(conn) {
-            self.pg_refresh(conn, &database);
-        } else {
-            self.side_act(conn, SideAct::Refresh(schema));
-        }
     }
 
     pub(in crate::app) fn sql_duplicate_dialog(&mut self, ui: &mut egui::Ui, f: &mut DupForm, keep: &mut bool) {
@@ -279,7 +159,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && built.is_ok() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
                 *keep = false;
-                self.sql_duplicate_run(f);
+                self.exec(Action::Ddl(DdlA::DuplicateRun { conn: f.conn, database: f.database.clone(), schema: f.schema.clone(), from: f.from.clone(), to: f.to.clone(), data: f.data }));
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -288,11 +168,6 @@ impl App {
                 foot_note(ui, NOTE_WRITE);
             }
         });
-    }
-
-    fn sql_duplicate_run(&mut self, f: &DupForm) {
-        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
-        self.core.worker.sql_duplicate(f.conn, sql, f.schema.clone(), f.from.clone(), f.to.clone(), f.data, ro);
     }
 
     pub(in crate::app) fn pg_truncate_dialog(&mut self, ui: &mut egui::Ui, f: &mut TruncForm, keep: &mut bool) {
@@ -349,7 +224,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if danger_solid(ui, ok, "Empty table").clicked() {
                 *keep = false;
-                self.pg_truncate_run(f);
+                self.exec(Action::Ddl(DdlA::TruncateRun { conn: f.conn, database: f.database.clone(), schema: f.schema.clone(), table: f.table.clone(), restart: f.restart, cascade: f.cascade }));
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -358,20 +233,6 @@ impl App {
                 foot_note(ui, NOTE_WRITE);
             }
         });
-    }
-
-    fn pg_truncate_run(&mut self, f: &TruncForm) {
-        let Some((sql, ro)) = self.write_session(f.conn, &f.database) else { return };
-        self.core.worker.pg_truncate(f.conn, sql, f.schema.clone(), f.table.clone(), f.restart, f.cascade, ro);
-    }
-
-    /// What an emptied table leaves open: tabs on a table of the database read it again, because CASCADE reaches tables the menu did not name.
-    pub(in crate::app) fn pg_emptied(&mut self, conn: u64, database: &str) {
-        let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel.conn == conn && self.core.tabs[i].sel.db == database && self.core.tabs[i].sql.is_some() && !self.core.tabs[i].sel.coll.is_empty()).collect();
-        for i in open {
-            self.reload_of(i);
-        }
-        self.pg_refresh(conn, database);
     }
 }
 

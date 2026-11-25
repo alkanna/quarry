@@ -663,7 +663,7 @@ impl App {
             self.exec(Action::Sql(SqlA::Run { tab, all: run_all, explain }));
         }
         if save_view {
-            self.save_query_as_view();
+            self.exec(Action::Ddl(quarry_core::action::DdlA::QueryAsView { tab }));
         }
         // Last, since opening a script may change the tab this frame was drawn for.
         self.pick_acts(pick_acts);

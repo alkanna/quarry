@@ -330,7 +330,7 @@ impl App {
             self.modal = Some(m);
         } else if let Modal::SqlExplain(mut x) = m {
             // Closing must not leave an ANALYZE running: it holds the locks of the statement it executes.
-            self.sql_explain_stop(&mut x);
+            self.core.sql_explain_stop(&mut x);
         } else if matches!(m, Modal::PgNewRole(_) | Modal::PgPassword(_)) {
             // Esc closes without the dialog's own buttons, so the password fields are forgotten here; dropping the form wipes them.
             super::sql::pg_roles::forget_pg_secrets(ctx, &m);

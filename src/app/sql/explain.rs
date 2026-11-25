@@ -2,15 +2,14 @@
 //! selected node on the right, the raw plan, and an optional ANALYZE run that shows what the server actually did. The
 //! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
-use super::explain_compare::{compare_view, Prev};
+use super::explain_compare::compare_view;
 use super::explain_flame::flame_view;
 use super::explain_panel::{findings_strip, inspector};
 use super::explain_tree::plan_tree;
-use super::query::{run_db, run_target};
+use super::query::run_db;
 use crate::app::*;
-use crate::db::sql::plan::{self, compare, Analyze};
+use crate::db::sql::plan::{self, Analyze};
 use crate::db::sql::{Db, Dialect};
-use std::sync::Arc;
 pub(crate) use quarry_core::state::sql::explain::*;
 
 /// What a click in the dialog asks for, done once the frame is drawn.
@@ -29,29 +28,9 @@ impl App {
     /// Shows the plan of `text` in a dialog. `text` is the statement under the caret of a Query view or the last page's
     /// SELECT of a Content grid.
     pub(in crate::app) fn sql_explain(&mut self, text: String) {
-        let Some(t) = self.t() else { return };
-        let conn = t.sel.conn;
-        let d = self.dialect_of(conn);
-        if text.trim().is_empty() {
-            return self.warn("Nothing to explain.");
+        if let Some(x) = self.core.sql_explain_new(text) {
+            self.modal = Some(Modal::SqlExplain(Box::new(x)));
         }
-        if let Err(e) = plan::explainable(&text, d) {
-            return self.warn(e);
-        }
-        let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
-        let t = &self.core.tabs[self.core.cur];
-        let (tab_db, database) = (t.sel.db.clone(), run_db(t));
-        let (db, schema) = run_target(t, db);
-        let writable = self.conn_writable(conn);
-        let analyze = plan::analyze_needs(d, &db.version).map(str::to_string).map_or_else(|| plan::analyze_mode(&text, d, db.pooler()), Err).and_then(|a| match (d, writable) {
-            // The read-only guard refuses ANALYZE on these engines, so it needs the unlock the user would otherwise be asked for.
-            (Dialect::Postgres, false) => Err("ANALYZE on PostgreSQL runs the statement inside a transaction it rolls back, which needs writes unlocked on this connection.".into()),
-            (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
-            _ => Ok(a),
-        });
-        let mut x = SqlExplain::new(text, conn, tab_db, database, d, db, schema, analyze);
-        self.sql_explain_send(&mut x, None);
-        self.modal = Some(Modal::SqlExplain(Box::new(x)));
     }
 
     /// The offline demo's dialog: ANALYZE would send the statement to a server that is not there, so it is turned off.
@@ -81,108 +60,19 @@ impl App {
         self.sql_explained(1, vec![set]);
     }
 
-    fn sql_explain_send(&mut self, x: &mut SqlExplain, analyze: Option<Analyze>) {
-        self.core.req += 1;
-        // A fresh handle per run, so a Stop for an old run never reaches this one.
-        (x.req, x.busy, x.asked, x.run, x.stopped) = (self.core.req, true, analyze, Default::default(), false);
-        let script = plan::explain_script(x.dialect, &x.stmt, analyze);
-        self.core.worker.sql_explain(self.core.req, x.db.clone(), x.schema.clone(), script, !self.conn_writable(x.conn), x.run.clone());
-    }
-
-    /// Ends the run in flight on the server, which also rolls back an ANALYZE of a write and frees its locks.
-    pub(in crate::app) fn sql_explain_stop(&mut self, x: &mut SqlExplain) {
-        if x.busy {
-            x.stopped = true;
-            self.core.worker.sql_kill(x.db.clone(), x.run.conn.load(std::sync::atomic::Ordering::SeqCst), x.run.cancel.clone());
-        }
-    }
-
     /// The answer of a request of the open dialog.
     pub(in crate::app) fn sql_explained(&mut self, req: u64, sets: Vec<db::sql::ResultSet>) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if x.req != req || !x.busy {
-            return;
+        if !self.core.sql_explained(x, req, sets) {
+            self.modal = None;
         }
-        x.busy = false;
-        let text = match plan::plan_text(&sets) {
-            Ok(t) => t,
-            Err(e) => {
-                let stopped = x.stopped;
-                // A failed first read leaves nothing to show; a failed ANALYZE keeps the plan it already had.
-                if x.plan.is_none() && x.unread.is_none() {
-                    self.modal = None;
-                }
-                // After Stop the error is the cancel itself.
-                if !stopped {
-                    self.err(e);
-                }
-                return;
-            }
-        };
-        x.raw = plan::raw_text(&text);
-        x.analyzed = x.asked.is_some();
-        x.rolled_back = x.asked == Some(Analyze::Rollback) && !crate::db::sql::lex::pageable(&x.stmt, x.dialect);
-        match plan::parse(x.dialect, &text) {
-            Ok(mut p) => {
-                let ready = if x.demo {
-                    x.ev = Some(plan::Evidence::demo(&p, x.dialect));
-                    true
-                } else {
-                    let wants = plan::evidence::wants(&p, &x.stmt, x.dialect);
-                    // A rerun of the same statement scans the same tables, so the evidence already read still holds.
-                    let held = !wants.is_empty() && x.ev.as_ref().is_some_and(|e| e.covers(&wants));
-                    if !wants.is_empty() && !held {
-                        self.core.req += 1;
-                        x.ev_req = Some(self.core.req);
-                        self.core.worker.sql_explain_evidence(self.core.req, x.db.clone(), x.schema.clone(), wants);
-                    }
-                    held
-                };
-                if ready {
-                    p.refind(x.dialect, x.ev.as_ref(), x.db.pooler());
-                }
-                // The panel opens on what matters most: the node of the top finding, else the one that costs the most.
-                (x.hypo, x.hypo_wait, x.hypo_cmp) = (None, None, false);
-                x.sel = p.findings.iter().find_map(|f| f.node).or_else(|| (0..p.nodes.len()).max_by(|&a, &b| p.nodes[a].share.unwrap_or(0.0).total_cmp(&p.nodes[b].share.unwrap_or(0.0))));
-                x.scroll_to = x.sel;
-                // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
-                let now = crate::library::now_secs();
-                let p = Arc::new(p);
-                x.prev = self.core.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
-                x.leave_empty_compare();
-                (x.plan, x.unread) = (Some(p), None);
-            }
-            // The raw text is still worth reading.
-            Err(e) => (x.plan, x.unread, x.pane) = (None, Some(e), Pane::Raw),
-        }
-        x.plan_changed();
     }
 
     /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
     pub(in crate::app) fn sql_explain_evidence(&mut self, req: u64, ev: plan::Evidence) {
-        let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if x.ev_req != Some(req) {
-            return;
+        if let Some(Modal::SqlExplain(x)) = &mut self.modal {
+            self.core.sql_explain_evidence(x, req, ev);
         }
-        x.ev_req = None;
-        let pooler = x.db.pooler();
-        let key = history_key(x, x.plan.as_ref().is_some_and(|p| p.analyzed));
-        if let Some(p) = &mut x.plan {
-            Arc::make_mut(p).refind(x.dialect, Some(&ev), pooler);
-            // Each plan is compared with the findings it showed: the plan kept for the next Compare and this Compare's
-            // new side follow the strip. `differs` reads no findings, so the Compare tab stays as it was.
-            self.core.explain_prev.update(&key, p.clone());
-            if let Some(prev) = &mut x.prev {
-                prev.diff.refind(&prev.plan, p);
-            }
-            // A trial that ran while the catalog was read again is found with the same evidence as the plan it is set against.
-            if let Some(h) = &mut x.hypo {
-                h.plan.refind(x.dialect, Some(&ev), pooler);
-                h.diff.refind(p, &h.plan);
-            }
-        }
-        x.ev = Some(ev);
-        x.plan_changed();
     }
 
     /// The catalog's answer as if the server had sent it, for the open dialog.
@@ -317,11 +207,11 @@ impl App {
                     ctx.copy_text(text);
                     self.toast_ok("Copied.".into(), None);
                 }
-                XAct::Hypo(fix) => self.sql_explain_hypo_try(x, fix),
+                XAct::Hypo(fix) => self.core.sql_explain_hypo_try(x, fix),
                 XAct::HypoCompare => self.sql_explain_hypo_compare(x),
                 XAct::Draft(sql) => {
                     *keep = false;
-                    self.sql_explain_stop(x);
+                    self.core.sql_explain_stop(x);
                     self.sql_new_query(x.conn, x.tab_db.clone());
                     if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
                         s.query = sql;
@@ -341,14 +231,14 @@ impl App {
             }
         }
         if stop {
-            self.sql_explain_stop(x);
+            self.core.sql_explain_stop(x);
         }
         if let Some(a) = again {
-            self.sql_explain_send(x, Some(a));
+            self.core.sql_explain_send(x, Some(a));
         }
         if rows {
             *keep = false;
-            self.sql_explain_stop(x);
+            self.core.sql_explain_stop(x);
             self.sql_explain_rows(x);
         }
     }
@@ -361,11 +251,6 @@ impl App {
         }
         self.sql_run(true, false);
     }
-}
-
-/// Where this session keeps the last plan of the dialog's statement: two databases of one connection are two places.
-fn history_key(x: &SqlExplain, analyzed: bool) -> compare::Key {
-    compare::Key { conn: x.conn, db: x.database.clone(), schema: x.schema.clone(), stmt: x.key_stmt.clone(), analyzed }
 }
 
 /// The line under the title: the engine, then the size of the plan or what the run took.
