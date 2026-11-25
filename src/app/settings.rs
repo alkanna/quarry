@@ -8,16 +8,14 @@ const SETTINGS_W: f32 = 780.0;
 const SETTINGS_SIDE_W: f32 = 188.0;
 
 impl App {
-    /// Cmd+=, Cmd+- and Cmd+0 step through SCALES; they work over dialogs so Settings can stay open.
-    pub(super) fn zoom_keys(&mut self, ctx: &egui::Context) {
-        let cmd = egui::Modifiers::COMMAND;
-        let (up, down, reset) = ctx.input_mut(|i| (i.consume_key(cmd, Key::Equals) || i.consume_key(cmd, Key::Plus), i.consume_key(cmd, Key::Minus), i.consume_key(cmd, Key::Num0)));
+    /// Bigger, Smaller and Actual size (Cmd+=, Cmd+- and Cmd+0) step through SCALES; they work over dialogs so Settings
+    /// can stay open.
+    pub(super) fn zoom(&mut self, c: Cmd, ctx: &egui::Context) {
         let at = SCALES.iter().position(|s| s.0 == self.core.prefs.scale()).unwrap_or(0);
-        let to = match (up, down, reset) {
-            (_, _, true) => 0,
-            (true, _, _) => (at + 1).min(SCALES.len() - 1),
-            (_, true, _) => at.saturating_sub(1),
-            _ => return,
+        let to = match c {
+            Cmd::ZoomReset => 0,
+            Cmd::ZoomIn => (at + 1).min(SCALES.len() - 1),
+            _ => at.saturating_sub(1),
         };
         if SCALES[to].0 != self.core.prefs.scale() {
             self.exec(Action::Prefs(PrefsA::Zoom(SCALES[to].0)));

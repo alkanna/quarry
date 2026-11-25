@@ -522,9 +522,6 @@ impl App {
         }
     }
 
-    pub(super) fn disconnect(&mut self, id: u64) {
-        self.exec(Action::Conn(ConnA::Disconnect { conn: id }));
-    }
 }
 
 /// The menu of a connection's tile.

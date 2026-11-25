@@ -2,6 +2,7 @@ use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, th
 use crate::db::{self, Msg, PAGE_SIZE, Target, UndoAction, UndoKind, Worker};
 use quarry_core::core::Core;
 use quarry_core::action::{Action, ConnA, GroupA, Secret, SideA};
+use quarry_core::cmd::{Chord, Cmd};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
@@ -104,57 +105,16 @@ use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 
-/// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 47] = [
-    ("Cmd+K", "Jump to a connection, database or collection"),
-    ("Cmd+T", "Open a collection in a new tab"),
-    ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
-    ("Cmd+R", "Reload the current tab"),
-    ("Cmd+Shift+R", "Refresh the connection's databases"),
-    ("Cmd+W", "Close the tab"),
-    ("Cmd+Shift+T", "Reopen the last closed tab"),
-    ("Cmd+1 to Cmd+8", "Go to that tab"),
-    ("Cmd+9", "Go to the last tab"),
-    ("Ctrl+Tab, Cmd+Shift+]", "Next tab"),
-    ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
-    ("Cmd+[, Cmd+]", "Back and forward through the tabs you visited"),
-    ("Cmd+Alt+1 to Cmd+Alt+8", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell, Watch"),
-    ("", "On a SQL tab: Content, Structure, Relations, Triggers, Info, Query, Shell"),
-    ("Cmd+F", "Focus the query"),
-    ("Cmd+Shift+F", "Find a collection in the sidebar"),
-    ("Up, Down", "Select the previous or next document"),
-    ("PageUp, PageDown", "Previous or next page"),
-    ("Enter", "Run the query"),
-    ("Cmd+E", "Explain the query, pipeline or SQL statement"),
-    ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret, or the selected script of the Library panel"),
-    ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
-    ("Esc", "Close or deselect"),
-    ("Alt+Up/Down (Left/Right)", "Move the focused row, column, tab or stage"),
-    ("Cmd+Backspace, Delete", "Delete the selected script or folder of the Library panel; the toast offers Undo"),
-    ("Cmd+,", "Settings"),
-    ("Cmd+N", "New connection"),
-    ("Cmd+L", "Show or hide the query log"),
-    ("Cmd+/", "This list"),
-    ("Ctrl+Space", "Suggestions in a query or SQL field, also where none show by themselves"),
-    ("Tab", "Show the selected SQL row as a record, one line per column; Esc closes it"),
-    ("Vim motions", "Modal editing in the code editors, turned on in Settings > Editing"),
-    ("", "With Vim motions on, where no text field has the keys:"),
-    ("h j k l, w b", "Move the grid's cell cursor; in a record, j and k walk its lines and h and l fold its JSON"),
-    ("gg, G, {n}G, 0, $", "First, last or nth row; first or last column"),
-    ("Ctrl+d/u, Ctrl+f/b", "Half a screen or a screen of rows down or up (Alt where Ctrl is the command key)"),
-    ("i, v", "Edit the cell under the cursor, or view its value in full"),
-    ("yy, Y", "Copy the cell's value, or the row as JSON"),
-    ("gt, gT, {n}gt", "Next, previous or nth tab"),
-    ("Ctrl+h, Ctrl+k, Ctrl+j/l", "Move the keys to the sidebar, the query or editor, the grid (Alt where Ctrl is the command key)"),
-    ("Cmd+S", "Save the script to the library, or write the library script or file it came from"),
-    ("Cmd+Shift+S", "Save the script to the library as a new one"),
-    ("Cmd+O", "Pick a script of the library for this view"),
-    ("Cmd+Shift+L", "Show the Library panel and move the keys to it"),
-    ("Enter", "Open the selected script of the Library panel"),
-    ("Alt+Enter", "Open the selected script of the Library panel in a new tab"),
-    ("F2", "Rename the selected script or folder of the Library panel"),
-];
-
+/// egui's shortcut for a chord of the registry. `Cmd` is Command on macOS and Ctrl elsewhere, as egui's COMMAND is.
+pub(crate) fn shortcut(c: &Chord) -> egui::KeyboardShortcut {
+    let mut m = egui::Modifiers::NONE;
+    for (on, k) in [(c.cmd, egui::Modifiers::COMMAND), (c.ctrl, egui::Modifiers::CTRL), (c.shift, egui::Modifiers::SHIFT), (c.alt, egui::Modifiers::ALT)] {
+        if on {
+            m = m | k;
+        }
+    }
+    egui::KeyboardShortcut::new(m, Key::from_name(c.key).expect("the registry spells keys as egui does"))
+}
 pub struct App {
     /// Everything that is not drawing: connections, tabs, windows, preferences and the worker.
     core: Core,
@@ -163,9 +123,9 @@ pub struct App {
     tree_x: egui::Rangef,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::MenuBar>,
-    /// Menu picks that are not key presses, handled at the start of the next frame.
+    /// Menu picks that call a command, handled at the start of the next frame.
     #[cfg(target_os = "macos")]
-    menu_acts: Vec<crate::menu::Act>,
+    menu_acts: Vec<Cmd>,
     modal: Option<Modal>,
     /// An answer that arrived while a dialog was open, shown once that dialog closes.
     late_modals: Vec<Modal>,
@@ -420,19 +380,13 @@ impl App {
         app
     }
 
-    /// Menu items without a keyboard twin.
+    /// A menu pick that calls its command. A page command waits for the page, as the key it used to replay did.
     #[cfg(target_os = "macos")]
-    fn menu_act(&mut self, ctx: &egui::Context, a: crate::menu::Act) {
-        use crate::menu::Act;
-        match a {
-            Act::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Act::CheckUpdates => self.check_now(),
-            Act::Export if !self.core.tabs.is_empty() => self.export(),
-            Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
-            Act::Insert if !self.core.tabs.is_empty() => self.core.insert = Some("{\n  \n}".into()),
-            Act::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
-            _ => {}
+    fn menu_act(&mut self, ctx: &egui::Context, c: Cmd) {
+        if matches!(c.spec().scope, quarry_core::cmd::Scope::Page | quarry_core::cmd::Scope::View) && (self.layer() != quarry_core::cmd::Layer::Page || !c.keys_on(&self.core, ctx.text_edit_focused())) {
+            return;
         }
+        self.run_cmd(c, ctx);
     }
 
     /// Keeps one scroll gesture on the axis it started on, so a slightly diagonal trackpad swipe
@@ -612,7 +566,6 @@ impl eframe::App for App {
         self.auto_update(&ctx);
         // Before the modals, so one opened by a shortcut draws this frame, and an Esc that closes a
         // modal is not also taken as a second Esc by `keys`.
-        self.zoom_keys(&ctx);
         self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);

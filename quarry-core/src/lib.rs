@@ -17,6 +17,7 @@ pub mod state;
 pub mod sysmem;
 pub mod update;
 pub mod vault;
+pub mod cmd;
 
 /// The app's version, read from the quarry package by build.rs: release-please bumps only that one.
 pub const VERSION: &str = env!("QUARRY_VERSION");

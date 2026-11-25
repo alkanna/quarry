@@ -151,7 +151,7 @@ fn disconnect_stops_a_running_watch_of_that_connection() {
     rt.block_on(async { coll.insert_one(mongodb::bson::doc! { "_id": 1 }).await.unwrap() });
     ui.wait("the first change", |a| a.t().is_some_and(|t| t.watch.err.is_none() && !t.watch.rows.is_empty()));
     let seen = ui.app().t().unwrap().watch.rows.len();
-    ui.h.state_mut().disconnect(CONN);
+    ui.h.state_mut().exec(quarry_core::action::Action::Conn(quarry_core::action::ConnA::Disconnect { conn: CONN }));
     ui.settle();
     assert!(!ui.app().core.tabs.iter().any(|t| t.watch.running()), "a watch kept running after Disconnect");
     rt.block_on(async { coll.insert_one(mongodb::bson::doc! { "_id": 2 }).await.unwrap() });

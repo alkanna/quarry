@@ -158,11 +158,6 @@ fn alt_arrow_moves_the_focused_header() {
     assert_eq!(shown(&ui), want, "Alt+Right did not move the focused header");
 }
 
-#[test]
-fn the_shortcut_list_names_the_keyboard_moves() {
-    assert!(SHORTCUTS.iter().any(|(k, what)| k.starts_with("Alt+Up/Down") && what.contains("Move the focused row")), "Alt+arrows are missing from the shortcut list");
-}
-
 /// Opens the right-click menu of the widget named `label`.
 fn menu_of(ui: &mut UiApp, label: &str) {
     ui.show(label);

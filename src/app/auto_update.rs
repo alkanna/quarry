@@ -34,11 +34,6 @@ impl App {
         }
     }
 
-    /// Check for updates from the app menu, the palette or Settings.
-    pub(super) fn check_now(&mut self) {
-        self.exec(Action::Update(UpdateA::CheckNow));
-    }
-
     /// Restart from Core, once its own work is clear: the app's dialogs can still hold it.
     pub(super) fn restart_now(&mut self) {
         if self.busy_work() {

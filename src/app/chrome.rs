@@ -3,6 +3,7 @@
 use super::*;
 use crate::ui::dnd;
 use quarry_core::action::{Action, TabA};
+use quarry_core::cmd::{KEY_ORDER, Layer, Scope};
 
 
 impl App {
@@ -60,123 +61,40 @@ impl App {
         }
     }
 
-    /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
-    /// stay off while it is open; a new kind of window belongs in this list.
+    /// What is over the page: Core's windows, or the app's modal. Each takes its own keys, Esc included, so page
+    /// shortcuts stay off while one is open; a new kind of window belongs in `quarry_core::cmd::WINDOWS`.
+    pub(super) fn layer(&self) -> Layer {
+        if self.modal.is_some() { Layer::Modal } else { self.core.layer() }
+    }
+
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.core.cloud_browser.is_some() || self.core.insert.is_some() || self.value_dialog_open() || self.core.users.is_some() || self.core.server.is_some() || self.core.sql_users.is_some() || self.core.pg_roles.is_some() || self.core.sql_server.is_some() || self.core.pg_server.is_some() || self.core.routines.window_open() || self.core.tool.is_some() || !self.core.agents.asks.is_empty() || self.core.agents.activity_open || self.core.agents.rules.is_some()
+        self.layer() != Layer::Page
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
-        if self.window_open() {
+        let page = self.layer() == Layer::Page;
+        // A plain key ("/") only while nothing is being typed into, so it never steals a character from a field.
+        let typing = ctx.memory(|m| m.focused().is_some());
+        let text = ctx.text_edit_focused();
+        // KEY_ORDER tries the longer combos first, since extra Shift and Alt still match a plain Cmd shortcut. A command
+        // whose keys_on is false leaves its key alone. Cmd+S reaches the library only when no page handler took it: staged
+        // SQL grid edits and document drafts consume it where they draw, before this runs, so they win. A new page handler
+        // of Cmd+S must consume the key too, or its press would also open the Save dialog.
+        for &(s, ch) in KEY_ORDER.iter() {
+            let on = match s.scope {
+                Scope::App => true,
+                Scope::Page | Scope::View => page,
+                Scope::Native => false,
+            };
+            if on && !(ch.mods() == 0 && typing) && s.cmd.keys_on(&self.core, text) && ctx.input_mut(|i| i.consume_shortcut(&shortcut(&ch))) {
+                self.run_cmd(s.cmd, ctx);
+            }
+        }
+        if !page {
             return;
         }
         let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
-        // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
-        // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
-        // would also open the Save dialog. A view that holds no script (a table's Structure, Indexes and the like) leaves
-        // the key alone. The cell editor of a SQL grid owns the key while it is open.
-        // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
-        if self.core.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
-            self.save_script_as();
-        }
-        if self.core.sql_cell.is_none() && self.tab_has_text() && k(cmd, Key::S) {
-            self.save_script();
-        }
-        // Cmd+O opens the library picker of the view on screen; a view with no script has none.
-        if self.tab_has_text() && k(cmd, Key::O) {
-            self.core.lib_ui.open_picker = true;
-        }
-        if k(cmd | shift, Key::L) {
-            self.focus_library();
-        }
-        // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
-        if k(cmd | shift, Key::T) {
-            self.reopen_tab();
-        }
-        if k(cmd, Key::W) {
-            self.ask_close_tab(self.core.cur);
-        }
-        if k(cmd, Key::K) {
-            self.open_palette();
-        }
-        if k(cmd, Key::T) {
-            self.open_new_tab();
-        }
-        let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
-        // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself. The tree has the keys
-        // only while it is on screen and no text field has taken them, so a flag left from a click never holds the editor's.
-        let tree_keys = self.core.lib_ui.panel.focus && !self.core.prefs.sidebar_hidden && self.core.prefs.side_mode() == SideMode::Library && !ctx.text_edit_focused();
-        let query_view = query_view && !tree_keys;
-        if query_view && k(cmd | shift, Key::Enter) {
-            self.sql_run(true, false);
-        } else if query_view && k(cmd, Key::Enter) {
-            self.sql_run(false, false);
-        }
-        if k(cmd, Key::E) {
-            if query_view {
-                self.sql_run(false, true);
-            } else {
-                self.explain();
-            }
-        }
-        if k(cmd | shift, Key::R) && let Some(id) = self.core.active.filter(|_| !self.core.demo) {
-            self.connect(id);
-        }
-        if k(cmd, Key::R) && !self.core.tabs.is_empty() {
-            self.reload();
-        }
-        // "/" only while nothing is being typed into, so it never steals a slash from a field.
-        let typing = ctx.memory(|m| m.focused().is_some());
-        if k(cmd | shift, Key::F) || (!typing && k(none, Key::Slash)) {
-            self.show_sidebar();
-            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("tree-filter")));
-        }
-        if k(cmd, Key::F) && !self.core.tabs.is_empty() {
-            self.set_view(View::Documents);
-            self.focus_query(ctx);
-        }
-        if k(cmd, Key::Comma) {
-            self.modal = Some(Modal::Settings);
-        }
-        if k(cmd, Key::N) {
-            self.new_conn_modal();
-        }
-        if k(cmd, Key::L) {
-            self.core.log.open = !self.core.log.open;
-        }
-        if k(cmd, Key::Slash) {
-            self.shortcuts_modal();
-        }
-        let n = self.core.tabs.len();
-        if n > 0 {
-            if k(ctrl | shift, Key::Tab) || k(cmd | shift, Key::OpenBracket) || k(cmd | shift, Key::OpenCurlyBracket) {
-                self.go_tab((self.core.cur + n - 1) % n);
-            }
-            if k(ctrl, Key::Tab) || k(cmd | shift, Key::CloseBracket) || k(cmd | shift, Key::CloseCurlyBracket) {
-                self.go_tab((self.core.cur + 1) % n);
-            }
-            const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-            // The palette shows these as each view's position in MONGO_VIEWS.
-            let views: &[(View, &str)] = if self.t().is_some_and(|t| t.sql.is_some()) { &SQL_VIEWS } else { &MONGO_VIEWS };
-            for (d, (v, _)) in DIGITS.iter().zip(views) {
-                if k(cmd | alt, *d) {
-                    self.set_view(*v);
-                }
-            }
-            // After the Cmd+Shift brackets above, which would also match these.
-            if k(cmd, Key::OpenBracket) {
-                self.nav(true);
-            }
-            if k(cmd, Key::CloseBracket) {
-                self.nav(false);
-            }
-            for (i, d) in DIGITS.iter().enumerate() {
-                if k(cmd, *d) {
-                    self.go_tab(if i == 8 { n - 1 } else { i.min(n - 1) });
-                }
-            }
-        }
+        let none = egui::Modifiers::NONE;
         // Plain keys only act when no text field, menu or cell editor wants them. The boolean switch and the calendar
         // leave no text field focused but still read the arrows and letters.
         if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.core.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.core.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
@@ -259,8 +177,7 @@ impl App {
     }
 
     pub(super) fn shortcuts_modal(&mut self) {
-        let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
-        self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
+        self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body: quarry_core::cmd::sheet(), code: false });
     }
 
     pub(super) fn screenshot(&mut self, ctx: &egui::Context) {

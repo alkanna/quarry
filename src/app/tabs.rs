@@ -25,20 +25,12 @@ impl App {
         self.core.set_cur(i)
     }
 
-    pub(super) fn nav(&mut self, back: bool) {
-        self.core.nav(back)
-    }
-
     pub(super) fn open_collection(&mut self, sel: Sel, how: Open) {
         self.core.open_collection(sel, how)
     }
 
     pub(super) fn open_tab(&mut self, sel: Sel, how: Open) -> bool {
         self.core.open_tab(sel, how)
-    }
-
-    pub(super) fn reopen_tab(&mut self) {
-        self.core.reopen_tab()
     }
 
     pub(super) fn close_tab(&mut self, i: usize) {

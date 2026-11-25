@@ -1222,7 +1222,7 @@ pub(crate) fn style(ctx: &egui::Context, look: Look) {
         ctx.data_mut(|d| d.insert_temp(id, pick));
     }
     LOOK_GEN.fetch_add(1, Relaxed);
-    // egui's own Cmd+= zoom steps by 10 % and is not saved; App::zoom_keys steps through SCALES instead.
+    // egui's own Cmd+= zoom steps by 10 % and is not saved; App::zoom steps through SCALES instead.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.set_zoom_factor(look.scale);
     ctx.all_styles_mut(|s| {
