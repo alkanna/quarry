@@ -907,16 +907,7 @@ fn member_slot(full: &[u64], open: &[u64], m: dnd::Move) -> Option<usize> {
     }
 }
 
-/// Two-letter mark and product name. MariaDB shares the MySQL engine, so only the server
-/// reply, once connected, tells it apart.
-pub(super) fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'static str) {
-    match (engine, product) {
-        (db::sql::Engine::Mongo, _) => ("MO", "MongoDB"),
-        (db::sql::Engine::Postgres, _) => ("PG", "PostgreSQL"),
-        (_, "MariaDB") => ("MA", "MariaDB"),
-        _ => ("MY", "MySQL"),
-    }
-}
+pub(super) use quarry_core::action::agents::engine_mark;
 
 /// The colors of the connection form's engine cards, so an engine reads the same everywhere.
 pub(super) fn mark_color(mark: &str) -> Color32 {

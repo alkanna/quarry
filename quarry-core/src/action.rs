@@ -48,6 +48,7 @@ pub mod lib_dialogs;
 pub mod mongo;
 pub mod grid;
 pub mod routines;
+pub mod agents;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -70,6 +71,8 @@ mod mongo_tests;
 mod structure_tests;
 #[cfg(test)]
 mod ddl_tests;
+#[cfg(test)]
+mod agents_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -96,6 +99,7 @@ pub use grid::GridA;
 pub use routines::RoutineA;
 pub use sql::ddl::{DdlA, SqlForm};
 pub use sql::ops::SqlOpsA;
+pub use agents::{AgentCall, AgentsA, Origin};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -123,6 +127,7 @@ pub enum Action {
     Routines(RoutineA),
     Ddl(DdlA),
     SqlOps(SqlOpsA),
+    Agents(AgentsA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -166,6 +171,8 @@ pub enum UiFx {
     IfFree(Dialog),
     /// Puts this text on the clipboard.
     CopyText(String),
+    /// An approval is waiting while the window has no focus: ask the system for the user's attention.
+    Attention,
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -295,6 +302,7 @@ impl Core {
             Action::Routines(a) => self.routine_act(a),
             Action::Ddl(a) => self.ddl(a),
             Action::SqlOps(a) => self.sql_ops(a),
+            Action::Agents(a) => self.agents_act(a),
         }
     }
 
@@ -362,6 +370,7 @@ impl Core {
             Msg::SqlRoutine { .. } => true,
             // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved does too, and hands the rest to `sql_view_saved`.
             Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => true,
+            Msg::Agent(_) => true,
             _ => false,
         }
     }
@@ -421,6 +430,7 @@ impl Core {
             Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
             Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
             Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
+            Msg::Agent(ev) => self.on_agent(ev),
             _ => {}
         }
     }

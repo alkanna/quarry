@@ -1,9 +1,9 @@
-//! The executor of agent calls. Everything here runs on the UI thread and only decides: parse, find the connection,
-//! check the rules and the guard, ask the policy, then answer at once, queue an approval, or start the operation on
-//! the Worker runtime. Operations answer the agent through the oneshot themselves and report back with
+//! The executor of agent calls. Everything here runs on the thread that owns Core and only decides: parse, find the
+//! connection, check the rules and the guard, ask the policy, then answer at once, queue an approval, or start the
+//! operation on the Worker runtime. Operations answer the agent through the oneshot themselves and report back with
 //! `AgentEvent::Done`, so the Activity list, the pill and the audit log stay here.
 
-use super::*;
+use crate::action::UiFx;
 use crate::agents::audit::{self, Entry, Summary};
 use crate::agents::config::OpClass;
 use crate::agents::guard;
@@ -11,13 +11,22 @@ use crate::agents::link::ToolErr;
 use crate::agents::policy::{self, AskWhy, Decision, LiveState};
 use crate::agents::scrub::Rules;
 use crate::agents::tools::{self, Call, ConnRef};
-use db::sql::Dialect;
+use crate::core::Core;
 use crate::db::dates::local_hms as clock;
+use crate::db::sql::Dialect;
+use crate::db::{self, group};
+use crate::paths::config_dir;
+use crate::state::agents::{Activity, AgentSession, Answer, Ask, LinkState, Outcome};
+use crate::state::config::{stored_uri, uri_err};
+use crate::state::{ns_key, Conn, Status};
+use mongodb::bson::Bson;
+use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-pub(crate) use quarry_core::state::agents::exec::*;
+pub use crate::state::agents::exec::*;
 
 /// Calls kept in the Activity list; the audit log on disk keeps the rest.
-pub(in crate::app) const ACTIVITY_MAX: usize = 500;
+pub const ACTIVITY_MAX: usize = 500;
 /// How long sampled MongoDB keys stand in for a collection's fields.
 const KEYS_FRESH: Duration = Duration::from_secs(300);
 /// When the sidebar looks again at a structure change still running on the server after the time limit.
@@ -25,9 +34,9 @@ const RECHECK: Duration = Duration::from_secs(30);
 /// Arguments kept for the detail view and the audit log.
 const ARGS_SHOWN: usize = audit::ARGS_MAX;
 
-pub(in crate::app) const OFF: &str = "AI agents are off in Quarry Settings.";
-pub(in crate::app) const DENIED: &str = "The user denied this in Quarry.";
-pub(in crate::app) const NO_ANSWER: &str = "No answer in Quarry within 50 s.";
+pub const OFF: &str = "AI agents are off in Quarry Settings.";
+pub const DENIED: &str = "The user denied this in Quarry.";
+pub const NO_ANSWER: &str = "No answer in Quarry within 50 s.";
 const CLOSED: &str = "The connection closed before the call could run. Open it in Quarry, then try again.";
 
 /// The SQL dialect of a connection, from its engine while it has not connected yet; None on MongoDB.
@@ -41,7 +50,7 @@ fn dialect_of(c: &Conn) -> Option<Dialect> {
 }
 
 /// The scrub hash key, derived from the settings key so neither can be learned from the other.
-pub(in crate::app) fn hash_key_from(k: &[u8; 32]) -> [u8; 32] {
+pub fn hash_key_from(k: &[u8; 32]) -> [u8; 32] {
     use hmac::{Hmac, KeyInit, Mac};
     let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(k).expect("HMAC takes any key length");
     m.update(b"quarry-agents-scrub-hash");
@@ -50,10 +59,10 @@ pub(in crate::app) fn hash_key_from(k: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-pub(super) const SCHEMA_PG_ONLY: &str = "`schema` is for PostgreSQL connections. Here `database` names the database.";
+pub const SCHEMA_PG_ONLY: &str = "`schema` is for PostgreSQL connections. Here `database` names the database.";
 
 /// What a not_open refusal says: approvals and agents never connect.
-pub(super) fn not_open(name: &str) -> String {
+pub fn not_open(name: &str) -> String {
     format!("Open {name} in Quarry first: agents never open connections themselves.")
 }
 
@@ -81,26 +90,26 @@ fn for_mongo(call: &Call) -> Option<bool> {
 /// information_schema holds names only.
 const MY_SYSTEM: [&str; 4] = ["mysql", "performance_schema", "sys", "information_schema"];
 
-impl App {
+impl Core {
     fn agent_id(&mut self) -> u64 {
-        let id = self.core.agents.exec.next;
-        self.core.agents.exec.next += 1;
+        let id = self.agents.exec.next;
+        self.agents.exec.next += 1;
         id
     }
 
-    pub(super) fn agent_push(&mut self, a: Activity) {
-        self.core.agents.activity.push_back(a);
-        while self.core.agents.activity.len() > ACTIVITY_MAX {
-            self.core.agents.activity.pop_front();
+    pub(crate) fn agent_push(&mut self, a: Activity) {
+        self.agents.activity.push_back(a);
+        while self.agents.activity.len() > ACTIVITY_MAX {
+            self.agents.activity.pop_front();
         }
     }
 
-    fn agent_activity(&mut self, id: u64) -> Option<&mut Activity> {
-        self.core.agents.activity.iter_mut().rev().find(|a| a.id == id)
+    pub(crate) fn agent_activity(&mut self, id: u64) -> Option<&mut Activity> {
+        self.agents.activity.iter_mut().rev().find(|a| a.id == id)
     }
 
     /// A call refused before it ran: the agent gets the reason as a tool error, the Activity list and the log a line.
-    pub(super) fn agent_refuse(&mut self, mut act: Activity, reply: Reply, code: &str, why: String) {
+    pub(crate) fn agent_refuse(&mut self, mut act: Activity, reply: Reply, code: &str, why: String) {
         let _ = reply.send(Err(ToolErr::new(code, why.clone())));
         act.outcome = Outcome::Refused(why);
         self.agent_audit(&act, "refused", Summary::default());
@@ -108,8 +117,8 @@ impl App {
     }
 
     /// The shared connection a call names, by id or by name.
-    pub(super) fn agent_conn(&self, r: &ConnRef) -> Result<u64, String> {
-        let shared = |id: u64| self.core.agents.cfg.conn(id).is_some() && self.conn(id).is_some();
+    pub(crate) fn agent_conn(&self, r: &ConnRef) -> Result<u64, String> {
+        let shared = |id: u64| self.agents.cfg.conn(id).is_some() && self.conn(id).is_some();
         match r {
             ConnRef::Id(id) if shared(*id) => Ok(*id),
             ConnRef::Id(id) => Err(format!("No connection with id {id} is shared with agents. Call list_connections.")),
@@ -119,8 +128,8 @@ impl App {
                 {
                     return Ok(id);
                 }
-                let exact: Vec<u64> = self.core.conns.iter().filter(|c| c.meta.name == *n && shared(c.meta.id)).map(|c| c.meta.id).collect();
-                let found = if exact.is_empty() { self.core.conns.iter().filter(|c| c.meta.name.eq_ignore_ascii_case(n) && shared(c.meta.id)).map(|c| c.meta.id).collect() } else { exact };
+                let exact: Vec<u64> = self.conns.iter().filter(|c| c.meta.name == *n && shared(c.meta.id)).map(|c| c.meta.id).collect();
+                let found = if exact.is_empty() { self.conns.iter().filter(|c| c.meta.name.eq_ignore_ascii_case(n) && shared(c.meta.id)).map(|c| c.meta.id).collect() } else { exact };
                 match found.as_slice() {
                     [id] => Ok(*id),
                     [] => Err(format!("No connection named {n} is shared with agents. Call list_connections.")),
@@ -132,25 +141,25 @@ impl App {
 
     /// The connection's compiled rules, from the cache while the settings they came from are unchanged.
     fn agent_rules(&mut self, conn: u64, database: &str) -> Result<Arc<Rules>, String> {
-        let rev = self.core.agents.rev;
+        let rev = self.agents.rev;
         let key = (conn, database.to_string());
-        if let Some((v, r)) = self.core.agents.exec.rules.get(&key)
+        if let Some((v, r)) = self.agents.exec.rules.get(&key)
             && *v == rev
         {
             return r.clone();
         }
         let p = self.agent_policy(conn, database);
-        let cfg = &self.core.agents.cfg;
+        let cfg = &self.agents.cfg;
         let global = match self.agent_home(conn) {
             Some(home) if !database.is_empty() => std::borrow::Cow::Owned(policy::pg_rules(&cfg.rules, database, &home)),
             _ => std::borrow::Cow::Borrowed(&cfg.rules[..]),
         };
-        let r = Rules::compile(&cfg.presets, &p.as_ref().map(|p| p.presets).unwrap_or_default(), &global, p.as_ref().map_or(&[][..], |p| p.rules.as_slice()), &self.core.agents.exec.hash_key)
+        let r = Rules::compile(&cfg.presets, &p.as_ref().map(|p| p.presets).unwrap_or_default(), &global, p.as_ref().map_or(&[][..], |p| p.rules.as_slice()), &self.agents.exec.hash_key)
             .map(|mut r| {
                 r.binary_as_size = cfg.binary_as_size;
                 r
             }).map(Arc::new).map_err(|e| format!("The data rules for this connection do not compile, so Quarry refuses every agent call on it until they are fixed in Settings > AI agents. {e}"));
-        self.core.agents.exec.rules.insert(key, (rev, r.clone()));
+        self.agents.exec.rules.insert(key, (rev, r.clone()));
         r
     }
 
@@ -161,8 +170,8 @@ impl App {
     }
 
     /// The connection's settings as they apply in `database`: on PostgreSQL its scope and rules are rewritten for it.
-    pub(super) fn agent_policy(&self, conn: u64, database: &str) -> Option<crate::agents::config::ConnPolicy> {
-        let p = self.core.agents.cfg.conn(conn)?;
+    pub(crate) fn agent_policy(&self, conn: u64, database: &str) -> Option<crate::agents::config::ConnPolicy> {
+        let p = self.agents.cfg.conn(conn)?;
         Some(match self.agent_home(conn) {
             Some(home) if !database.is_empty() => policy::pg_policy(p, database, &home),
             _ => p.clone(),
@@ -191,7 +200,7 @@ impl App {
         let known: Vec<&str> = c.dbs.iter().map(|d| d.0.as_str()).collect();
         if database != home && !known.is_empty() && !known.contains(&database.as_str()) {
             // Only the databases list_databases would show, so the refusal names none the scope hides.
-            let scope = self.core.agents.cfg.conn(conn).map(|p| p.scope.clone()).unwrap_or_default();
+            let scope = self.agents.cfg.conn(conn).map(|p| p.scope.clone()).unwrap_or_default();
             let shown: Vec<&str> = known.into_iter().filter(|d| policy::pg_listed(&scope, d, &home)).collect();
             return Err(("bad_args", format!("{database} is not a database of {} shared with agents. On PostgreSQL `database` names a database ({}) and `schema` the schema in it, public when left out.", c.meta.name, shown.join(", "))));
         }
@@ -201,11 +210,11 @@ impl App {
 
     /// The arguments for the detail view and the audit log: text fields read as documents where they parse, every
     /// document scrubbed by the namespace's rules, then the value rules over the whole text, cut to 4 KB.
-    pub(super) fn agent_args(&self, rules: Option<&Rules>, args: &Value, call: Option<&Call>) -> String {
+    pub(crate) fn agent_args(&self, rules: Option<&Rules>, args: &Value, call: Option<&Call>) -> String {
         let fallback;
         let rules = match rules {
             Some(r) => r,
-            None => match Rules::from_config(&self.core.agents.cfg, None, &self.core.agents.exec.hash_key) {
+            None => match Rules::from_config(&self.agents.cfg, None, &self.agents.exec.hash_key) {
                 Ok(r) => {
                     fallback = r;
                     &fallback
@@ -260,7 +269,7 @@ impl App {
                     None => {
                         // Once per database, and only one the sidebar lists, so a loop of calls sends no flood of reads.
                         let listed = c.dbs.iter().any(|d| d.0 == database);
-                        if listed && !self.core.sql_asked.contains(&(conn, database.clone())) {
+                        if listed && !self.sql_asked.contains(&(conn, database.clone())) {
                             self.pg_ask_schemas(conn, &database);
                         }
                         return None;
@@ -276,7 +285,7 @@ impl App {
             let mut missing = Vec::new();
             for s in spaces {
                 let key = if pg { ns_key(&database, &s) } else { s.clone() };
-                match self.core.sql_schema.get(&(conn, key.clone())) {
+                match self.sql_schema.get(&(conn, key.clone())) {
                     Some(sch) => out.extend(sch.tables.iter().map(|t| ((s.clone(), t.name.clone()), t.cols.iter().map(|c| c.name.clone()).collect()))),
                     None => missing.push((key, s)),
                 }
@@ -285,8 +294,8 @@ impl App {
                 return Some(out);
             }
             for (key, s) in missing {
-                if self.core.sql_schema_asked.insert((conn, key)) {
-                    self.core.worker.sql_schema(conn, sql.at(&database), s);
+                if self.sql_schema_asked.insert((conn, key)) {
+                    self.worker.sql_schema(conn, sql.at(&database), s);
                 }
             }
             return None;
@@ -300,7 +309,7 @@ impl App {
         let colls = c.dbs.iter().find(|d| d.0 == db)?.1.clone()?;
         let mut out = Vec::new();
         for coll in colls {
-            let (at, keys) = self.core.agents.exec.keys.get(&(conn, db.clone(), coll.clone()))?;
+            let (at, keys) = self.agents.exec.keys.get(&(conn, db.clone(), coll.clone()))?;
             if at.elapsed() > KEYS_FRESH {
                 return None;
             }
@@ -313,12 +322,12 @@ impl App {
     /// may have been locked, closed or unshared meanwhile.
     fn agent_check(&mut self, call: &Call, conn: u64, database: &str, session: u64, matched: Option<u64>) -> Result<(Arc<Rules>, OpClass, Decision), (String, &'static str)> {
         let Some(c) = self.conn(conn) else { return Err(("This connection was removed from Quarry.".into(), "refused")) };
-        if self.core.agents.cfg.conn(conn).is_none() {
+        if self.agents.cfg.conn(conn).is_none() {
             return Err(("This connection is not shared with agents. The user can share it in Settings > AI agents.".into(), "refused"));
         }
         let mongo = c.meta.engine == db::sql::Engine::Mongo;
         let dialect = dialect_of(c);
-        let live = LiveState { connected: c.status == Status::Ready, writable: c.writable, always_writable: self.core.prefs.always_writable, sql: dialect };
+        let live = LiveState { connected: c.status == Status::Ready, writable: c.writable, always_writable: self.prefs.always_writable, sql: dialect };
         match for_mongo(call) {
             Some(true) if !mongo => return Err(("This tool works on MongoDB connections. Use select_rows, query_sql, explain_sql or run_shell on SQL connections.".into(), "wrong_engine")),
             Some(false) if mongo => return Err(("This tool works on SQL connections. Use find, aggregate or count on MongoDB.".into(), "wrong_engine")),
@@ -331,15 +340,15 @@ impl App {
             let known = self.agent_known(conn, database, call);
             policy::hides_data(&rules, call, known.as_deref())
         };
-        let grants = self.core.agents.exec.grants.get(&(session, conn)).cloned().unwrap_or_default();
+        let grants = self.agents.exec.grants.get(&(session, conn)).cloned().unwrap_or_default();
         let d = policy::decide(self.agent_policy(conn, database).as_ref(), live, call, class, &grants, matched, hides);
         Ok((rules, class, d))
     }
 
     /// A call from an agent, straight from the link. Answered now, or queued for approval, or started.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::app) fn agent_call(&mut self, ctx: &egui::Context, session: u64, link: u64, tool: String, args: Value, client: String, reply: Reply) {
-        if !self.core.agents.cfg.enabled {
+    pub(super) fn agent_call(&mut self, session: u64, link: u64, tool: String, args: Value, client: String, reply: Reply) {
+        if !self.agents.cfg.enabled {
             let _ = reply.send(Err(ToolErr::new("off", OFF)));
             return;
         }
@@ -354,7 +363,7 @@ impl App {
             }
         };
         if matches!(call, Call::OpenShell { .. }) {
-            return self.agent_open_shell(ctx, act, call, &args, reply);
+            return self.agent_open_shell(act, call, &args, reply);
         }
         if call == Call::ListConnections {
             let v = self.agent_connections();
@@ -396,7 +405,7 @@ impl App {
             }
         };
         act.args = self.agent_args(Some(&rules), &args, Some(&call));
-        self.core.agents.exec.calls.insert((session, link), id);
+        self.agents.exec.calls.insert((session, link), id);
         let reason = tools::reason(&args);
         match decision {
             Decision::Refuse(why) => self.agent_refuse(act, reply, "refused", why),
@@ -413,7 +422,7 @@ impl App {
                     Decision::Ask(w) => w,
                     _ => AskWhy::default(),
                 };
-                self.agent_prepare(ctx, id, Pending { call, class, conn, database, session, why, reply, reason, snap: None, writable: false });
+                self.agent_prepare(id, Pending { call, class, conn, database, session, why, reply, reason, snap: None, writable: false });
             }
             Decision::Allow => {
                 act.outcome = Outcome::Running;
@@ -425,29 +434,29 @@ impl App {
                 act.outcome = Outcome::Waiting;
                 self.agent_push(act);
                 let facts = self.agent_facts(&call, conn);
-                self.agent_queue(ctx, id, Pending { call, class, conn, database, session, why, reply, reason, snap: None, writable: false }, facts, None);
+                self.agent_queue(id, Pending { call, class, conn, database, session, why, reply, reason, snap: None, writable: false }, facts, None);
             }
         }
     }
 
     /// Puts a call in the approval queue; it is denied after `ask_wait`. `no_undo` says why Allow can only run it
     /// without undo.
-    fn agent_queue(&mut self, ctx: &egui::Context, id: u64, mut p: Pending, facts: Vec<String>, no_undo: Option<String>) {
+    fn agent_queue(&mut self, id: u64, mut p: Pending, facts: Vec<String>, no_undo: Option<String>) {
         p.writable = self.agent_unlocked(p.conn);
         let Some(act) = self.agent_activity(id) else { return };
         act.outcome = Outcome::Waiting;
         let (client, tool, ns, code) = (act.client.clone(), act.tool.clone(), act.ns.clone(), act.args.clone());
         let ask = Ask { id, client, op: tool.replace('_', " ").to_uppercase(), tool, conn: p.conn, ns, code, facts, reason: p.reason.clone(), why: p.why.clone(), no_undo, at: Instant::now(), shown: None, gone: false };
-        self.core.agents.asks.push_back(ask);
-        self.core.agents.exec.pending.insert(id, p);
-        self.core.worker.agent_after(self.core.agents.exec.ask_wait, db::AgentEvent::Expired { activity: id });
+        self.agents.asks.push_back(ask);
+        self.agents.exec.pending.insert(id, p);
+        self.worker.agent_after(self.agents.exec.ask_wait, db::AgentEvent::Expired { activity: id });
         // A minimised or hidden Quarry would otherwise let the approval time out unseen.
-        if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        if !self.agents.ui.focused {
+            self.ui_fx.push(UiFx::Attention);
         }
     }
 
-    /// The client or pool a call runs on, taken now so the operation never looks back at App state.
+    /// The client or pool a call runs on, taken now so the operation never looks back at Core state.
     fn agent_target(&self, conn: u64, database: &str) -> Option<db::AgentTarget> {
         match self.conn(conn) {
             Some(Conn { sql: Some(s), .. }) => Some(db::AgentTarget::Sql(s.at(database))),
@@ -471,22 +480,22 @@ impl App {
     }
 
     /// Reads what a write touches before it is decided. Inserts and $out pipelines need no read.
-    fn agent_prepare(&mut self, ctx: &egui::Context, id: u64, p: Pending) {
-        if let Some(snap) = db::agent_snapshot_now(&p.call, &self.core.agents.cfg.limits) {
-            self.core.agents.exec.preparing.insert(id, p);
-            return self.agent_prepared(ctx, id, Ok(snap));
+    fn agent_prepare(&mut self, id: u64, p: Pending) {
+        if let Some(snap) = db::agent_snapshot_now(&p.call, &self.agents.cfg.limits) {
+            self.agents.exec.preparing.insert(id, p);
+            return self.agent_prepared(id, Ok(snap));
         }
         let Some(target) = self.agent_target(p.conn, &p.database) else {
             return self.agent_end(id, p.reply, "not_open", CLOSED.into(), Outcome::Failed(CLOSED.into()));
         };
-        self.core.worker.agent_prepare(id, target, p.call.clone(), self.core.agents.cfg.limits.clone());
-        self.core.agents.exec.preparing.insert(id, p);
+        self.worker.agent_prepare(id, target, p.call.clone(), self.agents.cfg.limits.clone());
+        self.agents.exec.preparing.insert(id, p);
     }
 
     /// The snapshot of a write arrived: the policy runs again with the count, then the write starts, asks, or is refused.
     /// A change too large to undo always asks, whatever the settings, and Allow then says it runs without undo.
-    fn agent_prepared(&mut self, ctx: &egui::Context, id: u64, res: db::Res<db::Snapshot>) {
-        let Some(mut p) = self.core.agents.exec.preparing.remove(&id) else { return };
+    fn agent_prepared(&mut self, id: u64, res: db::Res<db::Snapshot>) {
+        let Some(mut p) = self.agents.exec.preparing.remove(&id) else { return };
         let snap = match res {
             Ok(s) => s,
             Err(e) => {
@@ -518,18 +527,18 @@ impl App {
                 // Allowed by the settings, but nothing could take it back: the user decides, once.
                 p.why = AskWhy::default();
                 p.snap = Some(snap);
-                self.agent_queue(ctx, id, p, facts, no_undo);
+                self.agent_queue(id, p, facts, no_undo);
             }
             Decision::Ask(w) => {
                 p.why = AskWhy { session_ok: w.session_ok && no_undo.is_none(), ..w };
                 p.snap = Some(snap);
-                self.agent_queue(ctx, id, p, facts, no_undo);
+                self.agent_queue(id, p, facts, no_undo);
             }
         }
     }
 
     /// Starts an allowed call on the runtime. The connection's client or pool is taken now; the operation never
-    /// looks back at App state.
+    /// looks back at Core state.
     /// `snap` is for writes: what the write was decided on. It keeps its undo unless the snapshot says it could not
     /// (a change over the undo caps was offered only as Allow without undo). `writable` is whether it may write,
     /// decided by the caller: for a call that waited for approval, as it was when it was queued.
@@ -552,9 +561,9 @@ impl App {
         let write = changes_server(&call, class, writable, dialect.is_some());
         let structure = write && class != OpClass::ChangeData;
         let targets = if write { call.targets() } else { Vec::new() };
-        let job = db::AgentJob { activity: id, conn, target, call, rules, limits: self.core.agents.cfg.limits.clone(), scope, snap, keep_undo, writable, shell };
-        let run = self.core.worker.agent_run(job, reply);
-        self.core.agents.exec.running.insert(id, Running { run, conn, database: database.to_string(), approved, write, targets, structure });
+        let job = db::AgentJob { activity: id, conn, target, call, rules, limits: self.agents.cfg.limits.clone(), scope, snap, keep_undo, writable, shell };
+        let run = self.worker.agent_run(job, reply);
+        self.agents.exec.running.insert(id, Running { run, conn, database: database.to_string(), approved, write, targets, structure });
     }
 
     /// The Bun job of a run_shell call, built like the Shell tab's, with the agent time limit for each operation.
@@ -567,15 +576,15 @@ impl App {
     /// settings of Change data and Change structure go with it, for the relay to check each statement against.
     fn agent_shell_job(&self, conn: u64, database: &str, space: &str, script: &str, writable: bool) -> Result<db::AgentShell, String> {
         // The demo and the tests never read the keychain, nor run Bun.
-        if self.core.ephemeral {
+        if self.ephemeral {
             return Err("The shell is not available in this Quarry window.".into());
         }
-        let runtime = super::super::tools::find_bun(&self.core.prefs.shell_runtime).ok_or("Bun is needed for the shell, and the user has not installed it.")?;
+        let runtime = crate::action::tools::find_bun(&self.prefs.shell_runtime).ok_or("Bun is needed for the shell, and the user has not installed it.")?;
         let c = self.conn(conn).ok_or("This connection was removed from Quarry.")?;
         let name = c.meta.name.clone();
-        let packages: Vec<String> = self.core.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
-        let timeout = self.core.agents.cfg.limits.secs.max(1) as u64 * 1000;
-        let job = |input: Value, sql: Vec<(String, db::SqlRelay)>| db::ShellJob { runtime: runtime.clone(), dir: config_dir().join("shell"), input: input.to_string(), packages: self.core.prefs.shell_packages.clone(), sql };
+        let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
+        let timeout = self.agents.cfg.limits.secs.max(1) as u64 * 1000;
+        let job = |input: Value, sql: Vec<(String, db::SqlRelay)>| db::ShellJob { runtime: runtime.clone(), dir: config_dir().join("shell"), input: input.to_string(), packages: self.prefs.shell_packages.clone(), sql };
         if let Some(sql) = c.sql.clone() {
             let p = self.agent_policy(conn, database).ok_or("This connection is not shared with agents.")?;
             let pg = sql.dialect == Dialect::Postgres;
@@ -583,7 +592,7 @@ impl App {
             let sql = sql.at(database);
             let schema = if pg && space.is_empty() { "public".to_string() } else { space.to_string() };
             let key = if pg { ns_key(&sql.pg_database(), &schema) } else { schema.clone() };
-            let tables: Vec<String> = self.core.sql_schema.get(&(conn, key)).map(|s| s.tables.iter().map(|t| t.name.clone()).collect()).unwrap_or_default();
+            let tables: Vec<String> = self.sql_schema.get(&(conn, key)).map(|s| s.tables.iter().map(|t| t.name.clone()).collect()).unwrap_or_default();
             let entry = json!({ "name": name, "db": if pg { sql.pg_database() } else { schema.clone() }, "tables": tables, "dialect": if pg { "postgres" } else { "mysql" } });
             let input = json!({ "mongo": [], "sql": [entry], "code": script, "packages": packages, "timeoutMs": timeout, "main": name });
             let relay = db::SqlRelay { db: sql, schema, read_only: !writable, conn_id: Default::default() };
@@ -599,13 +608,13 @@ impl App {
 
     /// Whether the connection's writes are unlocked right now.
     fn agent_unlocked(&self, conn: u64) -> bool {
-        self.conn(conn).is_some_and(|c| c.writable) || self.core.prefs.always_writable
+        self.conn(conn).is_some_and(|c| c.writable) || self.prefs.always_writable
     }
 
     /// Whether an approved call may write. Free SQL runs read-only when the connection was locked as the call was queued,
     /// as the dialog said, even if the user unlocked it while the dialog was open: allowing it never makes it a write. A
     /// lock taken meanwhile does make it read-only. Calls whose approval unlocks are writable once it did.
-    fn agent_run_writable(&self, p: &Pending) -> bool {
+    pub(crate) fn agent_run_writable(&self, p: &Pending) -> bool {
         self.agent_unlocked(p.conn) && (p.writable || p.why.unlock)
     }
 
@@ -626,7 +635,7 @@ impl App {
             Call::RunShell { .. } => {
                 f.push("What this changes can't be undone from Agent activity.".to_string());
                 // Only on SQL: the MongoDB shell's guard lives in the script's own process, so the policy asks to unlock instead.
-                if let Some(p) = self.conn(conn).filter(|c| c.meta.engine.is_sql()).and_then(|_| self.core.agents.cfg.conn(conn)) {
+                if let Some(p) = self.conn(conn).filter(|c| c.meta.engine.is_sql()).and_then(|_| self.agents.cfg.conn(conn)) {
                     if locked {
                         f.push(format!("Runs read-only: {name} is locked for writes.\nUnlock it in Quarry first to let it write."));
                     }
@@ -640,7 +649,7 @@ impl App {
 
     /// Sets how a call ended and writes its audit line.
     fn agent_finish(&mut self, id: u64, outcome: Outcome, decision: &str, result: Summary) {
-        self.core.agents.exec.calls.retain(|_, a| *a != id);
+        self.agents.exec.calls.retain(|_, a| *a != id);
         let Some(a) = self.agent_activity(id) else { return };
         a.outcome = outcome;
         let a = a.clone();
@@ -648,8 +657,8 @@ impl App {
     }
 
     /// One line of the audit log for a finished call, written off the UI thread. Never in the demo or the tests.
-    pub(super) fn agent_audit(&mut self, a: &Activity, decision: &str, result: Summary) {
-        if self.core.ephemeral || !self.core.agents.cfg.audit.on {
+    pub(crate) fn agent_audit(&mut self, a: &Activity, decision: &str, result: Summary) {
+        if self.ephemeral || !self.agents.cfg.audit.on {
             return;
         }
         let reason = match &a.outcome {
@@ -658,34 +667,34 @@ impl App {
             Outcome::TimedOut => Some(NO_ANSWER.into()),
             _ => None,
         };
-        let conn_name = a.conn.and_then(|id| self.core.conns.iter().find(|c| c.meta.id == id)).map(|c| c.meta.name.clone());
+        let conn_name = a.conn.and_then(|id| self.conns.iter().find(|c| c.meta.id == id)).map(|c| c.meta.name.clone());
         let e = Entry { time: audit::now(), session: a.session, client: a.client.clone(), tool: a.tool.clone(), conn_id: a.conn, conn_name, ns: (!a.ns.is_empty()).then(|| a.ns.clone()), args: a.args.clone(), decision: decision.into(), reason, result, undo: a.undo };
-        if self.core.agents.exec.audit.is_none() {
-            self.core.agents.exec.audit = Some(self.core.worker.agents_audit(crate::agents::link::agents_dir(), self.core.agents.cfg.audit.max_bytes, 0));
+        if self.agents.exec.audit.is_none() {
+            self.agents.exec.audit = Some(self.worker.agents_audit(crate::agents::link::agents_dir(), self.agents.cfg.audit.max_bytes, 0));
         }
-        if self.core.agents.exec.audit.as_ref().is_some_and(|tx| tx.send(e).is_err()) {
+        if self.agents.exec.audit.as_ref().is_some_and(|tx| tx.send(e).is_err()) {
             // The writer thread ended; the next call opens it again.
-            self.core.agents.exec.audit = None;
+            self.agents.exec.audit = None;
         }
     }
 
     /// The user answered the approval dialog for call `id`. The policy runs again first: the connection may have been
     /// locked, closed or unshared while the dialog was open.
-    pub(in crate::app) fn agent_answer(&mut self, id: u64, a: Answer) {
-        self.core.agents.asks.retain(|k| k.id != id);
-        let Some(p) = (a != Answer::Close).then(|| self.core.agents.exec.pending.remove(&id)).flatten() else { return };
+    pub fn agent_answer(&mut self, id: u64, a: Answer) {
+        self.agents.asks.retain(|k| k.id != id);
+        let Some(p) = (a != Answer::Close).then(|| self.agents.exec.pending.remove(&id)).flatten() else { return };
         if a == Answer::Deny {
             let _ = p.reply.send(Err(ToolErr::new("denied", DENIED)));
             return self.agent_finish(id, Outcome::Denied, "denied", Summary::default());
         }
         // Allow without undo says the connection unlocks too when the dialog said it was locked.
         if (a == Answer::UnlockOnce || (a == Answer::WithoutUndo && p.why.unlock))
-            && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == p.conn)
+            && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == p.conn)
         {
             c.writable = true;
         }
         if a == Answer::Session && p.why.session_ok {
-            self.core.agents.exec.grants.entry((p.session, p.conn)).or_default().grant(p.class);
+            self.agents.exec.grants.entry((p.session, p.conn)).or_default().grant(p.class);
         }
         let matched = p.snap.as_ref().map(|s| s.matched);
         let why = match self.agent_check(&p.call, p.conn, &p.database, p.session, matched) {
@@ -706,9 +715,9 @@ impl App {
 
     /// The approval waited 50 s: the agent is told no, and the dialog keeps the call as gone until closed.
     fn agent_expired(&mut self, id: u64) {
-        let Some(p) = self.core.agents.exec.pending.remove(&id) else { return };
+        let Some(p) = self.agents.exec.pending.remove(&id) else { return };
         let _ = p.reply.send(Err(ToolErr::new("timeout", NO_ANSWER)));
-        if let Some(k) = self.core.agents.asks.iter_mut().find(|k| k.id == id) {
+        if let Some(k) = self.agents.asks.iter_mut().find(|k| k.id == id) {
             k.gone = true;
         }
         self.agent_finish(id, Outcome::TimedOut, "timed out", Summary::default());
@@ -716,26 +725,26 @@ impl App {
 
     /// The agent cancelled call `link` of `session`, or went away: a waiting call is never started, a running one stops.
     fn agent_cancel(&mut self, session: u64, link: u64) {
-        let Some(id) = self.core.agents.exec.calls.remove(&(session, link)) else { return };
+        let Some(id) = self.agents.exec.calls.remove(&(session, link)) else { return };
         self.agent_drop(id);
     }
 
     fn agent_drop(&mut self, id: u64) {
-        if self.core.agents.exec.preparing.remove(&id).is_some() {
+        if self.agents.exec.preparing.remove(&id).is_some() {
             return self.agent_finish(id, Outcome::Cancelled, "cancelled", Summary::default());
         }
         // Stopping a change half way would leave what it did with no undo and no record, so it finishes and is logged.
-        if self.core.agents.exec.running.get(&id).is_some_and(|r| r.write) {
+        if self.agents.exec.running.get(&id).is_some_and(|r| r.write) {
             return;
         }
-        if self.core.agents.exec.pending.remove(&id).is_some() {
-            if let Some(k) = self.core.agents.asks.iter_mut().find(|k| k.id == id) {
+        if self.agents.exec.pending.remove(&id).is_some() {
+            if let Some(k) = self.agents.asks.iter_mut().find(|k| k.id == id) {
                 k.gone = true;
             }
             return self.agent_finish(id, Outcome::Cancelled, "cancelled", Summary::default());
         }
-        if let Some(r) = self.core.agents.exec.running.remove(&id) {
-            r.run.cancel(&self.core.worker);
+        if let Some(r) = self.agents.exec.running.remove(&id) {
+            r.run.cancel(&self.worker);
             self.agent_finish(id, Outcome::Cancelled, "cancelled", Summary::default());
         }
     }
@@ -743,17 +752,17 @@ impl App {
     /// A link session closed: its grants end, and its calls still waiting for approval are gone. Running calls finish,
     /// so the log says what they did.
     fn agent_session_closed(&mut self, session: u64) {
-        self.core.agents.exec.grants.retain(|k, _| k.0 != session);
-        let waiting: Vec<u64> = self.core.agents.exec.pending.iter().chain(self.core.agents.exec.preparing.iter()).filter(|(_, p)| p.session == session).map(|(id, _)| *id).collect();
+        self.agents.exec.grants.retain(|k, _| k.0 != session);
+        let waiting: Vec<u64> = self.agents.exec.pending.iter().chain(self.agents.exec.preparing.iter()).filter(|(_, p)| p.session == session).map(|(id, _)| *id).collect();
         for id in waiting {
             self.agent_drop(id);
         }
     }
 
     fn agent_done(&mut self, f: db::Finished) {
-        let Some(r) = self.core.agents.exec.running.remove(&f.activity) else { return };
+        let Some(r) = self.agents.exec.running.remove(&f.activity) else { return };
         if let Some((db, coll, keys)) = f.keys {
-            self.core.agents.exec.keys.insert((r.conn, db, coll), (Instant::now(), keys));
+            self.agents.exec.keys.insert((r.conn, db, coll), (Instant::now(), keys));
         }
         let decision = if r.approved { "approved" } else { "allowed" };
         let outcome = match &f.error {
@@ -778,7 +787,7 @@ impl App {
             self.refresh_db(r.conn, &db);
             // Still running on the server: look again once it has had time to finish.
             if f.running {
-                self.core.worker.agent_after(RECHECK, db::AgentEvent::Refresh { conn: r.conn, db });
+                self.worker.agent_after(RECHECK, db::AgentEvent::Refresh { conn: r.conn, db });
             }
         }
         self.agent_finish(f.activity, outcome, decision, Summary { count: f.count, bytes: f.bytes, ms: Some(f.ms), error: f.error });
@@ -802,36 +811,36 @@ impl App {
             old.push(Activity { id, time: clock(e.time), session: e.session, client: e.client, tool: e.tool, conn: e.conn_id, ns: e.ns.unwrap_or_default(), database: String::new(), outcome, summary, args: e.args, answer: String::new(), undo: None });
         }
         for a in old.into_iter().rev() {
-            self.core.agents.activity.push_front(a);
+            self.agents.activity.push_front(a);
         }
-        while self.core.agents.activity.len() > ACTIVITY_MAX {
-            self.core.agents.activity.pop_front();
+        while self.agents.activity.len() > ACTIVITY_MAX {
+            self.agents.activity.pop_front();
         }
     }
 
     /// Everything the link and the runtime send about agents.
-    pub(in crate::app) fn on_agent(&mut self, ctx: &egui::Context, ev: db::AgentEvent) {
+    pub(crate) fn on_agent(&mut self, ev: db::AgentEvent) {
         use db::AgentEvent as E;
         match ev {
-            E::Listening => self.core.agents.link = LinkState::Listening,
-            E::Busy => self.core.agents.link = LinkState::Busy,
-            E::Failed(e) => self.core.agents.link = LinkState::Failed(e),
-            E::Opened { session } => self.core.agents.sessions.push(AgentSession { id: session, client: String::new(), calls: 0 }),
+            E::Listening => self.agents.link = LinkState::Listening,
+            E::Busy => self.agents.link = LinkState::Busy,
+            E::Failed(e) => self.agents.link = LinkState::Failed(e),
+            E::Opened { session } => self.agents.sessions.push(AgentSession { id: session, client: String::new(), calls: 0 }),
             E::Closed { session } => {
-                self.core.agents.sessions.retain(|s| s.id != session);
+                self.agents.sessions.retain(|s| s.id != session);
                 self.agent_session_closed(session);
             }
             E::Call { session, id, tool, args, client, reply } => {
-                if let Some(s) = self.core.agents.sessions.iter_mut().find(|s| s.id == session) {
+                if let Some(s) = self.agents.sessions.iter_mut().find(|s| s.id == session) {
                     s.calls += 1;
                     s.client = client.name.clone();
                 }
-                self.agent_call(ctx, session, id, tool, args, client.name, reply);
+                self.execute_as(super::Origin::Agent { session, link: id, client: client.name }, super::AgentCall { tool, args, reply });
             }
             E::Cancel { session, id } => self.agent_cancel(session, id),
             E::Done(f) => self.agent_done(f),
             E::Expired { activity } => self.agent_expired(activity),
-            E::Prepared { activity, res } => self.agent_prepared(ctx, activity, res),
+            E::Prepared { activity, res } => self.agent_prepared(activity, res),
             E::Undone { activity, res, back } => self.agent_undone(activity, res, back),
             E::Tail(entries) => self.agent_tail(entries),
             E::Refresh { conn, db } => {
@@ -858,7 +867,7 @@ fn sql_script_fact(p: &crate::agents::config::ConnPolicy) -> String {
 /// Whether a started call can change the server: a cancel then lets it finish so its end is recorded, and open tabs on
 /// what it reaches are told. Free SQL and SQL scripts on a locked connection run read-only and change nothing. The
 /// MongoDB shell always counts, since its read-only guard is not a boundary.
-fn changes_server(call: &Call, class: OpClass, writable: bool, sql: bool) -> bool {
+pub(crate) fn changes_server(call: &Call, class: OpClass, writable: bool, sql: bool) -> bool {
     match call {
         Call::RunSql { .. } => writable,
         Call::RunShell { .. } => writable || !sql,
@@ -878,469 +887,5 @@ fn write_fact(call: &Call, snap: &db::Snapshot) -> String {
             format!("Writes its results with {last}.")
         }
         _ => format!("Matches {n} documents, counted just now."),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agents::config::{Access, ConnPolicy, Mode};
-    use tokio::sync::oneshot;
-
-    const CONN: u64 = 21;
-
-    fn app() -> egui_kittest::Harness<'static, App> {
-        egui_kittest::Harness::builder().with_accessibility_check(false).build_eframe(|cc| App::for_test(cc))
-    }
-
-    /// A MongoDB connection marked open without a client, shared with `read` as the read mode.
-    fn shared(app: &mut App, read: Mode) {
-        app.core.conns.push(Conn::new(ConnMeta { id: CONN, name: "prod".into(), ..Default::default() }, Status::Ready));
-        app.core.agents.cfg.enabled = true;
-        app.core.agents.cfg.conns.insert(CONN, ConnPolicy { access: Access::ReadWrite, read, change: Mode::Allow, structure: Mode::Ask, ..Default::default() });
-    }
-
-    fn call(app: &mut App, ctx: &egui::Context, link: u64, tool: &str, args: Value) -> oneshot::Receiver<Result<Value, ToolErr>> {
-        let (reply, rx) = oneshot::channel();
-        app.agent_call(ctx, 1, link, tool.into(), args, "claude-code".into(), reply);
-        rx
-    }
-
-    fn refused(rx: &mut oneshot::Receiver<Result<Value, ToolErr>>) -> ToolErr {
-        rx.try_recv().expect("answered at once").expect_err("refused")
-    }
-
-    fn find(filter: Value) -> Value {
-        json!({ "connection": "prod", "database": "shop", "collection": "users", "filter": filter })
-    }
-
-    #[test]
-    fn refusals_are_answered_at_once_and_logged() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        let e = refused(&mut call(app, &ctx, 1, "find", json!({ "connection": "prod", "database": "shop" })));
-        assert_eq!(e.code, "bad_args");
-        let e = refused(&mut call(app, &ctx, 2, "find", json!({ "connection": "nope", "database": "shop", "collection": "users" })));
-        assert!(e.message.contains("No connection named nope"), "{}", e.message);
-        let e = refused(&mut call(app, &ctx, 3, "select_rows", json!({ "connection": CONN, "database": "shop", "table": "users" })));
-        assert_eq!(e.code, "wrong_engine");
-        // The Secrets preset hides password: filtering on it would probe the value.
-        let e = refused(&mut call(app, &ctx, 4, "find", find(json!({ "password": { "$regex": "^a" } }))));
-        assert_eq!(e.code, "guard");
-        let e = refused(&mut call(app, &ctx, 5, "run_command", json!({ "connection": "prod", "database": "shop", "command": { "shutdown": 1 } })));
-        assert!(e.message.contains("not available to agents"), "{}", e.message);
-        let e = refused(&mut call(app, &ctx, 6, "find", json!({ "connection": "prod", "database": "local", "collection": "oplog.rs" })));
-        assert!(e.message.contains("internals"), "{}", e.message);
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().read = Mode::Never;
-        let e = refused(&mut call(app, &ctx, 7, "count", find(json!({}))));
-        assert!(e.message.contains("Never"), "{}", e.message);
-        app.core.conns[0].status = Status::Idle;
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().read = Mode::Allow;
-        let e = refused(&mut call(app, &ctx, 8, "count", find(json!({}))));
-        assert_eq!(e.code, "not_open");
-        assert_eq!(app.core.agents.activity.len(), 8);
-        assert!(app.core.agents.activity.iter().all(|a| matches!(a.outcome, Outcome::Refused(_))));
-        // Arguments are scrubbed before they are shown or logged.
-        let a = &app.core.agents.activity[3];
-        assert!(a.args.contains("password") && !a.args.contains("^a"), "{}", a.args);
-        app.core.agents.cfg.enabled = false;
-        assert_eq!(refused(&mut call(app, &ctx, 9, "count", find(json!({})))).code, "off");
-    }
-
-    #[test]
-    fn list_connections_needs_no_connection() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Ask);
-        let v = call(app, &ctx, 1, "list_connections", json!({})).try_recv().unwrap().unwrap();
-        assert_eq!(v["connections"][0]["name"], "prod");
-        assert_eq!(app.core.agents.activity[0].outcome, Outcome::Allowed);
-    }
-
-    #[test]
-    fn ask_then_deny_then_cancel() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Ask);
-        let mut rx = call(app, &ctx, 1, "count", json!({ "connection": "prod", "database": "shop", "collection": "users", "reason": "count\nusers" }));
-        assert!(rx.try_recv().is_err(), "waits for the user");
-        let ask = app.core.agents.asks[0].clone();
-        assert_eq!((ask.op.as_str(), ask.reason.as_deref(), ask.why.setting, ask.why.session_ok), ("COUNT", Some("count users"), true, true));
-        assert_eq!(app.core.agents.activity[0].outcome, Outcome::Waiting);
-        app.agent_answer(ask.id, Answer::Deny);
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().message, DENIED);
-        assert!(app.core.agents.asks.is_empty());
-        assert_eq!(app.core.agents.activity[0].outcome, Outcome::Denied);
-        // A cancel closes the approval as gone and nothing runs.
-        let mut rx = call(app, &ctx, 2, "count", find(json!({})));
-        let id = app.core.agents.asks[0].id;
-        app.on_agent(&ctx, db::AgentEvent::Cancel { session: 1, id: 2 });
-        assert!(app.core.agents.asks[0].gone);
-        assert_eq!(app.agent_activity(id).unwrap().outcome, Outcome::Cancelled);
-        app.agent_answer(id, Answer::Once);
-        assert!(rx.try_recv().is_err(), "the reply was dropped, never answered");
-        assert!(app.core.agents.exec.running.is_empty());
-        assert!(app.core.agents.asks.is_empty(), "Once on a gone call only closes it");
-    }
-
-    #[test]
-    fn allowing_rechecks_the_policy_and_session_grants() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Ask);
-        let mut rx = call(app, &ctx, 1, "count", find(json!({})));
-        let id = app.core.agents.asks[0].id;
-        // Unshared while the dialog was open.
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::NotShared;
-        app.agent_answer(id, Answer::Once);
-        assert!(rx.try_recv().unwrap().unwrap_err().message.contains("not shared"));
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::Read;
-        let mut rx = call(app, &ctx, 2, "count", find(json!({})));
-        let id = app.core.agents.asks[0].id;
-        app.agent_answer(id, Answer::Session);
-        // Allowed, then it fails to run since the test connection has no client; the grant stays.
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open");
-        let mut rx = call(app, &ctx, 3, "count", find(json!({})));
-        assert!(app.core.agents.asks.is_empty(), "the session grant covers the next read");
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open");
-        app.on_agent(&ctx, db::AgentEvent::Closed { session: 1 });
-        let _rx = call(app, &ctx, 4, "count", find(json!({})));
-        assert_eq!(app.core.agents.asks.len(), 1, "grants end with their link session");
-    }
-
-    #[test]
-    fn rules_that_do_not_compile_refuse_and_recompile_on_change() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        app.core.agents.cfg.rules.push(crate::agents::config::RuleSpec { on: true, matcher: crate::agents::config::Matcher::FieldName("(".into()), scope: Vec::new(), action: crate::agents::config::Action::Remove, mode: Default::default() });
-        app.core.agents.rev += 1;
-        assert_eq!(refused(&mut call(app, &ctx, 1, "count", find(json!({})))).code, "rules");
-        app.core.agents.cfg.rules.clear();
-        app.core.agents.rev += 1;
-        let mut rx = call(app, &ctx, 2, "count", find(json!({})));
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open", "allowed this time, then no client");
-    }
-
-    #[test]
-    fn activity_is_capped() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        for i in 0..(ACTIVITY_MAX as u64 + 20) {
-            let _ = call(app, &ctx, i, "find", json!({}));
-        }
-        assert_eq!(app.core.agents.activity.len(), ACTIVITY_MAX);
-        assert_eq!(app.core.agents.activity.back().unwrap().id, ACTIVITY_MAX as u64 + 20);
-    }
-
-    #[test]
-    fn the_audit_tail_comes_first() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        let _ = call(app, &ctx, 1, "list_connections", json!({}));
-        let e = |d: &str, err: Option<&str>| Entry { time: 1_700_000_000, session: 9, client: "cursor".into(), tool: "find".into(), decision: d.into(), result: Summary { error: err.map(String::from), count: Some(3), ..Default::default() }, ..Default::default() };
-        app.on_agent(&ctx, db::AgentEvent::Tail(vec![e("allowed", None), e("refused", Some("x")), e("approved", Some("boom"))]));
-        let o: Vec<Outcome> = app.core.agents.activity.iter().map(|a| a.outcome.clone()).collect();
-        assert_eq!(o, [Outcome::Allowed, Outcome::Refused(String::new()), Outcome::Failed("boom".into()), Outcome::Allowed]);
-        assert_eq!(app.core.agents.activity[0].summary, "3 returned");
-    }
-
-    fn insert(n: usize) -> Value {
-        json!({ "connection": "prod", "database": "shop", "collection": "users", "documents": (0..n).map(|i| json!({ "a": i })).collect::<Vec<_>>() })
-    }
-
-    #[test]
-    fn a_write_too_large_to_undo_always_asks_and_runs_only_without_undo() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        app.core.conns[0].writable = true;
-        app.core.agents.cfg.limits.undo_docs = 2;
-        // Change data is set to Allow, but nothing could take this back.
-        let mut rx = call(app, &ctx, 1, "insert", insert(3));
-        assert!(rx.try_recv().is_err(), "waits for the user");
-        let ask = app.core.agents.asks[0].clone();
-        assert!(ask.no_undo.as_deref().is_some_and(|w| w.contains("more than the 2")), "{:?}", ask.no_undo);
-        assert_eq!(ask.facts, ["Inserts 3 documents."]);
-        assert!(!ask.why.session_ok);
-        app.agent_answer(ask.id, Answer::WithoutUndo);
-        // Allowed, then it fails to run since the test connection has no client.
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open");
-        // Within the cap it runs at once.
-        let mut rx = call(app, &ctx, 2, "insert", insert(2));
-        assert!(app.core.agents.asks.is_empty());
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open");
-    }
-
-    #[test]
-    fn a_write_on_a_locked_connection_asks_to_unlock() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        let mut rx = call(app, &ctx, 1, "insert", insert(1));
-        let ask = app.core.agents.asks[0].clone();
-        assert!(ask.why.unlock && ask.no_undo.is_none());
-        app.agent_answer(ask.id, Answer::UnlockOnce);
-        assert!(app.core.conns[0].writable, "Unlock writes and allow unlocks the connection");
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open");
-    }
-
-    /// A script can undo the shell's read-only guard, so a locked connection is never offered as "runs read-only": the
-    /// approval asks to unlock, and allowing unlocks it.
-    #[test]
-    fn run_shell_on_a_locked_connection_asks_to_unlock() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared(app, Mode::Allow);
-        app.core.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().scripts = Mode::Allow;
-        let mut rx = call(app, &ctx, 1, "run_shell", json!({ "connection": "prod", "database": "shop", "script": "async function run() { return 1 }" }));
-        let ask = app.core.agents.asks[0].clone();
-        assert!(ask.why.unlock && ask.why.always && !ask.why.session_ok, "{:?}", ask.why);
-        assert!(ask.facts.iter().all(|f| !f.contains("read-only")), "{:?}", ask.facts);
-        app.agent_answer(ask.id, Answer::UnlockOnce);
-        assert!(app.core.conns[0].writable);
-        assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "not_open", "allowed, then no client in the test");
-    }
-
-    /// A MySQL connection marked open without a pool, shared for reading and writing, with no rule presets so nothing hides
-    /// data.
-    fn shared_sql(app: &mut App, engine: db::sql::Engine) {
-        app.core.conns.push(Conn::new(ConnMeta { id: CONN, name: "shop".into(), engine, ..Default::default() }, Status::Ready));
-        app.core.agents.cfg.enabled = true;
-        app.core.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
-        app.core.agents.cfg.conns.insert(CONN, ConnPolicy { access: Access::ReadWrite, scripts: Mode::Allow, structure: Mode::Never, ..Default::default() });
-    }
-
-    fn sql_script() -> Value {
-        json!({ "connection": "shop", "database": "shop", "script": "async function run() { return await sql`SELECT id FROM users` }" })
-    }
-
-    /// run_shell reaches SQL connections. A locked one never asks to unlock: the script's statements come back through
-    /// Quarry's relay, which runs them read-only, and allowing it leaves the connection locked. The approval says so and
-    /// names what each statement is checked for.
-    #[test]
-    fn run_shell_on_sql_runs_read_only_when_locked() {
-        for engine in [db::sql::Engine::MySql, db::sql::Engine::Postgres] {
-            let mut h = app();
-            let ctx = h.ctx.clone();
-            let app = h.state_mut();
-            shared_sql(app, engine);
-            // A PostgreSQL call needs the session to know its database; this one never connects.
-            let pg = engine == db::sql::Engine::Postgres;
-            if pg {
-                app.core.conns[0].sql = Some(db::sql::Db::offline_pg(false, Default::default()));
-            }
-            let mut rx = call(app, &ctx, 1, "run_shell", sql_script());
-            assert!(rx.try_recv().is_err(), "{engine:?}: every script asks");
-            let ask = app.core.agents.asks[0].clone();
-            assert!(!ask.why.unlock && ask.why.always && !ask.why.session_ok, "{engine:?}: {:?}", ask.why);
-            assert!(ask.facts.iter().any(|f| f.starts_with("Runs read-only")), "{engine:?}: {:?}", ask.facts);
-            let checks = ask.facts.iter().find(|f| f.starts_with("Quarry checks each statement")).expect("the statement checks are listed");
-            assert!(checks.contains("user and role") && checks.contains("structure changes") && !checks.contains("data changes"), "{checks}");
-            assert!(!app.agent_run_writable(&app.core.agents.exec.pending[&ask.id]), "{engine:?}: queued locked, runs read-only");
-            app.agent_answer(ask.id, Answer::Once);
-            assert!(!app.core.conns[0].writable, "{engine:?}: allowing a SQL script never unlocks");
-            // Allowed, then no pool (MySQL) or no shell in a test window (PostgreSQL).
-            assert_eq!(rx.try_recv().unwrap().unwrap_err().code, if pg { "failed" } else { "not_open" }, "{engine:?}");
-            // Unlocked when it was queued, it may write.
-            app.core.conns[0].writable = true;
-            let _rx = call(app, &ctx, 2, "run_shell", sql_script());
-            let ask = app.core.agents.asks[0].clone();
-            assert!(app.agent_run_writable(&app.core.agents.exec.pending[&ask.id]));
-            assert!(!ask.facts.iter().any(|f| f.starts_with("Runs read-only")), "{:?}", ask.facts);
-        }
-    }
-
-    /// The same settings hold for SQL scripts as for free SQL: rules that hide data turn them off, shared read only and
-    /// Never refuse them.
-    #[test]
-    fn run_shell_on_sql_follows_the_connection_settings() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        shared_sql(app, db::sql::Engine::MySql);
-        // The Secrets preset hides password, and with no catalog loaded every column could be one.
-        app.core.agents.cfg.presets = Default::default();
-        app.core.agents.rev += 1;
-        let e = refused(&mut call(app, &ctx, 1, "run_shell", sql_script()));
-        assert!(e.message.contains("the shell are off"), "{}", e.message);
-        app.core.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
-        app.core.agents.rev += 1;
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::Read;
-        let e = refused(&mut call(app, &ctx, 2, "run_shell", sql_script()));
-        assert!(e.message.contains("shared read only"), "{}", e.message);
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().access = Access::ReadWrite;
-        app.core.agents.cfg.conns.get_mut(&CONN).unwrap().scripts = Mode::Never;
-        let e = refused(&mut call(app, &ctx, 3, "run_shell", sql_script()));
-        assert!(e.message.contains("Run scripts is set to Never"), "{}", e.message);
-        // MongoDB tools still refuse a SQL connection, and say the shell works there.
-        let e = refused(&mut call(app, &ctx, 4, "find", json!({ "connection": "shop", "database": "shop", "collection": "users" })));
-        assert!(e.code == "wrong_engine" && e.message.contains("run_shell"), "{}", e.message);
-    }
-
-    /// A structure change has no undo, so a cancel never stops it half way: it finishes and the Activity says how it
-    /// ended, here failing on a server nobody answers at.
-    #[test]
-    fn a_cancel_lets_a_change_without_undo_finish() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let client = rt.block_on(mongodb::Client::with_uri_str("mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=300&connectTimeoutMS=300")).unwrap();
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let id = {
-            let app = h.state_mut();
-            shared(app, Mode::Allow);
-            app.core.conns[0].writable = true;
-            app.core.conns[0].client = Some(client);
-            let _rx = call(app, &ctx, 1, "drop_collection", json!({ "connection": "prod", "database": "shop", "collection": "old" }));
-            let id = app.core.agents.asks[0].id;
-            app.agent_answer(id, Answer::Once);
-            assert!(app.core.agents.exec.running.get(&id).is_some_and(|r| r.write && r.structure));
-            app.on_agent(&ctx, db::AgentEvent::Cancel { session: 1, id: 1 });
-            assert!(app.core.agents.exec.running.contains_key(&id), "still running after the cancel");
-            assert_eq!(app.agent_activity(id).unwrap().outcome, Outcome::Running);
-            id
-        };
-        let t = Instant::now();
-        let outcome = loop {
-            h.step();
-            let o = h.state().core.agents.activity.iter().find(|a| a.id == id).unwrap().outcome.clone();
-            if o != Outcome::Running {
-                break o;
-            }
-            assert!(t.elapsed() < Duration::from_secs(30), "the drop never ended");
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
-        assert!(h.state().core.agents.exec.running.is_empty());
-    }
-
-    /// An index build Quarry stops waiting for at the time limit goes on on the server, so the Activity says it is still
-    /// running rather than failed.
-    #[test]
-    fn a_structure_change_past_the_time_limit_is_still_running() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        // Nobody answers there, and the driver keeps looking for a server well past the 1 s limit.
-        let client = rt.block_on(mongodb::Client::with_uri_str("mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=60000")).unwrap();
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let id = {
-            let app = h.state_mut();
-            shared(app, Mode::Allow);
-            app.core.agents.cfg.limits.secs = 1;
-            app.core.conns[0].writable = true;
-            app.core.conns[0].client = Some(client);
-            let _rx = call(app, &ctx, 1, "create_index", json!({ "connection": "prod", "database": "shop", "collection": "orders", "keys": { "at": -1 } }));
-            let id = app.core.agents.asks[0].id;
-            app.agent_answer(id, Answer::Once);
-            id
-        };
-        let t = Instant::now();
-        let a = loop {
-            h.step();
-            let a = h.state().core.agents.activity.iter().find(|a| a.id == id).unwrap().clone();
-            if a.outcome != Outcome::Running {
-                break a;
-            }
-            assert!(t.elapsed() < Duration::from_secs(30), "the call never ended");
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        assert_eq!(a.outcome, Outcome::Approved);
-        assert!(a.summary.starts_with("Still running on the server"), "{}", a.summary);
-    }
-
-    /// run_sql runs as the dialog said when it was queued: unlocking while the dialog is open never turns an approved
-    /// read-only run into a write, and locking meanwhile makes it read-only.
-    #[test]
-    fn run_sql_keeps_the_lock_it_was_asked_under() {
-        let mut h = app();
-        let ctx = h.ctx.clone();
-        let app = h.state_mut();
-        app.core.conns.push(Conn::new(ConnMeta { id: CONN, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
-        app.core.agents.cfg.enabled = true;
-        app.core.agents.cfg.presets = crate::agents::scrub::tests_support::no_presets();
-        app.core.agents.cfg.conns.insert(CONN, ConnPolicy { access: Access::ReadWrite, scripts: Mode::Ask, structure: Mode::Ask, ..Default::default() });
-        let sql = json!({ "connection": "shop", "sql": "UPDATE t SET a = 1" });
-        let _rx = call(app, &ctx, 1, "run_sql", sql.clone());
-        let locked = app.core.agents.asks[0].clone();
-        assert!(!locked.why.unlock && locked.facts.iter().any(|f| f.starts_with("Runs read-only")), "{:?}", locked.facts);
-        app.core.conns[0].writable = true;
-        assert!(!app.agent_run_writable(&app.core.agents.exec.pending[&locked.id]), "unlocked while the dialog was open: still read-only");
-        let _rx = call(app, &ctx, 2, "run_sql", sql);
-        let open = app.core.agents.asks[1].clone();
-        assert!(app.agent_run_writable(&app.core.agents.exec.pending[&open.id]));
-        app.core.conns[0].writable = false;
-        assert!(!app.agent_run_writable(&app.core.agents.exec.pending[&open.id]), "locked meanwhile: read-only");
-        // A call whose approval unlocks the connection writes once it did.
-        let _rx = call(app, &ctx, 3, "create_table", json!({ "connection": "shop", "database": "shop", "table": "t2", "columns": [{ "name": "a", "type": "int" }] }));
-        let unlock = app.core.agents.asks[2].clone();
-        assert!(unlock.why.unlock);
-        assert!(!app.agent_run_writable(&app.core.agents.exec.pending[&unlock.id]));
-        app.core.conns[0].writable = true;
-        assert!(app.agent_run_writable(&app.core.agents.exec.pending[&unlock.id]));
-    }
-
-    /// What a cancel lets finish and what marks open tabs as changed by an agent.
-    #[test]
-    fn what_counts_as_a_change() {
-        let c = |call: Call, writable: bool| {
-            let class = tools::classify(&call, Some(Dialect::MySql));
-            changes_server(&call, class, writable, true)
-        };
-        let run = || Call::RunSql { conn: ConnRef::Id(1), db: None, sql: "UPDATE t SET a = 1".into() };
-        assert!(!c(run(), false), "free SQL on a locked connection runs read-only and marks no tab");
-        assert!(c(run(), true));
-        let shell = || Call::RunShell { conn: ConnRef::Id(1), db: None, script: "async function run() { return 1 }".into() };
-        assert!(c(shell(), true));
-        assert!(!c(shell(), false), "a SQL script on a locked connection runs read-only");
-        assert!(changes_server(&shell(), OpClass::RunScripts, false, false), "the MongoDB shell's guard is not a boundary");
-        let cmd = |d: mongodb::bson::Document| Call::RunCommand { conn: ConnRef::Id(1), db: "shop".into(), command: d };
-        assert!(c(cmd(mongodb::bson::doc! { "drop": "x" }), true));
-        assert!(!c(cmd(mongodb::bson::doc! { "ping": 1 }), true));
-        let ns = || crate::agents::tools::Ns { conn: ConnRef::Id(1), db: "shop".into(), coll: "t".into() };
-        assert!(c(Call::DropTable { ns: ns() }, true));
-        assert!(c(Call::SqlDeleteRows { ns: ns(), wher: Vec::new() }, true));
-        assert!(!c(Call::SelectRows { ns: ns(), columns: Vec::new(), wher: Vec::new(), order: Vec::new(), limit: None, offset: 0 }, true));
-    }
-
-    #[test]
-    fn undo_over_the_total_cap_expires_the_oldest() {
-        let mut h = app();
-        let app = h.state_mut();
-        for id in 1..=3 {
-            app.agent_push(Activity { id, time: String::new(), session: 1, client: String::new(), tool: "insert".into(), conn: Some(CONN), ns: "shop.users".into(), database: String::new(), outcome: Outcome::Allowed, summary: "1 inserted".into(), args: String::new(), answer: String::new(), undo: None });
-        }
-        let u = || db::AgentUndo::Inserted { db: "shop".into(), coll: "users".into(), docs: vec![mongodb::bson::doc! { "_id": 1, "pad": "x".repeat(100) }] };
-        let one = u().bytes();
-        app.core.agents.cfg.limits.undo_total_bytes = one * 2;
-        app.agent_keep_undo(1, u());
-        app.agent_keep_undo(2, u());
-        assert_eq!(app.agent_activity(1).unwrap().undo, Some(1));
-        app.agent_keep_undo(3, u());
-        let first = app.agent_activity(1).unwrap().clone();
-        assert_eq!(first.undo, None);
-        assert!(first.summary.ends_with("undo expired"), "{}", first.summary);
-        assert_eq!((app.agent_activity(2).unwrap().undo, app.agent_activity(3).unwrap().undo), (Some(2), Some(3)));
-        assert_eq!(app.core.agents.undo.total(), one * 2);
-    }
-
-    #[test]
-    fn hash_keys_are_derived_not_copied() {
-        let k = [9u8; 32];
-        assert_ne!(hash_key_from(&k), k);
-        assert_eq!(hash_key_from(&k), hash_key_from(&k));
     }
 }

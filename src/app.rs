@@ -179,6 +179,8 @@ pub struct App {
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
     /// Text an action put on the clipboard, copied by the next `logic()`.
     clip: Option<String>,
+    /// An approval waits while the window has no focus: the next `logic()` asks for the user's attention.
+    attention: bool,
 }
 
 pub(crate) use crate::db::collection_ref;
@@ -210,6 +212,7 @@ impl App {
             scroll_gesture: Default::default(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
             clip: None,
+            attention: false,
         }
     }
 
@@ -405,7 +408,7 @@ impl App {
             for id in open {
                 app.connect(id);
             }
-            app.agents_start();
+            app.core.agents_start();
             // A fresh install has no ui.json, so it skips the notes. Run now, so the broken-settings note below still wins.
             app.core.whats_new_seen(ui_json.is_some());
             app.run_fx();
@@ -532,6 +535,10 @@ impl eframe::App for App {
         self.run_fx();
         if let Some(text) = self.clip.take() {
             ctx.copy_text(text);
+        }
+        // A minimised or hidden Quarry would otherwise let the approval time out unseen.
+        if std::mem::take(&mut self.attention) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
         }
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         crate::ui::vim::set_on(ctx, self.core.prefs.vim);

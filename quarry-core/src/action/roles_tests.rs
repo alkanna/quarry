@@ -353,6 +353,7 @@ fn all_actions() -> Vec<Action> {
     all.extend(tab_and_docs_actions());
     all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
     all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
+    all.extend(super::agents_tests::agents_actions().into_iter().map(Action::Agents));
     all
 }
 
@@ -497,6 +498,7 @@ fn variant(a: &Action) -> String {
         },
         Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
         Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
+        Action::Agents(a) => super::agents_tests::agents_variant(a),
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

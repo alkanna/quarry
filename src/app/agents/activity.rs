@@ -255,11 +255,10 @@ impl App {
             });
         });
         if clear {
-            self.core.agents.activity.retain(|a| a.outcome == Outcome::Waiting || a.outcome == Outcome::Running);
-            self.core.agents.picked = None;
+            self.exec(Action::Agents(AgentsA::Clear));
         }
         if let Some(id) = undo {
-            self.agent_undo(id);
+            self.exec(Action::Agents(AgentsA::Undo { id }));
         }
         if reveal {
             self.agents_reveal();

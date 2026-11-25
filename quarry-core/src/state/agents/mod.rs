@@ -107,7 +107,7 @@ pub struct Ask {
 }
 
 /// What the user chose in the approval dialog.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Answer {
     Deny,
     Once,
@@ -156,4 +156,23 @@ pub struct AgentsState {
     /// What the approval dialog answered, for the UI tests.
     #[cfg(any(test, feature = "test-support"))]
     pub answered: Vec<(u64, Answer)>,
+    /// The window as the app saw it just before handing over the latest agent event.
+    pub ui: AgentUi,
+}
+
+/// What only the window knows and an agent call depends on, set by the app before each agent event.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentUi {
+    /// The window has focus; an approval asks for attention otherwise.
+    pub focused: bool,
+    /// A text field has the keyboard, so keys would land in a tab open_shell shows.
+    pub typing: bool,
+    /// One of the app's dialogs is open.
+    pub modal: bool,
+}
+
+impl Default for AgentUi {
+    fn default() -> Self {
+        AgentUi { focused: true, typing: false, modal: false }
+    }
 }

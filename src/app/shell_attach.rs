@@ -16,36 +16,7 @@ pub(super) struct AttachedInfo {
     pub(super) typed: AttTyped,
 }
 
-/// The database name as a JS identifier: other characters become `_`, a leading digit gets one in front,
-/// and a reserved word gets one after it.
-pub(super) fn default_name(db: &str) -> String {
-    let mut s: String = db.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '$' { c } else { '_' }).collect();
-    if s.is_empty() || s.chars().all(|c| c == '_') {
-        return "conn".into();
-    }
-    if s.starts_with(|c: char| c.is_ascii_digit()) {
-        s.insert(0, '_');
-    }
-    if JS_RESERVED.contains(&s.as_str()) {
-        s.push('_');
-    }
-    s
-}
-
-/// Why `name` cannot be an attachment's global, or None when it can. `taken` lists the names already in
-/// use with what uses them, which the message names.
-pub(super) fn name_problem(name: &str, taken: &[(String, String)]) -> Option<String> {
-    if name.is_empty() {
-        return Some("Enter a name.".into());
-    }
-    if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$') || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
-        return Some("Use letters, digits, _ or $, and do not start with a digit.".into());
-    }
-    if JS_RESERVED.contains(&name) {
-        return Some(format!("{name} is a reserved word in JavaScript."));
-    }
-    taken.iter().find(|t| t.0 == name).map(|t| format!("{name} is already {}.", t.1))
-}
+pub(super) use quarry_core::action::agents::open_shell::{default_name, name_problem};
 
 /// "8.0.36" as "8.0".
 fn short_version(v: &str) -> String {
@@ -149,30 +120,7 @@ impl App {
 
     /// `shell_taken` for a Shell tab on `sel` with these attachments, which need not be the current one or exist yet.
     pub(super) fn globals_taken(&self, sel: &Sel, main_sql: bool, attached: &[Attached]) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut add = |n: &str, why: String| {
-            if !out.iter().any(|o| o.0 == n) {
-                out.push((n.to_string(), why));
-            }
-        };
-        // Refused whatever the engines, so a later attachment of another engine cannot collide with it.
-        for n in ["db", "sql", "table", "require", "console", "log", "_", "dayjs", "ObjectId", "ISODate", "randomId", "UUIDv4", "UUIDv1"] {
-            add(n, "a name the shell provides".into());
-        }
-        for p in &self.core.prefs.shell_packages {
-            add(&package_ident(p), format!("the name of the package {}", db::package_spec(p).0));
-        }
-        // The runner tells this tab's own connection apart from an attachment by its name.
-        if let Some(c) = self.conn(sel.conn) {
-            add(&c.meta.name, "the name of this tab's connection".into());
-        }
-        for n in self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.as_ref()).into_iter().flatten() {
-            add(n, format!("{} of {}", if main_sql { "a table" } else { "a collection" }, sel.db));
-        }
-        for a in attached {
-            add(&a.name, "used by another attached connection".into());
-        }
-        out
+        self.core.globals_taken(sel, main_sql, attached)
     }
 
     /// QUARRY_TEST_SQL=shellattach: the SQL shell with a read-only MongoDB connection attached and a run that used both.
@@ -216,10 +164,6 @@ async function run() {
     /// Opens the Attach dialog for the current tab.
     pub(super) fn open_attach(&mut self) {
         self.modal = Some(Modal::Attach(Box::default()));
-    }
-
-    pub(super) fn attach_load(&mut self, conn: u64, db: &str) {
-        self.core.attach_load(conn, db);
     }
 
     /// The tab's own connection as a pill; `locked` adds the read-only note.

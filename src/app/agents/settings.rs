@@ -372,18 +372,11 @@ impl App {
         ui.label(RichText::new("Open a connection to choose what agents may do on it. New connections start Not shared.").size(TXT_SMALL).color(FAINT()));
         ui.add_space(10.0);
         if let Some((id, a)) = picked {
-            self.set_agent_access(id, a);
+            self.exec(quarry_core::action::Action::Agents(AgentsA::SetAccess { conn: id, access: a }));
         }
         if let Some(id) = page {
             self.agents_open_page(id);
         }
-    }
-
-    /// Shares a connection with the defaults the first time, then only changes its access.
-    pub(super) fn set_agent_access(&mut self, id: u64, a: Access) {
-        let defaults = self.core.agents.cfg.defaults.clone();
-        self.core.agents.cfg.conns.entry(id).or_insert(defaults).access = a;
-        self.save_agents();
     }
 
     fn agents_protection(&mut self, ui: &mut egui::Ui) {
@@ -509,11 +502,11 @@ mod tests {
         let (_, cc) = snippet(ClientKind::ClaudeCode, win, true);
         assert_eq!(cc, r#"claude mcp add --scope user quarry -- "C:\Program Files\Quarry\quarry.exe" mcp"#);
         for kind in [ClientKind::ClaudeDesktop, ClientKind::Cursor] {
-            let v: Value = serde_json::from_str(&snippet(kind, win, true).1).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&snippet(kind, win, true).1).unwrap();
             assert_eq!(v["mcpServers"]["quarry"]["command"], win);
             assert_eq!(v["mcpServers"]["quarry"]["args"], json!(["mcp"]));
         }
-        let v: Value = serde_json::from_str(&snippet(ClientKind::Json, win, true).1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&snippet(ClientKind::Json, win, true).1).unwrap();
         assert_eq!(v["command"], win);
         let (_, toml) = snippet(ClientKind::Codex, win, true);
         assert_eq!(toml, "[mcp_servers.quarry]\ncommand = \"C:\\\\Program Files\\\\Quarry\\\\quarry.exe\"\nargs = [\"mcp\"]");

@@ -771,22 +771,7 @@ pub(crate) const CONSOLE_METHODS: [&str; 4] = ["log", "warn", "error", "info"];
 
 /// Shell autocomplete: methods after `db.`, a collection or a cursor; fields and operators inside a
 /// call's object; otherwise keywords, globals and collection names.
-/// The variable a package is loaded as: camelCase of its name without scope. Must match
-/// packageIdent() in shell_runner.mjs.
-pub(crate) fn package_ident(spec: &str) -> String {
-    let name = db::package_spec(spec).0;
-    let base = name.strip_prefix('@').and_then(|r| r.split_once('/')).map(|(_, n)| n.to_string()).unwrap_or(name);
-    let mut id: String = base
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|p| !p.is_empty())
-        .enumerate()
-        .map(|(i, p)| if i == 0 { p.to_string() } else { p[..1].to_ascii_uppercase() + &p[1..] })
-        .collect();
-    if id.starts_with(|c: char| c.is_ascii_digit()) {
-        id.insert(0, '_');
-    }
-    if id.is_empty() { "pkg".into() } else { id }
-}
+pub(crate) use quarry_core::action::agents::open_shell::package_ident;
 
 /// A character of a JavaScript identifier, as far as completion cares.
 pub(crate) fn is_js_ident(c: char) -> bool {

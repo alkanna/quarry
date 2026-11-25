@@ -92,6 +92,8 @@ impl App {
                 }
                 // Copied by `logic()`, which holds the egui context.
                 UiFx::CopyText(text) => self.clip = Some(text),
+                // Sent by `logic()`, which holds the egui context.
+                UiFx::Attention => self.attention = true,
             }
         }
     }

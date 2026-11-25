@@ -198,7 +198,7 @@ impl App {
         if let Some(a) = answer {
             #[cfg(test)]
             self.core.agents.answered.push((ask.id, a));
-            self.agent_answer(ask.id, a);
+            self.exec(Action::Agents(AgentsA::Answer { id: ask.id, answer: a }));
         }
     }
 }

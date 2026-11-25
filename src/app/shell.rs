@@ -391,10 +391,6 @@ impl App {
         }
     }
 
-    pub(super) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
-        self.core.shell_proxy(conn)
-    }
-
     pub(super) fn shell_view(&mut self, ui: &mut egui::Ui) {
         // The page draws before the windows over it, so a Cmd+Enter meant for a dialog reaches it first.
         let covered = self.window_open();

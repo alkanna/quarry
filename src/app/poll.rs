@@ -7,11 +7,14 @@ impl App {
         self.view_requests();
         while let Ok(m) = self.core.rx.try_recv() {
             if Core::handles(&m) {
+                // An agent call depends on what the window shows right now: focus, typing and an open dialog.
+                if matches!(m, Msg::Agent(_)) {
+                    self.core.agents.ui = quarry_core::state::agents::AgentUi { focused: ctx.input(|i| i.viewport().focused.unwrap_or(true)), typing: ctx.text_edit_focused(), modal: self.modal.is_some() };
+                }
                 self.core.on_msg(m);
                 continue;
             }
             match m {
-                Msg::Agent(ev) => self.on_agent(ctx, ev),
                 Msg::SqlOrphans { req, res, sample } => {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
                         f.orphans_done(req, res, sample);
@@ -70,6 +73,7 @@ impl App {
                 Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => {}
                 Msg::SqlAltered { .. } => {}
                 Msg::SqlRoutine { .. } => {}
+                Msg::Agent(_) => {}
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
                     self.sql_drop_info_done(conn, database, schema, table, res)

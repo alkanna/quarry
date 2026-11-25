@@ -36,7 +36,7 @@ fn an_agent_find_waits_for_approval_then_answers_scrubbed() {
     let ask = ui.app().core.agents.asks[0].clone();
     assert_eq!((ask.tool.as_str(), ask.ns.as_str(), ask.reason.as_deref()), ("find", "quarry_test.agent_ui", Some("look at users")));
     assert!(rx.try_recv().is_err(), "nothing answered before the user");
-    ui.h.state_mut().agent_answer(ask.id, Answer::Once);
+    ui.h.state_mut().core.agent_answer(ask.id, Answer::Once);
     ui.wait("the call to finish", |a| a.core.agents.activity.iter().any(|x| x.id == ask.id && x.outcome == Outcome::Approved));
     let v = rx.try_recv().expect("answered").expect("found");
     let docs = v["documents"].as_array().unwrap();
@@ -63,11 +63,11 @@ fn an_unanswered_approval_is_denied_by_the_timer() {
         h.step();
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(rx.try_recv().unwrap().unwrap_err().message, crate::app::agents::exec::NO_ANSWER);
+    assert_eq!(rx.try_recv().unwrap().unwrap_err().message, quarry_core::action::agents::exec::NO_ANSWER);
     assert_eq!(h.state().core.agents.activity[0].outcome, Outcome::TimedOut);
     // Allow on a call that timed out only closes it.
     let id = h.state().core.agents.asks[0].id;
-    h.state_mut().agent_answer(id, Answer::Once);
+    h.state_mut().core.agent_answer(id, Answer::Once);
     assert!(h.state().core.agents.asks.is_empty());
     assert_eq!(h.state().core.agents.activity[0].outcome, Outcome::TimedOut);
 }
@@ -128,7 +128,7 @@ fn structure_changes_always_ask_and_run_once_allowed() {
         let ask = ui.app().core.agents.asks[0].clone();
         assert!(ask.why.always && !ask.why.session_ok, "{tool}: structure never takes a session grant");
         assert!(ask.facts.iter().any(|f| f.contains("can't be undone")), "{tool}: {:?}", ask.facts);
-        ui.h.state_mut().agent_answer(ask.id, Answer::Once);
+        ui.h.state_mut().core.agent_answer(ask.id, Answer::Once);
         ui.wait("the call", |a| a.core.agents.activity.iter().any(|x| x.id == ask.id && x.outcome != Outcome::Running));
         let v = rx.try_recv().expect("answered").unwrap_or_else(|e| panic!("{tool}: {}", e.message));
         assert_eq!(v["undo"], json!(false));
@@ -144,7 +144,7 @@ fn structure_changes_always_ask_and_run_once_allowed() {
     let mut rx = inject(ui.app(), 5, "create_collection", ns.clone());
     ui.wait("the approval", |a| !a.core.agents.asks.is_empty());
     let id = ui.app().core.agents.asks[0].id;
-    ui.h.state_mut().agent_answer(id, Answer::Once);
+    ui.h.state_mut().core.agent_answer(id, Answer::Once);
     ui.wait("the call", |a| a.core.agents.activity.iter().any(|x| x.id == id && x.outcome != Outcome::Running));
     assert!(rx.try_recv().unwrap().unwrap_err().message.contains("already exists"));
     rt.block_on(async { d.collection::<Document>("agent_ui_made").drop().await.unwrap() });
