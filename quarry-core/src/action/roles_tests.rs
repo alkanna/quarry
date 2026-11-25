@@ -349,6 +349,7 @@ fn all_actions() -> Vec<Action> {
     all.extend(l.into_iter().map(Action::Library));
     all.extend(super::sql_tests::sql_actions().into_iter().map(Action::Sql));
     all.extend(super::sql_tests::struct_actions().into_iter().map(Action::Structure));
+    all.extend(super::structure_tests::routine_actions().into_iter().map(Action::Routines));
     all.extend(tab_and_docs_actions());
     all
 }
@@ -489,6 +490,9 @@ fn variant(a: &Action) -> String {
         },
         Action::Mongo(m) => super::mongo_tests::mongo_variant(m),
         Action::Grid(g) => super::mongo_tests::grid_variant(g),
+        Action::Routines(r) => match r {
+            RoutineA::Load { .. } | RoutineA::Reload { .. } | RoutineA::Fold { .. } | RoutineA::Open { .. } | RoutineA::New { .. } | RoutineA::Pane(_) | RoutineA::Save { .. } | RoutineA::Drop | RoutineA::Run => {}
+        },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

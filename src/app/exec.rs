@@ -45,6 +45,12 @@ impl App {
                         Dialog::Rename { doc, path, name } => Modal::Rename { doc, path, name },
                         Dialog::CreateIndex(f) => Modal::CreateIndex(f),
                         Dialog::ImportInsert(n) => Modal::ImportInsert(n),
+                        Dialog::ColEdit(f) => Modal::ColEdit(f),
+                        Dialog::IdxEdit(f) => Modal::IdxEdit(f),
+                        Dialog::CheckEdit(f) => Modal::CheckEdit(f),
+                        Dialog::TableOpts(f) => Modal::TableOpts(f),
+                        Dialog::FkEdit(f) => Modal::FkEdit(f),
+                        Dialog::SqlMaintain { what, stmt } => Modal::SqlMaintain { what, stmt },
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {

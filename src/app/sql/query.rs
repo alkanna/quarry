@@ -403,17 +403,7 @@ impl App {
 
     /// Opens a Query tab for a database. It has no table, so its collection name stays empty.
     pub(in crate::app) fn sql_new_query(&mut self, conn: u64, db: String) {
-        let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-        // A PostgreSQL Query tab starts in the schema the sidebar shows for its database.
-        let mut t = Tab::new(self.sel_in(conn, &db, String::new())).for_engine(engine);
-        // A database never expanded has no schema list yet; the tab fills its schema when the list arrives.
-        if self.is_pg(conn) && !self.core.sql_asked.contains(&(conn, db.clone())) {
-            self.pg_ask_schemas(conn, &db);
-        }
-        t.view = View::Sql;
-        self.core.tabs.push(t);
-        self.set_cur(self.core.tabs.len() - 1);
-        self.reset_doc_state();
+        self.core.sql_new_query(conn, db)
     }
 
     pub(in crate::app) fn sql_run(&mut self, all: bool, explain: bool) {

@@ -208,9 +208,9 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run").clicked() {
-                            let stmt = std::mem::take(stmt);
+                            let (what, tab) = (*what, self.core.tabs[self.core.cur].uid);
                             keep = false;
-                            self.sql_maintain_run(stmt);
+                            self.exec(Action::Structure(quarry_core::action::StructA::RunMaint { tab, what }));
                         }
                         if ui.button("Cancel").clicked() {
                             keep = false;

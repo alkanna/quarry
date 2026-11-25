@@ -33,6 +33,9 @@ pub(in crate::app) enum Act {
     DropRelation(usize),
     NewTrigger,
     DropTrigger(String),
+    /// Saves the draft of this trigger, or of the new one when empty.
+    SaveTrigger(String),
+    RevertTrigger(String),
     NewIndex,
     EditIndex(usize),
     DropIndex(usize),
@@ -114,22 +117,35 @@ impl App {
         // Columns are named in actions, by their place in the structure the grid drew.
         let cols: Vec<String> = self.structure().map(|s| s.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
         let name = |cols: &[String], i: usize| cols.get(i).cloned();
+        let st = |f: fn(&Structure) -> Vec<String>, i: usize| self.structure().map(f).and_then(|v| v.get(i).cloned());
+        let fk = |s: &Structure| s.foreign_keys.iter().map(|k| k.name.clone()).collect();
+        let ix = |s: &Structure| s.indexes.iter().map(|k| k.name.clone()).collect();
+        let ck = |s: &Structure| s.checks.iter().map(|k| k.name.clone()).collect();
         match a {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
                 let base = self.core.tabs[self.core.cur].sel.clone();
                 // A link: without a per-tab Back, the table it was followed from stays in its tab.
-                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::Link);
+                let sel = sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table);
+                self.exec(Action::Tab(quarry_core::action::TabA::Open { sel, how: Open::Link }));
             }
             Act::Refresh => self.exec(Action::Structure(StructA::Refresh { tab })),
-            Act::Maintain(what) => self.sql_maintain(what),
+            Act::Maintain(what) => self.exec(Action::Structure(StructA::Maintain { tab, what })),
             Act::Truncate => {
                 let sel = self.core.tabs[self.core.cur].sel.clone();
                 self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
             }
-            Act::NewColumn => self.open_col_form(None),
-            Act::EditColumn(i) => self.open_col_form(Some(i)),
-            Act::DuplicateColumn(i) => self.duplicate_column(i),
+            Act::NewColumn => self.exec(Action::Structure(StructA::EditColumn { tab, col: None })),
+            Act::EditColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::EditColumn { tab, col: Some(col) }));
+                }
+            }
+            Act::DuplicateColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::DuplicateColumn { tab, col }));
+                }
+            }
             Act::DropColumn(i) => {
                 if let Some(col) = name(&cols, i) {
                     self.exec(Action::Structure(StructA::DropColumn { tab, col }));
@@ -140,50 +156,48 @@ impl App {
                     self.exec(Action::Structure(StructA::MoveColumn { tab, col, to }));
                 }
             }
-            Act::NewRelation => self.open_fk_form(None),
-            Act::EditRelation(i) => self.open_fk_form(Some(i)),
-            Act::DropRelation(i) => self.stage_drop_fk(i),
-            Act::NewTrigger => self.trig_new(),
-            Act::DropTrigger(n) => self.trig_ask_drop(n),
-            Act::NewIndex => self.open_idx_form(None),
-            Act::EditIndex(i) => self.open_idx_form(Some(i)),
+            Act::NewRelation => self.exec(Action::Structure(StructA::EditFk { tab, fk: None })),
+            Act::EditRelation(i) => {
+                if let Some(fk) = st(fk, i) {
+                    self.exec(Action::Structure(StructA::EditFk { tab, fk: Some(fk) }));
+                }
+            }
+            Act::DropRelation(i) => {
+                if let Some(fk) = st(fk, i) {
+                    self.exec(Action::Structure(StructA::DropFk { tab, fk }));
+                }
+            }
+            Act::NewTrigger => self.exec(Action::Structure(StructA::TrigNew { tab })),
+            Act::DropTrigger(name) => self.exec(Action::Structure(StructA::TrigAskDrop { tab, name })),
+            Act::SaveTrigger(key) => self.exec(Action::Structure(StructA::TrigSave { tab, key })),
+            Act::RevertTrigger(key) => self.exec(Action::Structure(StructA::TrigRevert { tab, key })),
+            Act::NewIndex => self.exec(Action::Structure(StructA::EditIndex { tab, index: None })),
+            Act::EditIndex(i) => {
+                if let Some(index) = st(ix, i) {
+                    self.exec(Action::Structure(StructA::EditIndex { tab, index: Some(index) }));
+                }
+            }
             Act::DropIndex(i) => {
                 if let Some(index) = self.structure().and_then(|s| s.indexes.get(i)).map(|x| x.name.clone()) {
                     self.exec(Action::Structure(StructA::DropIndex { tab, index }));
                 }
             }
-            Act::NewCheck => self.open_check_form(None),
-            Act::EditCheck(i) => self.open_check_form(Some(i)),
-            Act::DropCheck(i) => self.stage_drop_check(i),
-            Act::EditTable => self.open_table_opts(),
+            Act::NewCheck => self.exec(Action::Structure(StructA::EditCheck { tab, check: None })),
+            Act::EditCheck(i) => {
+                if let Some(check) = st(ck, i) {
+                    self.exec(Action::Structure(StructA::EditCheck { tab, check: Some(check) }));
+                }
+            }
+            Act::DropCheck(i) => {
+                if let Some(check) = st(ck, i) {
+                    self.exec(Action::Structure(StructA::DropCheck { tab, check }));
+                }
+            }
+            Act::EditTable => self.exec(Action::Structure(StructA::EditTable { tab })),
             Act::Unstage(at) => self.exec(Action::Structure(StructA::Unstage { tab, at })),
             Act::Discard => self.exec(Action::Structure(StructA::Discard { tab })),
             Act::Apply => self.exec(Action::Structure(StructA::Apply { tab })),
         }
-    }
-
-    /// Runs a maintenance statement of the Info page. All of them count as writes: ANALYZE and CHECK are refused by a read-only session
-    /// on some servers, and the Query view's read-only gate would turn them away anyway. The heavy ones ask first.
-    pub(in crate::app) fn sql_maintain(&mut self, what: Maint) {
-        let sel = self.core.tabs[self.core.cur].sel.clone();
-        if !self.conn_writable(sel.conn) {
-            return self.warn_ro();
-        }
-        let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) else { return };
-        if what.heavy() {
-            self.modal = Some(Modal::SqlMaintain { what, stmt });
-        } else {
-            self.sql_maintain_run(stmt);
-        }
-    }
-
-    /// The Query view runs each statement on its own outside any transaction, so VACUUM works, and it logs the statement and shows the server's rows.
-    pub(in crate::app) fn sql_maintain_run(&mut self, stmt: String) {
-        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
-            s.query = format!("{stmt};");
-        }
-        self.core.tabs[self.core.cur].view = View::Sql;
-        self.sql_run(true, false);
     }
 
     /// The count shown beside a view's tab once the structure is known.
@@ -638,7 +652,7 @@ impl App {
         }
         ui.add_space(12.0);
         match &key {
-            Some(k) => self.trig_editor(ui, &d, k, editable),
+            Some(k) => self.trig_editor(ui, &d, k, editable, &mut acts),
             None => {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| ui.label(RichText::new("This table has no triggers").size(TXT_SMALL).color(FAINT())));

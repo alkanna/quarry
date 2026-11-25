@@ -19,7 +19,8 @@ fn table_changes(ui: &UiApp) -> Vec<Change> {
 }
 
 fn open_opts(ui: &mut UiApp) {
-    ui.h.state_mut().open_table_opts();
+    let tab = ui.app().core.tabs[ui.app().core.cur].uid;
+    ui.h.state_mut().exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::EditTable { tab }));
     ui.settle();
     assert!(matches!(ui.app().modal, Some(Modal::TableOpts(_))), "the dialog did not open");
 }

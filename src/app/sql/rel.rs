@@ -4,6 +4,7 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
+use quarry_core::action::{Action, StructA};
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 pub(crate) use quarry_core::state::sql::rel::*;
@@ -67,81 +68,10 @@ fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql
 }
 
 impl App {
-    /// The Add relation dialog, or with `edit` the dialog on that key of the table (PostgreSQL).
-    pub(in crate::app) fn open_fk_form(&mut self, edit: Option<usize>) {
-        let Some(own) = self.structure().cloned() else { return };
-        let from = edit.and_then(|i| own.foreign_keys.get(i).cloned());
-        if let Some(k) = &from {
-            if !k.opaque.is_empty() {
-                return self.warn(format!("{} cannot be edited here: {}.", k.name, k.opaque));
-            }
-            let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-            if self.staged().iter().any(|c| matches!(c, Change::DropFk(n) | Change::RenameFk { from: n, .. } | Change::SetFkDeferral { name: n, .. } if ddl::fk_name_is(pg, n, &k.name))) {
-                return self.warn(format!("{} already has a staged change. Remove it first.", k.name));
-            }
-        }
-        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        // The namespace the key points into: the database on MySQL, a schema of this database on PostgreSQL.
-        let pg = self.is_pg(sel.conn);
-        let ns = if pg { self.sel_schema(&sel) } else { sel.db.clone() };
-        let rest = self.staged().to_vec();
-        let first = own.columns.first().map(|c| c.name.clone()).unwrap_or_default();
-        let (d, version, _) = self.alter_env();
-        // Until the server answers, a MySQL that has the rule on by default is taken to have it.
-        let strict = ddl::fk_whole_key_default(d, &version);
-        let mut rules_req = 0;
-        if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()).filter(|_| !pg) {
-            self.core.req += 1;
-            rules_req = self.core.req;
-            self.core.worker.sql_fk_rules(rules_req, sql);
-        }
-        let (name, pairs) = match &from {
-            Some(k) => (k.name.clone(), k.cols.iter().cloned().zip(k.ref_cols.iter().cloned()).collect()),
-            None => (String::new(), vec![(first, String::new())]),
-        };
-        let (ref_db, ref_table) = from.as_ref().map(|k| (k.ref_db.clone(), k.ref_table.clone())).unwrap_or((ns, String::new()));
-        let (on_update, on_delete) = from.as_ref().map(|k| (k.on_update.clone(), k.on_delete.clone())).unwrap_or_else(|| if pg { ("NO ACTION".into(), "NO ACTION".into()) } else { ("CASCADE".into(), "RESTRICT".into()) });
-        self.modal = Some(Modal::FkEdit(Box::new(FkForm {
-            name,
-            named: from.is_some(),
-            pairs,
-            ref_db,
-            ref_table,
-            on_update,
-            on_delete,
-            own_cols: own.columns.iter().map(|c| c.name.clone()).filter(|n| !rest.iter().any(|c| matches!(c, Change::Drop(d) if d == n))).collect(),
-            own,
-            rest,
-            memo: None,
-            parent: None,
-            asked: (String::new(), String::new()),
-            parent_req: 0,
-            parent_err: None,
-            orphans: None,
-            orphan_for: None,
-            orphan_req: 0,
-            strict,
-            rules_req,
-            check: false,
-            sample: Vec::new(),
-            pg,
-            match_full: from.as_ref().is_some_and(|k| k.match_full),
-            deferrable: from.as_ref().is_some_and(|k| k.deferrable),
-            deferred: from.as_ref().is_some_and(|k| k.deferred),
-            not_valid: from.as_ref().is_some_and(|k| k.not_valid),
-            from,
-        })));
-    }
-
-    pub(in crate::app) fn stage_drop_fk(&mut self, i: usize) {
-        let Some(name) = self.structure().and_then(|s| s.foreign_keys.get(i)).map(|k| k.name.clone()) else { return };
-        let mut staged = self.staged().to_vec();
-        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if ddl::fk_name_is(pg, n, &name))) {
-            return;
-        }
-        staged.push(Change::DropFk(name));
-        self.set_staged(staged);
+    /// The Add relation dialog. Forwards to Core, which hands the form back at once.
+    pub(in crate::app) fn open_fk_form(&mut self) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Structure(StructA::EditFk { tab, fk: None }));
     }
 
     /// The tables a key can point at in a namespace (a database, or a schema of `db` on PostgreSQL), views left out. None
@@ -432,10 +362,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            self.set_staged(super::alter::restage(self.staged(), None, all, f.rest.len()));
-            if now {
-                self.request_alter_apply();
-            }
+            self.stage_from_dialog(all, f.rest.len(), None, now);
         }
     }
 
@@ -470,7 +397,7 @@ impl App {
         if which != "addrel" {
             return;
         }
-        self.open_fk_form(None);
+        self.open_fk_form();
         let Some(Modal::FkEdit(f)) = self.modal.as_mut() else { return };
         use db::sql::structure::{Column, Index, IndexCol};
         let code = Column { name: "code".into(), full_type: "char(3)".into(), collation: Some("utf8mb4_0900_ai_ci".into()), key: "PRI".into(), ..Default::default() };

@@ -4,28 +4,17 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
-use db::sql::ddl::{self, TrigDef, TrigJob};
+use db::sql::ddl::{self, TrigDef};
 use db::sql::structure::{Structure, Trigger};
 pub(crate) use quarry_core::state::sql::trig::*;
 
 const LINE_H: f32 = 20.0;
-
-/// The key of the draft of a trigger that does not exist yet.
-pub(in crate::app) const NEW: &str = "";
 
 pub(in crate::app) fn def_of(t: &Trigger) -> TrigDef {
     if t.pg.is_some() {
         return db::sql::pg::ddl_trig::def_of(t);
     }
     TrigDef { name: t.name.clone(), timing: t.timing.to_ascii_uppercase(), event: t.event.to_ascii_uppercase(), body: t.body.clone(), pg: Default::default() }
-}
-
-/// The draft of a new trigger for the engine.
-pub(in crate::app) fn blank(pg: bool) -> TrigDef {
-    if pg {
-        return db::sql::pg::ddl_trig::blank();
-    }
-    TrigDef { name: String::new(), timing: "BEFORE".into(), event: "INSERT".into(), body: "BEGIN\n  \nEND".into(), pg: Default::default() }
 }
 
 /// A body is the same when only its outer whitespace differs, which the server does not keep. The name of a new trigger's
@@ -96,14 +85,6 @@ impl App {
         Some(st.triggers[i].name.clone())
     }
 
-    pub(in crate::app) fn trig_new(&mut self) {
-        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-        if let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
-            s.st.trig_new = true;
-            s.st.trig.entry(NEW.to_string()).or_insert_with(|| blank(pg));
-        }
-    }
-
     /// Whether the connection of the open table lets writes through, which a view's own lock on rows does not decide: a view
     /// can hold INSTEAD OF triggers on PostgreSQL.
     fn tab_writable(&self) -> bool {
@@ -116,35 +97,8 @@ impl App {
         !self.sel_is_view() || self.t().is_some_and(|t| self.is_pg(t.sel.conn))
     }
 
-    /// Asks before dropping the selected trigger.
-    pub(in crate::app) fn trig_ask_drop(&mut self, name: String) {
-        if !self.tab_writable() {
-            return self.ask_unlock_then(move |a| a.trig_ask_drop(name));
-        }
-        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        let mut title = format!("Drop the trigger {name}? Undo brings it back as it was.");
-        // PostgreSQL drops the function with its trigger when nothing else runs it, or says why it stays; a trigger that cannot
-        // be put back is refused here, before the person types anything.
-        if self.is_pg(sel.conn) {
-            let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.warn(format!("The trigger {name} is not in the structure any more.")) };
-            match db::sql::pg::ddl_trig::preview(&self.sel_schema(&sel), &sel.coll, &TrigJob::Drop(t)) {
-                Ok((steps, warnings)) => {
-                    if steps.len() > 1 {
-                        title.push_str(" Its function is dropped with it, since nothing else runs it.");
-                    }
-                    for w in warnings {
-                        title.push(' ');
-                        title.push_str(&w);
-                    }
-                }
-                Err(why) => return self.warn(why),
-            }
-        }
-        self.modal = Some(Modal::Typed { title, expect: name.clone(), typed: String::new(), action: Danger::DropTrigger(sel, name) });
-    }
-
     /// The editor, its preview and the Save row for `key`.
-    pub(in crate::app) fn trig_editor(&mut self, ui: &mut egui::Ui, st: &Structure, key: &str, editable: bool) {
+    pub(in crate::app) fn trig_editor(&mut self, ui: &mut egui::Ui, st: &Structure, key: &str, editable: bool, acts: &mut Vec<crate::app::sql::structure::Act>) {
         let Some((conn, table)) = self.t().map(|t| (t.sel.conn, t.sel.coll.clone())) else { return };
         let live_trig: Option<&Trigger> = st.triggers.iter().find(|t| t.name == key);
         let (d, _, m) = self.alter_env();
@@ -253,16 +207,12 @@ impl App {
                 }
             });
         });
-        if revert && let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
-            s.st.trig.remove(key);
-            if key == NEW {
-                s.st.trig_new = false;
-            }
+        // Both run after the frame, once the structure is back in the tab.
+        if revert {
+            acts.push(crate::app::sql::structure::Act::RevertTrigger(key.to_string()));
         }
         if save && steps.as_ref().is_some_and(|s| s.is_ok()) {
-            // Built again from the live list, so the order it keeps is the one the server has now.
-            let job = ddl::save_job(&st.triggers, live_trig, &def);
-            self.run_trigger(job, if exists { "Saved the trigger" } else { "Created the trigger" });
+            acts.push(crate::app::sql::structure::Act::SaveTrigger(key.to_string()));
         }
         if let Some(s) = self.trig_state_mut() {
             s.trig_memo = Some(memo);
@@ -294,33 +244,10 @@ impl App {
         TrigMemo { key: key.to_string(), def: def.clone(), live: live.cloned(), n_trigs: st.triggers.len(), mode: m, cols: cols.iter().map(|c| c.to_string()).collect(), dirty, steps, script, pg_warnings }
     }
 
-    fn run_trigger(&mut self, job: TrigJob, done: &str) {
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        // A locked connection asks first and runs the change when writes are allowed, as Apply does for the structure.
-        if !self.tab_writable() {
-            let done = done.to_string();
-            return self.ask_unlock_then(move |a| a.run_trigger(job, &done));
-        }
-        if self.applying() {
-            return self.warn(BUSY_NOTE);
-        }
-        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        let Some((db, schema)) = self.sql_target(&sel) else { return self.warn_offline() };
-        let (.., m) = self.alter_env();
-        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
-            s.st.applying = true;
-            // The draft of a trigger that is being made is cleared once the structure lists it under this name.
-            s.st.trig_made = if let TrigJob::Create(c) = &job { Some(c.def.name.clone()) } else { None };
-            s.st.trig_saving = if let TrigJob::Edit { was, .. } = &job { Some(was.name.clone()) } else { None };
-        }
-        self.core.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
-    }
-
+    /// Drops trigger `name` of the open tab, once confirmed.
     pub(in crate::app) fn drop_trigger(&mut self, name: String) {
-        let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.warn(format!("The trigger {name} is not in the structure any more.")) };
-        self.run_trigger(TrigJob::Drop(t), "Dropped the trigger");
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::TrigDrop { tab, name }));
     }
 
     /// QUARRY_TEST_SQL=trigedit: the orders_before_update trigger with its body changed, so the preview shows
@@ -344,6 +271,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use db::sql::ddl::TrigJob;
 
     fn trig(name: &str, timing: &str, event: &str, order: u64) -> Trigger {
         Trigger { name: name.into(), timing: timing.into(), event: event.into(), body: "SET NEW.a = 1".into(), definer: "app@%".into(), order, sql_mode: String::new(), pg: None }

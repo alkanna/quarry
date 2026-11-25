@@ -13,6 +13,9 @@ use crate::state::sql::structure::Load;
 use crate::state::Danger;
 use serde::{Deserialize, Serialize};
 
+pub mod forms;
+pub mod trig;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum StructA {
     /// Stages dropping column `col`.
@@ -30,12 +33,47 @@ pub enum StructA {
     Run { tab: u64 },
     /// Reads the structure again.
     Refresh { tab: u64 },
+    /// Opens the column dialog on column `col`, or on a new column.
+    EditColumn { tab: u64, col: Option<String> },
+    /// Opens the column dialog on a copy of column `col`.
+    DuplicateColumn { tab: u64, col: String },
+    /// Opens the index dialog on index `index`, or on a new index.
+    EditIndex { tab: u64, index: Option<String> },
+    /// Opens the CHECK dialog on constraint `check`, or on a new one.
+    EditCheck { tab: u64, check: Option<String> },
+    DropCheck { tab: u64, check: String },
+    /// Opens the relation dialog on foreign key `fk`, or on a new one.
+    EditFk { tab: u64, fk: Option<String> },
+    DropFk { tab: u64, fk: String },
+    /// Opens the table options dialog.
+    EditTable { tab: u64 },
+    /// A dialog's Stage: its own changes go after the staged list as it is now; `replaces` is the column whose staged edit it
+    /// took over.
+    Stage { tab: u64, changes: Vec<Change>, replaces: Option<String> },
+    /// The table options dialog's Stage: its changes replace every staged table option.
+    StageTable { tab: u64, changes: Vec<Change> },
+    /// Triggers: a draft of a new trigger.
+    TrigNew { tab: u64 },
+    /// Triggers: drops the edits of draft `key` (a trigger's name, or empty for the new one).
+    TrigRevert { tab: u64, key: String },
+    /// Triggers: saves draft `key`.
+    TrigSave { tab: u64, key: String },
+    /// Triggers: asks before dropping trigger `name`.
+    TrigAskDrop { tab: u64, name: String },
+    /// Triggers: drops trigger `name`, once confirmed.
+    TrigDrop { tab: u64, name: String },
+    /// Info: a maintenance statement; the heavy ones ask first.
+    Maintain { tab: u64, what: crate::db::sql::Maint },
+    /// Info: runs a maintenance statement, once confirmed.
+    RunMaint { tab: u64, what: crate::db::sql::Maint },
 }
 
 impl StructA {
     fn tab(&self) -> u64 {
         match self {
             StructA::DropColumn { tab, .. } | StructA::MoveColumn { tab, .. } | StructA::DropIndex { tab, .. } | StructA::Unstage { tab, .. } | StructA::Discard { tab } | StructA::Apply { tab } | StructA::Run { tab } | StructA::Refresh { tab } => *tab,
+            StructA::EditColumn { tab, .. } | StructA::DuplicateColumn { tab, .. } | StructA::EditIndex { tab, .. } | StructA::EditCheck { tab, .. } | StructA::DropCheck { tab, .. } | StructA::EditFk { tab, .. } | StructA::DropFk { tab, .. } | StructA::EditTable { tab } | StructA::Stage { tab, .. } | StructA::StageTable { tab, .. } => *tab,
+            StructA::TrigNew { tab } | StructA::TrigRevert { tab, .. } | StructA::TrigSave { tab, .. } | StructA::TrigAskDrop { tab, .. } | StructA::TrigDrop { tab, .. } | StructA::Maintain { tab, .. } | StructA::RunMaint { tab, .. } => *tab,
         }
     }
 }
@@ -72,8 +110,55 @@ impl Core {
                 }
                 self.request_structure();
             }
+            StructA::EditColumn { col, .. } => self.open_col_form(col.as_deref()),
+            StructA::DuplicateColumn { col, .. } => self.duplicate_column(&col),
+            StructA::EditIndex { index, .. } => self.open_idx_form(index.as_deref()),
+            StructA::EditCheck { check, .. } => self.open_check_form(check.as_deref()),
+            StructA::DropCheck { check, .. } => self.stage_drop_check(&check),
+            StructA::EditFk { fk, .. } => self.open_fk_form(fk.as_deref()),
+            StructA::DropFk { fk, .. } => self.stage_drop_fk(&fk),
+            StructA::EditTable { .. } => self.open_table_opts(),
+            StructA::Stage { changes, replaces, .. } => self.stage_changes(changes, replaces.as_deref()),
+            StructA::StageTable { changes, .. } => self.stage_table_opts(changes),
+            StructA::TrigNew { .. } => self.trig_new(),
+            StructA::TrigRevert { key, .. } => self.trig_revert(&key),
+            StructA::TrigSave { key, .. } => return self.trig_save(&key),
+            StructA::TrigAskDrop { name, .. } => return self.trig_ask_drop(name),
+            StructA::TrigDrop { name, .. } => return self.drop_trigger(&name),
+            StructA::Maintain { what, .. } => return self.sql_maintain(what),
+            StructA::RunMaint { what, .. } => {
+                let sel = self.tabs[self.cur].sel.clone();
+                if let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) {
+                    self.sql_maintain_run(stmt);
+                }
+            }
         }
         Ok(Reply::Done)
+    }
+
+    /// Runs a maintenance statement of the Info page. All of them count as writes: ANALYZE and CHECK are refused by a read-only session
+    /// on some servers, and the Query view's read-only gate would turn them away anyway. The heavy ones ask first.
+    pub fn sql_maintain(&mut self, what: crate::db::sql::Maint) -> Result<Reply, Refusal> {
+        let sel = self.tabs[self.cur].sel.clone();
+        if !self.conn_writable(sel.conn) {
+            return Err(self.refuse_ro(sel.conn, None));
+        }
+        let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) else { return Ok(Reply::Done) };
+        if what.heavy() {
+            self.ui_fx.push(UiFx::Open(Dialog::SqlMaintain { what, stmt }));
+        } else {
+            self.sql_maintain_run(stmt);
+        }
+        Ok(Reply::Done)
+    }
+
+    /// The Query view runs each statement on its own outside any transaction, so VACUUM works, and it logs the statement and shows the server's rows.
+    pub fn sql_maintain_run(&mut self, stmt: String) {
+        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+            s.query = format!("{stmt};");
+        }
+        self.tabs[self.cur].view = crate::state::View::Sql;
+        self.sql_run(true, false);
     }
 
     /// Asks for the current tab's structure. The answer is matched back by `idx_req`.
@@ -88,6 +173,14 @@ impl Core {
             s.st.load = Load::Loading;
         }
         self.worker.sql_structure(req, db, space, t.sel.coll.clone());
+    }
+
+    /// A structure read answered: the tab that asked for it by `idx_req` takes it. The app's dialogs that read a structure of
+    /// their own take their answers first.
+    pub fn structure_loaded(&mut self, req: u64, res: db::Res<Structure>) {
+        if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
+            s.st.finish(res);
+        }
     }
 
     pub fn structure(&self) -> Option<&Structure> {

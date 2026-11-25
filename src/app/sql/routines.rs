@@ -4,6 +4,7 @@
 //! tabs for the page and stays beside the table that calls it.
 
 use crate::app::*;
+use quarry_core::action::{Action, RoutineA};
 use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Routine};
 pub(crate) use quarry_core::state::sql::routines::*;
 
@@ -24,7 +25,7 @@ pub(in crate::app) enum RAct {
 
 impl App {
     fn routines_key(&self, conn: u64, db: &str, schema: &str) -> (u64, String) {
-        (conn, ns_key(db, if self.is_pg(conn) { schema } else { "" }))
+        self.core.routines_key(conn, db, schema)
     }
 
     /// How many routines of a namespace match the sidebar's filter, so a database whose tables all miss it still shows.
@@ -132,215 +133,16 @@ impl App {
     }
 
     pub(in crate::app) fn routine_act(&mut self, conn: u64, a: RAct) {
-        match a {
-            RAct::Load(db, schema) => self.routines_load(conn, db, schema),
-            RAct::Reload(db, schema) => {
-                let key = self.routines_key(conn, &db, &schema);
-                self.core.routines.lists.remove(&key);
-                self.routines_load(conn, db, schema);
-            }
-            RAct::Fold(ns) => {
-                let key = (conn, ns);
-                if !self.core.routines.folded.remove(&key) {
-                    self.core.routines.folded.insert(key);
-                }
-            }
-            RAct::Open(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::View),
-            RAct::Run(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::Run),
-            RAct::New(db, schema, kind) => self.routine_new(conn, db, schema, kind),
-            RAct::Drop(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::Drop),
-        }
-    }
-
-    fn routines_load(&mut self, conn: u64, db: String, schema: String) {
-        let key = self.routines_key(conn, &db, &schema);
-        // A connection without a session (the offline demo) has no routines to read; an empty list ends the asking.
-        let Some(sql) = self.live_sql(conn) else {
-            self.core.routines.lists.entry(key).or_insert(Loaded::Ok(Vec::new()));
-            return;
+        let a = match a {
+            RAct::Load(db, schema) => RoutineA::Load { conn, db, schema },
+            RAct::Reload(db, schema) => RoutineA::Reload { conn, db, schema },
+            RAct::Fold(ns) => RoutineA::Fold { conn, ns },
+            RAct::Open(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::View },
+            RAct::Run(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::Run },
+            RAct::New(db, schema, kind) => RoutineA::New { conn, db, schema, kind },
+            RAct::Drop(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::Drop },
         };
-        self.core.routines.lists.insert(key, Loaded::Wait);
-        self.core.worker.sql_routines(conn, sql.at(&db), db, schema);
-    }
-
-    fn routine_window_for(&self, conn: u64, db: String, schema: String, kind: Kind, routine: Option<Routine>) -> RoutineWin {
-        let dialect = self.dialect_of(conn);
-        let system = super::ns::system_ns(dialect == db::sql::Dialect::Postgres, &schema, &db);
-        RoutineWin { conn, db, schema, dialect, system, kind, routine, detail: None, req: 0, busy: false, error: None, text: String::new(), base: String::new(), editing: false, recreate: false, offer_recreate: false, undo: None, pane: Pane::View, typed: String::new(), args: Vec::new(), memo: None }
-    }
-
-    fn routine_open(&mut self, conn: u64, db: String, schema: String, r: Option<Routine>, pane: Pane) {
-        let Some(r) = r else { return };
-        let mut w = self.routine_window_for(conn, db.clone(), schema.clone(), r.kind, Some(r.clone()));
-        w.pane = pane;
-        if let Some(sql) = self.live_sql(conn) {
-            self.core.req += 1;
-            w.req = self.core.req;
-            self.core.worker.sql_routine_detail(conn, self.core.req, sql.at(&db), schema, r);
-        }
-        self.core.routines.win = Some(w);
-    }
-
-    fn routine_new(&mut self, conn: u64, db: String, schema: String, kind: Kind) {
-        let mut w = self.routine_window_for(conn, db, schema.clone(), kind, None);
-        w.text = rt::template(w.dialect, kind, &schema);
-        w.editing = true;
-        self.core.routines.win = Some(w);
-    }
-
-    /// An answer of the worker. A read or a change answers the window that asked, by its request.
-    pub(in crate::app) fn routine_done(&mut self, conn: u64, req: u64, ans: rt::Answer) {
-        match ans {
-            rt::Answer::List { database, schema, res } => {
-                let key = self.routines_key(conn, &database, &schema);
-                // A list asked for before a Refresh forgot it is not put back.
-                if !matches!(self.core.routines.lists.get(&key), Some(Loaded::Wait)) {
-                    return;
-                }
-                self.core.routines.lists.insert(key, match res {
-                    Ok(l) => Loaded::Ok(l),
-                    Err(e) => Loaded::Err(e),
-                });
-            }
-            rt::Answer::Detail { res } => {
-                let Some(w) = self.core.routines.win.as_mut().filter(|w| w.req == req) else { return };
-                w.req = 0;
-                match res {
-                    Ok(d) => {
-                        // Typing in the editor is kept when the read arrives after it started.
-                        let typing = w.editing && w.dirty();
-                        w.base = d.source.clone();
-                        if !typing {
-                            w.text = d.source.clone();
-                        }
-                        w.args = rt::inputs(&d).iter().map(|_| Arg::default()).collect();
-                        w.detail = Some(*d);
-                        w.error = None;
-                    }
-                    Err(e) => w.error = Some(e),
-                }
-            }
-            rt::Answer::Changed { res } => {
-                let Some(w) = self.core.routines.win.as_mut().filter(|w| w.req == req) else { return };
-                w.req = 0;
-                w.busy = false;
-                match res {
-                    Ok(r) => self.routine_changed(r),
-                    Err(f) => {
-                        w.offer_recreate = f.recreate;
-                        w.error = Some(f.why);
-                    }
-                }
-            }
-        }
-    }
-
-    /// A save or a drop went through. `r` is the routine as it is now, None after a drop.
-    fn routine_changed(&mut self, r: Option<Routine>) {
-        let Some(mut w) = self.core.routines.win.take() else { return };
-        let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let list_key = self.routines_key(conn, &db, &schema);
-        self.core.routines.lists.remove(&list_key);
-        match r {
-            None => self.ok(format!("Dropped the {}", w.kind.noun())),
-            Some(r) => {
-                let was = w.routine.is_some();
-                if was && let Some(old) = &w.detail {
-                    w.undo = Some((old.source.clone(), w.recreate));
-                } else {
-                    w.undo = None;
-                }
-                self.ok(if was { format!("Saved the {}", w.kind.noun()) } else { format!("Created the {}", w.kind.noun()) });
-                w.routine = Some(r.clone());
-                w.kind = r.kind;
-                w.editing = false;
-                w.recreate = false;
-                w.offer_recreate = false;
-                w.error = None;
-                w.memo = None;
-                // Read again, so the view shows what the server holds now and Undo has the current routine to work on.
-                w.base = String::new();
-                w.detail = None;
-                if let Some(sql) = self.live_sql(conn) {
-                    self.core.req += 1;
-                    w.req = self.core.req;
-                    self.core.worker.sql_routine_detail(conn, self.core.req, sql.at(&db), schema, r);
-                }
-                self.core.routines.win = Some(w);
-            }
-        }
-    }
-
-    /// Starts a save, asking to unlock first when the connection is locked.
-    fn routine_save(&mut self, restore: bool) {
-        let Some(w) = self.core.routines.win.as_ref() else { return };
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        if !self.conn_writable(w.conn) {
-            let conn = w.conn;
-            return self.ask_unlock_on(conn, move |a| a.routine_save(restore));
-        }
-        let Some(w) = self.core.routines.win.as_mut() else { return };
-        // Undo writes the text from before the last save, on the routine as it is now, the way the save went.
-        let (text, recreate) = match (restore, w.undo.clone()) {
-            (true, Some((old, recreate))) => (old, recreate),
-            _ => (w.text.clone(), w.recreate),
-        };
-        let (conn, db, schema, old) = (w.conn, w.db.clone(), w.schema.clone(), w.detail.clone());
-        // An edit waits for the read of the routine it changes.
-        if w.routine.is_some() && old.is_none() {
-            return;
-        }
-        w.recreate = recreate;
-        w.busy = true;
-        w.error = None;
-        self.core.req += 1;
-        w.req = self.core.req;
-        let (req, read_only) = (self.core.req, !self.conn_writable(conn));
-        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
-        self.core.worker.sql_routine_save(conn, req, sql.at(&db), schema, old, text, recreate, read_only);
-    }
-
-    fn routine_drop(&mut self) {
-        let Some(w) = self.core.routines.win.as_ref() else { return };
-        let (conn, db, schema, Some(r)) = (w.conn, w.db.clone(), w.schema.clone(), w.routine.clone()) else { return };
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, |a| a.routine_drop());
-        }
-        self.core.req += 1;
-        let (req, read_only) = (self.core.req, !self.conn_writable(conn));
-        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
-        if let Some(w) = self.core.routines.win.as_mut() {
-            (w.req, w.busy, w.error) = (req, true, None);
-        }
-        self.core.worker.sql_routine_drop(conn, req, sql.at(&db), schema, r, read_only);
-    }
-
-    /// Runs the call in a new Query tab, where its results show. A routine that may write needs the connection unlocked; a PostgreSQL
-    /// function declared STABLE or IMMUTABLE runs on a locked one, on the session's read-only guard, which refuses it if it writes anyway.
-    fn routine_run(&mut self) {
-        let Some(w) = self.core.routines.win.as_ref() else { return };
-        let Some(detail) = w.detail.as_ref() else { return };
-        let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let bs = self.sql_bs_of(conn);
-        let Some(script) = rt::run_script(w.dialect, &schema, detail, &w.args, bs) else { return };
-        if !detail.read_only && !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.routine_run_script(conn, db, script));
-        }
-        self.routine_run_script(conn, db, script);
-    }
-
-    fn routine_run_script(&mut self, conn: u64, db: String, script: String) {
-        self.sql_new_query(conn, db);
-        if let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
-            s.query = script;
-        }
-        self.sql_run(true, false);
-        self.core.routines.win = None;
+        self.exec(Action::Routines(a));
     }
 
     pub(in crate::app) fn routine_window(&mut self, ctx: &egui::Context) {
@@ -362,26 +164,29 @@ impl App {
             });
             foot(ui, &mut w, writable, &mut acts)
         });
-        if let Some(i) = acts.pane {
-            w.pane = i;
-            w.typed.clear();
-        }
         let keep = r.inner && !(r.should_close() && self.modal.is_none());
         let (save, undo, drop, run) = (acts.save, acts.undo, acts.drop, acts.run);
         if keep {
             self.core.routines.win = Some(w);
         }
+        let mut next = Vec::new();
+        if let Some(i) = acts.pane {
+            next.push(RoutineA::Pane(i));
+        }
         if save {
-            self.routine_save(false);
+            next.push(RoutineA::Save { restore: false });
         }
         if undo {
-            self.routine_save(true);
+            next.push(RoutineA::Save { restore: true });
         }
         if drop {
-            self.routine_drop();
+            next.push(RoutineA::Drop);
         }
         if run {
-            self.routine_run();
+            next.push(RoutineA::Run);
+        }
+        for a in next {
+            self.exec(Action::Routines(a));
         }
     }
 
@@ -393,7 +198,7 @@ impl App {
         self.core.routines.lists.insert(key, Loaded::Ok(list.clone()));
         self.core.open_dbs.insert((conn, db.to_string()));
         let pick = if view == "new" { None } else { list.iter().find(|r| r.kind == if view == "run" { Kind::Procedure } else { Kind::Function }).cloned() };
-        let mut w = self.routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
+        let mut w = self.core.routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
         match pick {
             Some(r) => {
                 let d = demo_detail(dialect, &r);

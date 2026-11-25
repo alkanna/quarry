@@ -47,6 +47,7 @@ pub mod aggregate;
 pub mod lib_dialogs;
 pub mod mongo;
 pub mod grid;
+pub mod routines;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -65,6 +66,8 @@ mod sql_tests;
 mod docs_tests;
 #[cfg(test)]
 mod mongo_tests;
+#[cfg(test)]
+mod structure_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -88,6 +91,7 @@ pub use aggregate::{AggA, StageA};
 pub use indexes::IdxA;
 pub use mongo::{CmpA, FieldA, ImportA, MongoA, SchemaA};
 pub use grid::GridA;
+pub use routines::RoutineA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -112,6 +116,7 @@ pub enum Action {
     Indexes(IdxA),
     Mongo(MongoA),
     Grid(GridA),
+    Routines(RoutineA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -197,6 +202,14 @@ pub enum Dialog {
     CreateIndex(Box<crate::state::indexes::IndexForm>),
     /// Import's confirmation of inserting this many documents.
     ImportInsert(usize),
+    /// The Structure view's column, index, CHECK, table options and relation dialogs.
+    ColEdit(Box<crate::state::sql::alter::ColForm>),
+    IdxEdit(Box<crate::state::sql::alter::IdxForm>),
+    CheckEdit(Box<crate::state::sql::checks::CheckForm>),
+    TableOpts(Box<crate::state::sql::table_opts::TableForm>),
+    FkEdit(Box<crate::state::sql::rel::FkForm>),
+    /// A maintenance statement of the Info page that locks or rebuilds the table.
+    SqlMaintain { what: crate::db::sql::Maint, stmt: String },
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -271,6 +284,7 @@ impl Core {
             Action::Indexes(a) => self.indexes(a),
             Action::Mongo(a) => self.mongo(a),
             Action::Grid(a) => self.grid(a),
+            Action::Routines(a) => self.routine_act(a),
         }
     }
 
@@ -335,6 +349,7 @@ impl Core {
             Msg::Indexes { .. } | Msg::IndexInfo { .. } | Msg::Written { .. } | Msg::Saved { .. } => true,
             Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
             Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => true,
+            Msg::SqlRoutine { .. } => true,
             _ => false,
         }
     }
@@ -391,6 +406,7 @@ impl Core {
             Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(conn, op, coll, path, res),
             Msg::Related { req, res } => self.related_done(req, res),
             Msg::RefFound { conn, db, coll, path, value, res } => self.ref_found(conn, db, coll, path, value, res),
+            Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
             _ => {}
         }
     }

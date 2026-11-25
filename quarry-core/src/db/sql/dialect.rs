@@ -13,7 +13,7 @@ pub enum Dialect {
 }
 
 /// Table maintenance statements of the Info page.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Maint {
     Analyze,
     Optimize,

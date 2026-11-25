@@ -287,17 +287,36 @@ pub(super) fn struct_actions() -> Vec<StructA> {
         StructA::Apply { tab },
         StructA::Run { tab },
         StructA::Refresh { tab },
+        StructA::EditColumn { tab, col: Some("note".into()) },
+        StructA::DuplicateColumn { tab, col: "note".into() },
+        StructA::EditIndex { tab, index: None },
+        StructA::EditCheck { tab, check: Some("chk".into()) },
+        StructA::DropCheck { tab, check: "chk".into() },
+        StructA::EditFk { tab, fk: None },
+        StructA::DropFk { tab, fk: "fk".into() },
+        StructA::EditTable { tab },
+        StructA::Stage { tab, changes: vec![crate::db::sql::ddl::Change::Drop("note".into()), crate::db::sql::ddl::Change::AddIndex(Default::default())], replaces: Some("note".into()) },
+        StructA::StageTable { tab, changes: vec![crate::db::sql::ddl::Change::Table { opt: crate::db::sql::ddl::TableOpt::Comment("c".into()), was: crate::db::sql::ddl::TableOpt::Comment(String::new()) }] },
+        StructA::TrigNew { tab },
+        StructA::TrigRevert { tab, key: String::new() },
+        StructA::TrigSave { tab, key: "t".into() },
+        StructA::TrigAskDrop { tab, name: "t".into() },
+        StructA::TrigDrop { tab, name: "t".into() },
+        StructA::Maintain { tab, what: crate::db::sql::Maint::Optimize },
+        StructA::RunMaint { tab, what: crate::db::sql::Maint::Analyze },
     ]
 }
 
 pub(super) fn struct_variant(a: &StructA) {
     match a {
         StructA::DropColumn { .. } | StructA::MoveColumn { .. } | StructA::DropIndex { .. } | StructA::Unstage { .. } | StructA::Discard { .. } | StructA::Apply { .. } | StructA::Run { .. } | StructA::Refresh { .. } => {}
+        StructA::EditColumn { .. } | StructA::DuplicateColumn { .. } | StructA::EditIndex { .. } | StructA::EditCheck { .. } | StructA::DropCheck { .. } | StructA::EditFk { .. } | StructA::DropFk { .. } | StructA::EditTable { .. } | StructA::Stage { .. } | StructA::StageTable { .. } => {}
+        StructA::TrigNew { .. } | StructA::TrigRevert { .. } | StructA::TrigSave { .. } | StructA::TrigAskDrop { .. } | StructA::TrigDrop { .. } | StructA::Maintain { .. } | StructA::RunMaint { .. } => {}
     }
 }
 
 /// `content_core` with the table's structure read: columns id and note.
-fn structure_core() -> (Core, u64) {
+pub(super) fn structure_core() -> (Core, u64) {
     use crate::db::sql::structure::{Column, Structure};
     let (mut core, uid) = content_core(false);
     let col = |name: &str, ty: &str| Column { name: name.into(), full_type: ty.into(), ..Default::default() };

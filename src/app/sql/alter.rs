@@ -70,15 +70,6 @@ fn dflt_of(mode: DMode, text: &str) -> Dv {
     }
 }
 
-fn mode_of(d: &Dv) -> (DMode, String) {
-    match d {
-        Dv::None => (DMode::None, String::new()),
-        Dv::Null => (DMode::Null, String::new()),
-        Dv::Value(v) => (DMode::Value, v.clone()),
-        Dv::Expr(v) => (DMode::Expr, v.clone()),
-    }
-}
-
 /// A highlighted statement in a box, scrolling both ways.
 pub(in crate::app) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
     egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
@@ -94,6 +85,7 @@ impl App {
         self.core.structure()
     }
 
+    #[cfg(test)]
     pub(in crate::app) fn staged(&self) -> &[Change] {
         self.core.staged()
     }
@@ -128,85 +120,21 @@ impl App {
         self.plan_of(st, changes).map(|p| p.sql())
     }
 
-    fn name_after(&self, name: &str) -> String {
-        self.core.name_after(name)
+    /// The column dialog on a column of the structure, or on a new one. Forwards to Core, which hands the form back at once.
+    pub(in crate::app) fn open_col_form(&mut self, col: Option<String>) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Structure(StructA::EditColumn { tab, col }));
     }
 
-    pub(in crate::app) fn open_col_form(&mut self, i: Option<usize>) {
-        let Some(st) = self.structure().cloned() else { return };
-        let staged = self.staged().to_vec();
-        let Some(i) = i else {
-            let mut def = ColDef::new("", "VARCHAR");
-            def.args = "255".into();
-            if self.alter_env().0 == Dialect::Postgres {
-                (def.ty, def.args) = ("character varying(255)".into(), String::new());
-            }
-            return self.show_col_form(None, def, Pos::Keep, staged);
-        };
-        let c = &st.columns[i];
-        if staged.iter().any(|ch| matches!(ch, Change::Drop(n) if *n == c.name)) {
-            return self.warn(format!("{} is staged to be dropped. Remove that change first.", c.name));
+    /// A dialog's Stage change and Apply now: its own changes, the part of `all` after its snapshot of the list, are staged,
+    /// then Apply runs. Two actions, so an Unlock asked for by Apply does not stage the change a second time.
+    pub(in crate::app) fn stage_from_dialog(&mut self, mut all: Vec<Change>, rest_len: usize, replaces: Option<String>, now: bool) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        let changes = all.split_off(rest_len.min(all.len()));
+        self.exec(Action::Structure(StructA::Stage { tab, changes, replaces }));
+        if now {
+            self.request_alter_apply();
         }
-        let (mine, rest): (Vec<Change>, Vec<Change>) = staged.into_iter().partition(|ch| matches!(ch, Change::Modify { from, .. } if *from == c.name));
-        let (def, pos) = match mine.into_iter().next() {
-            Some(Change::Modify { def, pos, .. }) => (def, pos),
-            _ => match ColDef::in_table(&st, c) {
-                Ok(d) => (d, Pos::Keep),
-                Err(why) => return self.warn(why),
-            },
-        };
-        self.show_col_form(Some(c.name.clone()), def, pos, rest);
-    }
-
-    fn show_col_form(&mut self, from: Option<String>, def: ColDef, pos: Pos, rest: Vec<Change>) {
-        let Some(st) = self.structure() else { return };
-        let order: Vec<String> = ddl::columns_after(st, &rest).into_iter().filter(|n| Some(n) != from.as_ref()).collect();
-        let (dmode, dtext) = match &def.generated {
-            Some(g) => (DMode::Generated, g.expr.clone()),
-            None => mode_of(&def.default),
-        };
-        let stored = def.generated.as_ref().is_none_or(|g| g.stored);
-        let orig = from.is_some().then(|| (def.clone(), pos.clone()));
-        self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, stored, pos, rest, order, memo: None })));
-    }
-
-    pub(in crate::app) fn duplicate_column(&mut self, i: usize) {
-        let Some(st) = self.structure().cloned() else { return };
-        let c = &st.columns[i];
-        let mut def = match ColDef::in_table(&st, c) {
-            Ok(d) => d,
-            Err(why) => return self.warn(why),
-        };
-        let names = ddl::columns_after(&st, self.staged());
-        def.name = ddl::free_name(&names, &c.name);
-        // A second counter or a second copy of a unique key would not be a copy.
-        def.auto_increment = false;
-        // A MariaDB column CHECK names the column it was read from.
-        def.check = None;
-        // PostgreSQL has no column order, so the copy goes last.
-        let pos = if self.alter_env().0 == Dialect::Postgres { Pos::Keep } else { Pos::After(self.name_after(&c.name)) };
-        self.show_col_form(None, def, pos, self.staged().to_vec());
-    }
-
-    pub(in crate::app) fn open_idx_form(&mut self, i: Option<usize>) {
-        let Some(st) = self.structure().cloned() else { return };
-        let staged = self.staged().to_vec();
-        let from = i.and_then(|i| st.indexes.get(i)).map(IndexDef::from_index);
-        if let Some(f) = from.as_ref().filter(|f| f.functional) {
-            let why = if self.alter_env().0 == Dialect::Postgres { "an expression, operator class, collation, NULLS order, storage option or tablespace" } else { "an expression part" };
-            return self.warn(format!("{} has {why}, which this editor cannot write back. Change it with a query. Dropping it can still be undone.", f.name));
-        }
-        if let Some(f) = &from && staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
-            return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
-        }
-        let after = ddl::columns_after(&st, &staged);
-        let ty = |n: &str| st.columns.iter().find(|c| c.name == n).map(|c| c.full_type.clone()).or_else(|| staged.iter().find_map(|c| match c {
-            Change::Add { def, .. } | Change::Modify { def, .. } if def.name == n => Some(def.ty.to_ascii_lowercase()),
-            _ => None,
-        })).unwrap_or_default();
-        let avail = after.iter().map(|n| (n.clone(), ty(n))).collect();
-        let def = from.clone().unwrap_or_default();
-        self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { include_text: def.include.join(", "), from, def, avail, rest: staged, view: None })));
     }
 
     /// Asks for confirmation when the changes lose data or cannot be undone, then runs them.
@@ -511,10 +439,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            self.set_staged(restage(self.staged(), f.from.as_deref(), all, f.rest.len()));
-            if now {
-                self.request_alter_apply();
-            }
+            self.stage_from_dialog(all, f.rest.len(), f.from.clone(), now);
         }
     }
 
@@ -722,19 +647,16 @@ impl App {
         if stage || now {
             *keep = false;
             let all = f.view.take().map(|v| v.all).unwrap_or_default();
-            self.set_staged(restage(self.staged(), None, all, f.rest.len()));
-            if now {
-                self.request_alter_apply();
-            }
+            self.stage_from_dialog(all, f.rest.len(), None, now);
         }
     }
 
     /// QUARRY_TEST_SQL=coledit: the dialog open on the total column of the design, and `stagebar` for the bar
     /// over the grids with a few staged changes. Offline, so the answer to Apply is the demo notice.
     pub(in crate::app) fn sql_alter_demo(&mut self, which: &str) {
-        let (Some(i), true) = (self.structure().and_then(|s| s.columns.iter().position(|c| c.name == "total")), matches!(which, "coledit" | "stagebar")) else { return };
+        let (true, true) = (self.structure().is_some_and(|s| s.columns.iter().any(|c| c.name == "total")), matches!(which, "coledit" | "stagebar")) else { return };
         if which == "coledit" {
-            self.open_col_form(Some(i));
+            self.open_col_form(Some("total".into()));
             if let Some(Modal::ColEdit(f)) = self.modal.as_mut() {
                 f.def.args = "12,2".into();
                 f.pos = Pos::After("customer_id".into());
@@ -749,17 +671,6 @@ impl App {
         self.set_staged(staged);
     }
 }
-
-/// The staged list once a structure dialog stages `all`, its snapshot of the list (`rest_len` changes long) followed by its
-/// own changes. It starts from the list as it is now, not the snapshot: an Apply that finished meanwhile emptied the list,
-/// and the snapshot would stage those changes again. `replaces` is the column whose earlier staged edit the dialog took over.
-pub(in crate::app) fn restage(now: &[Change], replaces: Option<&str>, mut all: Vec<Change>, rest_len: usize) -> Vec<Change> {
-    let new = all.split_off(rest_len.min(all.len()));
-    let mut staged: Vec<Change> = now.iter().filter(|c| !matches!(c, Change::Modify { from, .. } if Some(from.as_str()) == replaces)).cloned().collect();
-    staged.extend(new);
-    staged
-}
-
 
 #[cfg(test)]
 mod tests {

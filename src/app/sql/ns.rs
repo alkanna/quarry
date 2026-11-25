@@ -65,10 +65,6 @@ impl App {
         self.core.form_ns(conn, db)
     }
 
-    pub(in crate::app) fn sel_in(&self, conn: u64, db: &str, coll: String) -> Sel {
-        self.core.sel_in(conn, db, coll)
-    }
-
     pub(in crate::app) fn live_sql(&self, conn: u64) -> Option<db::sql::Db> {
         self.core.live_sql(conn)
     }

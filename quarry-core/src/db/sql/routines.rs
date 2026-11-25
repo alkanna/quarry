@@ -12,7 +12,7 @@ use super::{se, Db, Dialect};
 use crate::db::{Msg, Res, Worker};
 use sqlx::Connection;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Function,
     Procedure,
@@ -52,7 +52,7 @@ impl Kind {
 }
 
 /// One row of the sidebar list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Routine {
     pub kind: Kind,
     pub name: String,

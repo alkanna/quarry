@@ -216,8 +216,9 @@ fn alt_down_moves_the_focused_column_row() {
 #[test]
 fn index_columns_drag_to_reorder_in_the_index_dialog() {
     let Some(mut ui) = demo_structure() else { return };
-    let i = ui.app().structure().and_then(|s| s.indexes.iter().position(|x| x.cols.len() == 2)).expect("an index on two columns");
-    ui.h.state_mut().open_idx_form(Some(i));
+    let index = ui.app().structure().and_then(|s| s.indexes.iter().find(|x| x.cols.len() == 2)).map(|x| x.name.clone()).expect("an index on two columns");
+    let tab = ui.app().core.tabs[ui.app().core.cur].uid;
+    ui.h.state_mut().exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::EditIndex { tab, index: Some(index) }));
     ui.settle();
     let cols = |ui: &UiApp| match &ui.app().modal {
         Some(Modal::IdxEdit(f)) => f.def.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),

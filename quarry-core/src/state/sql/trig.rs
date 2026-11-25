@@ -23,3 +23,14 @@ impl TrigMemo {
         self.key == key && self.live.as_ref() == live && self.n_trigs == n_trigs && self.mode == mode && self.cols.iter().map(String::as_str).eq(cols.iter().copied()) && self.def == *def
     }
 }
+
+/// The key of the draft of a trigger that does not exist yet.
+pub const NEW: &str = "";
+
+/// The draft of a new trigger for the engine.
+pub fn blank(pg: bool) -> TrigDef {
+    if pg {
+        return crate::db::sql::pg::ddl_trig::blank();
+    }
+    TrigDef { name: String::new(), timing: "BEFORE".into(), event: "INSERT".into(), body: "BEGIN\n  \nEND".into(), pg: Default::default() }
+}

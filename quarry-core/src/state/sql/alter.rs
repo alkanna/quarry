@@ -100,3 +100,24 @@ pub fn plural_changes(n: usize) -> String {
 
 /// Shown under a disabled Apply now button.
 pub const BUSY_NOTE: &str = "A structure change is still running.";
+
+/// The staged list once a structure dialog stages `all`, its snapshot of the list (`rest_len` changes long) followed by its
+/// own changes. It starts from the list as it is now, not the snapshot: an Apply that finished meanwhile emptied the list,
+/// and the snapshot would stage those changes again. `replaces` is the column whose earlier staged edit the dialog took over.
+pub fn restage(now: &[Change], replaces: Option<&str>, mut all: Vec<Change>, rest_len: usize) -> Vec<Change> {
+    let new = all.split_off(rest_len.min(all.len()));
+    let mut staged: Vec<Change> = now.iter().filter(|c| !matches!(c, Change::Modify { from, .. } if Some(from.as_str()) == replaces)).cloned().collect();
+    staged.extend(new);
+    staged
+}
+
+/// The default of a column as the dialog edits it: its kind and its text.
+pub fn mode_of(d: &crate::db::sql::ddl::Dv) -> (DMode, String) {
+    use crate::db::sql::ddl::Dv;
+    match d {
+        Dv::None => (DMode::None, String::new()),
+        Dv::Null => (DMode::Null, String::new()),
+        Dv::Value(v) => (DMode::Value, v.clone()),
+        Dv::Expr(v) => (DMode::Expr, v.clone()),
+    }
+}

@@ -154,7 +154,7 @@ pub struct Constraint {
 
 /// A table CHECK constraint, as its engine reports it. The expression is what goes between the brackets of
 /// `CHECK (...)`. A CHECK written on a column is one of these on MySQL, and MariaDB keeps it apart in `Column::check`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckConstraint {
     pub name: String,
     pub expr: String,
@@ -218,7 +218,7 @@ impl CheckConstraint {
 
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
 /// to the table itself; in `referenced_by` it belongs to `table`, which points here.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ForeignKey {
     pub name: String,
     pub db: String,

@@ -4,39 +4,11 @@
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::sql::create::pick;
 use crate::app::*;
+use quarry_core::action::{Action, StructA};
 use db::sql::ddl::{self, Change, TableOpt};
-use db::sql::Dialect;
 pub(crate) use quarry_core::state::sql::table_opts::*;
 
 impl App {
-    pub(in crate::app) fn open_table_opts(&mut self) {
-        let Some(was) = self.structure().map(|st| (st.status.comment.clone(), st.status.engine.clone(), st.status.collation.clone(), st.status.auto_increment)) else { return };
-        let Some((conn, schema)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone())) else { return };
-        let pg = self.alter_env().0 == Dialect::Postgres;
-        if !pg {
-            self.ask_meta(conn, &schema);
-        }
-        let mut auto = was.3.map(|n| n.to_string()).unwrap_or_default();
-        let (mut comment, mut engine, mut collation) = (was.0.clone(), was.1.clone(), was.2.clone());
-        // Start from what is staged, not from what the server holds, or a second visit would show the old values and stage them again.
-        let (mut rest, mut had_staged) = (Vec::new(), false);
-        for c in self.staged() {
-            match c {
-                Change::Table { opt, .. } => {
-                    had_staged = true;
-                    match opt {
-                        TableOpt::Comment(v) => comment = v.clone(),
-                        TableOpt::Engine(v) => engine = v.clone(),
-                        TableOpt::Collation(v) => collation = v.clone(),
-                        TableOpt::AutoIncrement(n) => auto = n.to_string(),
-                    }
-                }
-                c => rest.push(c.clone()),
-            }
-        }
-        self.modal = Some(Modal::TableOpts(Box::new(TableForm { conn, schema, pg, comment, engine, collation, auto, was, rest, had_staged, meta: None, load_err: None, view: None })));
-    }
-
     /// One change for each field that differs from what the structure read.
     fn table_changes(f: &TableForm) -> Result<Vec<Change>, String> {
         let mut v = Vec::new();
@@ -185,11 +157,9 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            let new = f.view.take().map(|v| v.new).unwrap_or_default();
-            // From the list as it is now (an Apply that finished meanwhile emptied it), with this dialog's options replacing the staged ones.
-            let mut staged: Vec<Change> = self.staged().iter().filter(|c| !matches!(c, Change::Table { .. })).cloned().collect();
-            staged.extend(new);
-            self.set_staged(staged);
+            let changes = f.view.take().map(|v| v.new).unwrap_or_default();
+            let tab = self.core.tabs[self.core.cur].uid;
+            self.exec(Action::Structure(StructA::StageTable { tab, changes }));
             if now {
                 self.request_alter_apply();
             }

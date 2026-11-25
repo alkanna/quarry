@@ -24,7 +24,7 @@ impl Routines {
     }
 }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+#[derive(Default, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Pane {
     #[default]
     View,

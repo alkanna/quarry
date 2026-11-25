@@ -123,7 +123,8 @@ fn dropping_a_check_stages_the_drop_and_locks_the_check_against_another_edit() {
     ui.click("checks row 2");
     ui.click("Drop");
     assert!(matches!(staged(&ui).as_slice(), [Change::DropCheck(n)] if n == "chk_orders_currency"), "the drop is not staged");
-    ui.h.state_mut().open_check_form(Some(1));
+    let tab = ui.app().core.tabs[ui.app().core.cur].uid;
+    ui.h.state_mut().exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::EditCheck { tab, check: Some("chk_orders_currency".into()) }));
     ui.settle();
     assert!(ui.app().modal.is_none(), "a check with a staged drop opened its dialog");
     assert!(ui.app().last_problem().contains("already has a staged change"), "no notice says why: {}", ui.app().last_problem());

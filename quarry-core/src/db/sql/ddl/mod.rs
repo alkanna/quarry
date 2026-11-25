@@ -66,7 +66,7 @@ pub(super) async fn session_mode(c: &mut sqlx::MySqlConnection) -> Res<Mode> {
     Ok(Mode::of(&session_sql_mode(c).await?))
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Dv {
     /// No DEFAULT clause.
     #[default]
@@ -78,7 +78,7 @@ pub enum Dv {
     Expr(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColDef {
     pub name: String,
     /// One word, upper case: "DECIMAL".
@@ -114,7 +114,7 @@ pub struct ColDef {
 }
 
 /// The expression of a generated column and whether the server stores the value or computes it on read.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Gen {
     pub expr: String,
     pub stored: bool,
@@ -191,7 +191,7 @@ impl ColDef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Pos {
     /// A new column goes last; an existing one stays where it is.
     Keep,
@@ -199,7 +199,7 @@ pub enum Pos {
     After(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum IndexKind {
     #[default]
     Index,
@@ -209,14 +209,14 @@ pub enum IndexKind {
     Primary,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IdxCol {
     pub name: String,
     pub prefix: Option<u64>,
     pub desc: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct IndexDef {
     pub name: String,
     pub kind: IndexKind,
@@ -268,7 +268,7 @@ impl IndexDef {
 }
 
 /// A table option the Structure view changes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TableOpt {
     Comment(String),
     Engine(String),
@@ -277,7 +277,7 @@ pub enum TableOpt {
     AutoIncrement(u64),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Change {
     Add { def: ColDef, pos: Pos },
     /// `from` is the name now; a different `def.name` renames the column (CHANGE).
