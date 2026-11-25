@@ -1,0 +1,352 @@
+//! The Roles and privileges window run headlessly: offline with made-up answers, and against the PostgreSQL servers of the
+//! live tests when their variables are set.
+
+use super::roles::demo_data;
+use super::*;
+use crate::db::sql::pg::roles::{Answer, Change, Did, Kind, Privs};
+use crate::db::sql::Engine;
+use crate::db::{UndoAction, UndoKind};
+use crate::state::sql::pg_roles::PgRolesWin;
+use crate::state::{Conn, ConnMeta, Status};
+use mongodb::bson::Bson;
+
+const CONN: u64 = 1;
+
+fn pg_conn(core: &mut Core) {
+    core.conns.push(Conn::new(ConnMeta { id: CONN, name: "test".into(), engine: Engine::Postgres, ..Default::default() }, Status::Ready));
+}
+
+/// A core with the window open on the demo server's roles and tables, writes locked.
+fn offline() -> Core {
+    let mut core = Core::for_test();
+    pg_conn(&mut core);
+    let mut w = PgRolesWin::new(CONN, "analytics".into());
+    let (cl, objs, defs) = demo_data();
+    w.set_cluster(Ok(cl));
+    w.objs = Some(Ok(objs));
+    w.defs = Some(Ok(defs));
+    w.role = Some("app_writer".into());
+    core.pg_roles = Some(w);
+    core
+}
+
+/// SELECT granted to `role` on the table `table`, from what the window read.
+fn grant(core: &Core, table: &str, role: &str) -> Change {
+    let w = core.pg_roles.as_ref().unwrap();
+    let o = w.objects().unwrap().objs.iter().find(|o| o.name == table).unwrap().clone();
+    let mut to: Privs = o.direct(role);
+    to.insert("SELECT".into(), false);
+    Change::Acl { target: o.target(Kind::Tables), grantee: role.into(), from: o.direct(role), to }
+}
+
+fn roles(core: &mut Core, a: RolesA) -> Result<Reply, Refusal> {
+    core.execute(Action::Roles(a))
+}
+
+fn staged(core: &Core) -> usize {
+    core.pg_roles.as_ref().map_or(0, |w| w.staged.len())
+}
+
+fn writable(core: &mut Core, on: bool) {
+    core.conns[0].writable = on;
+}
+
+#[test]
+fn a_locked_connection_stages_nothing_and_refuses_apply() {
+    let mut core = offline();
+    let c = grant(&core, "payments", "app_reader");
+    roles(&mut core, RolesA::Stage(c.clone())).unwrap();
+    assert_eq!(staged(&core), 0, "a locked connection staged a grant");
+
+    writable(&mut core, true);
+    roles(&mut core, RolesA::Stage(c)).unwrap();
+    assert_eq!(staged(&core), 1);
+
+    // Locked again before Apply: refused with the read-only toast, which names the connection, and nothing sent.
+    writable(&mut core, false);
+    let r = roles(&mut core, RolesA::Apply).unwrap_err();
+    assert_eq!(r.kind, RefusalKind::ReadOnly { conn: CONN });
+    assert_eq!(r.msg, "test is read-only. Unlock writes to make this change.");
+    assert!(core.toasts.iter().any(|t| t.title == "test is read-only"));
+    assert!(!core.pg_roles.as_ref().unwrap().busy);
+
+    // Unlocked: this connection has no session here, so it asks to connect.
+    writable(&mut core, true);
+    let r = roles(&mut core, RolesA::Apply).unwrap_err();
+    assert_eq!(r.kind, RefusalKind::Offline);
+    assert_eq!(staged(&core), 1, "a refused apply keeps what was staged");
+
+    // The offline demo says it has no database and keeps the change.
+    core.demo = true;
+    assert_eq!(roles(&mut core, RolesA::Apply), Ok(Reply::Done));
+    assert_eq!(core.status, "Offline demo: no database is connected.");
+
+    roles(&mut core, RolesA::Discard).unwrap();
+    assert_eq!(staged(&core), 0);
+}
+
+/// An Apply answer that is not the one the window waits for (from before Esc closed and reopened it) leaves what is staged now.
+#[test]
+fn a_late_apply_answer_keeps_newer_staged_changes() {
+    let mut core = Core::for_test();
+    let mut w = PgRolesWin::new(CONN, "shop".into());
+    w.staged.push(Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) });
+    (w.busy, w.req_apply) = (true, 7);
+    core.pg_roles = Some(w);
+    let done = || Msg::PgRoles { conn: CONN, req: 3, ans: Answer::Done { did: Did::Applied, res: Ok("Applied".into()), undo: None } };
+    core.inject(done());
+    assert_eq!(staged(&core), 1, "a stale answer cleared the staged change");
+    core.inject(Msg::PgRoles { conn: CONN, req: 7, ans: Answer::Done { did: Did::Applied, res: Ok("Applied".into()), undo: None } });
+    assert!(staged(&core) == 0 && !core.pg_roles.as_ref().unwrap().busy);
+}
+
+#[test]
+fn a_stale_read_is_ignored_and_an_apply_answer_lands_on_the_undo_list() {
+    let mut core = offline();
+    let w = core.pg_roles.as_mut().unwrap();
+    (w.req_cluster, w.req_apply, w.busy) = (10, 12, true);
+    w.staged.push(Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) });
+    let before = w.cl().unwrap().roles.len();
+    // A cluster read from an earlier Refresh answers late: the window keeps what it has.
+    core.inject(Msg::PgRoles { conn: CONN, req: 9, ans: Answer::Cluster(Ok(Default::default())) });
+    assert_eq!(core.pg_roles.as_ref().unwrap().cl().unwrap().roles.len(), before);
+    // Another connection's answer with the same request id is not this window's either.
+    core.inject(Msg::PgRoles { conn: 2, req: 10, ans: Answer::Cluster(Ok(Default::default())) });
+    assert_eq!(core.pg_roles.as_ref().unwrap().cl().unwrap().roles.len(), before);
+
+    let undo = UndoAction { agent: None, at: std::time::Instant::now(), conn: CONN, db: String::new(), coll: String::new(), kind: UndoKind::Insert { id: Bson::Int32(1) } };
+    core.inject(Msg::PgRoles { conn: CONN, req: 12, ans: Answer::Done { did: Did::Applied, res: Ok("Applied 1 change".into()), undo: Some(undo) } });
+    let w = core.pg_roles.as_ref().unwrap();
+    assert!(w.staged.is_empty() && !w.busy);
+    assert_eq!((core.undo.len(), core.status.as_str()), (1, "Applied 1 change"));
+    // The window reads the server again after a write; this core has no session, so it keeps what it showed.
+    assert!(w.cluster.is_some());
+}
+
+#[test]
+fn the_window_s_choices_are_actions() {
+    let mut core = offline();
+    writable(&mut core, true);
+    roles(&mut core, RolesA::Cell(Some(("16501".into(), "app_writer".into())))).unwrap();
+    roles(&mut core, RolesA::Inherited(false)).unwrap();
+    roles(&mut core, RolesA::System(true)).unwrap();
+    let w = core.pg_roles.as_ref().unwrap();
+    assert!(w.cell.is_some() && !w.inherited && w.system);
+    // A tab change closes the cell editor.
+    roles(&mut core, RolesA::Tab(crate::state::sql::pg_roles::PTab::Roles)).unwrap();
+    assert!(core.pg_roles.as_ref().unwrap().cell.is_none());
+
+    // The Role tab's limit field: its text is filled for the role on show, an edit stages, a bad one explains.
+    roles(&mut core, RolesA::OpenRole("app_writer".into())).unwrap();
+    core.pg_roles_fields();
+    assert_eq!(core.pg_roles.as_ref().unwrap().lim, "20");
+    core.pg_roles.as_mut().unwrap().lim = "35".into();
+    roles(&mut core, RolesA::LimitEdited).unwrap();
+    assert!(matches!(core.pg_roles.as_ref().unwrap().staged.as_slice(), [Change::Attrs { to, .. }] if to.conn_limit == 35));
+    core.pg_roles.as_mut().unwrap().lim = "many".into();
+    roles(&mut core, RolesA::LimitEdited).unwrap();
+    assert!(core.pg_roles.as_ref().unwrap().field_err.is_some());
+
+    // New role and Drop open the app's dialogs; Unlock opens Unlock with nothing to run after.
+    roles(&mut core, RolesA::NewRole).unwrap();
+    roles(&mut core, RolesA::Unlock).unwrap();
+    let fx = core.take_ui_fx();
+    assert!(matches!(fx.as_slice(), [UiFx::Open(Dialog::PgNewRole(_)), UiFx::Open(Dialog::Unlock(CONN))]));
+    writable(&mut core, false);
+    let r = roles(&mut core, RolesA::Drop("jane".into())).unwrap_err();
+    assert_eq!(r.kind, RefusalKind::ReadOnly { conn: CONN });
+    assert!(core.take_ui_fx().is_empty(), "a refused drop opens nothing");
+
+    roles(&mut core, RolesA::Close).unwrap();
+    assert!(core.pg_roles.is_none());
+}
+
+#[test]
+fn a_password_from_json_is_refused() {
+    let mut core = offline();
+    writable(&mut core, true);
+    let json = serde_json::to_string(&Action::Roles(RolesA::SetPassword { conn: CONN, role: "jane".into(), oid: "16405".into(), password: Secret::new("Zq9secret".into()) })).unwrap();
+    let r = core.execute(serde_json::from_str(&json).unwrap()).unwrap_err();
+    assert_eq!(r.kind, RefusalKind::Invalid);
+}
+
+/// Every variant of every area, so a new one must be added here: the match below has no wildcard.
+fn all_actions() -> Vec<Action> {
+    use crate::state::sql::pg_roles::{DefForm, PTab, RTab};
+    use crate::state::sql::users::{ExpKind, UTab};
+    let c = Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) };
+    let spec = crate::db::sql::pg::roles::NewRole { name: "r".into(), attrs: Default::default(), groups: vec!["g".into()] };
+    let form = DefForm { owner: "o".into(), schema: String::new(), kind: crate::db::sql::pg::roles::DefKind::Tables, privs: ["SELECT".to_string()].into() };
+    let pw = || Secret::new("pw".into());
+    let r = [
+        RolesA::Open { conn: 1 },
+        RolesA::Tab(PTab::Roles),
+        RolesA::RTab(RTab::Defaults),
+        RolesA::Database("d".into()),
+        RolesA::Schema("s".into()),
+        RolesA::Kind(Kind::Functions),
+        RolesA::Role("r".into()),
+        RolesA::OpenRole("r".into()),
+        RolesA::Stage(c),
+        RolesA::Apply,
+        RolesA::Discard,
+        RolesA::Close,
+        RolesA::Unlock,
+        RolesA::Refresh,
+        RolesA::NewRole,
+        RolesA::Drop("r".into()),
+        RolesA::Password("r".into()),
+        RolesA::Inherited(false),
+        RolesA::System(true),
+        RolesA::Cell(Some(("1".into(), String::new()))),
+        RolesA::LimitEdited,
+        RolesA::UntilEdited,
+        RolesA::DefForm(Some(form)),
+        RolesA::Create { conn: 1, spec, password: pw() },
+        RolesA::SetPassword { conn: 1, role: "r".into(), oid: "1".into(), password: pw() },
+        RolesA::DropRun { conn: 1, info: Default::default(), mode: crate::db::sql::pg::roles::DropMode::Reassign("h".into()) },
+    ];
+    let u = [
+        SqlUsersA::Open { conn: 1 },
+        SqlUsersA::Pick { user: "u".into(), host: "%".into() },
+        SqlUsersA::Tab(UTab::Global),
+        SqlUsersA::Apply,
+        SqlUsersA::Close,
+        SqlUsersA::Refresh,
+        SqlUsersA::Unlock,
+        SqlUsersA::NewUser,
+        SqlUsersA::Drop { user: "u".into(), host: "%".into() },
+        SqlUsersA::DropRun { conn: 1, user: "u".into(), host: "%".into(), is_role: false },
+        SqlUsersA::Password { user: "u".into(), host: "%".into() },
+        SqlUsersA::Create { conn: 1, user: "u".into(), host: "%".into(), password: pw() },
+        SqlUsersA::SetPassword { conn: 1, user: "u".into(), host: "%".into(), plugin: None, password: pw() },
+        SqlUsersA::Lock(true),
+        SqlUsersA::Expire(ExpKind::Days),
+        SqlUsersA::Tls(crate::db::sql::users::Tls::X509),
+        SqlUsersA::Role { name: "r@%".into(), on: true },
+        SqlUsersA::RoleAdd(Some("r".into())),
+        SqlUsersA::RoleAddDone,
+        SqlUsersA::Global { privilege: "PROCESS".into(), on: true },
+        SqlUsersA::PrivAdd(None),
+        SqlUsersA::PrivAddDone,
+        SqlUsersA::DbPriv { pattern: "shop".into(), privilege: "SELECT".into(), on: true },
+        SqlUsersA::DbAdd(Some("shop".into())),
+        SqlUsersA::DbAddDone,
+    ];
+    let m = [
+        MongoUsersA::Open { conn: 1 },
+        MongoUsersA::Refresh,
+        MongoUsersA::Unlock,
+        MongoUsersA::Edit { user: "u".into(), db: "admin".into() },
+        MongoUsersA::CloseEdit,
+        MongoUsersA::Save,
+        MongoUsersA::Add,
+        MongoUsersA::Drop { user: "u".into(), db: "admin".into() },
+        MongoUsersA::DropRun { conn: 1, user: "u".into(), db: "admin".into() },
+        MongoUsersA::Close,
+    ];
+    let s = [
+        MongoServerA::Open { conn: 1 },
+        MongoServerA::Ops(true),
+        MongoServerA::Refresh,
+        MongoServerA::AutoOps(true),
+        MongoServerA::ArmKill { op: "7".into(), at: 1.5 },
+        MongoServerA::Disarm,
+        MongoServerA::Kill { op: "7".into() },
+        MongoServerA::Unlock,
+        MongoServerA::Close,
+    ];
+    let mut all: Vec<Action> = r.into_iter().map(Action::Roles).collect();
+    all.extend(u.into_iter().map(|a| Action::Users(UsersA::Sql(a))));
+    all.extend(m.into_iter().map(|a| Action::Users(UsersA::Mongo(a))));
+    all.extend(s.into_iter().map(|a| Action::Server(ServerA::Mongo(a))));
+    all
+}
+
+/// The name of each variant; no wildcard, so a variant missing from `all_actions` fails to compile here first.
+fn variant(a: &Action) -> String {
+    let d = format!("{a:?}");
+    match a {
+        Action::Roles(r) => match r {
+            RolesA::Open { .. } | RolesA::Tab(_) | RolesA::RTab(_) | RolesA::Database(_) | RolesA::Schema(_) | RolesA::Kind(_) | RolesA::Role(_) | RolesA::OpenRole(_) | RolesA::Stage(_) | RolesA::Apply | RolesA::Discard | RolesA::Close | RolesA::Unlock | RolesA::Refresh | RolesA::NewRole | RolesA::Drop(_) | RolesA::Password(_) | RolesA::Inherited(_) | RolesA::System(_) | RolesA::Cell(_) | RolesA::LimitEdited | RolesA::UntilEdited | RolesA::DefForm(_) | RolesA::Create { .. } | RolesA::SetPassword { .. } | RolesA::DropRun { .. } => {}
+        },
+        Action::Users(UsersA::Sql(u)) => match u {
+            SqlUsersA::Open { .. } | SqlUsersA::Pick { .. } | SqlUsersA::Tab(_) | SqlUsersA::Apply | SqlUsersA::Close | SqlUsersA::Refresh | SqlUsersA::Unlock | SqlUsersA::NewUser | SqlUsersA::Drop { .. } | SqlUsersA::DropRun { .. } | SqlUsersA::Password { .. } | SqlUsersA::Create { .. } | SqlUsersA::SetPassword { .. } | SqlUsersA::Lock(_) | SqlUsersA::Expire(_) | SqlUsersA::Tls(_) | SqlUsersA::Role { .. } | SqlUsersA::RoleAdd(_) | SqlUsersA::RoleAddDone | SqlUsersA::Global { .. } | SqlUsersA::PrivAdd(_) | SqlUsersA::PrivAddDone | SqlUsersA::DbPriv { .. } | SqlUsersA::DbAdd(_) | SqlUsersA::DbAddDone => {}
+        },
+        Action::Users(UsersA::Mongo(m)) => match m {
+            MongoUsersA::Open { .. } | MongoUsersA::Refresh | MongoUsersA::Unlock | MongoUsersA::Edit { .. } | MongoUsersA::CloseEdit | MongoUsersA::Save | MongoUsersA::Add | MongoUsersA::Drop { .. } | MongoUsersA::DropRun { .. } | MongoUsersA::Close => {}
+        },
+        Action::Server(ServerA::Mongo(s)) => match s {
+            MongoServerA::Open { .. } | MongoServerA::Ops(_) | MongoServerA::Refresh | MongoServerA::AutoOps(_) | MongoServerA::ArmKill { .. } | MongoServerA::Disarm | MongoServerA::Kill { .. } | MongoServerA::Unlock | MongoServerA::Close => {}
+        },
+    }
+    d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn every_action_survives_a_serde_round_trip() {
+    let all = all_actions();
+    let names: std::collections::HashSet<String> = all.iter().map(variant).collect();
+    assert_eq!(names.len(), all.len(), "each variant once");
+    for a in all {
+        let json = serde_json::to_value(&a).unwrap();
+        let back: Action = serde_json::from_value(json.clone()).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+        assert_eq!(serde_json::to_value(&back).unwrap(), json, "{a:?}");
+        assert!(!json.to_string().contains("\"pw\""), "a password reached the JSON of {a:?}");
+    }
+}
+
+/// Stage a grant, see Apply refused while locked, apply it after unlocking, check the server, then undo it.
+#[test]
+fn live_grant_apply_and_undo() {
+    use crate::db::sql::testing::{live_pg, unique_name, PG_ENVS};
+    for var in PG_ENVS {
+        let Some(l) = live_pg(var) else { continue };
+        let (role, schema) = (unique_name("qr_core"), unique_name("qr_core_s"));
+        l.qsql(&l.pool, &format!("CREATE ROLE \"{role}\"; CREATE SCHEMA \"{schema}\"; CREATE TABLE \"{schema}\".t (a int)"));
+        let can = || l.one(&format!("SELECT has_table_privilege('{role}', '\"{schema}\".t', 'SELECT')::text"));
+
+        let mut core = Core::for_test();
+        core.worker.sql_connect(CONN, l.uri.clone(), std::time::Duration::from_secs(30), crate::db::Net::default());
+        let Ok(Msg::SqlConnected { res: Ok((db, _, _)), .. }) = core.rx.recv_timeout(std::time::Duration::from_secs(20)) else { panic!("{var}: connect") };
+        pg_conn(&mut core);
+        core.conns[0].sql = Some(db);
+        let loaded = |c: &Core| c.pg_roles.as_ref().is_some_and(|w| matches!(w.cluster, Some(Ok(_))) && matches!(w.objs, Some(Ok(_))) && !w.busy);
+
+        assert!(matches!(roles(&mut core, RolesA::Open { conn: CONN }), Ok(Reply::Pending(_))));
+        core.step_until("the roles and the tables", loaded);
+        roles(&mut core, RolesA::Schema(schema.clone())).unwrap();
+        core.step_until("the tables of the schema", |c| loaded(c) && c.pg_roles.as_ref().unwrap().objects().is_some_and(|o| o.schema == schema));
+
+        let c = grant(&core, "t", &role);
+        roles(&mut core, RolesA::Stage(c.clone())).unwrap();
+        assert_eq!(staged(&core), 0, "{var}: a locked connection staged a grant");
+        writable(&mut core, true);
+        roles(&mut core, RolesA::Stage(c)).unwrap();
+        writable(&mut core, false);
+        assert_eq!(roles(&mut core, RolesA::Apply).unwrap_err().kind, RefusalKind::ReadOnly { conn: CONN });
+        assert_eq!(can(), "false", "{var}: nothing runs before Apply");
+
+        writable(&mut core, true);
+        assert!(matches!(roles(&mut core, RolesA::Apply), Ok(Reply::Pending(_))));
+        core.step_until("the apply to finish", |c| staged(c) == 0 && loaded(c));
+        assert_eq!(can(), "true", "{var}: {}", core.status);
+
+        // Recent changes has the inverse; running it takes the grant back.
+        assert_eq!(core.undo.len(), 1, "{var}");
+        let a = core.undo.remove(0);
+        let (database, pk) = match &a.kind {
+            UndoKind::Sql { database, undo, .. } => (database.clone(), undo.pk_names()),
+            _ => panic!("{var}: not a SQL undo"),
+        };
+        let sql = core.conns[0].sql.as_ref().unwrap().at(&database);
+        core.worker.sql_undo(sql, a, pk, false);
+        let t = std::time::Instant::now();
+        while can() != "false" {
+            assert!(t.elapsed() < std::time::Duration::from_secs(40), "{var}: the undo never landed; {}", core.status);
+            core.tick();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        l.qsql(&l.pool, &format!("DROP SCHEMA \"{schema}\" CASCADE; DROP ROLE \"{role}\""));
+    }
+}

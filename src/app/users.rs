@@ -1,37 +1,8 @@
 //! The database users window.
 
 use super::*;
-
-/// "readWrite@shop, read" as role documents; a role without @db belongs to `default_db`.
-pub(super) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .map(|r| {
-            let (role, db) = r.split_once('@').unwrap_or((r, default_db));
-            Bson::Document(doc! { "role": role.trim(), "db": db.trim() })
-        })
-        .collect()
-}
-
-/// A server error without the command it echoes back, which can run to several lines.
-fn short_err(e: &str) -> &str {
-    e.find(" to execute command").map_or(e, |i| &e[..i])
-}
-
-/// The logged-in user from a connectionStatus answer, which needs no privilege: the fallback when
-/// usersInfo is refused.
-pub(super) fn self_users(status: &Document) -> Vec<Document> {
-    let auth = status.get_document("authInfo").cloned().unwrap_or_default();
-    let roles = auth.get_array("authenticatedUserRoles").cloned().unwrap_or_default();
-    auth.get_array("authenticatedUsers").into_iter().flatten().filter_map(Bson::as_document).map(|u| doc! { "user": u.get_str("user").unwrap_or_default(), "db": u.get_str("db").unwrap_or_default(), "roles": roles.clone() }).collect()
-}
-
-pub(super) fn roles_text(user: &Document) -> String {
-    user.get_array("roles")
-        .map(|a| a.iter().filter_map(|r| r.as_document()).map(|r| format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).collect::<Vec<_>>().join(", "))
-        .unwrap_or_default()
-}
+use quarry_core::action::users::{roles_text, short_err};
+use quarry_core::action::{Action, MongoUsersA, UsersA};
 
 impl App {
     /// Users of all databases with their roles, custom roles, and user actions. Writes need the
@@ -40,29 +11,23 @@ impl App {
         let Some(mut u) = self.core.users.take() else { return };
         let conn = u.conn;
         let writable = self.conn(conn).is_some_and(|c| c.writable);
-        let client = self.conn(conn).and_then(|c| c.client.clone());
         let atlas = self.conn(conn).is_some_and(|c| c.masked_uri.contains(".mongodb.net"));
         let mut open = true;
-        let mut cmds: Vec<(String, Document, String)> = Vec::new();
-        let mut drop_user = None;
-        let mut unlock = false;
+        let mut acts: Vec<MongoUsersA> = Vec::new();
         let screen = ctx.content_rect();
         let conn_name = self.conn_name(conn);
         let r = banded(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.6).clamp(600.0, 900.0)));
             dialog_head_with(ui, &Head::new("Users and roles").sub(conn_name).glyph(glyphs::user), |ui| {
                 if ui.button("Refresh").clicked() {
-                    u.users = None;
-                    u.roles = None;
-                    u.self_only = false;
-                    cmds.push(("*reload".into(), Document::new(), String::new()));
+                    acts.push(MongoUsersA::Refresh);
                 }
             });
             let mut b = body_begin(ui);
             let outer = ui;
             let ui = &mut b.content_ui;
-            if !writable {
-                unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to add, change or drop users.", Some("Unlock…"));
+            if !writable && banner(ui, Notice::Locked, "Read-only.", "Unlock writes to add, change or drop users.", Some("Unlock…")) {
+                acts.push(MongoUsersA::Unlock);
             }
             if u.self_only {
                 banner(ui, Notice::Warn, "", "This user may not list other users (it needs viewUser on every database), so only your own user is shown.", None);
@@ -89,10 +54,10 @@ impl App {
                                 ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add_enabled_ui(writable, |ui| danger(ui, "Drop…")).inner.clicked() {
-                                        drop_user = Some((db.clone(), name.clone()));
+                                        acts.push(MongoUsersA::Drop { user: name.clone(), db: db.clone() });
                                     }
                                     if ui.add_enabled(writable, egui::Button::new("Edit")).clicked() {
-                                        u.edit = Some((name.clone(), db.clone(), String::new(), roles_text(user)));
+                                        acts.push(MongoUsersA::Edit { user: name.clone(), db: db.clone() });
                                     }
                                 });
                             });
@@ -110,14 +75,10 @@ impl App {
                                     });
                                     ui.horizontal(|ui| {
                                         if primary(ui, "Save", PRIMARY()).clicked() {
-                                            let mut cmd = doc! { "updateUser": en.as_str(), "roles": parse_roles(roles, edb) };
-                                            if !pwd.is_empty() {
-                                                cmd.insert("pwd", pwd.as_str());
-                                            }
-                                            cmds.push((edb.clone(), cmd, format!("Updated user {en}")));
+                                            acts.push(MongoUsersA::Save);
                                         }
                                         if ui.button("Cancel").clicked() {
-                                            cmds.push(("*close-edit".into(), Document::new(), String::new()));
+                                            acts.push(MongoUsersA::CloseEdit);
                                         }
                                     });
                                 });
@@ -143,10 +104,7 @@ impl App {
                     });
                     let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
                     if ui.add_enabled(ok, primary_button(ui, "Add user", PRIMARY())).clicked() {
-                        let db = if u.new_db.trim().is_empty() { "admin".to_string() } else { u.new_db.trim().to_string() };
-                        let cmd = doc! { "createUser": u.new_name.trim(), "pwd": u.new_pwd.as_str(), "roles": parse_roles(&u.new_roles, &db) };
-                        cmds.push((db, cmd, format!("Added user {}", u.new_name.trim())));
-                        u.new_pwd.clear();
+                        acts.push(MongoUsersA::Add);
                     }
                 });
                 settings_section(ui, "CUSTOM ROLES", |ui| match &u.roles {
@@ -175,59 +133,12 @@ impl App {
             b.end(outer);
             open = !dialog_done(outer);
         });
-        if unlock {
-            self.modal = Some(Modal::Unlock(conn, None));
+        self.core.users = Some(u);
+        for a in acts {
+            self.exec(Action::Users(UsersA::Mongo(a)));
         }
-        for (db, cmd, done) in cmds {
-            match db.as_str() {
-                "*reload" => self.load_users(conn),
-                "*close-edit" => u.edit = None,
-                _ => {
-                    if let Some(client) = client.clone() {
-                        u.edit = None;
-                        self.core.worker.db_change(conn, client, db, cmd, done);
-                    }
-                }
-            }
+        if !open || (r.should_close() && self.modal.is_none()) {
+            self.exec(Action::Users(UsersA::Mongo(MongoUsersA::Close)));
         }
-        if let Some((db, user)) = drop_user {
-            self.modal = Some(Modal::Typed { title: format!("Drop the user {user} of {db}? Apps that log in with it will stop working."), expect: user.clone(), typed: String::new(), action: Danger::DropUser { conn, db, user } });
-        }
-        if open && !(r.should_close() && self.modal.is_none()) {
-            self.core.users = Some(u);
-        }
-    }
-
-    /// Users of every database and custom roles, read from admin like the original
-    /// (usersInfo / rolesInfo with showBuiltinRoles false, renderer ~156395).
-    pub(super) fn load_users(&mut self, conn: u64) {
-        let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else { return };
-        self.core.worker.command(client.clone(), "admin".into(), doc! { "usersInfo": { "forAllDBs": true } }, "users");
-        self.core.worker.command(client, "admin".into(), doc! { "rolesInfo": 1, "showBuiltinRoles": false }, "roles");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn refused_listing_falls_back_to_the_logged_in_user() {
-        let e = "Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { usersInfo: { forAllDBs: true }, $db: \"admin\" }";
-        assert!(db::is_unauthorized(e));
-        assert_eq!(short_err(e), "Command failed: Error code 13 (Unauthorized): not authorized on admin");
-        let status = doc! { "authInfo": { "authenticatedUsers": [{ "user": "khiman", "db": "admin" }], "authenticatedUserRoles": [{ "role": "atlasAdmin", "db": "admin" }] } };
-        let me = self_users(&status);
-        assert_eq!(me.len(), 1);
-        assert_eq!(roles_text(&me[0]), "atlasAdmin@admin");
-    }
-
-    #[test]
-    fn roles() {
-        let r = parse_roles("readWrite@shop, read ,", "admin");
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[1].as_document().unwrap().get_str("db").unwrap(), "admin");
-        let u = doc! { "roles": [ { "role": "read", "db": "x" } ] };
-        assert_eq!(roles_text(&u), "read@x");
     }
 }

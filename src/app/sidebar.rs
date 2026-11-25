@@ -1084,14 +1084,8 @@ impl App {
             SideAct::Refresh(db) => {
                 self.refresh_db(conn, &db);
             }
-            SideAct::Users => {
-                self.core.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
-                self.load_users(conn);
-            }
-            SideAct::Server => {
-                self.core.req += 1;
-                self.core.server = Some(ServerWin::new(conn, self.core.req));
-            }
+            SideAct::Users => self.exec(quarry_core::action::Action::Users(quarry_core::action::UsersA::Mongo(quarry_core::action::MongoUsersA::Open { conn }))),
+            SideAct::Server => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Mongo(quarry_core::action::MongoServerA::Open { conn }))),
             SideAct::DropDb(db) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
             }

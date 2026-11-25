@@ -5,6 +5,7 @@
 // codebase keeps out.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+pub mod action;
 pub mod agents;
 pub mod cloudsql;
 pub mod core;

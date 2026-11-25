@@ -55,15 +55,7 @@ impl App {
     /// The SQL session of a connection for a statement about to run. The offline demo has no server, so it says so
     /// and gives none. `missing` is what to say when the connection has no session, or nothing when None.
     pub(in crate::app) fn sql_db_for(&mut self, conn: u64, missing: Option<&str>) -> Option<db::sql::Db> {
-        if self.core.demo {
-            self.ok("Offline demo: no database is connected.");
-            return None;
-        }
-        let db = self.conn(conn).and_then(|c| c.sql.clone());
-        if let (None, Some(m)) = (&db, missing) {
-            self.warn(m);
-        }
-        db
+        self.core.sql_db_for(conn, missing)
     }
 
     /// The open tab's dialect.

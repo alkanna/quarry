@@ -29,6 +29,7 @@ mod demo_pg;
 mod documents;
 mod drafts;
 mod errors;
+mod exec;
 mod explain;
 mod export;
 mod group_dialog;
@@ -88,7 +89,6 @@ use state::*;
 use query::*;
 use tools::*;
 use tree::*;
-use users::*;
 use indexes::*;
 use server::*;
 use sql::server::*;
@@ -535,6 +535,7 @@ impl eframe::App for App {
         // Here rather than in ui(): eframe skips ui() while the window is minimised or covered, and agent calls
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
         self.poll(ctx);
+        self.run_fx();
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         crate::ui::vim::set_on(ctx, self.core.prefs.vim);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first

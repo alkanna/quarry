@@ -569,7 +569,7 @@ pub(super) async fn set_password(db: &Db, role: &str, oid: &str, password: &str,
 }
 
 /// What a role owns and holds in one database.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DbHold {
     pub database: String,
     /// What `pg_describe_object` calls each owned object.
@@ -581,7 +581,7 @@ pub struct DbHold {
     pub deps: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DropInfo {
     pub role: String,
     pub oid: String,
@@ -604,7 +604,7 @@ impl DropInfo {
 }
 
 /// What to do with what the role owns before DROP ROLE.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DropMode {
     Reassign(String),
     DropOwned,

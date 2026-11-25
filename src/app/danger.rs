@@ -61,13 +61,16 @@ impl App {
             return self.sql_drop_run(conn, database, schema, table, kind, opt);
         }
         if let Danger::SqlDropUser { conn, acct } = action {
-            return self.sql_user_drop_run(conn, acct);
+            return self.exec(quarry_core::action::Action::Users(quarry_core::action::UsersA::Sql(quarry_core::action::SqlUsersA::DropRun { conn, user: acct.user, host: acct.host, is_role: acct.is_role })));
+        }
+        if let Danger::DropUser { conn, db, user } = action {
+            return self.exec(quarry_core::action::Action::Users(quarry_core::action::UsersA::Mongo(quarry_core::action::MongoUsersA::DropRun { conn, user, db })));
         }
         if let Danger::DropTrigger(sel, name) = action {
             return self.on_tab(&sel, |a| a.drop_trigger(name));
         }
         let conn_specific = match &action {
-            Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
+            Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
             _ => None,
         };
         if let Some(conn) = conn_specific {
@@ -86,7 +89,6 @@ impl App {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
                     self.core.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
                 }
-                Danger::DropUser { db, user, .. } => self.core.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
                 Danger::Sync { .. } => {
                     let timeout = self.timeout();
                     self.drop_agg_row();

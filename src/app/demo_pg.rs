@@ -194,7 +194,7 @@ impl App {
                 }
                 self.core.pg_server = Some(PgServerWin::demo(CONN, which));
             }
-            "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
+            "roles" | "roles-role" => self.core.pg_roles_demo(which, CONN),
             // Plans captured from a PostgreSQL 18 server: a filtered full scan, and a sort that spilled under ANALYZE.
             "explain" => self.demo_explain_offline(db::sql::Dialect::Postgres, "SELECT * FROM bookings WHERE provider = 'ZEUS_AIR' AND status = 'DONE'", include_str!("../../quarry-core/src/db/sql/plan/fixtures/pg18-scan.json")),
             "explain-analyze" => self.demo_explain_offline(db::sql::Dialect::Postgres, "SELECT * FROM bookings WHERE created_at >= '2026-06-01' ORDER BY total", include_str!("../../quarry-core/src/db/sql/plan/fixtures/pg18-spill-analyze.json")),

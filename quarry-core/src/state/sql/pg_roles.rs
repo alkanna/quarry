@@ -6,13 +6,13 @@ use zeroize::Zeroize;
 use crate::db;
 use std::collections::{BTreeSet, HashMap};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PTab {
     Privileges,
     Roles,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RTab {
     Role,
     Membership,
@@ -20,6 +20,7 @@ pub enum RTab {
 }
 
 /// The + Default privilege form of the Roles tab.
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DefForm {
     pub owner: String,
     pub schema: String,

@@ -6,6 +6,10 @@ impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         self.view_requests();
         while let Ok(m) = self.core.rx.try_recv() {
+            if Core::handles(&m) {
+                self.core.on_msg(m);
+                continue;
+            }
             match m {
                 Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
                 Msg::Agent(ev) => self.on_agent(ctx, ev),
@@ -72,10 +76,13 @@ impl App {
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
                 Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
                 Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
-                Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
-                Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
-                Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
-                Msg::PgRoles { conn, req, ans } => self.pg_roles_answer(conn, req, ans),
+                Msg::PgRoles { conn, req, ans: db::sql::pg::roles::Answer::DropInfo(res) } => {
+                    if let Some(Modal::PgDropRole(f)) = &mut self.modal && f.conn == conn && f.req == req {
+                        f.info = Some(res);
+                    }
+                }
+                // Core::handles took these above.
+                Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } | Msg::PgRoles { .. } => {}
                 Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
@@ -457,31 +464,6 @@ impl App {
             ("shpg", Ok(d)) => self.shell_pg_listed(d),
             // Nice to have: a server that refuses these just shows less.
             (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
-            // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
-            ("users", Err(e)) if db::is_unauthorized(&e) && self.core.users.as_ref().is_some_and(|u| !u.self_only) => {
-                let conn = self.core.users.as_ref().map(|u| u.conn).unwrap_or_default();
-                if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
-                    self.core.worker.command(client, "admin".into(), doc! { "connectionStatus": 1 }, "users-self");
-                }
-                if let Some(u) = &mut self.core.users {
-                    u.self_only = true;
-                }
-            }
-            ("users", r) => {
-                if let Some(u) = &mut self.core.users {
-                    u.users = Some(r.map(|d| d.get_array("users").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
-                }
-            }
-            ("users-self", r) => {
-                if let Some(u) = &mut self.core.users {
-                    u.users = Some(r.map(|d| self_users(&d)));
-                }
-            }
-            ("roles", r) => {
-                if let Some(u) = &mut self.core.users {
-                    u.roles = Some(r.map(|d| d.get_array("roles").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
-                }
-            }
             ("stats", Ok(d)) => {
                 let title = format!("Statistics of {}", d.get_str("collection").unwrap_or_default());
                 let mut lines = Vec::new();
@@ -522,7 +504,6 @@ impl App {
                     s.vaction = opts.get_str("validationAction").ok().filter(|a| !matches!(*a, "warn" | "error")).map(str::to_string);
                 }
             }
-            (tag, r) if tag.starts_with("server:") => self.server_reply(tag, r),
             (_, Err(e)) => self.err(e),
             _ => {}
         }
@@ -574,7 +555,7 @@ impl App {
             }
         }
         if self.core.users.as_ref().is_some_and(|u| u.conn == conn) {
-            self.load_users(conn);
+            self.core.load_users(conn);
         }
         // Hiding an index or switching the profiler changes what the Indexes view shows.
         if self.t().is_some_and(|t| t.view == View::Indexes) {

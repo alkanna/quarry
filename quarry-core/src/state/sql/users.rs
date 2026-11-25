@@ -4,7 +4,7 @@ use crate::db::sql::users::{self, Account, AccountInfo, AccountPlan, Edit, Expir
 use crate::db;
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum UTab {
     Account,
     Global,
@@ -13,7 +13,7 @@ pub enum UTab {
 }
 
 /// How the password lifetime is chosen; "After N days" has its number in a field beside it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ExpKind {
     Never,
     Default,

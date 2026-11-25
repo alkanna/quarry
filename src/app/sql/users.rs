@@ -3,35 +3,13 @@
 
 use crate::app::*;
 use db::sql::ddl::Mode;
-use db::sql::users::{self, Account, AccountInfo, AccountPlan, Caps, Grant, Loaded, Op, Scope, Settings, Tls, UserList, DB_PRIVS};
+use db::sql::users::{self, Account, AccountInfo, AccountPlan, Caps, Grant, Scope, Settings, Tls, UserList, DB_PRIVS};
 use db::sql::Dialect;
 pub(crate) use quarry_core::state::sql::users::*;
+use quarry_core::action::users::{has_row, NOTE_USER};
+use quarry_core::action::{Action, Secret, SqlUsersA as Act, UsersA};
 
 const NOTE_APPLY: &str = "Read-only: unlock writes to change this account";
-const NOTE_USER: &str = "Read-only: unlock writes to create a user";
-
-/// Whether `rows` has one for `pattern` already. Where the server folds case, `Shop` is the row `shop`, and a second
-/// row would grant on it again under another spelling. Takes the fields, not the window, so it can be called while
-/// the add field holds the window's text.
-fn has_row(rows: &[GrantRow], fold: bool, pattern: &str) -> bool {
-    if fold {
-        let low = pattern.to_lowercase();
-        rows.iter().any(|r| r.pattern.to_lowercase() == low)
-    } else {
-        rows.iter().any(|r| r.pattern == pattern)
-    }
-}
-
-enum Act {
-    Pick(String, String),
-    Apply,
-    Close,
-    NewUser,
-    Drop(Account),
-    Password(Account),
-    Unlock,
-    Refresh,
-}
 
 /// What the tabs need to know about the server and connection.
 struct Env {
@@ -138,165 +116,9 @@ fn preview_block(ui: &mut egui::Ui, text: Result<String, String>) {
 }
 
 impl App {
-    fn users_sql(&self, conn: u64) -> Option<db::sql::Db> {
-        self.conn(conn).and_then(|c| c.sql.clone())
-    }
-
-    fn users_dialect(&self, conn: u64) -> Dialect {
-        self.users_sql(conn).map_or(Dialect::MySql, |s| s.dialect)
-    }
-
-    /// The demo has no server, so it assumes a current MySQL.
-    fn users_caps(&self, conn: u64) -> Caps {
-        self.users_sql(conn).map_or_else(|| Caps::of(Dialect::MySql, "8.4.3"), |s| Caps::of(s.dialect, &s.version))
-    }
-
+    /// The Users and privileges window of a SQL connection, or Roles and privileges on PostgreSQL.
     pub(in crate::app) fn open_sql_users(&mut self, conn: u64) {
-        if self.users_dialect(conn) == Dialect::Postgres || self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres) {
-            return self.open_pg_roles(conn);
-        }
-        self.core.sql_users = Some(SqlUsersWin::new(conn));
-        self.sql_users_reload();
-    }
-
-    /// Asks for the account list again; the grants of the chosen account follow when it arrives.
-    fn sql_users_reload(&mut self) {
-        let Some(conn) = self.core.sql_users.as_ref().map(|w| w.conn) else { return };
-        let Some(sql) = self.users_sql(conn) else { return };
-        self.core.req += 1;
-        let req = self.core.req;
-        if let Some(w) = &mut self.core.sql_users {
-            w.list_req = req;
-            w.list = None;
-        }
-        self.core.worker.sql_users(conn, req, sql);
-    }
-
-    fn sql_users_ask_grants(&mut self) {
-        let Some((conn, acct)) = self.core.sql_users.as_ref().and_then(|w| w.account().map(|a| (w.conn, a))) else { return };
-        let Some(sql) = self.users_sql(conn) else { return };
-        self.core.req += 1;
-        let req = self.core.req;
-        if let Some(w) = &mut self.core.sql_users {
-            w.grants_req = req;
-            w.grants = None;
-            w.rows.clear();
-            w.adding = None;
-        }
-        self.core.worker.sql_user_grants(conn, req, sql, acct);
-    }
-
-    pub(in crate::app) fn sql_users_loaded(&mut self, conn: u64, req: u64, res: db::Res<UserList>) {
-        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn && w.list_req == req) else { return };
-        if let Ok(l) = &res {
-            let has = |s: &Option<(String, String)>| s.as_ref().is_some_and(|(u, h)| l.accounts.iter().any(|a| &a.user == u && &a.host == h));
-            if !has(&w.sel) {
-                w.sel = l.current.clone().filter(|c| has(&Some(c.clone()))).or_else(|| l.accounts.first().map(|a| (a.user.clone(), a.host.clone())));
-            }
-        }
-        w.set_list(res);
-        self.sql_users_ask_grants();
-    }
-
-    pub(in crate::app) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Loaded>) {
-        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn && w.grants_req == req) else { return };
-        match res {
-            Ok(l) => {
-                if let Some(acct) = w.account() {
-                    w.fill(&acct, &l);
-                }
-                w.grants = Some(Ok(l.grants));
-            }
-            Err(e) => {
-                w.rows.clear();
-                w.grants = Some(Err(e));
-            }
-        }
-    }
-
-    /// An edit, create, drop, password change or undo finished. The window reads the server again, so it shows what is there.
-    pub(in crate::app) fn sql_user_done(&mut self, conn: u64, account: Account, op: Op, res: db::Res<String>, undo: Vec<UndoAction>) {
-        match res {
-            Ok(s) => self.ok(s),
-            Err(e) => self.err(e),
-        }
-        // Oldest first, so the newest ends on top of Recent changes.
-        for u in undo {
-            self.push_undo(u);
-        }
-        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn) else { return };
-        // An undo from Recent changes is not the window's Apply, so it does not end the Apply that may be running.
-        if !matches!(op, Op::Undone | Op::UndoneRename) {
-            w.busy = false;
-        }
-        match op {
-            Op::Created | Op::Renamed | Op::UndoneRename => w.sel = Some((account.user.clone(), account.host.clone())),
-            Op::Dropped if w.sel.as_ref() == Some(&(account.user.clone(), account.host.clone())) => w.sel = None,
-            _ => {}
-        }
-        // What the boxes show was applied or undone: until the server is read again nothing may be applied a second time.
-        w.grants = None;
-        w.rows.clear();
-        w.adding = None;
-        self.sql_users_reload();
-    }
-
-    pub(in crate::app) fn sql_new_user(&mut self, conn: u64) {
-        if !self.conn_writable(conn) {
-            return self.warn(NOTE_USER);
-        }
-        self.core.req += 1;
-        self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.core.req })));
-    }
-
-    pub(in crate::app) fn sql_user_drop_ask(&mut self, conn: u64, acct: Account) {
-        let what = if acct.is_role { "role" } else { "user" };
-        let title = format!("Drop the {what} {} on {}? Its password and every privilege go with it, and logins that use it stop working. This cannot be undone.", acct.label(), self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default());
-        self.modal = Some(Modal::Typed { title, expect: acct.label(), typed: String::new(), action: Danger::SqlDropUser { conn, acct } });
-    }
-
-    pub(in crate::app) fn sql_user_drop_run(&mut self, conn: u64, acct: Account) {
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
-        self.core.worker.sql_user_drop(conn, sql, acct, false);
-    }
-
-    /// Runs what the open tab has staged.
-    fn sql_user_apply(&mut self) {
-        let Some((conn, acct, tab)) = self.core.sql_users.as_ref().and_then(|w| Some((w.conn, w.account()?, w.tab))) else { return };
-        if self.core.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(c) = self.conn(conn) else { return };
-        if !c.writable {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
-        let Some(w) = self.core.sql_users.as_mut() else { return };
-        let plan = match tab {
-            UTab::Databases | UTab::Global => None,
-            UTab::Account => w.account_plan(&acct).ok(),
-            UTab::Limits => w.limits_plan().ok(),
-        };
-        let edits = match tab {
-            UTab::Databases => w.edits(),
-            UTab::Global => w.global_edits(),
-            _ => Vec::new(),
-        };
-        if edits.is_empty() && plan.as_ref().is_none_or(|p| p.is_empty()) {
-            return;
-        }
-        w.busy = true;
-        match plan {
-            Some(p) => self.core.worker.sql_user_account(conn, sql, acct, p, false),
-            None => self.core.worker.sql_user_edit(conn, sql, acct, edits, false),
-        }
+        self.exec(Action::Users(UsersA::Sql(Act::Open { conn })));
     }
 
     pub(in crate::app) fn sql_users_window(&mut self, ctx: &egui::Context) {
@@ -305,12 +127,12 @@ impl App {
         let writable = self.conn_writable(conn);
         let conn_name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| (c.server.product.clone(), short_version(&c.server.version))).filter(|(p, _)| !p.is_empty()).map_or(String::new(), |(p, v)| format!("{p} {v}"));
-        let dialect = self.users_dialect(conn);
+        let dialect = self.core.users_dialect(conn);
         let env = Env {
             writable,
             mode: self.sql_mode(conn),
             dialect,
-            caps: self.users_caps(conn),
+            caps: self.core.users_caps(conn),
             // The server's own databases are left out.
             known: self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default(),
             roles: w.list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.accounts.iter().filter(|a| a.is_role).map(|a| a.user.clone()).collect()).unwrap_or_default(),
@@ -369,53 +191,17 @@ impl App {
                 // Dropping sits at the left of the Account tab's footer, as in the design.
                 foot_left(ui, |ui| {
                     if w.tab == UTab::Account && let Some(a) = acct.clone().filter(|_| w.list.is_some()) && ui.add_enabled_ui(writable, |ui| danger(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
-                        acts.push(Act::Drop(a));
+                        acts.push(Act::Drop { user: a.user, host: a.host });
                     }
                 });
             });
         });
-        let mut open = true;
-        let mut pick = None;
-        for a in acts {
-            match a {
-                Act::Pick(u, h) => pick = Some((u, h)),
-                Act::Apply => {
-                    self.core.sql_users = Some(w);
-                    self.sql_user_apply();
-                    w = self.core.sql_users.take().unwrap();
-                }
-                Act::Close => open = false,
-                Act::NewUser => self.sql_new_user(conn),
-                Act::Drop(a) => self.sql_user_drop_ask(conn, a),
-                Act::Password(a) => {
-                    if writable {
-                        let current = w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default();
-                        // MariaDB's SET PASSWORD sets the mysql_native_password part only, so an account that logs in another way is left alone.
-                        let blocked = w.info.as_ref().filter(|_| matches!(dialect, Dialect::MariaDb)).and_then(|i| (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")).then(|| format!("{} logs in with {}; Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", a.label(), if i.chain { "more than one method".to_string() } else { i.plugin.clone() })));
-                        self.core.req += 1;
-                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin: String::new(), current, blocked, password: String::new(), again: String::new(), serial: self.core.req })));
-                    } else {
-                        self.modal = Some(Modal::Unlock(conn, None));
-                    }
-                }
-                Act::Unlock => self.modal = Some(Modal::Unlock(conn, None)),
-                Act::Refresh => {
-                    self.core.sql_users = Some(w);
-                    self.sql_users_reload();
-                    w = self.core.sql_users.take().unwrap();
-                }
-            }
-        }
-        if !(open && !(r.should_close() && self.modal.is_none())) {
-            return;
-        }
-        let picked = pick.is_some();
-        if let Some(p) = pick {
-            w.sel = Some(p);
-        }
         self.core.sql_users = Some(w);
-        if picked {
-            self.sql_users_ask_grants();
+        for a in acts {
+            self.exec(Action::Users(UsersA::Sql(a)));
+        }
+        if r.should_close() && self.modal.is_none() {
+            self.exec(Action::Users(UsersA::Sql(Act::Close)));
         }
     }
 
@@ -468,12 +254,12 @@ impl App {
                         let state = [(a.locked, "locked"), (a.expired, "password expired")].iter().filter(|(on, _)| *on).map(|(_, t)| *t).collect::<Vec<_>>().join(", ");
                         let r = if state.is_empty() { r } else { r.on_hover_text(format!("{}: {state}", a.label())) };
                         if r.clicked() && !active {
-                            acts.push(Act::Pick(a.user.clone(), a.host.clone()));
+                            acts.push(Act::Pick { user: a.user.clone(), host: a.host.clone() });
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             if ui.add_enabled_ui(writable, |ui| danger_item(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
-                                acts.push(Act::Drop((*a).clone()));
+                                acts.push(Act::Drop { user: a.user.clone(), host: a.host.clone() });
                             }
                         });
                     }
@@ -539,7 +325,7 @@ impl App {
                 let staged = acct.as_ref().is_some_and(|a| w.grants.is_some() && w.staged(tab, a));
                 let r = view_tab(ui, &if staged { format!("{label} •") } else { label.to_string() }, w.tab == tab);
                 if r.clicked() {
-                    w.tab = tab;
+                    acts.push(Act::Tab(tab));
                 }
                 if staged {
                     r.on_hover_text("Has changes that are not applied yet");
@@ -574,8 +360,8 @@ impl App {
         }
         match w.tab {
             UTab::Account => self.tab_account(ui, w, env, &acct, acts),
-            UTab::Global => self.tab_global(ui, w, env, &acct),
-            UTab::Databases => self.tab_databases(ui, w, env, &acct),
+            UTab::Global => self.tab_global(ui, w, env, &acct, acts),
+            UTab::Databases => self.tab_databases(ui, w, env, &acct, acts),
             UTab::Limits => self.tab_limits(ui, w, env, &acct),
         }
         if w.busy {
@@ -607,14 +393,18 @@ impl App {
             });
             rows.row("Password", "A new password cannot be undone", |ui| {
                 if ui.add_enabled(!acct.is_role && env.caps.alter_user, egui::Button::new("Change password…")).on_disabled_hover_text(if env.writable { "Not available for this account" } else { NOTE_APPLY }).clicked() {
-                    acts.push(Act::Password(acct.clone()));
+                    acts.push(Act::Password { user: acct.user.clone(), host: acct.host.clone() });
                 }
             });
         });
         ui.add_enabled_ui(editable, |ui| {
             form_card(ui, "Access", "", |rows| {
                 rows.row("Lock account", "Refuse new logins for this account", |ui| {
-                    ui.add_enabled_ui(env.caps.lock, |ui| toggle(ui, &mut w.locked)).inner.on_disabled_hover_text("This server version has no ACCOUNT LOCK");
+                    let mut locked = w.locked;
+                    ui.add_enabled_ui(env.caps.lock, |ui| toggle(ui, &mut locked)).inner.on_disabled_hover_text("This server version has no ACCOUNT LOCK");
+                    if locked != w.locked {
+                        acts.push(Act::Lock(locked));
+                    }
                 });
                 rows.row("Password expires", "", |ui| {
                     ui.add_enabled_ui(env.caps.lifetime, |ui| {
@@ -622,25 +412,33 @@ impl App {
                             ui.label(RichText::new("days").size(TXT_SMALL).color(FAINT()));
                             ui.add(egui::TextEdit::singleline(&mut w.days).font(egui::TextStyle::Monospace).desired_width(60.0));
                         }
-                        segmented(ui, &mut w.exp, &[(ExpKind::Never, "Never"), (ExpKind::Default, "Server default"), (ExpKind::Days, "After N days")]);
+                        let mut exp = w.exp;
+                        segmented(ui, &mut exp, &[(ExpKind::Never, "Never"), (ExpKind::Default, "Server default"), (ExpKind::Days, "After N days")]);
+                        if exp != w.exp {
+                            acts.push(Act::Expire(exp));
+                        }
                     });
                 });
                 let hint = if w.tls == Tls::Specified { "A cipher or certificate requirement is set; pick one to replace it" } else { "" };
                 rows.row("Require TLS", hint, |ui| {
-                    segmented(ui, &mut w.tls, &[(Tls::None, "None"), (Tls::Ssl, "TLS"), (Tls::X509, "X509")]);
+                    let mut tls = w.tls;
+                    segmented(ui, &mut tls, &[(Tls::None, "None"), (Tls::Ssl, "TLS"), (Tls::X509, "X509")]);
+                    if tls != w.tls {
+                        acts.push(Act::Tls(tls));
+                    }
                 });
             });
         });
         // Roles are GRANT and REVOKE, which older servers have without ALTER USER.
         if env.caps.roles && !acct.is_role {
             form_card(ui, "Roles", "active at login", |rows| {
-                rows.full(|ui| self.role_chips(ui, w, env));
+                rows.full(|ui| self.role_chips(ui, w, env, acts));
             });
         }
         statements(ui, "account", "Statements to run", w.account_plan(acct).and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
-    fn role_chips(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env) {
+    fn role_chips(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
         ui.horizontal_wrapped(|ui| {
             let mut all: Vec<String> = w.roles_orig.clone();
             for r in &w.roles_now {
@@ -652,15 +450,15 @@ impl App {
                 // A granted role is a pill with a cross; one taken away stays as a faint chip that gives it back.
                 if w.roles_now.contains(&r) {
                     if pill_chip(ui, &users::role_shown(&r), true) {
-                        w.roles_now.retain(|x| *x != r);
+                        acts.push(Act::Role { name: r, on: false });
                     }
                 } else if chip(ui, &users::role_shown(&r), PRIMARY(), false).on_hover_text("Will be taken away; click to keep").clicked() {
-                    w.roles_now.push(r);
+                    acts.push(Act::Role { name: r, on: true });
                 }
             }
             if w.role_add.is_none() {
                 if ui.button("+ Role").clicked() {
-                    w.role_add = Some(String::new());
+                    acts.push(Act::RoleAdd(Some(String::new())));
                 }
                 return;
             }
@@ -679,7 +477,7 @@ impl App {
                     menu_look(ui);
                     for n in &env.roles {
                         if ui.selectable_label(false, n.as_str()).clicked() {
-                            *text = n.clone();
+                            acts.push(Act::RoleAdd(Some(n.clone())));
                         }
                     }
                 });
@@ -691,20 +489,14 @@ impl App {
                 cancel = true;
             }
             if add && !text.trim().is_empty() {
-                // MySQL names a role with its host, % when none is given.
-                let name = text.trim().to_string();
-                let role = if matches!(env.dialect, Dialect::MySql) && !name.contains('@') { format!("{name}@%") } else { name };
-                if !w.roles_now.contains(&role) {
-                    w.roles_now.push(role);
-                }
-                w.role_add = None;
+                acts.push(Act::RoleAddDone);
             } else if cancel {
-                w.role_add = None;
+                acts.push(Act::RoleAdd(None));
             }
         });
     }
 
-    fn tab_global(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
+    fn tab_global(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
         ui.columns(3, |cols| {
             for (ui, (title, list)) in cols.iter_mut().zip([("DATA", &users::GLOBAL_DATA[..]), ("STRUCTURE", &users::GLOBAL_STRUCTURE[..]), ("ADMINISTRATION", &users::GLOBAL_ADMIN[..])]) {
                 caption(ui, title);
@@ -712,11 +504,7 @@ impl App {
                 for p in list {
                     let mut on = w.g_now.contains(*p);
                     if ui.checkbox(&mut on, users::priv_title(p)).changed() {
-                        if on {
-                            w.g_now.insert(p.to_string());
-                        } else {
-                            w.g_now.remove(*p);
-                        }
+                        acts.push(Act::Global { privilege: p.to_string(), on });
                     }
                 }
             }
@@ -739,17 +527,13 @@ impl App {
                     let kept = w.dyn_grant.contains(&p);
                     let hint = if kept { "Held WITH GRANT OPTION: change it in a SQL shell" } else if !on { "Will be revoked; click to keep" } else if w.g_orig.contains(&p) { "Click to revoke" } else { "Will be granted; click to cancel" };
                     if chip(ui, &p, PRIMARY(), on).on_hover_text(hint).clicked() && !kept {
-                        if on {
-                            w.g_now.remove(&p);
-                        } else {
-                            w.g_now.insert(p);
-                        }
+                        acts.push(Act::Global { privilege: p, on: !on });
                     }
                 }
                 match &mut w.priv_add {
                     None => {
                         if ui.button("+ Privilege").clicked() {
-                            w.priv_add = Some(String::new());
+                            acts.push(Act::PrivAdd(Some(String::new())));
                         }
                     }
                     Some(text) => {
@@ -769,11 +553,10 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             done = Some(false);
                         }
-                        if let Some(add) = done {
-                            if add {
-                                w.g_now.insert(name);
-                            }
-                            w.priv_add = None;
+                        match done {
+                            Some(true) => acts.push(Act::PrivAddDone),
+                            Some(false) => acts.push(Act::PrivAdd(None)),
+                            None => {}
                         }
                     }
                 }
@@ -800,12 +583,12 @@ impl App {
         statements(ui, "limits", "Statements to run", w.limits_plan().and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
-    fn tab_databases(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
-        self.privilege_table(ui, w);
+    fn tab_databases(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
+        self.privilege_table(ui, w, acts);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("+ Database").clicked() && w.adding.is_none() {
-                w.adding = Some(String::new());
+                acts.push(Act::DbAdd(Some(String::new())));
             }
             if let Some(Ok(g)) = &w.grants {
                 let other: Vec<&Grant> = g.iter().filter(|g| !matches!(g.scope, Scope::Db(_)) && !(g.scope == Scope::Global && g.privs.is_empty())).collect();
@@ -835,7 +618,7 @@ impl App {
                         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                             for d in free {
                                 if ui.selectable_label(false, d.as_str()).clicked() {
-                                    *text = d.clone();
+                                    acts.push(Act::DbAdd(Some(d.clone())));
                                 }
                             }
                         });
@@ -852,13 +635,9 @@ impl App {
                 ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
             }
             if add && users::check_db_name(text).is_ok() {
-                let pattern = users::pattern_of(text.trim());
-                if !has_row(&w.rows, w.fold_case, &pattern) {
-                    w.rows.push(GrantRow { pattern, orig: BTreeSet::new(), now: BTreeSet::new() });
-                }
-                w.adding = None;
+                acts.push(Act::DbAddDone);
             } else if cancel {
-                w.adding = None;
+                acts.push(Act::DbAdd(None));
             }
         }
         ui.add_space(10.0);
@@ -867,7 +646,7 @@ impl App {
 
     /// The database table of the design: a name column and a checkbox per privilege, sideways scrolling for the
     /// ones beyond the design's nine.
-    fn privilege_table(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin) {
+    fn privilege_table(&self, ui: &mut egui::Ui, w: &SqlUsersWin, acts: &mut Vec<Act>) {
         const ROW_H: f32 = 28.0;
         const NAME_W: f32 = 160.0;
         let widths: Vec<f32> = DB_PRIVS.iter().map(|p| ui.painter().layout_no_wrap(users::priv_title(p), FontId::proportional(TXT_SMALL), MUTED()).size().x.max(40.0) + 20.0).collect();
@@ -888,7 +667,7 @@ impl App {
                     let (empty, _) = ui.allocate_exact_size(egui::vec2(total, ROW_H + 8.0), Sense::hover());
                     ui.painter().text(egui::pos2(empty.left() + 10.0, empty.center().y), egui::Align2::LEFT_CENTER, "No database privileges. Use + Database to give some.", FontId::proportional(TXT_SMALL), FAINT());
                 }
-                for row in &mut w.rows {
+                for row in &w.rows {
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(total.max(ui.available_width()), ROW_H), Sense::hover());
                     ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, LINE()));
                     if resp.hovered() {
@@ -905,11 +684,7 @@ impl App {
                         let mut on = row.now.contains(*p);
                         let cell = egui::Rect::from_center_size(egui::pos2(x + cw / 2.0, rect.center().y), egui::vec2(18.0, 18.0));
                         if ui.put(cell, egui::Checkbox::without_text(&mut on)).on_hover_text(users::priv_title(p)).changed() {
-                            if on {
-                                row.now.insert(p.to_string());
-                            } else {
-                                row.now.remove(*p);
-                            }
+                            acts.push(Act::DbPriv { pattern: row.pattern.clone(), privilege: p.to_string(), on });
                         }
                         x += cw;
                     }
@@ -961,7 +736,9 @@ impl App {
         let ui = outer;
         dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked() {
-                self.sql_user_create_run(f);
+                // Taken out of the form either way, so no copy stays in app state once Create was pressed.
+                let password = Secret::new(std::mem::take(&mut f.password));
+                self.exec(Action::Users(UsersA::Sql(Act::Create { conn: f.conn, user: f.user.clone(), host: f.host.clone(), password })));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -973,19 +750,12 @@ impl App {
         }
     }
 
-    fn sql_user_create_run(&mut self, f: &mut NewUser) {
-        // Taken out of the form either way, so no copy stays in app state once Create was pressed.
-        let password = std::mem::take(&mut f.password);
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        self.core.worker.sql_user_create(f.conn, sql, Account::named(&f.user, &f.host), password, false);
-    }
-
     /// Change password: two masked fields, the plugin on MySQL, and a preview that shows '***'.
     pub(in crate::app) fn sql_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PwForm, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
-        let caps = self.users_caps(f.conn);
-        let dialect = self.users_dialect(f.conn);
+        let caps = self.core.users_caps(f.conn);
+        let dialect = self.core.users_dialect(f.conn);
         dialog_head(ui, &Head::new("Change password").sub(f.acct.label()).glyph(glyphs::key));
         let mut b = body_begin(ui);
         let outer = ui;
@@ -1034,7 +804,10 @@ impl App {
         let ui = outer;
         dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok() && shown.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
-                self.sql_password_run(f);
+                let password = Secret::new(std::mem::take(&mut f.password));
+                f.again.clear();
+                let plugin = Some(f.plugin.clone()).filter(|p| !p.is_empty());
+                self.exec(Action::Users(UsersA::Sql(Act::SetPassword { conn: f.conn, user: f.acct.user.clone(), host: f.acct.host.clone(), plugin, password })));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -1049,14 +822,6 @@ impl App {
             f.again.clear();
             forget_secret(ui.ctx(), "change-password", f.serial, 2);
         }
-    }
-
-    fn sql_password_run(&mut self, f: &mut PwForm) {
-        let password = std::mem::take(&mut f.password);
-        f.again.clear();
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        let plugin = Some(f.plugin.clone()).filter(|p| !p.is_empty());
-        self.core.worker.sql_user_password(f.conn, sql, f.acct.clone(), plugin, password, false);
     }
 
     /// QUARRY_TEST_SQL=users, useraccount, userglobal or userlimits (the window on user "report"), or newuser (the + User dialog).

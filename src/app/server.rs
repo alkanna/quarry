@@ -2,16 +2,16 @@
 //! server only while it is open, Quarry is focused, and for the section on screen.
 
 use super::*;
-use std::time::Instant;
 pub(crate) use quarry_core::state::server::*;
 use quarry_core::state::server::POLL;
 
 /// What a role without the needed privilege sees in place of a section.
 const NEEDS_MONITOR: &str = "Not available for this user: it needs the clusterMonitor role (on Atlas, atlasAdmin or a custom role that includes clusterMonitor).";
 
-fn num(d: &Document, path: &str) -> Option<f64> {
-    db::get_path(d, path).and_then(db::num)
-}
+use quarry_core::action::server::num;
+#[cfg(test)]
+use quarry_core::action::server::ops_of;
+use quarry_core::action::{Action, MongoServerA, ServerA};
 
 fn uptime(s: f64) -> String {
     let s = s as i64;
@@ -86,25 +86,17 @@ pub(super) fn member_rows(rs: Option<&db::Res<Document>>, hello: Option<&db::Res
     }
 }
 
-/// Running operations, longest first, without the currentOp that listed them.
-pub(super) fn ops_of(d: &Document) -> Vec<Document> {
-    let mut ops: Vec<Document> = d.get_array("inprog").map(|a| a.iter().filter_map(Bson::as_document).filter(|o| !o.get_document("command").is_ok_and(|c| c.contains_key("currentOp"))).cloned().collect()).unwrap_or_default();
-    ops.sort_by(|a, b| num(b, "microsecs_running").unwrap_or(0.0).total_cmp(&num(a, "microsecs_running").unwrap_or(0.0)));
-    ops
-}
-
 impl App {
     pub(super) fn server_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.core.server.take() else { return };
+        if self.core.server.is_some() && ctx.input(|i| i.focused) && self.core.server_poll() {
+            ctx.request_repaint_after(POLL);
+        }
+        let Some(s) = self.core.server.take() else { return };
         let conn = s.conn;
-        let client = self.conn(conn).and_then(|c| c.client.clone());
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        if let (Some(client), false) = (&client, self.core.demo) {
-            self.server_poll(ctx, &mut s, client);
-        }
         let mut open = true;
-        let (mut unlock, mut kill) = (false, None);
+        let mut acts: Vec<MongoServerA> = Vec::new();
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "server-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(660.0, 1100.0)));
@@ -113,20 +105,15 @@ impl App {
                 refresh = ui.button("Refresh").clicked();
             });
             if let Some(i) = picked && (i == 1) != s.ops_tab {
-                s.ops_tab = i == 1;
-                s.next = None;
+                acts.push(MongoServerA::Ops(i == 1));
             }
             if refresh {
-                s.status = s.status.take().filter(|r| r.is_ok());
-                s.rs = s.rs.take().filter(|r| r.is_ok());
-                s.hello = None;
-                s.refresh = true;
-                s.next = None;
+                acts.push(MongoServerA::Refresh);
             }
             dialog_pane(ui, |ui| {
                 egui::ScrollArea::both().max_height(screen.height() - 300.0).auto_shrink([false, true]).show(ui, |ui| {
                     if s.ops_tab {
-                        self.ops_section(ui, &mut s, writable, &mut unlock, &mut kill);
+                        self.ops_section(ui, &s, writable, &mut acts);
                     } else {
                         overview_section(ui, &s);
                     }
@@ -138,72 +125,28 @@ impl App {
                 if ops {
                     foot_left(ui, |ui| {
                         if chip(ui, "Refresh every 2 s", PRIMARY(), s.auto_ops).clicked() {
-                            s.auto_ops = !s.auto_ops;
+                            acts.push(MongoServerA::AutoOps(!s.auto_ops));
                         }
                     });
                 }
                 done
             });
         });
-        if unlock {
-            self.modal = Some(Modal::Unlock(conn, None));
+        self.core.server = Some(s);
+        for a in acts {
+            self.exec(Action::Server(ServerA::Mongo(a)));
         }
-        if let (Some(op), Some(client)) = (kill, client) {
-            self.core.worker.command(client, "admin".into(), doc! { "killOp": 1, "op": op }, &format!("server:{}:kill", s.id));
-        }
-        if open && !(r.should_close() && self.modal.is_none()) {
-            self.core.server = Some(s);
+        if !open || (r.should_close() && self.modal.is_none()) {
+            self.exec(Action::Server(ServerA::Mongo(MongoServerA::Close)));
         }
     }
 
-    /// Asks for the section on screen every POLL while Quarry is focused and the last answers are in.
-    fn server_poll(&self, ctx: &egui::Context, s: &mut ServerWin, client: &Client) {
-        if !ctx.input(|i| i.focused) {
-            return;
-        }
-        if !s.ops_tab || s.auto_ops {
-            ctx.request_repaint_after(POLL);
-        }
-        let now = Instant::now();
-        if s.waiting > 0 || s.next.is_some_and(|t| now < t) {
-            return;
-        }
-        s.next = Some(now + POLL);
-        let (id, mut sent) = (s.id, 0);
-        let mut ask = |cmd: Document, what: &str| {
-            sent += 1;
-            self.core.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
-        };
-        if s.ops_tab {
-            if s.auto_ops || s.ops.is_none() || s.refresh {
-                let mut cmd = doc! { "currentOp": 1, "active": true };
-                if s.own_only {
-                    cmd.insert("$ownOps", true);
-                }
-                ask(cmd, "ops");
-            }
-        } else {
-            // A section that failed is not asked again until Refresh, so a missing privilege costs one call.
-            if !matches!(s.status, Some(Err(_))) {
-                ask(doc! { "serverStatus": 1, "repl": 0, "metrics": 0, "locks": 0 }, "status");
-            }
-            if !matches!(s.rs, Some(Err(_))) {
-                ask(doc! { "replSetGetStatus": 1 }, "rs");
-            }
-            if s.hello.is_none() {
-                ask(doc! { "hello": 1 }, "hello");
-            }
-        }
-        s.waiting = sent;
-        s.refresh = false;
-    }
-
-    fn ops_section(&self, ui: &mut egui::Ui, s: &mut ServerWin, writable: bool, unlock: &mut bool, kill: &mut Option<Bson>) {
+    fn ops_section(&self, ui: &mut egui::Ui, s: &ServerWin, writable: bool, acts: &mut Vec<MongoServerA>) {
         if s.own_only {
             ui.label(RichText::new("Showing only your operations: listing everyone's needs the inprog privilege (clusterMonitor role).").size(TXT_SMALL).color(WARNING()));
         }
-        if !writable {
-            *unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill operations.", Some("Unlock…"));
+        if !writable && banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill operations.", Some("Unlock…")) {
+            acts.push(MongoServerA::Unlock);
         }
         let ops = match &s.ops {
             None => return spin(ui),
@@ -248,16 +191,15 @@ impl App {
                             // "Kill it" is drawn where "Kill…" was, so a double click must not reach it.
                             let r = danger(ui, "Kill it");
                             if confirmed(ui, &r, at) {
-                                *kill = Some(id.clone());
-                                s.confirm_kill = None;
+                                acts.push(MongoServerA::Kill { op: key.clone() });
                             }
                             if ui.button("Keep").clicked() {
-                                s.confirm_kill = None;
+                                acts.push(MongoServerA::Disarm);
                             }
                         }
                         None => {
                             if ui.button("Kill…").clicked() {
-                                s.confirm_kill = Some((key, arm_time(ui)));
+                                acts.push(MongoServerA::ArmKill { op: key, at: arm_time(ui) });
                             }
                         }
                     }
@@ -265,48 +207,6 @@ impl App {
                 ui.end_row();
             }
         });
-    }
-
-    /// Applies an answer to one of the Server window's commands. Errors stay in the window
-    /// instead of the status bar, so a role without privileges is not told so every 2 seconds.
-    pub(super) fn server_reply(&mut self, tag: &str, r: db::Res<Document>) {
-        let mut parts = tag.splitn(3, ':').skip(1);
-        let (id, what) = (parts.next().and_then(|i| i.parse::<u64>().ok()), parts.next().unwrap_or_default());
-        if what == "kill" {
-            match r {
-                Ok(_) => {
-                    self.ok("Asked the server to kill the operation");
-                    if let Some(s) = self.core.server.as_mut().filter(|s| Some(s.id) == id) {
-                        s.refresh = true;
-                        s.next = None;
-                    }
-                }
-                Err(e) if db::is_unauthorized(&e) => self.err("Your role cannot kill this operation: killing other users' operations needs the killop privilege."),
-                Err(e) => self.err(e),
-            }
-            return;
-        }
-        let Some(s) = self.core.server.as_mut().filter(|s| Some(s.id) == id) else { return };
-        s.waiting = s.waiting.saturating_sub(1);
-        match what {
-            "status" => {
-                if let Some(Ok(cur)) = s.status.take() {
-                    s.prev = Some(cur);
-                }
-                s.status = Some(r.map(|d| (Instant::now(), d)));
-            }
-            "hello" => s.hello = Some(r),
-            "rs" => s.rs = Some(r),
-            "ops" => match r {
-                Err(e) if db::is_unauthorized(&e) && !s.own_only => {
-                    s.own_only = true;
-                    s.refresh = true;
-                    s.next = None;
-                }
-                r => s.ops = Some(r.map(|d| ops_of(&d))),
-            },
-            _ => {}
-        }
     }
 }
 

@@ -32,7 +32,7 @@ pub use statements::*;
 // Kinds and privileges.
 
 /// What the Privileges matrix lists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     #[default]
     Tables,
@@ -112,7 +112,7 @@ impl Kind {
 }
 
 /// The kinds ALTER DEFAULT PRIVILEGES knows, with `pg_default_acl.defaclobjtype`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
 pub enum DefKind {
     #[default]
     Tables,
@@ -196,7 +196,7 @@ pub fn privs_text(p: &Privs) -> String {
 
 /// What ALTER ROLE changes. `valid_until` is empty for never, "-infinity" for a role that never could sign in, else the moment
 /// in UTC as `YYYY-MM-DD HH:MM:SS+00`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attrs {
     pub login: bool,
     pub superuser: bool,
@@ -291,7 +291,7 @@ impl Role {
 }
 
 /// The options of one membership. INHERIT and SET are per membership from PostgreSQL 16 and None before.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Opts {
     pub admin: bool,
     pub inherit: Option<bool>,

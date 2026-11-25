@@ -4,8 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn push_undo(&mut self, a: UndoAction) {
-        self.core.undo.insert(0, a);
-        trim_undo(&mut self.core.undo, std::time::Instant::now());
+        self.core.push_undo(a)
     }
 
     /// Forgets the undo entries of what a drop just removed. A database or table made again under the name would otherwise get them.
@@ -81,11 +80,8 @@ pub(super) fn mongo_undo_is_under(a: &UndoAction, conn: u64, db: &str, coll: &st
     !matches!(a.kind, UndoKind::Sql { .. }) && a.conn == conn && a.db == db && (coll.is_empty() || a.coll == coll)
 }
 
-/// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
-pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
-    undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
-    undo.truncate(db::UNDO_MAX);
-}
+#[cfg(test)]
+use quarry_core::core::notify::trim_undo;
 
 #[cfg(test)]
 mod tests {

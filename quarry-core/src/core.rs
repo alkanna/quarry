@@ -1,6 +1,8 @@
 //! Everything the app holds that is not drawing: connections, tabs, windows, preferences, the worker and its answers.
 //! The egui app keeps only what needs egui types, so the state can be built and tested without a window.
 
+pub mod notify;
+
 use crate::db::{self, Msg, UndoAction, Worker};
 use crate::state::cloud_sql;
 use crate::state::complete::{Ac, Fields};
@@ -185,7 +187,10 @@ pub struct Core {
     pub update_checked: Option<std::time::Instant>,
     /// Opens the update popover on the next frame, after a check started from the menu or the palette.
     pub upd_popup: bool,
-    pub started: std::time::Instant,}
+    pub started: std::time::Instant,
+    /// What the last actions left for the UI to do, drained by the app.
+    pub ui_fx: Vec<crate::action::UiFx>,
+}
 
 impl Core {
     /// The empty state the app and the tests start from; `demo` means fake offline data, and nothing touches disk.
@@ -292,6 +297,7 @@ impl Core {
             update_checked: None,
             upd_popup: false,
             started: std::time::Instant::now(),
+            ui_fx: Vec::new(),
         }
     }
 

@@ -11,11 +11,11 @@ pub(crate) type Modal = quarry_core::state::Modal<Retry>;
 
 impl App {
     pub(super) fn ok(&mut self, s: impl Into<String>) {
-        self.core.status = s.into();
+        self.core.ok(s)
     }
 
     pub(super) fn conn(&self, id: u64) -> Option<&Conn> {
-        self.core.conns.iter().find(|c| c.meta.id == id)
+        self.core.conn(id)
     }
 
     pub(super) fn t(&self) -> Option<&Tab> {

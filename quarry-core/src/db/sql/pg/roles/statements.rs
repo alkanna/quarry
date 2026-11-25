@@ -5,7 +5,7 @@ use super::*;
 // Statements.
 
 /// What a GRANT names: the object and, for a function, its arguments. `oid` tells it from one made again under the name.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Target {
     pub kind: Kind,
     pub schema: String,
@@ -210,7 +210,7 @@ pub(super) fn stmts(c: &Change, exact: Option<&Exact>, major: u32) -> Res<Vec<St
 }
 
 /// One staged change. `from` is what the window showed, `to` what the change leaves.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Change {
     Acl { target: Target, grantee: String, from: Privs, to: Privs },
     Attrs { role: String, from: Attrs, to: Attrs },
@@ -350,7 +350,7 @@ impl Batch {
 
 // New roles and passwords.
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewRole {
     pub name: String,
     pub attrs: Attrs,

@@ -10,7 +10,7 @@ pub enum Expire {
     Days(u32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tls {
     None,
     Ssl,

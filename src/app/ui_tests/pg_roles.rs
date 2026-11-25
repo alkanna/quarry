@@ -91,20 +91,3 @@ fn pg_password_is_forgotten_when_esc_closes_the_dialog() {
     assert!(h.state().modal.is_none(), "Esc closed the dialog");
     assert!(egui::TextEdit::load_state(&h.ctx, id).is_none(), "the field's state, with its undo history, is gone");
 }
-
-/// An Apply answer that is not the one the window waits for (from before Esc closed and reopened it) leaves what is staged now.
-#[test]
-fn pg_a_late_apply_answer_keeps_newer_staged_changes() {
-    use crate::db::sql::pg::roles::{Answer, Change, Did};
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_eframe(|cc| App::for_test(cc));
-    let app = h.state_mut();
-    let mut w = crate::app::sql::pg_roles::PgRolesWin::new(CONN, "shop".into());
-    w.staged.push(Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) });
-    (w.busy, w.req_apply) = (true, 7);
-    app.core.pg_roles = Some(w);
-    let done = || Answer::Done { did: Did::Applied, res: Ok("Applied".into()), undo: None };
-    app.pg_roles_answer(CONN, 3, done());
-    assert_eq!(app.core.pg_roles.as_ref().unwrap().staged.len(), 1, "a stale answer cleared the staged change");
-    app.pg_roles_answer(CONN, 7, done());
-    assert!(app.core.pg_roles.as_ref().unwrap().staged.is_empty() && !app.core.pg_roles.as_ref().unwrap().busy);
-}
