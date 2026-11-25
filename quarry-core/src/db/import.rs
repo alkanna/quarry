@@ -50,7 +50,7 @@ pub fn to_table(docs: &[Document], sep: char) -> String {
     out
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ImportKind {
     #[default]
     Json,

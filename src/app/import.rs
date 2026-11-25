@@ -1,14 +1,20 @@
 //! The import view.
 
 use super::*;
+use quarry_core::action::{ImportA, MongoA};
 
 impl App {
     pub(super) fn import_view(&mut self, ui: &mut egui::Ui) {
         let mut open_file = false;
         let mut start = false;
         let writable = self.sel_writable();
+        // Typing in the box changes the input, so it is parsed again here rather than by an action.
+        self.core.import_parse();
         let t = &mut self.core.tabs[self.core.cur];
+        let tab = t.uid;
         let im = &mut t.import;
+        let opts = |im: &ImportTab| (im.kind, im.separator, im.header, im.camel, im.upsert);
+        let before = opts(im);
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
                 caption(ui, "IMPORT");
@@ -58,22 +64,6 @@ impl App {
                 ui.label(RichText::new("(update the match, add if none)").size(TXT_SMALL).color(FAINT()));
             });
         });
-        // Parse again only when the input or options changed.
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (&im.text, im.kind as u8, im.separator, im.header, im.camel).hash(&mut h);
-            h.finish()
-        };
-        if key != im.parsed_key {
-            im.parsed_key = key;
-            im.parsed = (!im.text.trim().is_empty()).then(|| db::parse_import(&im.text, im.kind, &db::CsvOptions { separator: im.separator, header: im.header, camel_case: im.camel }));
-            im.fields = match &im.parsed {
-                Some(Ok(d)) => auto_fields(&d[..d.len().min(500)]),
-                _ => Vec::new(),
-            };
-            t.selected = None;
-        }
         ui.add_space(6.0);
         let mut preview = false;
         match &im.parsed {
@@ -98,48 +88,22 @@ impl App {
                 preview = true;
             }
         }
+        let after = opts(im);
+        let mut acts = Vec::new();
+        if after != before {
+            // The widgets wrote into the tab; the action is what applies the change.
+            (im.kind, im.separator, im.header, im.camel, im.upsert) = before;
+            let (kind, separator, header, camel, upsert) = after;
+            acts.push(ImportA::Opts { tab, kind, separator, header, camel, upsert });
+        }
         if open_file && let Some(path) = rfd::FileDialog::new().add_filter("Data", &["json", "jsonl", "ndjson", "csv", "tsv", "txt"]).pick_file() {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let im = &mut self.core.tabs[self.core.cur].import;
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-                    im.kind = match ext.as_str() {
-                        "csv" | "tsv" => db::ImportKind::Csv,
-                        "jsonl" | "ndjson" => db::ImportKind::JsonLines,
-                        _ if text.trim_start().starts_with('{') && text.lines().filter(|l| !l.trim().is_empty()).count() > 1 && db::parse_doc(text.lines().next().unwrap_or_default()).is_ok() => db::ImportKind::JsonLines,
-                        _ => db::ImportKind::Json,
-                    };
-                    if ext == "tsv" {
-                        im.separator = Some('\t');
-                    }
-                    im.file = path.file_name().map(|f| f.to_string_lossy().to_string());
-                    im.text = text;
-                }
-                Err(e) => self.err(format!("Could not read the file: {e}")),
-            }
+            acts.push(ImportA::File { tab, path });
         }
         if start {
-            if !writable {
-                self.ask_unlock();
-            } else {
-                let im = &self.core.tabs[self.core.cur].import;
-                let n = match &im.parsed {
-                    Some(Ok(d)) => d.len(),
-                    _ => 0,
-                };
-                if im.upsert {
-                    let key = im.upsert_by.trim().to_string();
-                    let coll = self.core.tabs[self.core.cur].sel.coll.clone();
-                    self.modal = Some(Modal::Typed {
-                        title: format!("Upsert {n} documents into {coll} by {key}? Matching documents are updated with the imported fields."),
-                        expect: coll,
-                        typed: String::new(),
-                        action: self.pinned(Danger::Upsert { key }),
-                    });
-                } else {
-                    self.modal = Some(Modal::ImportInsert(n));
-                }
-            }
+            acts.push(ImportA::Start { tab });
+        }
+        for a in acts {
+            self.exec(Action::Mongo(MongoA::Import(a)));
         }
         if preview {
             // The preview uses the same table as documents.

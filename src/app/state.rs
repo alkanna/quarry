@@ -46,12 +46,6 @@ impl App {
         self.core.writable_target()
     }
 
-    pub(super) fn ask_unlock(&mut self) {
-        if let Some(t) = self.t() {
-            self.modal = Some(Modal::Unlock(t.sel.conn, None));
-        }
-    }
-
     /// Asks to allow writes, then runs `then` if they were allowed.
     pub(super) fn ask_unlock_then(&mut self, then: impl FnOnce(&mut App) + 'static) {
         if let Some(t) = self.t() {

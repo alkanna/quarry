@@ -410,6 +410,7 @@ fn tab_and_docs_actions() -> Vec<Action> {
     all.extend(g.into_iter().map(Action::Aggregate));
     let x = [IdxA::Create { tab: 1, spec: mongodb::bson::doc! { "key": { "a": 1 }, "name": "a_1" } }, IdxA::Hide { tab: 1, name: "a_1".into(), hidden: true }, IdxA::Profile { tab: 1 }];
     all.extend(x.into_iter().map(Action::Indexes));
+    all.extend(super::mongo_tests::all_mongo());
     all
 }
 
@@ -486,6 +487,8 @@ fn variant(a: &Action) -> String {
         Action::Indexes(x) => match x {
             IdxA::Create { .. } | IdxA::Hide { .. } | IdxA::Profile { .. } => {}
         },
+        Action::Mongo(m) => super::mongo_tests::mongo_variant(m),
+        Action::Grid(g) => super::mongo_tests::grid_variant(g),
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

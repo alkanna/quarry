@@ -471,7 +471,7 @@ pub fn group_profile(entries: &[Document]) -> Vec<Shape> {
 }
 
 /// A column data action from the table header.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ColOp {
     Copy,
     CopyDistinct,

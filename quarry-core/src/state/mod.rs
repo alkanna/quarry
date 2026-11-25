@@ -660,7 +660,7 @@ pub struct CompareTab {
     pub fields: [Vec<String>; 3],
 }
 
-#[derive(Default, Clone, Copy, PartialEq)]
+#[derive(Default, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum CmpList {
     #[default]
     Changed,
@@ -1706,6 +1706,7 @@ pub enum TabClose {
     All,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ColAct {
     Pin(String),
     Hide(String),

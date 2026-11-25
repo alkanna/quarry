@@ -177,6 +177,8 @@ pub struct App {
     /// The current scroll gesture for `prefs.lock_scroll_axis`: distance so far, locked axis (true is vertical) and last scroll time.
     scroll_gesture: (egui::Vec2, Option<Option<bool>>, f64, egui::Vec2),
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
+    /// Text an action put on the clipboard, copied by the next `logic()`.
+    clip: Option<String>,
 }
 
 pub(crate) use crate::db::collection_ref;
@@ -207,6 +209,7 @@ impl App {
             vnav: Default::default(),
             scroll_gesture: Default::default(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
+            clip: None,
         }
     }
 
@@ -527,6 +530,9 @@ impl eframe::App for App {
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
         self.poll(ctx);
         self.run_fx();
+        if let Some(text) = self.clip.take() {
+            ctx.copy_text(text);
+        }
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         crate::ui::vim::set_on(ctx, self.core.prefs.vim);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first

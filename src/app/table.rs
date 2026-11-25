@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::ui::dnd;
-use quarry_core::action::{Action, DocsA};
+use quarry_core::action::{Action, DocsA, GridA};
+pub(super) use quarry_core::action::grid::{col_acts_on, visible_cols};
 pub(crate) use quarry_core::state::table::Rows;
 
 /// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
@@ -109,110 +110,6 @@ pub(super) fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
     .max(x + 8.0)
 }
 
-/// Applies column actions to one set of column preferences. `n` is how many columns show before any were picked.
-pub(super) fn col_acts_on(p: &mut ColPrefs, n: usize, fields: &[String], acts: Vec<ColAct>) {
-    for a in acts {
-        let mut shown = visible_cols(Some(p), fields, n);
-        match a {
-            ColAct::Highlight(c) => {
-                let c = db::strip_indices(&c);
-                if !p.highlight.contains(&c) {
-                    p.highlight.push(c);
-                } else {
-                    p.highlight.retain(|x| *x != c);
-                }
-                continue;
-            }
-            ColAct::Pin(c) => {
-                if !p.pinned.contains(&c) {
-                    p.pinned.push(c);
-                } else {
-                    p.pinned.retain(|x| *x != c);
-                }
-                continue;
-            }
-            ColAct::Hide(c) => {
-                shown.retain(|x| *x != c);
-                p.pinned.retain(|x| *x != c);
-            }
-            ColAct::Move(c, d) => {
-                if let Some(i) = shown.iter().position(|x| *x == c) {
-                    let j = (i as i32 + d).clamp(0, shown.len() as i32 - 1) as usize;
-                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                    shown.swap(i, j);
-                    // Moving across the edge of the pinned block changes which columns are pinned.
-                    p.pinned = shown[..pinned_n].to_vec();
-                }
-            }
-            ColAct::MoveTo(c, to) => {
-                if let Some(i) = shown.iter().position(|x| *x == c) {
-                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                    let c = shown.remove(i);
-                    shown.insert(if to > i { to - 1 } else { to }.min(shown.len()), c);
-                    p.pinned = shown[..pinned_n].to_vec();
-                }
-            }
-            ColAct::Show(c) => {
-                if !shown.contains(&c) {
-                    shown.push(c);
-                }
-            }
-            ColAct::Align(c, a) => {
-                if a == 0 {
-                    p.align.remove(&c);
-                } else {
-                    p.align.insert(c, a);
-                }
-                continue;
-            }
-            ColAct::Customize { col, label, path } => {
-                if path != col {
-                    if shown.contains(&path) {
-                        shown.retain(|x| *x != col);
-                        p.pinned.retain(|x| *x != col);
-                    } else {
-                        shown.iter_mut().chain(p.pinned.iter_mut()).filter(|x| **x == col).for_each(|x| *x = path.clone());
-                    }
-                    // A column already at that path keeps its own width and alignment.
-                    if let Some(w) = p.widths.remove(&col) {
-                        p.widths.entry(path.clone()).or_insert(w);
-                    }
-                    if let Some(a) = p.align.remove(&col) {
-                        p.align.entry(path.clone()).or_insert(a);
-                    }
-                    p.labels.remove(&col);
-                    let (from, to) = (db::strip_indices(&col), db::strip_indices(&path));
-                    if p.highlight.contains(&from) {
-                        p.highlight.retain(|h| *h != from && *h != to);
-                        p.highlight.push(to);
-                    }
-                }
-                if label.trim().is_empty() {
-                    p.labels.remove(&path);
-                } else {
-                    p.labels.insert(path, label.trim().to_string());
-                }
-            }
-            ColAct::Reset => {
-                *p = ColPrefs::default();
-                continue;
-            }
-        }
-        p.shown = Some(shown);
-    }
-}
-
-pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
-    let base: Vec<String> = match p.and_then(|p| p.shown.clone()) {
-        Some(v) => v,
-        None => fields.iter().take(n).cloned().collect(),
-    };
-    let pinned: Vec<String> = p.map(|p| p.pinned.clone()).unwrap_or_default();
-    let mut out: Vec<String> = pinned.iter().filter(|c| base.contains(c)).cloned().collect();
-    out.extend(base.into_iter().filter(|c| !pinned.contains(c)));
-    out
-}
-
 /// A move in the filtered SHOWN list as the insert-before index into the whole list that `ColAct::MoveTo` takes.
 /// `kept` holds the whole-list index of each row the filter keeps: down a list the column goes after the row it was
 /// dropped past, up a list before it, so the columns the filter hides keep their places.
@@ -220,15 +117,9 @@ fn kept_before(kept: &[usize], m: dnd::Move) -> usize {
     if m.to > m.from { kept[m.to] + 1 } else { kept[m.to] }
 }
 
-/// How many columns show before the user picks some. SQL tables are narrow enough to show whole,
-/// while Mongo documents can have hundreds of fields.
-fn default_n(sql: bool, setting: usize) -> usize {
-    if sql { usize::MAX } else { setting }
-}
-
 impl App {
     pub(super) fn default_cols(&self) -> usize {
-        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.core.prefs.default_cols)
+        self.core.default_cols()
     }
 
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
@@ -380,15 +271,8 @@ impl App {
             self.core.col_filter.clear();
         }
         if !acts.is_empty() {
-            self.apply_col_acts(&key, &fields, acts);
+            self.exec(Action::Grid(GridA::Cols { key, agg, acts }));
         }
-    }
-
-    pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
-        let n = self.default_cols();
-        let p = self.core.prefs.cols.entry(key.to_string()).or_default();
-        col_acts_on(p, n, fields, acts);
-        self.save_prefs();
     }
 
     /// Draws the rows. SQL cell work found on the way comes back in `SqlAfter`, because the page is out of the tab
@@ -877,20 +761,20 @@ impl App {
         if let Some((c, v)) = view.or(rec.view) {
             self.sql_view_value(&c, &v);
         }
-        if let Some((c, w)) = resized {
-            self.core.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
-        }
+        let mut set: Vec<(String, Option<f32>)> = resized.into_iter().map(|(c, w)| (c, Some(w))).collect();
         if let Some(c) = fit {
             // Back to the measured width, like the original's "optimal" column width.
-            self.core.prefs.cols.entry(key.clone()).or_default().widths.remove(&c);
+            set.push((c, None));
             save_widths = true;
         }
-        if save_widths {
-            self.save_prefs();
+        if !set.is_empty() || save_widths {
+            self.exec(Action::Grid(GridA::Widths { key: key.clone(), set, save: save_widths }));
         }
-        self.core.col_scope_query = scope_query;
+        if scope_query != self.core.col_scope_query {
+            self.exec(Action::Grid(GridA::ScopeQuery(scope_query)));
+        }
         for (c, a) in head_acts {
-            self.head_act(ui, agg, docs, fields, &c, a);
+            self.head_act(ui, agg, docs, &c, a);
         }
         if let Some(i) = click {
             self.row_click(ui, agg, i);
@@ -1073,23 +957,6 @@ fn eye_button(ui: &mut egui::Ui) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sql_shows_every_column_by_default() {
-        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
-        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
-    }
-
-    #[test]
-    fn columns_default_pin_and_move() {
-        let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
-        let p = ColPrefs { pinned: vec!["f3".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
-        let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
-    }
 
     #[test]
     fn a_move_in_the_filtered_list_keeps_hidden_columns_in_place() {

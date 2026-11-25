@@ -188,9 +188,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Import", PRIMARY()).clicked() {
-                            if let Some((conn, target)) = self.writable_target() && let Some(Ok(docs)) = self.core.tabs[self.core.cur].import.parsed.clone() {
-                                self.core.worker.import(conn, target, docs, None);
-                                self.ok("Importing…");
+                            if let Some(tab) = self.t().map(|t| t.uid) {
+                                self.exec(Action::Mongo(quarry_core::action::MongoA::Import(quarry_core::action::ImportA::Insert { tab })));
                             }
                             keep = false;
                         }
@@ -271,8 +270,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "Save", PRIMARY())).clicked() {
-                            let fields = self.t().map(|t| if *agg { t.agg_source().1.to_vec() } else { t.fields.clone() }).unwrap_or_default();
-                            self.apply_col_acts(key, &fields, vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: path.trim().to_string() }]);
+                            self.exec(Action::Grid(quarry_core::action::GridA::Cols { key: key.clone(), agg: *agg, acts: vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: path.trim().to_string() }] }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {

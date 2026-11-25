@@ -156,16 +156,6 @@ impl App {
         self.core.load_related(req)
     }
 
-    /// Opens the referenced document in its collection's tab.
-    pub(super) fn go_ref(&mut self, conn: u64, db: String, coll: String, id: Bson) {
-        self.open_tab(Sel { conn, db, coll, ..Default::default() }, Open::Link);
-        let t = self.tm().unwrap();
-        t.view = View::Documents;
-        t.filter_txt = format!("{{ _id: {} }}", db::shell_text(&id));
-        t.clear_options();
-        self.run_query();
-    }
-
     pub(super) fn analyze_relations(&mut self, conn: u64, client: Client, db: String, coll: String) {
         let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.core.views.has(conn, &db, c)).collect();
         let colls = if coll.is_empty() { all.clone() } else { vec![coll.clone()] };

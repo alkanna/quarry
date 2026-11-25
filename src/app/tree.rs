@@ -1,7 +1,7 @@
 //! One document as an editable tree: inline edits, drafts, field menus and the inspector.
 
 use super::*;
-use quarry_core::action::{Action, DocsA, EditA};
+use quarry_core::action::{Action, DocsA, EditA, FieldA, MongoA};
 
 pub(super) fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
     prefs.cols.get(key).is_some_and(|p| !p.highlight.is_empty() && p.highlight.contains(&db::strip_indices(&path.join("."))))
@@ -315,75 +315,25 @@ impl App {
                     };
                     self.modal = Some(Modal::Text { title: path, body, code: !matches!(v, Bson::String(_)) });
                 }
-                TreeAct::PinColumn(path) => {
-                    let key = self.col_key(false);
-                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
-                    self.apply_col_acts(&key, &fields, vec![ColAct::Show(path.clone()), ColAct::Pin(path)]);
-                    self.core.prefs.table = true;
-                }
-                TreeAct::Highlight(path) => {
-                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
-                    self.apply_col_acts(&self.col_key(false), &fields, vec![ColAct::Highlight(path)]);
-                }
+                TreeAct::PinColumn(path) => self.field_act(|tab| FieldA::PinColumn { tab, path }),
+                TreeAct::Highlight(path) => self.field_act(|tab| FieldA::Highlight { tab, path }),
                 TreeAct::Filter(path, value, add) => {
                     let tab = self.t().unwrap().uid;
                     self.exec(Action::Docs(DocsA::FilterField { tab, path, value, add }));
                 }
-                TreeAct::Group(path, v, filtered) => {
-                    let filter = if filtered { self.t().unwrap().query.filter.clone() } else { Document::new() };
-                    // Counted in the background and shown in a window, so the tab's own pipeline is kept;
-                    // "Open in Aggregate" opens the pipeline in a new tab, as the original does.
-                    match (db::group_count_pipeline(&path, &v, filter), self.target()) {
-                        (Err(e), _) => self.err(e),
-                        (_, None) => self.warn_offline(),
-                        (Ok(p), Some(target)) => {
-                            let t = self.t().unwrap();
-                            let (conn, co) = (t.sel.conn, filtered.then(|| t.query.collation.clone()).flatten());
-                            self.ok(format!("Counting the values of {path}…"));
-                            self.core.worker.group_count(conn, target, path, p, co);
-                        }
-                    }
-                }
-                TreeAct::Distinct(path) => match self.target() {
-                    Some(target) => {
-                        let scope = self.t().unwrap().query.scope();
-                        self.core.worker.distinct_count(target, path, scope);
-                    }
-                    None => self.warn_offline(),
-                },
-                TreeAct::Index(path) => {
-                    let t = self.tm().unwrap();
-                    t.view = View::Indexes;
-                    t.selected = None;
-                    self.reset_doc_state();
-                    self.load_indexes();
-                    self.open_create_index(Some(doc! { db::strip_indices(&path): 1 }));
-                }
-                TreeAct::GoRef(path, v) => {
-                    let Some(s) = self.t().map(|t| t.sel.clone()) else { continue };
-                    let path = db::strip_indices(&path);
-                    let rel = self.core.prefs.relations.get(&format!("{}/{}", s.conn, s.db)).and_then(|l| l.iter().find(|r| r.coll == s.coll && r.path == path)).cloned();
-                    match (rel, self.conn(s.conn).and_then(|c| c.client.clone())) {
-                        (_, None) => self.warn_offline(),
-                        (Some(r), _) => self.go_ref(s.conn, s.db, r.target, v),
-                        (None, Some(client)) => {
-                            let colls = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == s.db)).and_then(|d| d.1.clone()).unwrap_or_default();
-                            self.ok("Looking for the collection that holds this id…");
-                            self.core.worker.find_ref(s.conn, Target { client, db: s.db, coll: s.coll, timeout: self.timeout() }, colls, path, v);
-                        }
-                    }
-                }
-                TreeAct::Rename(path) => {
-                    if self.sel_writable() {
-                        let name = path.last().cloned().unwrap_or_default();
-                        self.modal = Some(Modal::Rename { doc: d.clone(), path, name });
-                    } else {
-                        let d = d.clone();
-                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::Rename(path)]));
-                    }
-                }
+                TreeAct::Group(path, value, filtered) => self.field_act(|tab| FieldA::Group { tab, path, value, filtered }),
+                TreeAct::Distinct(path) => self.field_act(|tab| FieldA::Distinct { tab, path }),
+                TreeAct::Index(path) => self.field_act(|tab| FieldA::Index { tab, path }),
+                TreeAct::GoRef(path, value) => self.field_act(|tab| FieldA::GoRef { tab, path, value }),
+                TreeAct::Rename(path) => self.field_act(|tab| FieldA::Rename { tab, doc: d.clone(), path }),
             }
         }
+    }
+
+    /// A field menu's action on the current tab.
+    fn field_act(&mut self, a: impl FnOnce(u64) -> FieldA) {
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Mongo(MongoA::Field(a(tab))));
     }
 
     pub(super) fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {

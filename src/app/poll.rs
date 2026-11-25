@@ -100,69 +100,8 @@ impl App {
                     Ok(s) => self.ok(s),
                     Err(e) => self.err(e),
                 }
-                Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(ctx, conn, op, coll, path, res),
                 Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
                 Msg::Notice { title, body } => self.show_late(Modal::Text { title, body, code: false }),
-                Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
-                    Ok(rows) => {
-                        self.ok(format!("{} distinct values of {path}", rows.len()));
-                        self.show_late(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
-                    }
-                    Err(e) => self.err(e),
-                },
-                Msg::Related { req, res } => match (res, self.tab_by_req(req)) {
-                    (Ok(v), Some(t)) => t.related.extend(v),
-                    (Err(e), _) => self.err(format!("Could not load related documents: {e}")),
-                    _ => {}
-                },
-                Msg::RefFound { conn, db, coll, path, value, res } => match res {
-                    Ok(Some((target, preview))) => {
-                        self.core.prefs.relations.entry(format!("{conn}/{db}")).or_default().push(Relation { coll: coll.clone(), path: path.clone(), target: target.clone(), preview: preview.clone() });
-                        self.save_prefs();
-                        let reqs: Vec<u64> = self.core.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll).map(|t| t.req).collect();
-                        for r in reqs {
-                            self.load_related(r);
-                        }
-                        self.go_ref(conn, db, target.clone(), value);
-                        self.ok(format!("Linked {path} to {target}, showing {preview} next to its ids. Edit it under Data relations in the database menu."));
-                    }
-                    Ok(None) => self.err(format!("No collection of {db} has a document with this _id.")),
-                    Err(e) => self.err(e),
-                },
-                Msg::Analyzed { conn, db, res } => match res {
-                    Ok(found) => {
-                        let list = self.core.prefs.relations.entry(format!("{conn}/{db}")).or_default();
-                        let mut added = 0;
-                        for (coll, path, target, preview) in found {
-                            if !list.iter().any(|r| r.coll == coll && r.path == path) {
-                                list.push(Relation { coll, path, target, preview });
-                                added += 1;
-                            }
-                        }
-                        self.save_prefs();
-                        let reqs: Vec<u64> = self.core.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db).map(|t| t.req).collect();
-                        for r in reqs {
-                            self.load_related(r);
-                        }
-                        self.ok(if added == 0 { "Analysis done: no new relations found.".to_string() } else { format!("Analysis done: {added} new relation{} found.", if added == 1 { "" } else { "s" }) });
-                        if self.modal.is_none() {
-                            self.modal = Some(Modal::Relations { conn, db });
-                        }
-                    }
-                    Err(e) => self.err(format!("Could not analyze relations: {e}")),
-                },
-                Msg::Compared { req, res } => {
-                    let Some(i) = self.core.tabs.iter().position(|t| t.compare.req == req) else { continue };
-                    let t = &mut self.core.tabs[i];
-                    t.compare.running = false;
-                    match res {
-                        Ok(r) => {
-                            t.clear_failed(View::Compare);
-                            t.compare.set_result(Some(r));
-                        }
-                        Err(e) => self.fail_view(i, View::Compare, e, "compare"),
-                    }
-                }
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 // Link 0 is the Link a folder dialog's preview, which fills a form the app's Modal holds.
                 Msg::LibScan { scan, .. } => {
@@ -170,25 +109,12 @@ impl App {
                         f.got_preview(scan);
                     }
                 }
-                Msg::Schema { req, res } => {
-                    let Some(i) = self.core.tabs.iter().position(|t| t.schema.req == req) else { continue };
-                    let t = &mut self.core.tabs[i];
-                    t.schema.running = false;
-                    match res {
-                        Ok((stats, n, ms)) => {
-                            t.clear_failed(View::Schema);
-                            (t.schema.stats, t.schema.docs, t.schema.ms, t.schema.err) = (stats, n, Some(ms), None);
-                        }
-                        Err(e) => {
-                            (t.schema.stats, t.schema.ms, t.schema.err) = (Vec::new(), None, Some(e.clone()));
-                            self.fail_view(i, View::Schema, e, "analyze the schema");
-                        }
-                    }
-                }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 // Core::handles took the Shell, Watch and database tools answers above.
                 Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => {}
+                // Core::handles took the Compare, Schema, relations and field menu answers above.
+                Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => {}
             }
         }
     }
@@ -235,21 +161,7 @@ impl App {
                 let body = format!("viewOn: {}\npipeline:\n{}", opts.get_str("viewOn").unwrap_or_default(), db::to_edit_value(opts.get("pipeline").unwrap_or(&Bson::Array(vec![]))));
                 self.modal = Some(Modal::Text { title: "View definition".into(), body, code: true });
             }
-            (tag, Ok(d)) if tag.starts_with("validator:") => {
-                let req: u64 = tag["validator:".len()..].parse().unwrap_or(0);
-                let opts = d.get_document("cursor").ok().and_then(|c| c.get_array("firstBatch").ok()).and_then(|a| a.first()).and_then(|x| x.as_document()).and_then(|x| x.get_document("options").ok()).cloned().unwrap_or_default();
-                if let Some(t) = self.core.tabs.iter_mut().find(|t| t.schema.vreq == req) {
-                    let s = &mut t.schema;
-                    s.vtext = opts.get_document("validator").map(db::to_edit_json).unwrap_or_default();
-                    s.vlevel = match opts.get_str("validationLevel") {
-                        Ok("off") => 0,
-                        Ok("moderate") => 1,
-                        _ => 2,
-                    };
-                    s.vwarn = opts.get_str("validationAction") == Ok("warn");
-                    s.vaction = opts.get_str("validationAction").ok().filter(|a| !matches!(*a, "warn" | "error")).map(str::to_string);
-                }
-            }
+            (tag, Ok(d)) if tag.starts_with("validator:") => self.core.validator_loaded(tag["validator:".len()..].parse().unwrap_or(0), d),
             (_, Err(e)) => self.err(e),
             _ => {}
         }

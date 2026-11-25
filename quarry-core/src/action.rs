@@ -45,6 +45,8 @@ pub mod undo;
 pub mod indexes;
 pub mod aggregate;
 pub mod lib_dialogs;
+pub mod mongo;
+pub mod grid;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -61,6 +63,8 @@ mod prefs_tests;
 mod sql_tests;
 #[cfg(test)]
 mod docs_tests;
+#[cfg(test)]
+mod mongo_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -82,6 +86,8 @@ pub use docs::{BarField, DocsA, EditA, ValueA};
 pub use undo::UndoA;
 pub use aggregate::{AggA, StageA};
 pub use indexes::IdxA;
+pub use mongo::{CmpA, FieldA, ImportA, MongoA, SchemaA};
+pub use grid::GridA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -104,6 +110,8 @@ pub enum Action {
     Undo(UndoA),
     Aggregate(AggA),
     Indexes(IdxA),
+    Mongo(MongoA),
+    Grid(GridA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -141,6 +149,12 @@ pub enum UiFx {
     OpenScript { r: crate::library::ScriptRef, how: crate::state::library::open::How, conn: u64 },
     /// Open a linked file just read (`App::open_resolved`), with the time and length it had.
     OpenResolved { r: crate::library::ScriptRef, how: crate::state::library::open::How, script: Box<crate::library::Script>, meta: Option<(std::time::SystemTime, u64)> },
+    /// A dialog an answer opens, shown once the dialog already open (which may hold typing) closes.
+    Late(Dialog),
+    /// A dialog shown only if no other is open.
+    IfFree(Dialog),
+    /// Puts this text on the clipboard.
+    CopyText(String),
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -174,6 +188,15 @@ pub enum Dialog {
     Delete(crate::state::Sel, Vec<mongodb::bson::Document>),
     /// A pipeline with $out or $merge, which writes.
     AggWrite(Vec<mongodb::bson::Document>),
+    /// The value counts of a field, from the server.
+    Grouped { sel: crate::state::Sel, path: String, pipeline: Vec<mongodb::bson::Document>, rows: Vec<mongodb::bson::Document> },
+    /// The data relations of a database.
+    Relations { conn: u64, db: String },
+    /// Rename field `path` of document `doc`, with `name` to start from.
+    Rename { doc: mongodb::bson::Document, path: Vec<String>, name: String },
+    CreateIndex(Box<crate::state::indexes::IndexForm>),
+    /// Import's confirmation of inserting this many documents.
+    ImportInsert(usize),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -246,6 +269,8 @@ impl Core {
             Action::Undo(a) => self.undo(a),
             Action::Aggregate(a) => self.aggregate(a),
             Action::Indexes(a) => self.indexes(a),
+            Action::Mongo(a) => self.mongo(a),
+            Action::Grid(a) => self.grid(a),
         }
     }
 
@@ -309,6 +334,7 @@ impl Core {
             // Msg::Docs stays in the app's poll: the page's field suggestions are built by its autocomplete.
             Msg::Indexes { .. } | Msg::IndexInfo { .. } | Msg::Written { .. } | Msg::Saved { .. } => true,
             Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
+            Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => true,
             _ => false,
         }
     }
@@ -358,6 +384,13 @@ impl Core {
             Msg::Saved { tag, res, undo } => self.saved(tag, res, undo),
             Msg::Aggregated { req, res } => self.aggregated(req, res),
             Msg::StagePreview { req, res } => self.stage_previewed(req, res),
+            Msg::Compared { req, res } => self.compared(req, res),
+            Msg::Schema { req, res } => self.schema_done(req, res),
+            Msg::Analyzed { conn, db, res } => self.analyzed(conn, db, res),
+            Msg::Grouped { conn, db, coll, path, pipeline, res } => self.grouped(conn, db, coll, path, pipeline, res),
+            Msg::ColumnValues { conn, op, coll, path, res } => self.column_values_done(conn, op, coll, path, res),
+            Msg::Related { req, res } => self.related_done(req, res),
+            Msg::RefFound { conn, db, coll, path, value, res } => self.ref_found(conn, db, coll, path, value, res),
             _ => {}
         }
     }

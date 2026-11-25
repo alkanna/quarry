@@ -40,6 +40,11 @@ impl App {
                         Dialog::Save { tag, changes } => Modal::Save { tag, changes },
                         Dialog::Delete(sel, docs) => Modal::Delete(sel, docs),
                         Dialog::AggWrite(p) => Modal::AggWrite(p),
+                        Dialog::Grouped { sel, path, pipeline, rows } => Modal::Grouped { sel, path, pipeline, rows },
+                        Dialog::Relations { conn, db } => Modal::Relations { conn, db },
+                        Dialog::Rename { doc, path, name } => Modal::Rename { doc, path, name },
+                        Dialog::CreateIndex(f) => Modal::CreateIndex(f),
+                        Dialog::ImportInsert(n) => Modal::ImportInsert(n),
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {
@@ -63,6 +68,23 @@ impl App {
                 UiFx::Restart => self.restart_now(),
                 UiFx::OpenScript { r, how, conn } => self.open_script_on(&r, how, conn),
                 UiFx::OpenResolved { r, how, script, meta } => self.open_resolved(&r, how, *script, Some(meta)),
+                // Opened as usual, then swapped with the dialog that was open, which stays on top.
+                UiFx::Late(d) => {
+                    let held = self.modal.take();
+                    self.core.ui_fx.push(UiFx::Open(d));
+                    self.run_fx();
+                    if let Some(m) = held {
+                        self.late_modals.extend(self.modal.replace(m));
+                    }
+                }
+                UiFx::IfFree(d) => {
+                    if self.modal.is_none() {
+                        self.core.ui_fx.push(UiFx::Open(d));
+                        self.run_fx();
+                    }
+                }
+                // Copied by `logic()`, which holds the egui context.
+                UiFx::CopyText(text) => self.clip = Some(text),
             }
         }
     }

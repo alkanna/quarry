@@ -256,11 +256,7 @@ impl App {
 
     pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
         // Loaded with another page size, set from another tab: its page numbers no longer line up.
-        let size = self.page_size();
-        if let Some(t) = self.tm().filter(|t| t.size != 0 && t.size != size && !t.loading) {
-            t.page = 0;
-            self.reload();
-        }
+        self.core.follow_page_size();
         self.snippet_strip(ui, crate::app::library::snippet_strip::Src::Bar);
         let mut run = false;
         let (mut explain, mut help) = (false, false);
@@ -716,6 +712,7 @@ impl App {
 
     pub(super) fn export(&mut self) {
         let Some(target) = self.target() else { return self.warn_offline() };
+        let tab = self.t().unwrap().uid;
         let file = rfd::FileDialog::new()
             .set_file_name(format!("{}.json", target.coll))
             .add_filter("JSON", &["json"])
@@ -723,9 +720,7 @@ impl App {
             .add_filter("TSV", &["tsv"])
             .save_file();
         if let Some(path) = file {
-            self.ok(format!("Exporting to {}…", path.display()));
-            let q = self.t().unwrap().query.clone();
-            self.core.worker.export(target, q, path);
+            self.exec(Action::Mongo(quarry_core::action::MongoA::Import(quarry_core::action::ImportA::Export { tab, path })));
         }
     }
 }
