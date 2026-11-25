@@ -105,17 +105,7 @@ impl App {
 
     /// Keeps what undoes call `id`. Older entries go once the total is over the cap; their calls say so.
     pub(super) fn agent_keep_undo(&mut self, id: u64, u: db::AgentUndo) {
-        let bytes = u.bytes();
-        let gone = self.core.agents.undo.push(id, bytes, u, self.core.agents.cfg.limits.undo_total_bytes);
-        if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == id) {
-            a.undo = Some(id);
-        }
-        for g in gone {
-            if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == g) {
-                a.undo = None;
-                a.summary = format!("{} · undo expired", a.summary);
-            }
-        }
+        self.core.agent_keep_undo(id, u)
     }
 
     /// An Undo call finished. What it could not reach comes back so it can be tried again.

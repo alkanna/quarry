@@ -39,6 +39,11 @@ pub mod update;
 pub mod toasts;
 pub mod prefs;
 pub mod library;
+pub mod tabs;
+pub mod docs;
+pub mod undo;
+pub mod indexes;
+pub mod aggregate;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -53,6 +58,8 @@ mod conn_tests;
 mod prefs_tests;
 #[cfg(test)]
 mod sql_tests;
+#[cfg(test)]
+mod docs_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -69,6 +76,11 @@ pub use prefs::{Pref, PrefVals, PrefsA};
 pub use library::LibA;
 pub use sql::SqlA;
 pub use structure::StructA;
+pub use tabs::TabA;
+pub use docs::{BarField, DocsA, EditA, ValueA};
+pub use undo::UndoA;
+pub use aggregate::{AggA, StageA};
+pub use indexes::IdxA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -86,6 +98,11 @@ pub enum Action {
     Library(LibA),
     Sql(SqlA),
     Structure(StructA),
+    Tab(TabA),
+    Docs(DocsA),
+    Undo(UndoA),
+    Aggregate(AggA),
+    Indexes(IdxA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -151,6 +168,11 @@ pub enum Dialog {
     SaveAll(Vec<String>),
     /// The insert form of a SQL table.
     SqlRow(Box<crate::state::sql::edit::RowForm>),
+    /// Save a draft's changes, when Ask before saving is on.
+    Save { tag: String, changes: Vec<(String, Option<mongodb::bson::Bson>, Option<mongodb::bson::Bson>)> },
+    Delete(crate::state::Sel, Vec<mongodb::bson::Document>),
+    /// A pipeline with $out or $merge, which writes.
+    AggWrite(Vec<mongodb::bson::Document>),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -218,6 +240,11 @@ impl Core {
             Action::Library(a) => self.library_act(a),
             Action::Sql(a) => self.sql(a),
             Action::Structure(a) => self.structure_act(a),
+            Action::Tab(a) => self.tab(a),
+            Action::Docs(a) => self.docs(a),
+            Action::Undo(a) => self.undo(a),
+            Action::Aggregate(a) => self.aggregate(a),
+            Action::Indexes(a) => self.indexes(a),
         }
     }
 
@@ -278,6 +305,9 @@ impl Core {
             Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } => true,
             Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => true,
             Msg::SqlAltered { .. } => true,
+            // Msg::Docs stays in the app's poll: the page's field suggestions are built by its autocomplete.
+            Msg::Indexes { .. } | Msg::IndexInfo { .. } | Msg::Written { .. } | Msg::Saved { .. } => true,
+            Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
             _ => false,
         }
     }
@@ -321,6 +351,12 @@ impl Core {
             Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
             Msg::SqlFacts { conn, database, schema, table, column, res } => self.sql_facts_done(conn, database, schema, table, column, res),
             Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
+            Msg::Indexes { req, res } => self.indexes_loaded(req, res),
+            Msg::IndexInfo { key, res } => self.index_info_loaded(key, res),
+            Msg::Written { at, res, undo, reload, retry } => self.written(at, res, undo, reload, retry),
+            Msg::Saved { tag, res, undo } => self.saved(tag, res, undo),
+            Msg::Aggregated { req, res } => self.aggregated(req, res),
+            Msg::StagePreview { req, res } => self.stage_previewed(req, res),
             _ => {}
         }
     }

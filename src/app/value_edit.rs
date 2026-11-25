@@ -2,6 +2,7 @@
 //! as a panel docked beside the page (docs/long-values.figcraft, options A and C).
 
 use super::*;
+use quarry_core::action::{Action, DocsA, ValueA};
 
 #[derive(PartialEq, Clone, Copy)]
 pub(super) enum ValueAct {
@@ -10,8 +11,6 @@ pub(super) enum ValueAct {
     Close,
     Null,
 }
-
-pub(super) use quarry_core::core::drafts::is_long;
 
 /// The editor, its error and the footer, shared by the dialog and the panel. `null` labels a Set null button. `rows` is the
 /// panel's height in lines; None is the dialog, whose height follows the text. `dirty` is set by an edit.
@@ -113,11 +112,6 @@ impl App {
         self.core.value_dialog_open()
     }
 
-    /// The side panel holds text not applied yet, which opening another value would throw away.
-    pub(super) fn panel_dirty(&self) -> bool {
-        self.core.panel_dirty()
-    }
-
     /// The large editor as a dialog, from `modals`.
     pub(super) fn value_dialog(&mut self, ctx: &egui::Context) {
         if !self.value_dialog_open() {
@@ -206,40 +200,17 @@ impl App {
         value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, !matches!(je.kind, "string" | "binary"), &mut je.focus, &mut je.dirty, None, null, rows, max_h)
     }
 
+    /// Puts the editor back, then runs its button through Core.
     fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
-        let new = match act {
-            ValueAct::None => return self.core.json_edit = Some(je),
-            ValueAct::Close => return,
-            ValueAct::Null => db::edit_path(&je.base, &je.path, Some(Bson::Null)),
-            ValueAct::Apply if je.path.is_empty() => db::parse_doc(&je.text).and_then(|mut new| {
-                match (je.base.get("_id"), new.get("_id")) {
-                    (Some(a), Some(b)) if a != b => return Err("The _id of a document cannot change. Use Duplicate to make a copy.".to_string()),
-                    (Some(a), None) => {
-                        // Keep _id first, as MongoDB stores it.
-                        let mut d = doc! { "_id": a.clone() };
-                        d.extend(new);
-                        new = d;
-                    }
-                    _ => {}
-                }
-                Ok(new)
-            }),
-            ValueAct::Apply if je.kind == "binary" && !je.enc.is_empty() => db::decode_bytes(&je.text, je.enc).and_then(|bytes| {
-                let subtype = je.subtype;
-                db::edit_path(&je.base, &je.path, Some(Bson::Binary(mongodb::bson::Binary { subtype, bytes })))
-            }),
-            ValueAct::Apply => db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v))),
+        self.core.json_edit = Some(je);
+        let act = match act {
+            ValueAct::None => return,
+            ValueAct::Apply => ValueA::Apply,
+            ValueAct::Null => ValueA::Null,
+            ValueAct::Close => ValueA::Close,
         };
-        match new {
-            Ok(n) => {
-                let base = je.base.clone();
-                self.stage(&base, Ok(n));
-            }
-            Err(e) => {
-                self.err(e);
-                self.core.json_edit = Some(je);
-            }
-        }
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Docs(DocsA::Value { tab, act }));
     }
 
     fn sql_cell_body(&mut self, ui: &mut egui::Ui, e: &mut CellEdit, rows: Option<usize>, max_h: f32) -> ValueAct {

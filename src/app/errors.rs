@@ -182,12 +182,6 @@ impl App {
         self.core.warn_offline()
     }
 
-    /// A failure of work the user did not start, like listing a database's collections on
-    /// connect: it goes to the list with its own connection and place, without a toast.
-    pub(super) fn err_quiet(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String) {
-        self.core.err_quiet(raw, conn, sel, place)
-    }
-
     /// The read for `view` in tab `i` failed: the view shows the panel until its next read works.
     pub(super) fn fail_view(&mut self, i: usize, view: View, raw: String, what: &str) {
         self.core.fail_view(i, view, raw, what)

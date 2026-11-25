@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::{Action, DocsA};
 pub(crate) use quarry_core::state::table::Rows;
 
 /// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
@@ -894,15 +895,16 @@ impl App {
         if let Some(i) = click {
             self.row_click(ui, agg, i);
         }
-        if let Some(i) = check_click {
-            self.toggle_check(i, ui.input(|i| i.modifiers.shift));
+        let tab = self.t().unwrap().uid;
+        if let Some(row) = check_click {
+            self.exec(Action::Docs(DocsA::Check { tab, row, range: ui.input(|i| i.modifiers.shift) }));
         }
         if let Some(on) = check_all {
-            *self.checks_mut().0 = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
+            self.exec(Action::Docs(DocsA::CheckAll { tab, rows: docs.len(), on }));
         }
         self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
-            self.select(agg, i, false);
+            self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle: false }));
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
@@ -914,7 +916,7 @@ impl App {
             fk: fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (fks[k].clone(), d))),
         };
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
-            self.select(agg, i, false);
+            self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle: false }));
             let path: Vec<String> = c.split('.').map(String::from).collect();
             let d = self.shown_row(docs, i, false).or_else(|| docs.owned(i)).unwrap_or_default();
             match db::get_path(&d, &c).cloned() {

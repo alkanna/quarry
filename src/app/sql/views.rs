@@ -5,14 +5,6 @@ use crate::app::*;
 use quarry_core::action::{Action, SqlA};
 
 impl App {
-    pub(in crate::app) fn reload_sql(&mut self, i: usize) {
-        self.core.reload_sql(i)
-    }
-
-    pub(in crate::app) fn sql_remember_filter(&mut self, i: usize) {
-        self.core.sql_remember_filter(i)
-    }
-
     pub(in crate::app) fn sql_mode(&self, conn: u64) -> db::sql::ddl::Mode {
         self.core.sql_mode(conn)
     }

@@ -498,7 +498,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tabs::has_clauses;
+    use quarry_core::action::tabs::has_clauses;
     use db::sql::value::Kind;
     use db::sql::{Col, Dialect};
 

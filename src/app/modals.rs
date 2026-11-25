@@ -2,6 +2,7 @@
 //! Larger dialogs live with their feature and are called from here.
 
 use super::*;
+use quarry_core::action::{Action, DocsA};
 
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
@@ -30,16 +31,11 @@ impl App {
                 });
             });
             if submit {
-                match db::parse_doc(text) {
-                    Ok(d) => {
-                        if let Some((conn, target)) = self.writable_target() {
-                            self.core.worker.insert(conn, target, d, self.core.insert.take());
-                        }
-                    }
-                    Err(e) => self.err(e),
+                if let Some(tab) = self.t().map(|t| t.uid) {
+                    self.exec(Action::Docs(DocsA::InsertRun { tab }));
                 }
             } else if close || r.should_close() {
-                self.core.insert = None;
+                self.exec(Action::Docs(DocsA::InsertClose));
             }
         }
 
@@ -104,7 +100,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Save", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                            self.write_draft(tag);
+                            self.exec(Action::Docs(DocsA::Write { keys: vec![tag.clone()] }));
                             keep = false;
                         }
                         if ui.button("Keep editing").on_hover_text("Esc").clicked() {
@@ -367,19 +363,7 @@ impl App {
                 self.on_tab(&at.clone(), |a| a.sql_delete(docs));
                 *keep = false;
             } else if del {
-                let docs = docs.to_vec();
-                self.on_tab(&at.clone(), |a| {
-                    if let Some((conn, target)) = a.writable_target() {
-                        match docs.as_slice() {
-                            [d] => a.core.worker.delete(conn, target, d.clone(), true),
-                            _ => a.core.worker.delete_docs(conn, target, docs.clone()),
-                        }
-                        // The reload drops deleted rows from the checks; others stay checked.
-                        if let Some(t) = a.tm() {
-                            t.selected = None;
-                        }
-                    }
-                });
+                self.exec(Action::Docs(DocsA::DeleteRun { at: at.clone(), docs: docs.to_vec() }));
                 *keep = false;
             }
             if ui.button("Cancel").clicked() {
@@ -492,9 +476,7 @@ impl App {
                 if sql {
                     self.write_sql_drafts(keys.to_vec());
                 } else {
-                    for k in keys.iter() {
-                        self.write_draft(k);
-                    }
+                    self.exec(Action::Docs(DocsA::Write { keys: keys.to_vec() }));
                 }
                 *keep = false;
             }
@@ -582,8 +564,9 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                 let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
-                let base = d.clone();
-                self.stage(&base, new);
+                if let Some(tab) = self.t().map(|t| t.uid) {
+                    self.exec(Action::Docs(DocsA::Stage { tab, doc: d.clone(), new }));
+                }
                 *keep = false;
             }
             // $rename cannot reach into arrays, so this is offered only for plain paths.

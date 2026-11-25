@@ -344,6 +344,67 @@ fn all_actions() -> Vec<Action> {
     all.extend(l.into_iter().map(Action::Library));
     all.extend(super::sql_tests::sql_actions().into_iter().map(Action::Sql));
     all.extend(super::sql_tests::struct_actions().into_iter().map(Action::Structure));
+    all.extend(tab_and_docs_actions());
+    all
+}
+
+/// The tab, Documents and undo variants of `all_actions`. Each EditA is round-tripped in docs_tests.rs.
+fn tab_and_docs_actions() -> Vec<Action> {
+    use crate::state::{Open, Sel, TabClose, View};
+    let sel = Sel { conn: 1, db: "shop".into(), coll: "orders".into(), ..Default::default() };
+    let d = || vec![mongodb::bson::doc! { "_id": 1, "a": "x" }];
+    let t = [
+        TabA::Open { sel: sel.clone(), how: Open::Link },
+        TabA::Pick { tab: 1 },
+        TabA::Close { tab: 1 },
+        TabA::CloseMany { tab: 1, what: TabClose::Right },
+        TabA::Duplicate { tab: 1 },
+        TabA::Move { tab: 1, to: 2 },
+        TabA::Reopen,
+        TabA::Nav { back: true },
+        TabA::View { tab: 1, view: View::Indexes },
+    ];
+    let k = [
+        DocsA::Run { tab: 1 },
+        DocsA::Page { tab: 1, page: 2 },
+        DocsA::History { tab: 1, field: BarField::Sort, text: "{ a: 1 }".into() },
+        DocsA::Layout { table: false },
+        DocsA::Click { tab: 1, agg: false, row: 3, cmd: true, shift: false },
+        DocsA::Select { tab: 1, agg: true, row: 0, toggle: true },
+        DocsA::CloseRow { tab: 1, agg: false, row: 0 },
+        DocsA::Check { tab: 1, row: 2, range: true },
+        DocsA::CheckAll { tab: 1, rows: 50, on: true },
+        DocsA::ClearChecks { tab: 1 },
+        DocsA::Stage { tab: 1, doc: d().remove(0), new: Err("no".into()) },
+        DocsA::FilterField { tab: 1, path: "a.0.b".into(), value: mongodb::bson::Bson::Int32(3), add: true },
+        DocsA::Edit { tab: 1, doc: d().remove(0), act: EditA::Remove { path: vec!["a".into()] } },
+        DocsA::Value { tab: 1, act: ValueA::Null },
+        DocsA::Save { key: "k".into() },
+        DocsA::Write { keys: vec!["k".into()] },
+        DocsA::Discard { key: "k".into() },
+        DocsA::AskBeforeSave(false),
+        DocsA::SaveAll { tab: 1 },
+        DocsA::Insert { tab: 1 },
+        DocsA::InsertRun { tab: 1 },
+        DocsA::InsertClose,
+        DocsA::Duplicate { tab: 1, docs: d() },
+        DocsA::Delete { tab: 1, docs: d() },
+        DocsA::Filter { tab: 1, docs: d() },
+        DocsA::DeleteRun { at: sel, docs: d() },
+    ];
+    let mut all: Vec<Action> = t.into_iter().map(Action::Tab).collect();
+    all.extend(k.into_iter().map(Action::Docs));
+    all.push(Action::Undo(UndoA::Apply { at: 7, confirmed: false }));
+    let g = [
+        AggA::Stages { tab: 1, acts: vec![StageA::Edited(0), StageA::Toggled(1), StageA::Move(0, 1), StageA::Remove(0), StageA::Add("$match".into()), StageA::Op(0, "$sort".into()), StageA::More(usize::MAX), StageA::Preview(0)] },
+        AggA::TextMode { tab: 1, on: true },
+        AggA::AutoPreview(false),
+        AggA::Run { tab: 1 },
+        AggA::RunTo { tab: 1, stage: 2 },
+    ];
+    all.extend(g.into_iter().map(Action::Aggregate));
+    let x = [IdxA::Create { tab: 1, spec: mongodb::bson::doc! { "key": { "a": 1 }, "name": "a_1" } }, IdxA::Hide { tab: 1, name: "a_1".into(), hidden: true }, IdxA::Profile { tab: 1 }];
+    all.extend(x.into_iter().map(Action::Indexes));
     all
 }
 
@@ -402,6 +463,24 @@ fn variant(a: &Action) -> String {
         },
         Action::Sql(a) => super::sql_tests::sql_variant(a),
         Action::Structure(a) => super::sql_tests::struct_variant(a),
+        Action::Tab(t) => match t {
+            TabA::Open { .. } | TabA::Pick { .. } | TabA::Close { .. } | TabA::CloseMany { .. } | TabA::Duplicate { .. } | TabA::Move { .. } | TabA::Reopen | TabA::Nav { .. } | TabA::View { .. } => {}
+        },
+        Action::Docs(k) => match k {
+            DocsA::Edit { act, .. } => match act {
+                EditA::Start { .. } | EditA::Commit | EditA::Expand | EditA::Cancel | EditA::Remove { .. } | EditA::AddField { .. } | EditA::CommitNew | EditA::EditDoc => {}
+            },
+            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } => {}
+        },
+        Action::Undo(u) => match u {
+            UndoA::Apply { .. } => {}
+        },
+        Action::Aggregate(g) => match g {
+            AggA::Stages { .. } | AggA::TextMode { .. } | AggA::AutoPreview(_) | AggA::Run { .. } | AggA::RunTo { .. } => {}
+        },
+        Action::Indexes(x) => match x {
+            IdxA::Create { .. } | IdxA::Hide { .. } | IdxA::Profile { .. } => {}
+        },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

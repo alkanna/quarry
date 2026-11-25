@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::{Action, TabA};
 
 
 impl App {
@@ -260,29 +261,6 @@ impl App {
     pub(super) fn shortcuts_modal(&mut self) {
         let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
         self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
-    }
-
-    pub(super) fn go_tab(&mut self, i: usize) {
-        if i != self.core.cur && i < self.core.tabs.len() {
-            self.set_cur(i);
-            self.reset_doc_state();
-        }
-    }
-
-    pub(super) fn set_view(&mut self, v: View) {
-        let Some(t) = self.tm().filter(|t| t.view != v) else { return };
-        // A tab with no collection has nothing for the other views to show.
-        if t.sel.coll.is_empty() && !matches!(v, View::Shell | View::Sql) {
-            return;
-        }
-        t.view = v;
-        t.selected = None;
-        // The editor belongs to the Content grid; another view must never inherit it.
-        self.core.sql_cell = None;
-        self.reset_doc_state();
-        if v == View::Indexes {
-            self.load_indexes();
-        }
     }
 
     pub(super) fn screenshot(&mut self, ctx: &egui::Context) {
@@ -669,12 +647,12 @@ impl App {
             }
         });
         });
+        let uid = |app: &App, i: usize| app.core.tabs.get(i).map(|t| t.uid);
         if let Some(m) = tab_move.or(menu_move) {
-            // The current tab stays current wherever it or the others move; nothing else is kept by tab index.
-            let c = self.core.cur;
-            self.core.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };
-            m.apply(&mut self.core.tabs);
-            self.core.tab_seen = Some(self.core.cur);
+            // A drop into a tab is not a move; tabs only reorder.
+            if let (false, Some(tab)) = (m.into, uid(self, m.from)) {
+                self.exec(Action::Tab(TabA::Move { tab, to: m.to }));
+            }
             ui.ctx().request_repaint();
             return;
         }
@@ -683,47 +661,19 @@ impl App {
             self.core.tab_seen = None;
         }
         if reopen {
-            return self.reopen_tab();
+            return self.exec(Action::Tab(TabA::Reopen));
         }
         if let Some(query) = search {
             return self.open_palette_with(query);
         }
         if let Some((i, what)) = many {
-            let keep = |j: usize| match what {
-                TabClose::This => j != i,
-                TabClose::Others => j == i,
-                TabClose::Left => j >= i,
-                TabClose::Right => j <= i,
-                TabClose::All => false,
-            };
-            let cur = self.core.cur;
-            let all = std::mem::take(&mut self.core.tabs);
-            for (j, t) in all.into_iter().enumerate() {
-                if keep(j) {
-                    self.core.tabs.push(t);
-                } else {
-                    self.remember_closed(t);
-                }
+            if let Some(tab) = uid(self, i) {
+                self.exec(Action::Tab(TabA::CloseMany { tab, what }));
             }
-            // Stay on the same tab when it survives, else on the clicked one, else the nearest.
-            self.core.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.core.tabs.len().saturating_sub(1));
-            self.set_cur(self.core.cur);
-            self.reset_doc_state();
         } else if let Some(i) = close {
             self.ask_close_tab(i);
-        } else if let Some(i) = pick {
-            self.go_tab(i);
-        }
-        if dup {
-            let t = &self.core.tabs[self.core.cur];
-            let mut n = Tab::new(t.sel.clone());
-            (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
-            // Copy what ran, not the typed texts, so edits the source never ran stay marked as unrun.
-            n.ran_txt = t.ran_txt.clone();
-            self.core.tabs.insert(self.core.cur + 1, n);
-            self.set_cur(self.core.cur + 1);
-            self.reset_doc_state();
-            self.reload();
+        } else if let Some(tab) = pick.and_then(|i| uid(self, i)) {
+            self.exec(Action::Tab(if dup { TabA::Duplicate { tab } } else { TabA::Pick { tab } }));
         }
     }
 

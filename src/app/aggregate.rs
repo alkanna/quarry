@@ -2,19 +2,10 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::aggregate::AggA;
+use quarry_core::action::Action;
 
-pub(super) enum StageAct {
-    Edited(usize),
-    Toggled(usize),
-    /// Move the stage at the first index to the second, dragged there.
-    Move(usize, usize),
-    Remove(usize),
-    Add(String),
-    Op(usize, String),
-    /// Show 10 more documents; `usize::MAX` is the collection sample.
-    More(usize),
-    Preview(usize),
-}
+pub(super) use quarry_core::action::aggregate::StageA as StageAct;
 
 /// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
 /// on the left and what comes out of the stage on the right.
@@ -169,11 +160,12 @@ impl App {
         let mut code_lang = None;
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
-        self.sync_stages();
+        self.core.sync_stages();
         let auto = self.core.prefs.auto_preview;
         let mut auto_now = auto;
         let t = self.tm().unwrap();
-        let builder = !t.agg_text_mode;
+        let (tab, builder) = (t.uid, !t.agg_text_mode);
+        let mut text_mode = t.agg_text_mode;
         let labels: Vec<String> = if builder || db::is_shell(&t.agg_txt) {
             Vec::new()
         } else {
@@ -187,7 +179,7 @@ impl App {
             ui.horizontal(|ui| {
                 caption(ui, if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" });
                 ui.add_space(8.0);
-                segmented(ui, &mut t.agg_text_mode, &[(false, "Stages"), (true, "Text")]);
+                segmented(ui, &mut text_mode, &[(false, "Stages"), (true, "Text")]);
                 if builder {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
@@ -316,16 +308,17 @@ impl App {
                 });
             }
         });
-        if auto_now != auto {
-            self.core.prefs.auto_preview = auto_now;
-            self.save_prefs();
-            if auto_now {
-                self.stages_changed(0, false);
-            }
+        if text_mode != !builder {
+            self.exec(Action::Aggregate(AggA::TextMode { tab, on: text_mode }));
         }
-        self.apply_stage_acts(sacts);
-        if builder && unsynced.is_none() {
-            self.pump_previews(ui.ctx());
+        if auto_now != auto {
+            self.exec(Action::Aggregate(AggA::AutoPreview(auto_now)));
+        }
+        if !sacts.is_empty() {
+            self.exec(Action::Aggregate(AggA::Stages { tab, acts: sacts }));
+        }
+        if builder && unsynced.is_none() && let Some(at) = self.core.pump_previews() {
+            ui.ctx().request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
         }
         if let Some(l) = code_lang {
             self.show_code(l, false);
@@ -333,22 +326,11 @@ impl App {
         if let Some(b) = demo_pick {
             self.demo_open_picker(ui.ctx(), &b, "picker-agg");
         }
-        let t = self.tm().unwrap();
-        if let (Some(i), false) = (stage, run) && let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
-            self.run_pipeline(p);
-            self.tm().unwrap().agg_stage = Some(i);
+        if let (Some(stage), false) = (stage, run) {
+            self.exec(Action::Aggregate(AggA::RunTo { tab, stage }));
         }
-        let t = self.tm().unwrap();
         if run {
-            let text = t.agg_txt.clone();
-            if db::is_shell(&text) {
-                self.run_shell(&text);
-            } else {
-                match db::parse_pipeline(&text) {
-                    Err(e) => self.err(e),
-                    Ok(p) => self.run_pipeline(p),
-                }
-            }
+            self.exec(Action::Aggregate(AggA::Run { tab }));
         }
         if explain {
             self.explain();
@@ -359,116 +341,5 @@ impl App {
         }
         // Last, since opening a script may change the tab this frame was drawn for.
         self.pick_acts(pick_acts);
-    }
-
-    /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
-    /// library, a pasted query).
-    pub(super) fn sync_stages(&mut self) {
-        let Some(t) = self.tm() else { return };
-        if t.agg_text_mode || t.stages_src == t.agg_txt || db::is_shell(&t.agg_txt) {
-            return;
-        }
-        if let Ok(st) = stages_from_text(&t.agg_txt) {
-            t.stages = st;
-            t.stages_src = t.agg_txt.clone();
-        }
-    }
-
-    /// Stages from `from` on need a new preview (a second later while typing), and the pipeline
-    /// text follows the stages.
-    pub(super) fn stages_changed(&mut self, from: usize, typing: bool) {
-        let auto = self.core.prefs.auto_preview;
-        let t = self.tm().unwrap();
-        let at = std::time::Instant::now() + std::time::Duration::from_millis(if typing { 1000 } else { 0 });
-        for s in t.stages.iter_mut().skip(from) {
-            s.due = auto.then_some(at);
-        }
-        t.agg_txt = text_from_stages(&t.stages);
-        t.stages_src = t.agg_txt.clone();
-    }
-
-    pub(super) fn apply_stage_acts(&mut self, acts: Vec<StageAct>) {
-        for a in acts {
-            let t = self.tm().unwrap();
-            match a {
-                StageAct::Edited(i) => self.stages_changed(i, true),
-                StageAct::Toggled(i) => self.stages_changed(i, false),
-                StageAct::Move(i, j) => {
-                    if i < t.stages.len() && j < t.stages.len() && i != j {
-                        let s = t.stages.remove(i);
-                        t.stages.insert(j, s);
-                        self.stages_changed(i.min(j), false);
-                    }
-                }
-                StageAct::Remove(i) => {
-                    if i < t.stages.len() {
-                        t.stages.remove(i);
-                        self.stages_changed(i, false);
-                    }
-                }
-                StageAct::Add(op) => {
-                    let body = db::STAGES.iter().find(|(o, _)| *o == op).map_or("{}", |(_, b)| b);
-                    t.stages.push(Stage::new(&op, body, true));
-                    let i = t.stages.len() - 1;
-                    self.stages_changed(i, false);
-                }
-                StageAct::Op(i, op) => {
-                    let s = &mut t.stages[i];
-                    // A body still equal to the old stage's example becomes the new stage's example.
-                    let template = |o: &str| db::STAGES.iter().find(|(x, _)| *x == o).map(|(_, b)| *b);
-                    if template(&s.op) == Some(s.text.as_str()) || s.text.trim().is_empty() {
-                        s.text = template(&op).unwrap_or("{}").to_string();
-                    }
-                    s.op = op;
-                    self.stages_changed(i, false);
-                }
-                StageAct::More(i) => {
-                    let s = if i == usize::MAX { &mut t.agg_input } else { &mut t.stages[i] };
-                    s.limit += db::STAGE_SAMPLE;
-                    s.due = Some(std::time::Instant::now());
-                }
-                StageAct::Preview(i) => t.stages[i].due = Some(std::time::Instant::now()),
-            }
-        }
-    }
-
-    /// Runs the next stage preview that is due, one at a time and in order, like the original's
-    /// getResultsForStages (renderer line 112079), so a pipeline never floods the server.
-    pub(super) fn pump_previews(&mut self, ctx: &egui::Context) {
-        if self.core.demo {
-            return;
-        }
-        let Some(target) = self.target() else { return };
-        let now = std::time::Instant::now();
-        let t = &mut self.core.tabs[self.core.cur];
-        if t.agg_input.req == 0 && t.agg_input.due.is_some_and(|d| d <= now) {
-            t.agg_input.due = None;
-            self.core.req += 1;
-            t.agg_input.req = self.core.req;
-            self.core.worker.stage_preview(self.core.req, target.clone(), Vec::new(), t.agg_input.limit);
-        }
-        if t.stages.iter().any(|s| s.req != 0) {
-            return;
-        }
-        if let Some(next) = t.stages.iter().filter_map(|s| s.due).min() && next > now {
-            ctx.request_repaint_after(next - now);
-        }
-        let Some(k) = t.stages.iter().position(|s| s.due.is_some_and(|d| d <= now)) else { return };
-        t.stages[k].due = None;
-        if !t.stages[k].on {
-            return;
-        }
-        match stage_pipeline(&t.stages, k) {
-            Err(e) => (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some(e), None, Vec::new()),
-            // The original never previews past $out or $merge (lastStages, renderer line 112045).
-            Ok(p) if db::has_write_stage(&p) => {
-                (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some("This stage writes, so it only runs with the whole pipeline (Run).".into()), None, Vec::new());
-            }
-            Ok(p) => {
-                self.core.req += 1;
-                t.stages[k].req = self.core.req;
-                self.core.worker.stage_preview(self.core.req, target, p, t.stages[k].limit);
-            }
-        }
     }
 }

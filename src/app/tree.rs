@@ -1,6 +1,7 @@
 //! One document as an editable tree: inline edits, drafts, field menus and the inspector.
 
 use super::*;
+use quarry_core::action::{Action, DocsA, EditA};
 
 pub(super) fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
     prefs.cols.get(key).is_some_and(|p| !p.highlight.is_empty() && p.highlight.contains(&db::strip_indices(&path.join("."))))
@@ -105,31 +106,13 @@ pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
 impl App {
     /// Starts editing one value: small values in place, objects and arrays in the large JSON editor.
     pub(super) fn start_inline(&mut self, d: &Document, path: Vec<String>, v: Bson) {
-        if !self.sel_writable() {
-            let d = d.clone();
-            return self.ask_unlock_then(move |a| a.start_inline(&d, path, v));
-        }
-        if self.panel_dirty() {
-            return self.warn("Apply or cancel the value in the side panel first.");
-        }
-        self.core.new_field = None;
-        let kind = db::type_name_kind(&v);
-        if let ("binary", Bson::Binary(bin)) = (kind, &v) {
-            let enc = db::default_encoding(&bin.bytes);
-            self.core.inline = None;
-            let text = db::encode_bytes(bin, enc).unwrap_or_default();
-            self.core.json_edit = Some(JsonEdit { enc, subtype: bin.subtype, ..JsonEdit::new(d.clone(), path, text, kind) });
-            return;
-        }
-        let container = matches!(v, Bson::Document(_) | Bson::Array(_));
-        let text = if container { db::to_edit_value(&v) } else { db::inline_text(&v) };
-        // With the panel open, a double-click loads the new field into it, so the panel follows the selection.
-        if container || value_edit::is_long(&text) || self.value_in_panel() {
-            self.core.inline = None;
-            self.core.json_edit = Some(JsonEdit::new(d.clone(), path, text, kind));
-        } else {
-            self.core.inline = Some(Inline { text, kind, path, focus: true, pick: None, local: false });
-        }
+        self.edit_act(d, EditA::Start { path, value: v });
+    }
+
+    /// A field edit of document `d` on the current tab.
+    fn edit_act(&mut self, d: &Document, act: EditA) {
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Docs(DocsA::Edit { tab, doc: d.clone(), act }));
     }
 
     /// Side panel mode: the open document on the right.
@@ -193,8 +176,9 @@ impl App {
                 }
             }
             right_group(ui, |ui| {
-                if quiet(ui, "Close").on_hover_text("Esc").clicked() && let Some(key) = row.or(selected) {
-                    self.close_row(key);
+                if quiet(ui, "Close").on_hover_text("Esc").clicked() && let Some((agg, row)) = row.or(selected) {
+                    let tab = self.t().unwrap().uid;
+                    self.exec(Action::Docs(DocsA::CloseRow { tab, agg, row }));
                 }
                 if quiet(ui, "Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
@@ -270,8 +254,9 @@ impl App {
             self.core.inline = inline;
             self.core.new_field = new_field;
         }
-        if let (true, Some((agg, i)), false) = (passive, row, acts.is_empty()) {
-            self.select(agg, i, false);
+        if let (true, Some((agg, row)), false) = (passive, row, acts.is_empty()) {
+            let tab = self.t().unwrap().uid;
+            self.exec(Action::Docs(DocsA::Select { tab, agg, row, toggle: false }));
         }
         self.handle_acts(d, acts);
     }
@@ -300,14 +285,12 @@ impl App {
         });
         ui.add_space(4.0);
         if confirm != self.core.prefs.confirm_save {
-            self.core.prefs.confirm_save = confirm;
-            self.save_prefs();
+            self.exec(Action::Docs(DocsA::AskBeforeSave(confirm)));
         }
         if discard {
-            self.core.drafts.remove(key);
-            self.ok("Edits discarded");
+            self.exec(Action::Docs(DocsA::Discard { key: key.to_string() }));
         } else if save {
-            self.save_draft(key);
+            self.exec(Action::Docs(DocsA::Save { key: key.to_string() }));
         }
     }
 
@@ -316,68 +299,14 @@ impl App {
             match a {
                 // Applied by the document view, which knows the fold's id.
                 TreeAct::Fold(..) => {}
-                TreeAct::Start(p, v) => self.start_inline(d, p, v),
-                TreeAct::Expand => {
-                    if let Some(i) = self.core.inline.take() {
-                        // Text typed inline counts as an edit the side panel must keep.
-                        let dirty = db::get_path(d, &i.path.join(".")).is_none_or(|v| db::inline_text(v) != i.text);
-                        self.core.json_edit = Some(JsonEdit { dirty, ..JsonEdit::new(d.clone(), i.path, i.text, i.kind) });
-                    }
-                }
-                TreeAct::Cancel => {
-                    self.core.inline = None;
-                    self.core.new_field = None;
-                }
-                TreeAct::Commit => {
-                    if let Some(i) = &self.core.inline {
-                        let new = db::make_value(i.kind, &i.text).and_then(|v| db::edit_path(d, &i.path, Some(v)));
-                        self.stage(d, new);
-                    }
-                }
-                TreeAct::Remove(p) => {
-                    if self.sel_writable() {
-                        self.stage(d, db::edit_path(d, &p, None));
-                    } else {
-                        let d = d.clone();
-                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::Remove(p)]));
-                    }
-                }
-                TreeAct::AddField(parent) => {
-                    if self.sel_writable() {
-                        self.core.inline = None;
-                        self.core.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string", err: None });
-                    } else {
-                        let d = d.clone();
-                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::AddField(parent)]));
-                    }
-                }
-                TreeAct::CommitNew => {
-                    if let Some(n) = &mut self.core.new_field {
-                        let is_array = !n.parent.is_empty() && matches!(db::get_path(d, &n.parent.join(".")), Some(Bson::Array(_)));
-                        let name = n.name.trim().to_string();
-                        if name.is_empty() && !is_array {
-                            n.err = Some("Give the new field a name.".into());
-                            continue;
-                        }
-                        let mut path = n.parent.clone();
-                        path.push(if is_array { usize::MAX.to_string() } else { name.clone() });
-                        if !is_array && db::get_path(d, &path.join(".")).is_some() {
-                            n.err = Some(format!("{name} already exists. Double-click it in the tree to change it."));
-                            continue;
-                        }
-                        let new = db::make_value(n.kind, &n.text).and_then(|v| db::edit_path(d, &path, Some(v)));
-                        self.stage(d, new);
-                    }
-                }
-                TreeAct::EditDoc => {
-                    if self.sel_writable() {
-                        self.core.inline = None;
-                        self.core.json_edit = Some(JsonEdit::new(d.clone(), Vec::new(), db::to_edit_json(d), "object"));
-                    } else {
-                        let d = d.clone();
-                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::EditDoc]));
-                    }
-                }
+                TreeAct::Start(path, value) => self.edit_act(d, EditA::Start { path, value }),
+                TreeAct::Expand => self.edit_act(d, EditA::Expand),
+                TreeAct::Cancel => self.edit_act(d, EditA::Cancel),
+                TreeAct::Commit => self.edit_act(d, EditA::Commit),
+                TreeAct::Remove(path) => self.edit_act(d, EditA::Remove { path }),
+                TreeAct::AddField(parent) => self.edit_act(d, EditA::AddField { parent }),
+                TreeAct::CommitNew => self.edit_act(d, EditA::CommitNew),
+                TreeAct::EditDoc => self.edit_act(d, EditA::EditDoc),
                 TreeAct::ShowFull(path, v) => {
                     let body = match &v {
                         Bson::String(s) => s.clone(),
@@ -396,16 +325,9 @@ impl App {
                     let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
                     self.apply_col_acts(&self.col_key(false), &fields, vec![ColAct::Highlight(path)]);
                 }
-                TreeAct::Filter(path, v, add) => {
-                    let path = db::strip_indices(&path);
-                    let t = self.tm().unwrap();
-                    let mut f = if add { t.query.filter.clone() } else { Document::new() };
-                    f.insert(path, v);
-                    t.filter_txt = db::shell_text(&Bson::Document(f));
-                    t.view = View::Documents;
-                    t.selected = None;
-                    self.reset_doc_state();
-                    self.run_query();
+                TreeAct::Filter(path, value, add) => {
+                    let tab = self.t().unwrap().uid;
+                    self.exec(Action::Docs(DocsA::FilterField { tab, path, value, add }));
                 }
                 TreeAct::Group(path, v, filtered) => {
                     let filter = if filtered { self.t().unwrap().query.filter.clone() } else { Document::new() };

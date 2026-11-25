@@ -38,10 +38,6 @@ impl App {
         self.core.timeout()
     }
 
-    pub(super) fn target_for(&self, s: &Sel) -> Option<Target> {
-        self.core.target_for(s)
-    }
-
     pub(super) fn target(&self) -> Option<Target> {
         self.core.target()
     }

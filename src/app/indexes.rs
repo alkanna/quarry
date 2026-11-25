@@ -4,57 +4,8 @@
 use super::*;
 pub(crate) use quarry_core::state::indexes::*;
 
-/// A week, in ms: a usage counter younger than this cannot prove an index unused.
-const WEEK_MS: i64 = 7 * 24 * 3600 * 1000;
-
-/// One table row per index: its keys and options with the usage stats merged in.
-pub(super) fn index_rows(indexes: &[Document], info: Option<&db::IndexInfo>, now: i64) -> Vec<Document> {
-    indexes
-        .iter()
-        .map(|ix| {
-            let name = ix.get_str("name").unwrap_or_default().to_string();
-            let mut opts = ix.clone();
-            opts.remove("name");
-            let keys = opts.remove("keys").unwrap_or_else(|| Bson::Document(doc! {}));
-            let stat = info.and_then(|i| i.stats.iter().find(|s| s.name == name));
-            let mut status = Vec::new();
-            if stat.is_some_and(|s| s.hidden) || opts.get_bool("hidden").unwrap_or(false) {
-                status.push("hidden");
-            }
-            let mut row = doc! { "name": &name, "keys": keys };
-            if !opts.is_empty() {
-                row.insert("options", opts);
-            }
-            if let Some(s) = stat {
-                if name != "_id_" && db::is_unused(s.ops, s.since, now) {
-                    status.push("unused");
-                } else if s.ops == 0 && s.since.is_some_and(|t| now - t < WEEK_MS) {
-                    status.push("no use since restart");
-                }
-                row.insert("ops", s.ops);
-                if let Some(t) = s.since {
-                    row.insert("since", mongodb::bson::DateTime::from_millis(t));
-                }
-                if let Some(b) = s.size {
-                    row.insert("size", human_bytes(b));
-                }
-            }
-            if !status.is_empty() {
-                row.insert("status", status.join(", "));
-            }
-            row
-        })
-        .collect()
-}
-
-/// Why the usage columns are empty, without the raw command the server echoes back.
-fn stats_note(e: &str) -> &'static str {
-    if db::is_unauthorized(e) {
-        "Usage counts are not available: this user may not read index statistics here (it needs the indexStats privilege, part of clusterMonitor)."
-    } else {
-        "Usage counts are not available for this collection."
-    }
-}
+use quarry_core::action::indexes::{stats_note, IdxA};
+use quarry_core::action::Action;
 
 /// What a row's menu asks for.
 pub(super) enum IdxAct {
@@ -144,8 +95,9 @@ impl App {
         if let Some(k) = create {
             self.open_create_index(Some(k));
         }
-        if profiling && let Some((conn, target)) = self.writable_target() {
-            self.core.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
+        if profiling {
+            let tab = self.t().unwrap().uid;
+            self.exec(Action::Indexes(IdxA::Profile { tab }));
         }
     }
 
@@ -231,9 +183,8 @@ impl App {
                 keep = false;
             }
         });
-        if let (true, Ok(s)) = (create, spec) && let Some((conn, target)) = self.writable_target() {
-            let done = format!("Created index {}", s.get_str("name").unwrap_or_default());
-            self.core.worker.db_change(conn, target.client, target.db, command(s), done);
+        // The dialog closes once the create is sent; a refusal already said why and keeps it open.
+        if let (true, Ok(spec), Some(tab)) = (create, spec, self.t().map(|t| t.uid)) && self.core.execute(Action::Indexes(IdxA::Create { tab, spec })).is_ok() {
             keep = false;
         }
         keep
@@ -259,9 +210,8 @@ impl App {
                 self.ok("Copied the createIndex command");
             }
             IdxAct::Hide(hidden) => {
-                if let Some((conn, target)) = self.writable_target() {
-                    let done = format!("{} index {name}", if hidden { "Hid" } else { "Unhid" });
-                    self.core.worker.db_change(conn, target.client, target.db, doc! { "collMod": target.coll, "index": { "name": name, "hidden": hidden } }, done);
+                if let Some(tab) = self.t().map(|t| t.uid) {
+                    self.exec(Action::Indexes(IdxA::Hide { tab, name, hidden }));
                 }
             }
             IdxAct::Drop => {
@@ -275,72 +225,22 @@ impl App {
         }
     }
 
-    /// Rebuilds the index rows of the tabs showing collection `key` ("db.coll"). Open rows follow
-    /// their index by name, since a create or drop moves the others up or down.
     pub(super) fn refresh_idx_rows(&mut self, key: &str) {
-        let now = mongodb::bson::DateTime::now().timestamp_millis();
-        let info = self.core.idx_info.as_ref().filter(|(k, _)| k == key).map(|(_, i)| i);
-        for t in self.core.tabs.iter_mut().filter(|t| t.sel.key() == key) {
-            let rows = index_rows(&t.indexes, info, now);
-            if t.view == View::Indexes {
-                let name = |i: usize| t.idx_rows.get(i).and_then(|r| r.get_str("name").ok());
-                let pos = |i: usize| name(i).and_then(|n| rows.iter().position(|r| r.get_str("name") == Ok(n)));
-                t.selected = match t.selected {
-                    Some((true, i)) => pos(i).map(|p| (true, p)),
-                    s => s,
-                };
-                t.expanded = t.expanded.iter().filter_map(|&(agg, i)| if agg { pos(i).map(|p| (true, p)) } else { Some((agg, i)) }).collect();
-            }
-            t.idx_rows = rows;
-            t.rows_replaced();
-        }
+        self.core.refresh_idx_rows(key)
     }
 
     pub(super) fn load_indexes(&mut self) {
-        self.load_indexes_of(self.core.cur);
+        self.core.load_indexes()
     }
 
     pub(super) fn load_indexes_of(&mut self, i: usize) {
-        if let Some(target) = self.core.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
-            self.core.req += 1;
-            let req = self.core.req;
-            self.core.tabs[i].idx_req = req;
-            // Only the Indexes view shows usage, and it costs a profiler query.
-            if self.core.tabs[i].view == View::Indexes {
-                self.core.worker.index_info(target.clone());
-            }
-            self.core.worker.indexes(req, target);
-        }
+        self.core.load_indexes_of(i)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn index_rows_merge_usage() {
-        let ixs = [doc! { "name": "_id_", "keys": { "_id": 1 } }, doc! { "name": "email_1", "keys": { "email": 1 }, "unique": true }];
-        let day = 24 * 3600 * 1000;
-        let now = 100 * day;
-        let stat = |name: &str, ops, since| db::IndexStat { name: name.into(), ops, since: Some(since), hidden: false, size: Some(2048) };
-        let info = db::IndexInfo { stats: vec![stat("_id_", 0, 0), stat("email_1", 0, 0)], stats_err: None, level: 0, slowms: 100, shapes: Vec::new() };
-        let rows = index_rows(&ixs, Some(&info), now);
-        assert_eq!(rows[0].get_str("status"), Err(mongodb::bson::document::ValueAccessError::NotPresent), "_id_ is never unused");
-        assert_eq!(rows[1].get_str("status").unwrap(), "unused");
-        assert_eq!(rows[1].get_document("options").unwrap(), &doc! { "unique": true });
-        assert_eq!(rows[1].get_str("size").unwrap(), "2 KB");
-        let info = db::IndexInfo { stats: vec![stat("email_1", 0, now - day)], ..info };
-        assert_eq!(index_rows(&ixs, Some(&info), now)[1].get_str("status").unwrap(), "no use since restart");
-        assert!(index_rows(&ixs, None, now)[1].get("ops").is_none());
-    }
-
-    #[test]
-    fn refused_index_stats_get_a_short_note() {
-        let atlas = "Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { aggregate: \"system.roles\", pipeline: [ { $indexStats: {} } ] }";
-        assert!(stats_note(atlas).contains("indexStats privilege"));
-        assert_eq!(stats_note("Command failed: something else"), "Usage counts are not available for this collection.");
-    }
 
     #[test]
     fn index_form_builds_the_spec() {

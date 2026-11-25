@@ -81,10 +81,6 @@ impl App {
         self.core.pg_load_tables(conn, db, schema)
     }
 
-    pub(in crate::app) fn pg_set_schema(&mut self, conn: u64, db: &str, schema: String) {
-        self.core.pg_set_schema(conn, db, schema)
-    }
-
     /// Refresh: the schema list, the tables of every schema already loaded and the autocomplete cache are read again.
     /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
     /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.

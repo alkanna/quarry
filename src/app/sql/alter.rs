@@ -221,19 +221,6 @@ impl App {
         self.exec(Action::Structure(StructA::Run { tab }));
     }
 
-    /// Before a structure undo runs: one that drops a column or converts a type back loses what was written since,
-    /// so it asks for the table name like a drop does. True when it asked, and the undo waits for the answer.
-    pub(in crate::app) fn alter_undo_gate(&mut self, i: usize) -> bool {
-        let Some(a) = self.core.undo.get(i) else { return false };
-        let UndoKind::Sql { undo: db::sql::write::SqlUndo::Alter(u), .. } = &a.kind else { return false };
-        if u.loss.is_empty() {
-            return false;
-        }
-        let title = format!("Undo \"{}\" on {}? {} This cannot be undone.", u.label, a.coll, u.loss.join(" "));
-        self.modal = Some(Modal::Typed { title, expect: a.coll.clone(), typed: String::new(), action: Danger::UndoAlter(a.at) });
-        true
-    }
-
     /// The staged changes as a bar above the grids: the list, what cannot be undone, and the statement.
     pub(in crate::app) fn staged_bar(&self, ui: &mut egui::Ui, memo: &mut Option<PlanMemo>, st: &Structure, staged: &[Change], editable: bool, applying: bool, acts: &mut Vec<crate::app::sql::structure::Act>) {
         use crate::app::sql::structure::Act;

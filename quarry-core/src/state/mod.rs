@@ -356,7 +356,7 @@ impl ServerInfo {
 
 }
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, Debug, Serialize, Deserialize)]
 pub struct Sel {
     pub conn: u64,
     pub db: String,
@@ -421,7 +421,7 @@ pub enum Jump {
     Coll(Sel),
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum View {
     Documents,
     Aggregate,
@@ -1689,7 +1689,7 @@ pub enum TreeAct {
 pub const NEW_PIPELINE: &str = "[\n  { $match: {} },\n  { $limit: 20 }\n]";
 
 /// Where a collection opens. `Here` reuses the current tab unless work in it would be lost.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Open {
     Here,
     NewTab,
@@ -1697,7 +1697,7 @@ pub enum Open {
     Link,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum TabClose {
     This,
     Others,

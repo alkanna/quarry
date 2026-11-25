@@ -81,25 +81,9 @@ impl App {
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
                 Msg::Command { tag, res } => self.on_command(tag, res),
                 Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
-                Msg::IndexInfo { key, res } => match res {
-                    Ok(i) => {
-                        self.core.idx_info = Some((key.clone(), i));
-                        self.refresh_idx_rows(&key);
-                    }
-                    Err(e) => self.err(e),
-                },
-                Msg::Docs { req, res, approx } => self.on_docs(req, res, approx),
-                Msg::Indexes { req, res } => match (res, self.core.tabs.iter().position(|t| t.idx_req == req)) {
-                    (Ok(v), Some(i)) => {
-                        let t = &mut self.core.tabs[i];
-                        t.clear_failed(View::Indexes);
-                        t.set_indexes(v);
-                        let key = t.sel.key();
-                        self.refresh_idx_rows(&key);
-                    }
-                    (Err(e), Some(i)) => self.fail_view(i, View::Indexes, e, "list the indexes"),
-                    _ => {}
-                },
+                Msg::Docs { req, res, approx } => self.core.docs_loaded(req, res, approx, &page_info),
+                // Core::handles took these above.
+                Msg::IndexInfo { .. } | Msg::Indexes { .. } | Msg::Written { .. } | Msg::Saved { .. } | Msg::Aggregated { .. } | Msg::StagePreview { .. } => {}
                 Msg::Explained { req, res } if req == self.core.explain_req => match res {
                     Ok(raw) => {
                         self.show_late(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false });
@@ -112,23 +96,6 @@ impl App {
                         *preview = Some((stages, res));
                     }
                 }
-                Msg::StagePreview { req, res } => {
-                    let Some(st) = self.core.tabs.iter_mut().flat_map(|t| std::iter::once(&mut t.agg_input).chain(t.stages.iter_mut())).find(|s| s.req == req) else { continue };
-                    st.req = 0;
-                    match res {
-                        Ok((n, docs, ms)) => {
-                            // Rows stay open when a refresh brings back the same documents.
-                            if st.sample != docs {
-                                st.open.clear();
-                            }
-                            (st.count, st.sample, st.ms, st.error) = (n, docs, Some(ms), None);
-                        }
-                        Err(e) => (st.count, st.sample, st.ms, st.error) = (None, Vec::new(), None, Some(e)),
-                    }
-                }
-                Msg::Aggregated { req, res } => self.on_aggregated(req, res),
-                Msg::Written { at, res, undo, reload, retry } => self.on_written(at, res, undo, reload, retry),
-                Msg::Saved { tag, res, undo } => self.on_saved(tag, res, undo),
                 Msg::Info(res) => match res {
                     Ok(s) => self.ok(s),
                     Err(e) => self.err(e),
@@ -342,106 +309,6 @@ impl App {
         }
     }
 
-    fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>, approx: bool) {
-        let Some(i) = self.core.tabs.iter().position(|t| t.req == req) else { return };
-        let t = &mut self.core.tabs[i];
-        t.rows_replaced();
-        t.loading = false;
-        t.count_approx = approx;
-        match res {
-            Ok((docs, count, ms)) => {
-                // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
-                let last = count.saturating_sub(1) / self.page_size();
-                if docs.is_empty() && self.core.tabs[i].page > last {
-                    self.core.tabs[i].page = last;
-                    return self.reload_of(i);
-                }
-                let Core { tabs, values, .. } = &mut self.core;
-                let t = &mut tabs[i];
-                // A query that works again clears an earlier error.
-                t.clear_failed(View::Documents);
-                // SQL columns keep the table's order and never include the hidden _id.
-                t.fields = match &t.sql {
-                    Some(s) => s.cols.iter().map(|c| c.name.clone()).collect(),
-                    None => auto_fields(&docs),
-                };
-                t.paths = doc_paths(&docs);
-                let mut f = field_info(&docs);
-                if let Some(v) = values.get(&t.coll_key()) {
-                    merge_values(&mut f, v);
-                }
-                t.field_info = Arc::new(f);
-                // Checks and open rows follow their documents by _id, so actions that reload
-                // (duplicate, filter, edits) keep them; rows that left the results drop out.
-                if !t.checked.is_empty() {
-                    t.checked = follow_ids(&t.docs, &docs, t.checked.iter().copied());
-                    t.check_anchor = None;
-                }
-                // The open document follows its _id too; rows without one keep their position.
-                if let Some((false, i)) = t.selected && t.docs.get(i).is_some_and(|d| d.id().is_some()) {
-                    t.selected = follow_ids(&t.docs, &docs, std::iter::once(i)).first().map(|&j| (false, j));
-                }
-                let open = follow_ids(&t.docs, &docs, t.expanded.iter().filter(|e| !e.0).map(|e| e.1));
-                t.expanded.retain(|e| e.0);
-                t.expanded.extend(open.into_iter().map(|i| (false, i)));
-                t.docs = docs;
-                t.count = count;
-                t.ms = ms;
-                if matches!(t.selected, Some((false, i)) if i >= t.docs.len()) {
-                    t.selected = None;
-                }
-                t.related.clear();
-                let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
-                t.stats_asked = true;
-                self.sql_remember_filter(i);
-                self.load_related(req);
-                if let Some(s) = ask && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone()) {
-                    let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);
-                    self.core.worker.coll_stats(client, s.db, s.coll, tag);
-                }
-            }
-            Err(e) => {
-                // Old rows under the new query would read as its results. Selection and checks are indexes
-                // into those rows, so they go too, or the next read would open whatever lands at that index.
-                t.docs.clear();
-                t.selected = t.selected.filter(|s| s.0);
-                t.checked.clear();
-                t.expanded.retain(|e| e.0);
-                let what = if t.sql.is_some() { "load the rows" } else { "load the documents" };
-                self.fail_view(i, View::Documents, e, what);
-            }
-        }
-    }
-
-    fn on_aggregated(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u128)>) {
-        let Some(i) = self.core.tabs.iter().position(|t| t.agg_req == req) else {
-            // A superseded run or a closed tab: its error goes to the list, not over the newer run.
-            if let Err(e) = res {
-                self.err_quiet(e, None, None, "Aggregate".into());
-            }
-            return;
-        };
-        let t = &mut self.core.tabs[i];
-        t.agg_req = 0;
-        t.rows_replaced();
-        match res {
-            Ok((d, ms)) => {
-                t.clear_failed(View::Aggregate);
-                t.agg_fields = auto_fields(&d);
-                let n = d.len();
-                t.agg_docs = d;
-                t.expanded.retain(|e| !e.0);
-                t.agg_ms = Some(ms);
-                self.ok(format!("Pipeline returned {n} documents"));
-            }
-            Err(e) => {
-                // Old results under a failed run would read as its output.
-                (t.agg_docs, t.agg_ms) = (Vec::new(), None);
-                self.fail_view(i, View::Aggregate, e, "run the pipeline");
-            }
-        }
-    }
-
     /// An answer that opens a dialog waits for the one already open, which may hold the user's typing.
     fn show_late(&mut self, m: Modal) {
         if self.modal.is_some() {
@@ -450,114 +317,19 @@ impl App {
             self.modal = Some(m);
         }
     }
-
-    fn on_written(&mut self, at: (String, String), res: db::Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)>) {
-        match res {
-            Ok(s) => {
-                // A write that ran for another tab must not close an editor being typed in this one.
-                if self.t().is_some_and(|t| t.sel.space() == at.0 && t.sel.coll == at.1) {
-                    self.reset_doc_state();
-                }
-                self.ok(s);
-            }
-            Err(e) => {
-                // Reopen the refused insert so the typed document is not lost, but
-                // only over the collection it was meant for.
-                if let Some((db, coll, text)) = retry && self.t().is_some_and(|t| t.sel.space() == db && t.sel.coll == coll) {
-                    self.core.insert = Some(text);
-                }
-                self.err(e);
-            }
-        }
-        // An agent's change never joins the user's list; its undo goes back to its Activity entry.
-        match undo {
-            Some(u) if u.agent.is_some() => {
-                let id = u.agent.unwrap_or_default();
-                self.agent_keep_undo(id, db::AgentUndo::Sql(u));
-            }
-            Some(u) => self.push_undo(u),
-            None => {}
-        }
-        // The worker only knows the database and collection, so a same-named
-        // collection on another connection may reload too, which is harmless.
-        let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel.space() == at.0 && self.core.tabs[i].sel.coll == at.1).collect();
-        for i in tabs {
-            if reload {
-                self.reload_of(i);
-            } else {
-                self.load_indexes_of(i);
-            }
-        }
-    }
-
-    fn on_saved(&mut self, tag: String, res: db::Res<String>, undo: Option<UndoAction>) {
-        let dr = self.core.saving.remove(&tag);
-        let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), schema: d.schema.clone(), coll: d.coll.clone() });
-        match res {
-            Ok(s) => {
-                self.toast_ok(s.clone(), undo.as_ref().map(|u| u.at));
-                self.ok(s);
-            }
-            Err(e) => {
-                // Keep the edits so nothing typed is lost; the person can reload and redo. An edit staged on the
-                // same row while this save was in flight is newer, so it wins over the failed one.
-                if let Some(dr) = dr {
-                    self.core.drafts.entry(tag).or_insert(dr);
-                }
-                self.err(e);
-            }
-        }
-        if let Some(u) = undo {
-            self.push_undo(u);
-        }
-        // Waits for the collection's other saves so the reload shows all of them.
-        if let Some(sel) = sel.filter(|s| !self.core.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.schema == s.schema && d.coll == s.coll)) {
-            let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel == sel).collect();
-            for i in tabs {
-                self.reload_of(i);
-            }
-        }
-    }
 }
 
 impl App {
     pub(super) fn page_size(&self) -> u64 {
         self.core.page_size()
     }
+}
 
-    pub(super) fn reload(&mut self) {
-        self.reload_of(self.core.cur);
+/// The field paths and suggestions of a page, which the autocomplete builds: the rows, then the values fetched before.
+fn page_info(docs: &[db::Row], values: Option<&HashMap<String, Vec<Bson>>>) -> (Vec<String>, Fields) {
+    let mut f = field_info(docs);
+    if let Some(v) = values {
+        merge_values(&mut f, v);
     }
-
-    pub(super) fn reload_of(&mut self, i: usize) {
-        if self.core.demo {
-            return;
-        }
-        if let Some(t) = self.core.tabs.get_mut(i) {
-            t.agent_changed = false;
-        }
-        if self.core.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
-            return self.reload_sql(i);
-        }
-        // A Shell tab opened from the library has no collection to read.
-        if self.core.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
-            return;
-        }
-        let Some(target) = self.core.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
-        // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
-        self.core.req += 1;
-        let req = self.core.req;
-        let size = self.page_size();
-        let t = &mut self.core.tabs[i];
-        t.req = req;
-        t.loading = true;
-        t.size = size;
-        let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
-        self.core.worker.find(req, target, q, page, size);
-        // Indexes also feed the Sort history (as in the original) and the indexed-field marks, so
-        // load them once per tab.
-        if view == View::Indexes || no_idx {
-            self.load_indexes_of(i);
-        }
-    }
+    (doc_paths(docs), f)
 }

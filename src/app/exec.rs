@@ -37,6 +37,9 @@ impl App {
                         Dialog::SqlExplain(_) => unreachable!("handled above"),
                         Dialog::SaveAll(keys) => Modal::SaveAll(keys),
                         Dialog::SqlRow(f) => Modal::SqlRow(f),
+                        Dialog::Save { tag, changes } => Modal::Save { tag, changes },
+                        Dialog::Delete(sel, docs) => Modal::Delete(sel, docs),
+                        Dialog::AggWrite(p) => Modal::AggWrite(p),
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {
@@ -44,16 +47,16 @@ impl App {
                     for i in 0..self.core.tabs.len() {
                         if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
                             self.core.cur = i;
-                            self.run_query();
+                            self.core.run_query();
                         }
                     }
                     self.core.cur = here;
                 }
-                UiFx::CloseTabs { conn, db, coll } => self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && coll.as_ref().is_none_or(|c| t.sel.coll == *c)),
+                UiFx::CloseTabs { conn, db, coll } => self.core.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && coll.as_ref().is_none_or(|c| t.sel.coll == *c)),
                 UiFx::Connected { conn, sql: true } => {
                     for i in 0..self.core.tabs.len() {
                         if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
-                            self.reload_of(i);
+                            self.core.reload_of(i);
                         }
                     }
                 }

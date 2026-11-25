@@ -153,15 +153,7 @@ impl App {
     /// Asks for the preview of every referenced id on the page, like the original's
     /// relatedDocuments (renderer line 107207).
     pub(super) fn load_related(&mut self, req: u64) {
-        let Some(t) = self.core.tabs.iter().find(|t| t.req == req) else { return };
-        let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
-        let rels = self.core.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
-        for r in rels {
-            let ids = db::values_at(t.docs.iter().map(db::Row::raw), &r.path);
-            if !ids.is_empty() {
-                self.core.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
-            }
-        }
+        self.core.load_related(req)
     }
 
     /// Opens the referenced document in its collection's tab.
