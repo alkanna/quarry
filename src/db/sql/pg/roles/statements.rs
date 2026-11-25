@@ -1,5 +1,4 @@
-//! The GRANT, REVOKE, ALTER ROLE, membership and default privilege statements, CREATE ROLE, and the
-//! password hashes (MD5 and SCRAM-SHA-256) computed here so a password never goes out as typed.
+//! GRANT, REVOKE, ALTER ROLE, membership, default privilege and CREATE ROLE statements, and the password hashes sent in place of a password.
 
 use super::*;
 
@@ -34,7 +33,7 @@ impl Target {
     }
 }
 
-pub(super) fn grantee_sql(g: &str) -> String {
+fn grantee_sql(g: &str) -> String {
     if g.is_empty() { "PUBLIC".into() } else { q(g) }
 }
 
@@ -44,7 +43,7 @@ pub(super) fn grantee_shown(g: &str) -> &str {
 
 /// The GRANT and REVOKE statements that turn `from` into `to`. `head` comes before the verb (ALTER DEFAULT PRIVILEGES ...), `on`
 /// is the ON clause. Revokes go first, so a privilege moved from plain to grant option never sits both ways at once.
-pub(super) fn acl_stmts(head: &str, on: &str, grantee: &str, from: &Privs, to: &Privs, allowed: &[&str]) -> Res<Vec<String>> {
+fn acl_stmts(head: &str, on: &str, grantee: &str, from: &Privs, to: &Privs, allowed: &[&str]) -> Res<Vec<String>> {
     for p in from.keys().chain(to.keys()) {
         if !allowed.contains(&p.as_str()) {
             return Err(format!("{p} is not a privilege of {on} here."));
@@ -77,7 +76,7 @@ pub(super) fn acl_stmts(head: &str, on: &str, grantee: &str, from: &Privs, to: &
     Ok(out)
 }
 
-pub(super) fn check_limit(n: i64) -> Res<()> {
+fn check_limit(n: i64) -> Res<()> {
     if n < -1 || n > i32::MAX as i64 {
         return Err("The connection limit is a whole number, -1 for none.".into());
     }
@@ -98,7 +97,7 @@ pub fn attrs_sql(role: &str, from: &Attrs, to: &Attrs) -> Res<Option<String>> {
     Ok((!parts.is_empty()).then(|| format!("ALTER ROLE {} WITH {}", q(role), parts.join(" "))))
 }
 
-pub(super) fn tf(b: bool) -> &'static str {
+fn tf(b: bool) -> &'static str {
     if b { "TRUE" } else { "FALSE" }
 }
 
@@ -139,7 +138,7 @@ pub enum Exact {
 }
 
 impl Exact {
-    pub(super) fn swap(self) -> Exact {
+    fn swap(self) -> Exact {
         match self {
             Exact::Acl(a, b) => Exact::Acl(b, a),
             Exact::Member(a, b) => Exact::Member(b, a),
@@ -294,7 +293,7 @@ impl Change {
     }
 }
 
-pub(super) fn privs_label(from: &Privs, to: &Privs, on: &str, to_whom: &str) -> String {
+fn privs_label(from: &Privs, to: &Privs, on: &str, to_whom: &str) -> String {
     let added: Vec<String> = to.iter().filter(|(p, g)| from.get(*p) != Some(g) && (!from.contains_key(*p) || **g)).map(|(p, g)| if *g { format!("{p} with grant option") } else { p.clone() }).collect();
     let gone: Vec<String> = from.iter().filter(|(p, g)| !to.contains_key(*p) || (**g && to.get(*p) == Some(&false))).map(|(p, g)| if to.contains_key(p) && *g { format!("grant option for {p}") } else { p.clone() }).collect();
     match (added.is_empty(), gone.is_empty()) {

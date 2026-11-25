@@ -1,5 +1,4 @@
-//! Reading roles, objects and default privileges, running a checked batch, and creating, dropping and
-//! changing the password of a role.
+//! Reading roles and privileges, running a checked batch, creating and dropping roles, and setting passwords.
 
 use super::*;
 
@@ -9,7 +8,7 @@ use super::*;
 /// would read as never, so both infinities are named.
 pub(super) const UNTIL: &str = "CASE WHEN r.rolvaliduntil IS NULL OR r.rolvaliduntil = 'infinity' THEN '' WHEN r.rolvaliduntil = '-infinity' THEN '-infinity' ELSE to_char(r.rolvaliduntil AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00' END";
 
-pub(super) fn roles_sql(filter: &str) -> String {
+fn roles_sql(filter: &str) -> String {
     format!(
         "SELECT r.oid::text AS oid, r.rolname::text AS name, r.rolcanlogin::text AS login, r.rolsuper::text AS su, r.rolcreatedb::text AS cdb, r.rolcreaterole::text AS cr, r.rolinherit::text AS inh, \
          r.rolreplication::text AS repl, r.rolbypassrls::text AS bypass, r.rolconnlimit::text AS lim, {UNTIL} AS until, pg_has_role(current_user, r.oid, 'MEMBER WITH ADMIN OPTION')::text AS adm \
@@ -17,7 +16,7 @@ pub(super) fn roles_sql(filter: &str) -> String {
     )
 }
 
-pub(super) fn members_sql(major: u32) -> String {
+fn members_sql(major: u32) -> String {
     let (inh, set) = if major >= 16 { ("a.inherit_option::text", "a.set_option::text") } else { ("NULL::text", "NULL::text") };
     format!(
         "SELECT g.rolname::text AS grp, m.rolname::text AS member, COALESCE(gr.rolname::text, '') AS grantor, a.admin_option::text AS adm, {inh} AS inh, {set} AS setopt \
@@ -33,11 +32,11 @@ pub(super) fn b(r: &SqlRow, c: &str) -> bool {
     matches!(text(r, c).as_deref(), Some("true" | "t"))
 }
 
-pub(super) fn ob(r: &SqlRow, c: &str) -> Option<bool> {
+fn ob(r: &SqlRow, c: &str) -> Option<bool> {
     text(r, c).map(|v| v == "true" || v == "t")
 }
 
-pub(super) fn attrs_of(r: &SqlRow) -> Attrs {
+fn attrs_of(r: &SqlRow) -> Attrs {
     Attrs {
         login: b(r, "login"),
         superuser: b(r, "su"),
@@ -70,11 +69,11 @@ pub(super) fn memberships(rows: &[SqlRow]) -> Vec<Membership> {
 }
 
 /// 17 from "17.2" or "18beta1", the way `Db::version` holds it.
-pub(super) fn major_of_version(v: &str) -> u32 {
+fn major_of_version(v: &str) -> u32 {
     v.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)
 }
 
-pub(super) fn major_of(version_num: &str) -> u32 {
+fn major_of(version_num: &str) -> u32 {
     version_num.trim().parse::<u32>().map(|n| n / 10000).unwrap_or(0)
 }
 
@@ -92,7 +91,7 @@ pub(super) async fn load_cluster(db: &Db) -> Res<Cluster> {
 }
 
 /// The ACL of a row as JSON triples, NULL read as the defaults the owner gets.
-pub(super) fn acl_json(col: &str, ch: char, owner: &str) -> String {
+fn acl_json(col: &str, ch: char, owner: &str) -> String {
     format!(
         "COALESCE((SELECT json_agg(json_build_array(CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee)::text END, pg_get_userbyid(a.grantor)::text, a.privilege_type, a.is_grantable))::text \
          FROM aclexplode(COALESCE({col}, acldefault('{ch}', {owner}))) a), '[]')"
@@ -117,9 +116,9 @@ pub(super) fn parse_acl(json: &str) -> Vec<AclEntry> {
 pub const OBJ_LIMIT: usize = 2000;
 
 pub(super) const SCHEMAS: &str = "SELECT n.nspname::text AS name FROM pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' ORDER BY 1";
-pub(super) const DB_OID: &str = "SELECT oid::text AS o FROM pg_database WHERE datname = current_database()";
+const DB_OID: &str = "SELECT oid::text AS o FROM pg_database WHERE datname = current_database()";
 
-pub(super) fn objects_sql(kind: Kind) -> String {
+fn objects_sql(kind: Kind) -> String {
     let (_, col, owner, ch) = kind.catalog();
     let lim = OBJ_LIMIT + 1;
     match kind {
@@ -168,7 +167,7 @@ pub(super) async fn load_objects(db: &Db, schema: &str, kind: Kind) -> Res<Objec
     Ok(Objects { database: db.pg_database(), schema: schema.into(), kind, objs, schemas, db_oid, cut })
 }
 
-pub(super) const DEFAULTS: &str = "SELECT pg_get_userbyid(d.defaclrole)::text AS owner, COALESCE(n.nspname::text, '') AS schema, d.defaclobjtype::text AS kind, \
+const DEFAULTS: &str = "SELECT pg_get_userbyid(d.defaclrole)::text AS owner, COALESCE(n.nspname::text, '') AS schema, d.defaclobjtype::text AS kind, \
     COALESCE((SELECT json_agg(json_build_array(CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee)::text END, pg_get_userbyid(a.grantor)::text, a.privilege_type, a.is_grantable))::text FROM aclexplode(d.defaclacl) a), '[]') AS acl \
     FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace ORDER BY 1, 2, 3";
 
@@ -182,9 +181,9 @@ pub(super) async fn load_defaults(db: &Db) -> Res<Defaults> {
 
 // Running a batch.
 
-pub(super) const ROLE_OID: &str = "SELECT oid::text AS o FROM pg_roles WHERE rolname = $1";
+const ROLE_OID: &str = "SELECT oid::text AS o FROM pg_roles WHERE rolname = $1";
 /// The grantee as an oid, 0 for PUBLIC.
-pub(super) const GRANTEE: &str = "CASE WHEN $2 = '' THEN 0::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END";
+const GRANTEE: &str = "CASE WHEN $2 = '' THEN 0::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END";
 
 pub(super) async fn rows(tx: &mut Tx<'_>, db: &Db, sql: &str, args: Vec<Param>) -> Res<Vec<SqlRow>> {
     let t0 = Instant::now();
@@ -194,7 +193,7 @@ pub(super) async fn rows(tx: &mut Tx<'_>, db: &Db, sql: &str, args: Vec<Param>) 
 }
 
 /// Privileges by grantor, from rows of `gr`, `p` and `g`.
-pub(super) fn grants_of(rows: &[SqlRow]) -> Grantors<Privs> {
+fn grants_of(rows: &[SqlRow]) -> Grantors<Privs> {
     let mut out = Grantors::<Privs>::new();
     for r in rows {
         *out.entry(t(r, "gr")).or_default().entry(t(r, "p")).or_insert(false) |= b(r, "g");
@@ -203,7 +202,7 @@ pub(super) fn grants_of(rows: &[SqlRow]) -> Grantors<Privs> {
 }
 
 /// Whether the object is still the one the window read: same oid, name and schema, and for a function the same arguments.
-pub(super) async fn target_ok(tx: &mut Tx<'_>, db: &Db, tg: &Target) -> Res<bool> {
+async fn target_ok(tx: &mut Tx<'_>, db: &Db, tg: &Target) -> Res<bool> {
     let (sql, args): (&str, Vec<Param>) = match tg.kind {
         Kind::Tables | Kind::Sequences => ("SELECT count(*)::text AS n FROM pg_class WHERE oid = $1::oid AND relname = $2 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $3)", vec![Param::Text(tg.oid.clone()), Param::Text(tg.name.clone()), Param::Text(tg.schema.clone())]),
         Kind::Functions => (
@@ -285,7 +284,7 @@ pub(super) fn holds(c: &Change, exact: Option<&Exact>, now: &State, before: bool
     }
 }
 
-pub(super) fn exact_of(before: &State, after: &State) -> Option<Exact> {
+fn exact_of(before: &State, after: &State) -> Option<Exact> {
     match (before, after) {
         (State::Privs(a), State::Privs(b)) => Some(Exact::Acl(a.clone(), b.clone())),
         (State::Member(a), State::Member(b)) => Some(Exact::Member(a.clone(), b.clone())),
@@ -294,7 +293,7 @@ pub(super) fn exact_of(before: &State, after: &State) -> Option<Exact> {
 }
 
 /// What a change is about, for messages.
-pub(super) fn subject(c: &Change) -> String {
+fn subject(c: &Change) -> String {
     match c {
         Change::Acl { target, grantee, .. } => format!("what {} holds on {}", grantee_shown(grantee), target.shown()),
         Change::Attrs { role, .. } => format!("role {role}"),
@@ -306,7 +305,7 @@ pub(super) fn subject(c: &Change) -> String {
 /// VALID UNTIL as typed, read by the server in this session and written back as `UNTIL` reads it, so the check after the run and
 /// the undo compare like with like, with whether that moment has passed. A value the written form would not give back (a
 /// fraction of a second, a year BC) is refused rather than changed.
-pub(super) async fn canonical_until(tx: &mut Tx<'_>, db: &Db, typed: &str) -> Res<(String, bool)> {
+async fn canonical_until(tx: &mut Tx<'_>, db: &Db, typed: &str) -> Res<(String, bool)> {
     let v = typed.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("never") || v.eq_ignore_ascii_case("infinity") {
         return Ok((String::new(), false));
@@ -326,7 +325,7 @@ pub(super) async fn canonical_until(tx: &mut Tx<'_>, db: &Db, typed: &str) -> Re
 
 /// Why a table REVOKE in `c` is refused: PostgreSQL revokes a privilege, or its grant option, on every column of the table along
 /// with the table's, and nothing here would give those column grants back.
-pub(super) async fn column_grants(tx: &mut Tx<'_>, db: &Db, c: &Change, exact: Option<&Exact>) -> Res<Option<String>> {
+async fn column_grants(tx: &mut Tx<'_>, db: &Db, c: &Change, exact: Option<&Exact>) -> Res<Option<String>> {
     let (Change::Acl { target, grantee, .. }, Some((from, to))) = (c, acl_pair(c, exact)?) else { return Ok(None) };
     if target.kind != Kind::Tables {
         return Ok(None);
@@ -354,7 +353,7 @@ pub(super) async fn column_grants(tx: &mut Tx<'_>, db: &Db, c: &Change, exact: O
     Ok(None)
 }
 
-pub(super) async fn check_roles(tx: &mut Tx<'_>, db: &Db, roles: &[(String, String)], c: &[Change]) -> Res<()> {
+async fn check_roles(tx: &mut Tx<'_>, db: &Db, roles: &[(String, String)], c: &[Change]) -> Res<()> {
     let named: BTreeSet<&str> = c.iter().flat_map(Change::roles).collect();
     for (name, oid) in roles.iter().filter(|(n, _)| named.contains(n.as_str())) {
         let now = rows(tx, db, ROLE_OID, vec![Param::Text(name.clone())]).await?.first().map(|r| t(r, "o"));
@@ -468,7 +467,7 @@ pub(super) async fn verifier(db: &Db, role: &str, password: &str) -> Res<zeroize
 
 /// The server's error on a statement with a password, with the password and verifier cut out. A policy extension can refuse a
 /// verifier where it wants the password in clear, so that is said.
-pub(super) fn password_err(e: String, secrets: &[&str]) -> String {
+fn password_err(e: String, secrets: &[&str]) -> String {
     let e = scrub(e, secrets);
     if e.to_lowercase().contains("password") || e.to_lowercase().contains("encrypt") {
         return format!("{e}. Quarry sends a password only as its hash, and a password policy extension such as credcheck may refuse one sent that way.");
@@ -486,16 +485,16 @@ pub struct Made {
     pub members: Vec<String>,
 }
 
-pub(super) const MADE_GROUPS: &str = "SELECT g.rolname::text AS n FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid WHERE a.member = $1::oid ORDER BY 1";
-pub(super) const MADE_MEMBERS: &str = "SELECT m.rolname::text AS n FROM pg_auth_members a JOIN pg_roles m ON m.oid = a.member WHERE a.roleid = $1::oid ORDER BY 1";
+const MADE_GROUPS: &str = "SELECT g.rolname::text AS n FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid WHERE a.member = $1::oid ORDER BY 1";
+const MADE_MEMBERS: &str = "SELECT m.rolname::text AS n FROM pg_auth_members a JOIN pg_roles m ON m.oid = a.member WHERE a.roleid = $1::oid ORDER BY 1";
 /// Whatever the role owns or holds in any database or on the server, and its per-role settings.
-pub(super) const HOLDS: &str = "SELECT ((SELECT count(*) FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = $1::oid) + (SELECT count(*) FROM pg_db_role_setting WHERE setrole = $1::oid))::text AS n";
+const HOLDS: &str = "SELECT ((SELECT count(*) FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass AND refobjid = $1::oid) + (SELECT count(*) FROM pg_db_role_setting WHERE setrole = $1::oid))::text AS n";
 
 pub(super) async fn names(tx: &mut Tx<'_>, db: &Db, sql: &str, oid: &str) -> Res<Vec<String>> {
     Ok(rows(tx, db, sql, vec![Param::Text(oid.into())]).await?.iter().map(|r| t(r, "n")).collect())
 }
 
-pub(super) async fn in_write<T>(db: &Db, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
+async fn in_write<T>(db: &Db, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
     let mut conn = writer_conn(db, "", read_only).await?;
     let out = async {
         let mut tx = conn.begin_write(db).await.map_err(se)?;
@@ -646,24 +645,24 @@ pub fn drop_preview(plan: &[(String, Vec<String>)]) -> String {
 }
 
 /// The role's pg_shdepend rows in this database (`{}` is `current_database()`) or on the server (`0`), with what each is.
-pub(super) fn hold_sql(dbid: &str) -> String {
+fn hold_sql(dbid: &str) -> String {
     format!(
         "SELECT pg_describe_object(classid, objid, objsubid) AS what, deptype::text AS dep, classid::text || ':' || objid::text || ':' || objsubid::text || ':' || deptype::text AS k \
          FROM pg_shdepend WHERE dbid = {dbid} AND refclassid = 'pg_authid'::regclass AND refobjid = $1::oid"
     )
 }
 
-pub(super) const IN_DB: &str = "(SELECT oid FROM pg_database WHERE datname = current_database())";
-pub(super) const HOLD_DBS: &str = "SELECT d.datname::text AS name FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = $1::oid GROUP BY 1 ORDER BY 1";
+const IN_DB: &str = "(SELECT oid FROM pg_database WHERE datname = current_database())";
+const HOLD_DBS: &str = "SELECT d.datname::text AS name FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = $1::oid GROUP BY 1 ORDER BY 1";
 
-pub(super) fn deps_of(rs: &[SqlRow]) -> Vec<String> {
+fn deps_of(rs: &[SqlRow]) -> Vec<String> {
     let mut v: Vec<String> = rs.iter().map(|r| t(r, "k")).collect();
     v.sort();
     v
 }
 
 /// (owned, held) descriptions, each sorted.
-pub(super) fn split_hold(rs: &[SqlRow]) -> (Vec<String>, Vec<String>) {
+fn split_hold(rs: &[SqlRow]) -> (Vec<String>, Vec<String>) {
     let (mut owned, mut held) = (Vec::new(), Vec::new());
     for r in rs {
         if t(r, "dep") == "o" { owned.push(t(r, "what")) } else { held.push(t(r, "what")) }
@@ -673,7 +672,7 @@ pub(super) fn split_hold(rs: &[SqlRow]) -> (Vec<String>, Vec<String>) {
     (owned, held)
 }
 
-pub(super) fn hold_of(database: &str, rs: &[SqlRow]) -> DbHold {
+fn hold_of(database: &str, rs: &[SqlRow]) -> DbHold {
     let (owned, held) = split_hold(rs);
     DbHold { database: database.into(), owned, held: held.len(), deps: deps_of(rs) }
 }

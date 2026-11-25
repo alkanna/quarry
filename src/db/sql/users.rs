@@ -16,8 +16,10 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 mod grants;
-pub use grants::*;
+mod settings;
 mod statements;
+pub use grants::*;
+pub use settings::*;
 pub use statements::*;
 
 /// The privileges that can be given on a whole database, in the order the checkboxes show them. The first

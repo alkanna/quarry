@@ -5,7 +5,7 @@ use super::*;
 // Parsing SHOW GRANTS.
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Tok {
+enum Tok {
     Word(String),
     Ident(String),
     Str(String),
@@ -14,7 +14,7 @@ pub(super) enum Tok {
 
 /// The tokens of one SHOW GRANTS line. Backticks double to escape themselves; in a string both a doubled
 /// quote and a backslash escape are read, because the server writes the first and old versions the second.
-pub(super) fn tokens(s: &str) -> Vec<Tok> {
+fn tokens(s: &str) -> Vec<Tok> {
     let c: Vec<char> = s.chars().collect();
     let (mut i, mut out) = (0, Vec::new());
     while i < c.len() {
@@ -111,7 +111,7 @@ pub struct Grant {
     pub raw: String,
 }
 
-pub(super) fn is_word(t: Option<&Tok>, w: &str) -> bool {
+fn is_word(t: Option<&Tok>, w: &str) -> bool {
     matches!(t, Some(Tok::Word(x)) if x.eq_ignore_ascii_case(w))
 }
 

@@ -24,10 +24,10 @@ use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-mod statements;
-pub use statements::*;
 mod run;
+mod statements;
 pub use run::*;
+pub use statements::*;
 
 // Kinds and privileges.
 
