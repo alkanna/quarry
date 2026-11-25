@@ -1,42 +1,13 @@
 //! The JS shell view and running scripts.
 
 use super::*;
+use quarry_core::action::{Action, ShellA};
 use crate::ui::sql_complete::{Wants, analyze, split_statement};
 use crate::app::library::snippet_strip::{self as snip, Src};
 use crate::library::snippet::Lang;
 use std::cell::RefCell;
 
-/// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
-/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
-/// which writes to a collection from a pipeline just like `$out`.
-pub(super) fn dangerous_words(code: &str, sql: bool) -> Vec<String> {
-    let lower = code.to_lowercase();
-    if sql {
-        // Whole words only: SQL scripts name columns like created_at and updated_at all the time.
-        const WORDS: [&str; 16] = ["drop", "replace", "update", "delete", "insert", "rename", "truncate", "alter", "create", "grant", "revoke", "merge", "call", "load", "lock", "kill"];
-        let found: Vec<&str> = lower.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-        return WORDS.iter().filter(|w| found.contains(w)).map(|w| w.to_string()).collect();
-    }
-    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
-}
-
-/// The words to confirm before a script runs. A script that reaches both engines is checked for both, since
-/// it cannot be told which handle a word belongs to.
-pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<Item = bool>) -> Vec<String> {
-    let (mut mongo, mut sql) = (!main_sql, main_sql);
-    for s in attached_sql {
-        (mongo, sql) = (mongo || !s, sql || s);
-    }
-    let mut out = if mongo { dangerous_words(code, false) } else { Vec::new() };
-    if sql {
-        for w in dangerous_words(code, true) {
-            if !out.contains(&w) {
-                out.push(w);
-            }
-        }
-    }
-    out
-}
+pub(super) use quarry_core::action::shell::shell_ops;
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
@@ -273,8 +244,9 @@ const LINE_H: f32 = 20.0;
 /// Height of the Console and Queries panel under the result, tab row included.
 const SHELL_PANEL_H: f32 = 150.0;
 
-/// The panel under the result: the script's console output, or every query it ran.
-fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(String, bool, Color32)]) {
+/// The panel under the result: the script's console output, or every query it ran. Returns the tab picked, if any.
+fn shell_panel(ui: &mut egui::Ui, sh: &ShellTab, conn: &str, kinds: &[(String, bool, Color32)]) -> Option<bool> {
+    let mut pick = None;
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_min_height(SHELL_PANEL_H - 12.0);
@@ -282,10 +254,10 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             ui.spacing_mut().item_spacing.x = 14.0;
             let (n_log, n_q) = (sh.logs.len() + sh.logs_dropped, sh.queries.len());
             if view_tab(ui, &format!("Console  {n_log}"), !sh.queries_tab).clicked() {
-                sh.queries_tab = false;
+                pick = Some(false);
             }
             if view_tab(ui, &format!("Queries  {n_q}"), sh.queries_tab).clicked() {
-                sh.queries_tab = true;
+                pick = Some(true);
             }
         });
         let line = ui.min_rect().bottom();
@@ -346,6 +318,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             });
         });
     });
+    pick
 }
 
 /// The Shell's reference for a SQL tab.
@@ -400,174 +373,26 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
 }
 
 impl App {
-    /// Switches the current tab to the Shell with `code` ready to review and run.
     pub(super) fn open_in_shell(&mut self, code: String) {
-        let Some(t) = self.tm() else { return };
-        t.shell.code = code;
-        t.view = View::Shell;
-        t.selected = None;
+        self.core.open_in_shell(code);
     }
 
-    /// The script that runs: the editor's text with its `{{...}}` values filled in, or why it can't be.
-    pub(super) fn shell_code(&self) -> Result<String, String> {
-        let Some(t) = self.t() else { return Ok(String::new()) };
-        snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true)
-    }
-
+    /// Runs the current tab's script, after the write confirm when it may write.
     pub(super) fn run_shell_script(&mut self) {
-        // The confirm judges what will run, and a value that does not read stops the run before it.
-        let code = match self.shell_code() {
-            Ok(c) => c,
-            Err(e) => return self.warn(e),
-        };
-        let Some(t) = self.t() else { return };
-        let ops = shell_ops(&code, t.sql.is_some(), t.shell.attached.iter().filter_map(|a| self.conn(a.conn)).map(|c| c.meta.engine.is_sql()));
-        // Same check as the original; on a read-only connection the runner refuses writes anyway.
-        if !ops.is_empty() && self.shell_writable() {
-            self.modal = Some(Modal::ShellWrite(ops));
-        } else {
-            self.start_shell();
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Shell(ShellA::Run { tab }));
         }
     }
 
+    /// Runs the current tab's script without the confirm.
     pub(super) fn start_shell(&mut self) {
-        if self.core.demo {
-            return self.ok("Offline demo: the shell needs a real connection.");
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Shell(ShellA::Start { tab }));
         }
-        let Some(runtime) = find_bun(&self.core.prefs.shell_runtime) else {
-            return self.warn_settings("Bun is needed for the Shell. Install it from bun.sh, or set its path in Settings.");
-        };
-        let Some(t) = self.t() else { return };
-        let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
-        // Every run passes here: the editor, the library and the write confirm. History keeps the text as written.
-        let filled = match self.shell_code() {
-            Ok(c) => c,
-            Err(e) => return self.warn(e),
-        };
-        let collections: Vec<String> = self.tables_of(&sel);
-        let schema = self.sel_schema(&sel);
-        let packages: Vec<String> = self.core.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
-        let read_only = !self.sel_writable();
-        // A PostgreSQL attachment's tables are not saved with the tab, so a restored one lists them again. They arrive
-        // while the script starts, and a table helper missing on this run is there on the next (table('name') always works).
-        let unlisted: Vec<(u64, String)> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.tables.is_empty() && self.conn(a.conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)).map(|a| (a.conn, a.db.clone())).collect()).unwrap_or_default();
-        for (c, d) in unlisted {
-            self.attach_load(c, &d);
-        }
-        let (mut mongo, mut sql_entries, mut sql) = match self.shell_attachments() {
-            Ok(v) => v,
-            Err(e) => {
-                self.core.tabs[self.core.cur].shell.error = Some(e);
-                return;
-            }
-        };
-        // The tab's own connection is the main entry. A SQL script gets no address and no password: its queries come back to this app.
-        let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        if main_sql {
-            let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-            if db.dialect == db::sql::Dialect::Postgres {
-                // The tab's database picks the pool, and the script starts in the tab's schema.
-                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "postgres" }));
-                sql.insert(0, (name.clone(), db::SqlRelay { db: db.at(&sel.db), schema, read_only, conn_id: Default::default() }));
-            } else {
-                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "mysql" }));
-                sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
-            }
-        } else {
-            // Without a live client there is no SSH tunnel either, and the stored address would then reach whatever answers locally.
-            if self.conn(sel.conn).is_none_or(|c| c.client.is_none()) {
-                return self.warn_offline();
-            }
-            let uri = match stored_uri(sel.conn) {
-                Ok(u) => u,
-                Err(e) => return self.err(uri_err(e)),
-            };
-            mongo.insert(0, serde_json::json!({ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }));
-        }
-        let mut input = serde_json::json!({ "mongo": mongo, "sql": sql_entries });
-        input["code"] = filled.into();
-        input["packages"] = packages.into();
-        input["timeoutMs"] = self.core.prefs.timeout_ms.into();
-        input["maxBytes"] = db::SHELL_MAX.into();
-        input["main"] = name.into();
-        let input = input.to_string();
-        // The original's NodeShell.addHistory (renderer line 196411): skip scripts over 1000
-        // characters, move a repeat to the top, keep MAX_HISTORY_LENGTH = 50 per database.
-        const MAX_HISTORY_LENGTH: usize = 50;
-        const MAX_HISTORY_SCRIPT: usize = 1000;
-        if code.chars().count() <= MAX_HISTORY_SCRIPT {
-            let h = self.core.prefs.shell_histories.entry(format!("{}/{}", sel.conn, sel.db)).or_default();
-            h.retain(|x| *x != code);
-            h.insert(0, code);
-            h.truncate(MAX_HISTORY_LENGTH);
-        }
-        self.save_prefs();
-        // A table added since the editor types were built shows up in the next ones.
-        if main_sql {
-            self.sql_columns_ask(true);
-        }
-        for a in self.core.tabs[self.core.cur].shell.attached.clone() {
-            if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
-                // A PostgreSQL schema is read on a session of its own database and cached under that database and schema.
-                let (key, space, db) = if db.dialect == db::sql::Dialect::Postgres {
-                    let s = super::shell_attach::pg_schema(&a.schema).to_string();
-                    (ns_key(&a.db, &s), s, db.at(&a.db))
-                } else {
-                    (a.db.clone(), a.db.clone(), db)
-                };
-                self.core.sql_schema_asked.insert((a.conn, key));
-                self.core.worker.sql_schema(a.conn, db, space);
-            }
-        }
-        self.core.req += 1;
-        let req = self.core.req;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        // The floating selection bar is not disabled with the result, so stale checks could still be exported.
-        self.core.tabs[self.core.cur].shell_checked.clear();
-        let sh = &mut self.core.tabs[self.core.cur].shell;
-        // Only the script and the last result are kept, so a field added to ShellTab later starts fresh.
-        let old = std::mem::take(sh);
-        *sh = ShellTab {
-            code: old.code,
-            attached: old.attached,
-            agent_code: old.agent_code,
-            queries_tab: old.queries_tab,
-            value: old.value,
-            docs: old.docs,
-            fields: old.fields,
-            page: old.page,
-            raw: old.raw,
-            raw_text: old.raw_text,
-            count: old.count,
-            cut: old.cut,
-            ms: old.ms,
-            query_ms: old.query_ms,
-            req,
-            cancel: Some(tx),
-            started: Some(std::time::Instant::now()),
-            ..Default::default()
-        };
-        let packages = self.core.prefs.shell_packages.clone();
-        self.core.tabs[self.core.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
-        self.core.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
     }
 
-    /// The Shell runs in its own process, so it reaches SSH-only servers through this app's
-    /// tunnel (a local SOCKS5 port) or through the connection's own proxy.
     pub(super) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
-        let Some(c) = self.conn(conn) else { return serde_json::Value::Null };
-        match &c.tunnel {
-            Some(db::Way::Ssh(t)) => return serde_json::json!({ "host": "127.0.0.1", "port": t.port }),
-            // The Cloud SQL proxy is plain TCP and only serves PostgreSQL, which the shell reaches through the app, not SOCKS.
-            Some(db::Way::CloudSql(_)) => return serde_json::Value::Null,
-            // A SQL connection's own proxy is dialed by the app, and the shell reaches SQL through the app's relay.
-            Some(db::Way::Proxy(_)) => return serde_json::Value::Null,
-            None => {}
-        }
-        match &c.meta.proxy {
-            Some(p) => serde_json::json!({ "host": p.host, "port": if p.port == 0 { 1080 } else { p.port }, "user": p.user, "password": secret(conn, "proxy-password") }),
-            None => serde_json::Value::Null,
-        }
+        self.core.shell_proxy(conn)
     }
 
     pub(super) fn shell_view(&mut self, ui: &mut egui::Ui) {
@@ -582,7 +407,7 @@ impl App {
         let kinds = self.shell_kinds();
         let (mut detach, mut open_attach) = (None, false);
         if sql {
-            self.sql_columns_ask(false);
+            self.core.sql_columns_ask(false);
         }
         let history = self.t().and_then(|t| self.core.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
         let mut packages = self.core.prefs.shell_packages.clone();
@@ -607,6 +432,9 @@ impl App {
             t.shell.code = default_script(&coll, sql);
         }
         let running = t.shell.started;
+        let uid = t.uid;
+        // Clicks become actions, run after drawing.
+        let mut acts: Vec<ShellA> = Vec::new();
         let (mut run, mut stop, mut editor, mut fmt) = (false, false, None, false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -637,13 +465,13 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 fmt = quiet(ui, "Format").on_hover_text("Indent the script by its brackets and break long lines (Shift+Alt+F)").clicked();
                 if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
-                    t.shell.help = !t.shell.help;
+                    acts.push(ShellA::Help { tab: uid, on: !t.shell.help });
                 }
                 ui.menu_button("History", |ui| {
                     menu_look(ui);
                     ui.set_max_width(520.0);
                     if ui.button("Reset to the starter script").clicked() {
-                        t.shell.code = default_script(&coll, sql);
+                        acts.push(ShellA::Code { tab: uid, code: default_script(&coll, sql) });
                         ui.close();
                     }
                     ui.separator();
@@ -653,7 +481,7 @@ impl App {
                     for h in &history {
                         let first: String = h.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("async function")).take(1).collect();
                         if ui.button(RichText::new(first.chars().take(80).collect::<String>()).monospace()).on_hover_text(h.as_str()).clicked() {
-                            t.shell.code = h.clone();
+                            acts.push(ShellA::Code { tab: uid, code: h.clone() });
                             ui.close();
                         }
                     }
@@ -671,7 +499,12 @@ impl App {
             ui.add_space(8.0);
         }
         if let Some(s) = &strip {
+            let was = t.snip.filled;
             make_default = snip::strip_ui(ui, s, &mut t.snip, true);
+            if t.snip.filled != was {
+                acts.push(ShellA::Filled { tab: uid, on: t.snip.filled });
+                t.snip.filled = was;
+            }
         }
         let filled_view = strip.is_some() && t.snip.filled;
         // The editor: line numbers, token colors, and the same frame for both engines.
@@ -876,7 +709,11 @@ impl App {
                         });
                     });
                     if !t.shell.docs.is_empty() {
-                        segmented(ui, &mut t.shell.raw, &[(false, "Table"), (true, "JSON")]);
+                        let mut raw = t.shell.raw;
+                        segmented(ui, &mut raw, &[(false, "Table"), (true, "JSON")]);
+                        if raw != t.shell.raw {
+                            acts.push(ShellA::Raw { tab: uid, on: raw });
+                        }
                     }
                 });
             });
@@ -902,11 +739,6 @@ impl App {
                 });
             }
         }
-        if let Some(p) = page_to {
-            t.shell.page = p;
-            // Checks are positions in the page on screen.
-            t.shell_checked.clear();
-        }
         if let Some(n) = too_big {
             self.warn(format!("The result is {} MB, too big to copy. Use Export to save it to a file.", n >> 20));
         }
@@ -918,8 +750,9 @@ impl App {
                 self.open_export(sel, false);
             }
         }
-        if page_to.is_some() {
-            self.drop_agg_row();
+        // Before the table below draws, so it shows the new page.
+        if let Some(page) = page_to {
+            self.exec(Action::Shell(ShellA::Page { tab: uid, page }));
         }
         if has_table {
             // The result table is the same one documents use: open, colours, right-click menu.
@@ -934,14 +767,16 @@ impl App {
         }
         let ui = outer;
         ui.add_space(8.0);
-        shell_panel(ui, &mut self.core.tabs[self.core.cur].shell, &conn_name, &kinds);
+        if let Some(on) = shell_panel(ui, &self.core.tabs[self.core.cur].shell, &conn_name, &kinds) {
+            acts.push(ShellA::Queries { tab: uid, on });
+        }
         if let Some(code) = use_example {
-            self.core.tabs[self.core.cur].shell.code = code;
+            acts.push(ShellA::Code { tab: uid, code });
         }
         self.core.new_pkg = new_pkg;
         if packages != self.core.prefs.shell_packages {
-            self.core.prefs.shell_packages = packages;
-            self.save_prefs();
+            acts.push(ShellA::Packages(packages));
+            // Package changes need a fresh language server, which installs them so their types load.
             self.js_restart();
         }
         if saved {
@@ -954,10 +789,16 @@ impl App {
             self.js_editor(ui.ctx(), f, &colls);
         }
         if stop {
-            self.core.tabs[self.core.cur].shell.stop();
+            acts.push(ShellA::Stop { tab: uid });
         }
-        if let Some(i) = detach {
-            self.core.tabs[self.core.cur].shell.attached.remove(i);
+        if let Some(name) = detach.and_then(|i| self.core.tabs[self.core.cur].shell.attached.get(i)).map(|a| a.name.clone()) {
+            acts.push(ShellA::Detach { tab: uid, name });
+        }
+        if !acts.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        for a in acts {
+            self.exec(Action::Shell(a));
         }
         if open_attach {
             self.open_attach();
@@ -1066,14 +907,5 @@ mod tests {
         t.proj_txt = "{ at: { $gt: #today } }".into();
         assert!(!chain(&t).contains('#'), "shortcuts are expanded");
         assert!(query_script("x", "db.x.aggregate([])", ".sort({ a: 1 })").ends_with("db.x.aggregate([])\n}"));
-        assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
-        assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
-        assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);
-        assert_eq!(dangerous_words("sql`CALL p(); LOCK TABLES t READ; KILL 5; LOAD DATA INFILE 'x' INTO TABLE t`", true), ["call", "load", "lock", "kill"]);
-        assert!(dangerous_words("sql`SELECT created_at, updated_at FROM orders`", true).is_empty());
-        // A script with both engines is checked for both, each word once.
-        assert_eq!(shell_ops("x.deleteMany({}); sql`DELETE FROM t`", false, [true].into_iter()), ["delete"]);
-        assert_eq!(shell_ops("db.x.aggregate([{ $out: 'y' }]); sql`TRUNCATE t`", true, [false].into_iter()), ["$out", "truncate"]);
-        assert!(shell_ops("sql`SELECT 1`", true, std::iter::empty()).is_empty());
     }
 }

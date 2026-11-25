@@ -47,7 +47,7 @@ fn a_shell_snippet_from_cmd_k_opens_filled_in_the_shell() {
     assert_eq!(t.shell.code, SHELL.replace("{{status:paid|shipped=paid}}", "\"paid\"").replace("{{from:date}}", "ISODate(\"2026-11-03T00:00:00Z\")"));
     // Run again sends the same text, not one filled a second time.
     assert!(t.snip.off);
-    assert_eq!(ui.app().shell_code().unwrap(), t.shell.code);
+    assert_eq!(ui.app().core.shell_code().unwrap(), t.shell.code);
 }
 
 #[test]
@@ -85,12 +85,12 @@ fn a_shell_tab_fills_its_values_and_refuses_one_in_quotes() {
     ui.h.run_steps(2);
     assert!(ui.app().t().unwrap().view == View::Shell);
     ui.show("Run on");
-    assert!(ui.app().shell_code().unwrap_err().contains("from needs a value"));
+    assert!(ui.app().core.shell_code().unwrap_err().contains("from needs a value"));
     ui.h.state_mut().tm().unwrap().snip.vals.insert("from".into(), "2026-11-03".into());
-    assert!(ui.app().shell_code().unwrap().contains("$gte: ISODate(\"2026-11-03T00:00:00Z\")"));
+    assert!(ui.app().core.shell_code().unwrap().contains("$gte: ISODate(\"2026-11-03T00:00:00Z\")"));
     // In the Shell a value goes in code: inside quotes it could be SQL text of an attached connection.
     ui.h.state_mut().tm().unwrap().shell.code = "print('{{from}}')".into();
-    assert!(ui.app().shell_code().unwrap_err().contains("outside quotes"));
+    assert!(ui.app().core.shell_code().unwrap_err().contains("outside quotes"));
 }
 
 #[test]

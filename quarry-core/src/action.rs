@@ -29,23 +29,34 @@ pub mod server;
 pub mod users;
 pub mod sql;
 pub mod sql_server;
+pub mod shell;
+pub mod tools;
+pub mod watch;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
 mod users_tests;
 #[cfg(test)]
 mod sql_server_tests;
+#[cfg(test)]
+mod shell_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
 pub use users::{MongoUsersA, SqlUsersA, UsersA};
 pub use sql_server::{PgServerA, SqlServerA};
+pub use shell::ShellA;
+pub use tools::ToolsA;
+pub use watch::WatchA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
     Roles(RolesA),
     Users(UsersA),
     Server(ServerA),
+    Shell(ShellA),
+    Watch(WatchA),
+    Tools(ToolsA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -86,6 +97,8 @@ pub enum Dialog {
     SqlPassword(Box<crate::state::sql::users::PwForm>),
     /// A confirmation that asks for a name to be typed.
     Typed { title: String, expect: String, action: crate::state::Danger },
+    /// The Shell's confirm before a script with these possibly destructive words runs.
+    ShellWrite(Vec<String>),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -142,6 +155,9 @@ impl Core {
             Action::Roles(a) => self.roles(a),
             Action::Users(a) => self.users(a),
             Action::Server(a) => self.server(a),
+            Action::Shell(a) => self.shell(a),
+            Action::Watch(a) => self.watch(a),
+            Action::Tools(a) => self.tools(a),
         }
     }
 
@@ -193,6 +209,7 @@ impl Core {
             Msg::PgRoles { .. } | Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } => true,
             Msg::Command { tag, .. } => matches!(tag.as_str(), "users" | "users-self" | "roles") || tag.starts_with("server:"),
             Msg::SqlServer { .. } | Msg::PgServer { .. } => true,
+            Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => true,
             _ => false,
         }
     }
@@ -208,6 +225,14 @@ impl Core {
             Msg::Command { tag, res } => self.mongo_users_reply(&tag, res),
             Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
             Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
+            Msg::ShellLog { req, level, text } => self.shell_log(req, level, text),
+            Msg::ShellQuery { req, q } => self.shell_query(req, q),
+            Msg::ShellDone { req, res, ms, query_ms } => self.shell_done(req, res, ms, query_ms),
+            Msg::WatchEvent { req, doc } => self.watch_event(req, doc),
+            Msg::WatchDone { req, res } => self.watch_done(req, res),
+            Msg::ToolLog(line) => self.tool_log(line),
+            Msg::ToolDone(res) => self.tool_done(res),
+            Msg::ToolsInstalled(res) => self.tools_installed(res),
             _ => {}
         }
     }

@@ -75,10 +75,6 @@ impl App {
         self.core.sql_facts.entry((conn, key, table)).or_default().insert(column, res.unwrap_or_default());
     }
 
-    pub(in crate::app) fn ask_sql_schema(&mut self, conn: u64, sql: db::sql::Db, key: String, space: String) {
-        self.core.ask_sql_schema(conn, sql, key, space)
-    }
-
     /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
     /// under that name would never get its autocomplete and shell types back. A PostgreSQL database holds one cache per
     /// schema, all of them under keys that start with its name.

@@ -6,9 +6,8 @@ use super::*;
 pub(crate) use quarry_core::state::shell_attach::*;
 
 /// The schema a PostgreSQL attachment runs in. Its columns are cached under this name too, so every user of it must agree.
-pub(super) fn pg_schema(schema: &str) -> &str {
-    if schema.is_empty() { PG_SCHEMA } else { schema }
-}
+pub(super) use quarry_core::action::shell::pg_schema;
+use quarry_core::action::{Action, ShellA};
 
 /// What the language server needs of one attachment: its name, its collection or table names, and the types behind them.
 pub(super) struct AttachedInfo {
@@ -219,36 +218,8 @@ async function run() {
         self.modal = Some(Modal::Attach(Box::default()));
     }
 
-    /// Asks for what an attached database needs on the editor side: the table list and schema of a SQL
-    /// one. Collections of a Mongo connection arrive when it connects. Demo mode has no server.
     pub(super) fn attach_load(&mut self, conn: u64, db: &str) {
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        if self.core.demo {
-            return;
-        }
-        if sql.dialect == db::sql::Dialect::Postgres {
-            // The schema is the attachment's own, so each PostgreSQL attachment on `db` asks for its tables. Every tab, since
-            // an agent may fill one in the background.
-            let mut schemas: Vec<String> = self.core.tabs.iter().flat_map(|t| &t.shell.attached).filter(|a| a.conn == conn && a.db == db).map(|a| pg_schema(&a.schema).to_string()).collect();
-            schemas.sort();
-            schemas.dedup();
-            for s in schemas {
-                // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
-                self.ask_sql_schema(conn, sql.at(db), ns_key(db, &s), s.clone());
-                self.core.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
-            }
-            return;
-        }
-        if self.core.sql_asked.insert((conn, db.to_string())) {
-            self.core.worker.sql_tables(conn, sql.clone(), db.to_string());
-        }
-        self.ask_sql_schema(conn, sql, db.to_string(), db.to_string());
-    }
-
-    /// Whether any target of the current tab's script can be written to: its own connection, or an
-    /// attachment that is allowed to write and whose connection is unlocked.
-    pub(super) fn shell_writable(&self) -> bool {
-        self.sel_writable() || self.t().is_some_and(|t| t.shell.attached.iter().any(|a| a.allow_writes && self.conn(a.conn).is_some_and(|c| c.writable)))
+        self.core.attach_load(conn, db);
     }
 
     /// The tab's own connection as a pill; `locked` adds the read-only note.
@@ -287,34 +258,6 @@ async function run() {
                 Pill { mark, color, label: format!("{}  ·  {}", a.name, place), note, own: false, hint: format!("{} is {what}", a.name) }
             })
             .collect()
-    }
-
-    /// The attachments as the runner and the relay take them, or what stops the run.
-    pub(super) fn shell_attachments(&self) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>, Vec<(String, db::SqlRelay)>), String> {
-        let (mut mongo, mut sql, mut relays) = (Vec::new(), Vec::new(), Vec::new());
-        for a in self.t().map(|t| t.shell.attached.clone()).unwrap_or_default() {
-            let Some(c) = self.conn(a.conn) else { return Err(format!("The connection of {} no longer exists. Detach it with the x on its chip.", a.name)) };
-            let list = c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default();
-            // Attached connections are read-only unless the tab allows writes and the connection itself is unlocked.
-            let read_only = !(a.allow_writes && c.writable);
-            if let Some(db) = c.sql.clone() {
-                let pg = db.dialect == db::sql::Dialect::Postgres;
-                // A PostgreSQL connection belongs to one database, so the database picks the pool and the schema is the search_path.
-                if pg {
-                    sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": a.tables, "dialect": "postgres" }));
-                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: pg_schema(&a.schema).into(), read_only, conn_id: Default::default() }));
-                    continue;
-                }
-                sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": list, "dialect": "mysql" }));
-                relays.push((a.name.clone(), db::SqlRelay { db, schema: a.db.clone(), read_only, conn_id: Default::default() }));
-            } else if c.client.is_some() {
-                let uri = stored_uri(a.conn).map_err(uri_err)?;
-                mongo.push(serde_json::json!({ "name": a.name, "uri": uri, "db": a.db, "proxy": self.shell_proxy(a.conn), "collections": list, "readOnly": read_only }));
-            } else {
-                return Err(format!("{} uses {}, which is not connected. Connect it in the sidebar, then run again.", a.name, c.meta.name));
-            }
-        }
-        Ok((mongo, sql, relays))
     }
 
     /// Each attachment as the language server types it. Collections are typed from the field info of
@@ -496,9 +439,8 @@ async function run() {
             }
         });
         if attach {
-            if let (Some(conn), Some(t)) = (f.conn, self.tm()) {
-                t.shell.attached.push(Attached { conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes, schema: if pg { f.schema.clone() } else { String::new() }, tables: Vec::new() });
-                self.attach_load(conn, &f.db);
+            if let (Some(conn), Some(tab)) = (f.conn, self.t().map(|t| t.uid)) {
+                self.exec(Action::Shell(ShellA::Attach { tab, conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes, schema: f.schema.clone() }));
             }
             *keep = false;
         }
@@ -525,14 +467,7 @@ async function run() {
                 }
             }
         }
-        if !schema.is_empty() && !d.contains_key("error") {
-            let tables = names("tables");
-            for t in &mut self.core.tabs {
-                for a in t.shell.attached.iter_mut().filter(|a| a.conn == conn && a.db == database && (a.schema == schema || a.schema.is_empty() && schema == PG_SCHEMA)) {
-                    a.tables = tables.clone();
-                }
-            }
-        }
+        self.core.shell_pg_tables(&d);
     }
 }
 

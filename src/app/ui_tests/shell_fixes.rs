@@ -110,21 +110,6 @@ fn disconnect(ui: &mut UiApp, conn: u64, name: &str) {
 }
 
 #[test]
-fn shell_fix_the_console_keeps_the_latest_lines_each_cut_short() {
-    let mut sh = ShellTab::default();
-    for i in 0..1600 {
-        sh.push_log("log".into(), format!("line {i}"));
-    }
-    // Two bytes a character, so a cut by bytes would land inside one or keep only 1000 characters.
-    sh.push_log("log".into(), "é".repeat(3000));
-    assert!(sh.logs.len() <= 1500, "{} lines kept", sh.logs.len());
-    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 1599");
-    assert!(sh.logs_dropped > 0 && sh.logs.len() + sh.logs_dropped >= 1600, "{} dropped", sh.logs_dropped);
-    assert_eq!(sh.logs.last().unwrap().1.chars().count(), 2000);
-    assert!(!sh.logs.iter().any(|l| l.1 == "line 0"), "the oldest lines were kept");
-}
-
-#[test]
 fn shell_fix_a_script_that_logs_many_lines_keeps_the_latest_in_the_console() {
     let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
     let sh = run_done(&mut ui, "async function run() {\n  for (let i = 0; i < 1600; i++) console.log('line ' + i);\n  console.log('y'.repeat(5000));\n  return 1;\n}");

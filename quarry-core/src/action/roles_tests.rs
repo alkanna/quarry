@@ -294,6 +294,24 @@ fn all_actions() -> Vec<Action> {
         PgServerA::Close,
     ];
     all.extend(p.into_iter().map(|a| Action::Server(ServerA::Pg(a))));
+    let sh = [
+        ShellA::Run { tab: 1 },
+        ShellA::Start { tab: 1 },
+        ShellA::Stop { tab: 1 },
+        ShellA::Code { tab: 1, code: "x".into() },
+        ShellA::Detach { tab: 1, name: "a".into() },
+        ShellA::Attach { tab: 1, conn: 2, db: "d".into(), name: "a".into(), allow_writes: false, schema: String::new() },
+        ShellA::Help { tab: 1, on: true },
+        ShellA::Queries { tab: 1, on: true },
+        ShellA::Raw { tab: 1, on: true },
+        ShellA::Page { tab: 1, page: 2 },
+        ShellA::Filled { tab: 1, on: true },
+        ShellA::Packages(vec!["zod".into()]),
+    ];
+    all.extend(sh.into_iter().map(Action::Shell));
+    all.extend([WatchA::Start { tab: 1 }, WatchA::Stop { tab: 1 }, WatchA::Clear { tab: 1 }].into_iter().map(Action::Watch));
+    let tools = [ToolsA::Install, ToolsA::Dump { conn: 1, db: "d".into(), coll: None, path: "/tmp/a".into(), gzip: true }, ToolsA::Stop, ToolsA::Close];
+    all.extend(tools.into_iter().map(Action::Tools));
     all
 }
 
@@ -318,6 +336,15 @@ fn variant(a: &Action) -> String {
         },
         Action::Server(ServerA::Pg(s)) => match s {
             PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Unlock | PgServerA::Close => {}
+        },
+        Action::Shell(s) => match s {
+            ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) => {}
+        },
+        Action::Watch(w) => match w {
+            WatchA::Start { .. } | WatchA::Stop { .. } | WatchA::Clear { .. } => {}
+        },
+        Action::Tools(t) => match t {
+            ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Stop | ToolsA::Close => {}
         },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")

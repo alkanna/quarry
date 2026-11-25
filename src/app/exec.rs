@@ -26,6 +26,7 @@ impl App {
                         Dialog::SqlNewUser(f) => Modal::SqlNewUser(f),
                         Dialog::SqlPassword(f) => Modal::SqlPassword(f),
                         Dialog::Typed { title, expect, action } => Modal::Typed { title, expect, typed: String::new(), action },
+                        Dialog::ShellWrite(ops) => Modal::ShellWrite(ops),
                     })
                 }
             }

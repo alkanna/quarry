@@ -111,8 +111,6 @@ impl App {
                 },
                 Msg::Command { tag, res } => self.on_command(tag, res),
                 Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
-                Msg::WatchEvent { req, doc } => self.watch_event(req, doc),
-                Msg::WatchDone { req, res } => self.watch_done(req, res),
                 Msg::IndexInfo { key, res } => match res {
                     Ok(i) => {
                         self.core.idx_info = Some((key.clone(), i));
@@ -228,39 +226,11 @@ impl App {
                         Err(e) => self.fail_view(i, View::Compare, e, "compare"),
                     }
                 }
-                Msg::ToolLog(line) => {
-                    if let Some(t) = &mut self.core.tool {
-                        t.log.push(line);
-                        if t.log.len() > 2000 {
-                            t.log.drain(..500);
-                        }
-                    }
-                }
                 Msg::UpdateChecked(res) => self.on_update_checked(res),
                 Msg::UpdateInstalled(res) => self.on_update_installed(res),
-                Msg::ToolsInstalled(res) => {
-                    // Only a click shows failures; a background update that fails stays quiet, like the app's own.
-                    let manual = std::mem::take(&mut self.core.tools_installing);
-                    match res {
-                        Ok(Some(v)) => self.ok(format!("{} the MongoDB Database Tools {v} in {}", if manual { "Installed" } else { "Updated" }, tools_dir().display())),
-                        Ok(None) => {}
-                        Err(e) if manual => self.err(format!("Could not install the MongoDB Database Tools: {e}")),
-                        Err(_) => {}
-                    }
-                }
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 Msg::LibScan { link, scan } => self.apply_scan(link, scan),
                 Msg::LibFile { job, out } => self.file_done(job, out),
-                Msg::ToolDone(res) => {
-                    if let Some(t) = &mut self.core.tool {
-                        t.cancel = None;
-                        t.done = Some(res.clone());
-                    }
-                    match res {
-                        Ok(m) => self.ok(m),
-                        Err(e) => self.err(e),
-                    }
-                }
                 Msg::Tested { req, res, info } => {
                     // A SQL test already says how long it took; the others get the time measured here.
                     let started = self.core.test_started.take();
@@ -286,54 +256,10 @@ impl App {
                         }
                     }
                 }
-                Msg::ShellLog { req, level, text } => {
-                    if let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) {
-                        t.shell.push_log(level, text);
-                    }
-                }
-                Msg::ShellQuery { req, q } => {
-                    if let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) {
-                        // The panel keeps the latest queries only, a loop can run millions.
-                        let mut q = q;
-                        if q.text.len() > 2000 {
-                            q.text = q.text.chars().take(2000).collect();
-                        }
-                        t.shell.queries.push(q);
-                        // Trimmed in batches so a loop does not shift a thousand entries per query.
-                        if t.shell.queries.len() > 1500 {
-                            let over = t.shell.queries.len() - 1000;
-                            t.shell.queries.drain(..over);
-                        }
-                    }
-                }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
-                Msg::ShellDone { req, res, ms, query_ms } => {
-                    let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
-                    t.rows_replaced();
-                    let sql = t.sql.is_some();
-                    let sh = &mut t.shell;
-                    sh.cancel = None;
-                    sh.started = None;
-                    (sh.ms, sh.query_ms) = (Some(ms), query_ms);
-                    match res {
-                        Ok(out) => {
-                            match out {
-                                db::ShellOut::Value(v) => sh.set_value(v),
-                                db::ShellOut::Docs { rows, single, cut } => sh.set_rows(rows, single, cut),
-                            }
-                            if sql {
-                                sh.hide_absent_id();
-                            }
-                        }
-                        Err(e) => {
-                            sh.value = None;
-                            sh.docs.clear();
-                            (sh.fields, sh.count, sh.cut) = (Vec::new(), None, false);
-                            sh.error = Some(e);
-                        }
-                    }
-                }
+                // Core::handles took the Shell, Watch and database tools answers above.
+                Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => {}
             }
         }
     }

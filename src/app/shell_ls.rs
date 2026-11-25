@@ -315,24 +315,6 @@ impl App {
         out
     }
 
-    /// The key of the current tab's database in the column cache.
-    fn sql_key(&self) -> (u64, String) {
-        let t = &self.core.tabs[self.core.cur];
-        (t.sel.conn, ns_key(&t.sel.db, &self.sel_schema(&t.sel)))
-    }
-
-    /// Asks for the schema of the current SQL tab's database, which autocomplete shares. `again`
-    /// refreshes one already held, as a run does so that a table added since shows up.
-    pub(super) fn sql_columns_ask(&mut self, again: bool) {
-        let key = self.sql_key();
-        if self.core.demo || (self.core.sql_schema_asked.contains(&key) && !again) {
-            return;
-        }
-        let Some((db, space)) = self.sql_target(&self.core.tabs[self.core.cur].sel) else { return };
-        self.core.sql_schema_asked.insert(key.clone());
-        self.core.worker.sql_schema(key.0, db, space);
-    }
-
     /// Sends a request about character `at` of the current script, starting the server first if
     /// needed. Returns the request number, or None when the server is off or cannot start.
     fn js_send(&mut self, ask: db::JsAsk, at: usize, colls: &[String]) -> Option<u64> {
@@ -352,7 +334,7 @@ impl App {
         let att_same = attached.len() == self.js.typed_att.len() && attached.iter().zip(&self.js.typed_att).all(|(a, b)| a.typed.same(b));
         // SQL tabs are typed from the autocomplete schema, which is replaced on every reload, so
         // pointer equality means unchanged.
-        let sql_cols = sql.then(|| self.core.sql_schema.get(&self.sql_key()).cloned()).flatten();
+        let sql_cols = sql.then(|| self.core.sql_schema.get(&self.core.shell_sql_key()).cloned()).flatten();
         let (known, same) = if sql {
             let same = match (&sql_cols, &self.js.typed_sql) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),

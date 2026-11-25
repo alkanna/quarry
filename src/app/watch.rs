@@ -3,48 +3,8 @@
 
 use super::*;
 
-/// Changes kept on screen; the oldest go first.
-const WATCH_CAP: usize = 500;
-
-/// One table row from a change event: when, what, which document, the fields an update touched,
-/// and the document as it is now (absent for deletes).
-pub(super) fn watch_row(mut ev: Document) -> Document {
-    let mut row = Document::new();
-    if let Some(at) = ev.remove("wallTime").or_else(|| ev.remove("clusterTime")) {
-        row.insert("at", at);
-    }
-    row.insert("op", ev.get_str("operationType").unwrap_or_default());
-    if let Some(id) = ev.get_document_mut("documentKey").ok().and_then(|k| k.remove("_id")) {
-        row.insert("_id", id);
-    }
-    if let Ok(u) = ev.get_document("updateDescription") {
-        let mut changed: Vec<Bson> = u.get_document("updatedFields").map(|f| f.keys().map(|k| Bson::String(k.clone())).collect()).unwrap_or_default();
-        changed.extend(u.get_array("removedFields").into_iter().flatten().filter_map(|k| k.as_str()).map(|k| Bson::String(format!("-{k}"))));
-        row.insert("changed", changed);
-    }
-    if let Some(d @ Bson::Document(_)) = ev.remove("fullDocument") {
-        row.insert("doc", d);
-    }
-    row
-}
-
-/// Open and expanded result rows after the first `n` result rows were dropped. Documents rows are untouched.
-fn shift_rows(selected: &mut Option<(bool, usize)>, expanded: &mut BTreeSet<(bool, usize)>, n: usize) {
-    let shift = |(agg, i): (bool, usize)| if !agg { Some((agg, i)) } else { i.checked_sub(n).map(|i| (true, i)) };
-    *selected = selected.and_then(shift);
-    *expanded = expanded.iter().copied().filter_map(shift).collect();
-}
-
-/// The message for a stream that could not start or stopped with an error.
-fn watch_err(e: &str) -> String {
-    if e.contains("only supported on replica sets") || e.contains("40573") {
-        "Change streams need a replica set or a sharded cluster; this server is standalone.".into()
-    } else if db::is_unauthorized(e) {
-        "Watching needs the changeStream and find privileges on this collection (the read role has both).".into()
-    } else {
-        e.to_string()
-    }
-}
+pub(super) use quarry_core::action::watch::watch_row;
+use quarry_core::action::{Action, WatchA};
 
 impl App {
     pub(super) fn watch_view(&mut self, ui: &mut egui::Ui) {
@@ -69,16 +29,15 @@ impl App {
         if let Some(e) = err {
             ui.label(RichText::new(e).color(ALERT()));
         }
+        let tab = self.t().map_or(0, |t| t.uid);
         if start {
-            self.start_watch();
+            self.exec(Action::Watch(WatchA::Start { tab }));
         }
-        let t = self.tm().unwrap();
         if stop {
-            t.watch.stop();
+            self.exec(Action::Watch(WatchA::Stop { tab }));
         }
         if clear {
-            t.watch.rows.clear();
-            self.drop_agg_row();
+            self.exec(Action::Watch(WatchA::Clear { tab }));
         }
         ui.add_space(6.0);
         if self.t().is_some_and(|t| t.watch.rows.is_empty()) {
@@ -87,86 +46,5 @@ impl App {
         } else {
             self.results(ui, true);
         }
-    }
-
-    fn start_watch(&mut self) {
-        if self.core.demo {
-            return self.ok("Offline demo: nothing to watch.");
-        }
-        let Some(target) = self.target() else { return self.warn_offline() };
-        self.core.req += 1;
-        let req = self.core.req;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let w = &mut self.tm().unwrap().watch;
-        w.req = req;
-        w.cancel = Some(tx);
-        w.err = None;
-        self.core.worker.watch(req, target, rx);
-    }
-
-    /// Stops every stream whose view is not on screen, so a hidden Watch never keeps reading.
-    pub(super) fn stop_hidden_watches(&mut self) {
-        let cur = self.core.cur;
-        for (i, t) in self.core.tabs.iter_mut().enumerate() {
-            if t.watch.running() && (i != cur || t.view != View::Watch) {
-                t.watch.stop();
-            }
-        }
-    }
-
-    pub(super) fn watch_event(&mut self, req: u64, ev: Document) {
-        let cur = self.core.cur;
-        let Some((i, t)) = self.core.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
-        // Fails only for keys BSON cannot hold, which a server never sends.
-        if let Ok(r) = db::Row::from_doc(&watch_row(ev)) {
-            t.watch.rows.push(r);
-        }
-        let n = t.watch.rows.len().saturating_sub(WATCH_CAP);
-        if n == 0 {
-            return;
-        }
-        t.watch.rows.drain(..n);
-        // The open rows move up with their change; one that fell off the top closes.
-        let was_open = t.selected.is_some();
-        shift_rows(&mut t.selected, &mut t.expanded, n);
-        if was_open && t.selected.is_none() && i == cur {
-            self.reset_doc_state();
-        }
-    }
-
-    pub(super) fn watch_done(&mut self, req: u64, res: db::Res<()>) {
-        let Some(t) = self.core.tabs.iter_mut().find(|t| t.watch.req == req) else { return };
-        t.watch.stop();
-        t.watch.err = res.err().map(|e| watch_err(&e));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn change_events_become_rows() {
-        let at = mongodb::bson::DateTime::from_millis(1_700_000_000_000);
-        let ev = doc! { "operationType": "update", "wallTime": at, "documentKey": { "_id": 7 }, "updateDescription": { "updatedFields": { "status": "paid", "total": 5 }, "removedFields": ["note"] }, "fullDocument": { "_id": 7, "status": "paid" } };
-        assert_eq!(watch_row(ev), doc! { "at": at, "op": "update", "_id": 7, "changed": ["status", "total", "-note"], "doc": { "_id": 7, "status": "paid" } });
-        assert_eq!(watch_row(doc! { "operationType": "delete", "documentKey": { "_id": 7 } }), doc! { "op": "delete", "_id": 7 });
-    }
-
-    #[test]
-    fn open_rows_follow_their_change_when_old_ones_drop() {
-        let (mut sel, mut exp) = (Some((true, 4)), BTreeSet::from([(true, 1), (true, 5), (false, 3)]));
-        shift_rows(&mut sel, &mut exp, 2);
-        assert_eq!(sel, Some((true, 2)));
-        assert_eq!(exp, BTreeSet::from([(true, 3), (false, 3)]));
-        let mut sel = Some((true, 1));
-        shift_rows(&mut sel, &mut BTreeSet::new(), 2);
-        assert_eq!(sel, None);
-    }
-
-    #[test]
-    fn stream_errors_say_what_is_missing() {
-        assert!(watch_err("Command failed: Error code 40573 (Location40573): The $changeStream stage is only supported on replica sets").contains("standalone"));
-        assert!(watch_err("Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command").contains("changeStream"));
     }
 }

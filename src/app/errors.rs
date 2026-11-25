@@ -187,10 +187,6 @@ impl App {
         self.core.warn_offline()
     }
 
-    pub(super) fn warn_settings(&mut self, s: impl Into<String>) {
-        self.core.warn_settings(s)
-    }
-
     /// A failure of work the user did not start, like listing a database's collections on
     /// connect: it goes to the list with its own connection and place, without a toast.
     pub(super) fn err_quiet(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String) {
