@@ -34,6 +34,10 @@ pub mod tools;
 pub mod watch;
 pub mod conn;
 pub mod side;
+pub mod update;
+pub mod toasts;
+pub mod prefs;
+pub mod library;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -44,6 +48,8 @@ mod sql_server_tests;
 mod shell_tests;
 #[cfg(test)]
 mod conn_tests;
+#[cfg(test)]
+mod prefs_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -54,6 +60,10 @@ pub use tools::ToolsA;
 pub use watch::WatchA;
 pub use conn::{ConnA, GroupA, RailDrop};
 pub use side::SideA;
+pub use update::{UpdBtn, UpdateA};
+pub use toasts::AppA;
+pub use prefs::{Pref, PrefVals, PrefsA};
+pub use library::LibA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -65,6 +75,10 @@ pub enum Action {
     Tools(ToolsA),
     Conn(ConnA),
     Side(SideA),
+    Update(UpdateA),
+    App(AppA),
+    Prefs(PrefsA),
+    Library(LibA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -96,6 +110,12 @@ pub enum UiFx {
     Connected { conn: u64, sql: bool },
     /// Closes the tabs of a dropped or renamed database or collection, every collection of `db` when `coll` is None.
     CloseTabs { conn: u64, db: String, coll: Option<String> },
+    /// Restart into the installed update, once the app's own dialogs hold nothing.
+    Restart,
+    /// Open a library script on this connection (`App::open_script_on`), once its connection is ready.
+    OpenScript { r: crate::library::ScriptRef, how: crate::state::library::open::How, conn: u64 },
+    /// Open a linked file just read (`App::open_resolved`), with the time and length it had.
+    OpenResolved { r: crate::library::ScriptRef, how: crate::state::library::open::How, script: Box<crate::library::Script>, meta: Option<(std::time::SystemTime, u64)> },
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -113,6 +133,11 @@ pub enum Dialog {
     ShellWrite(Vec<String>),
     /// MongoDB's New database or New collection dialog.
     MongoNewColl(Box<crate::state::mongo_create::MongoNewColl>),
+    Settings,
+    WhatsNew(Box<crate::state::whats_new::WhatsNew>),
+    ErrorDetails(Box<crate::state::errors::ErrEntry>),
+    /// A text window, such as a linked file against the tab that edits it.
+    Text { title: String, body: String, code: bool },
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -174,6 +199,10 @@ impl Core {
             Action::Tools(a) => self.tools(a),
             Action::Conn(a) => self.conn_act(a),
             Action::Side(a) => self.side(a),
+            Action::Update(a) => self.update(a),
+            Action::App(a) => self.app(a),
+            Action::Prefs(a) => self.prefs_act(a),
+            Action::Library(a) => self.library_act(a),
         }
     }
 
@@ -228,6 +257,9 @@ impl Core {
             Msg::Command { tag, .. } => matches!(tag.as_str(), "users" | "users-self" | "roles") || tag.starts_with("server:"),
             Msg::SqlServer { .. } | Msg::PgServer { .. } => true,
             Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => true,
+            Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) => true,
+            Msg::LibScan { link, .. } => *link != 0,
+            Msg::LibFile { .. } => true,
             _ => false,
         }
     }
@@ -258,6 +290,10 @@ impl Core {
             Msg::ToolLog(line) => self.tool_log(line),
             Msg::ToolDone(res) => self.tool_done(res),
             Msg::ToolsInstalled(res) => self.tools_installed(res),
+            Msg::UpdateChecked(res) => self.on_update_checked(res),
+            Msg::UpdateInstalled(res) => self.on_update_installed(res),
+            Msg::LibScan { link, scan } => self.apply_scan(link, scan),
+            Msg::LibFile { job, out } => self.file_done(job, out),
             _ => {}
         }
     }

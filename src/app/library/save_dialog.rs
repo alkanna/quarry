@@ -165,7 +165,7 @@ impl App {
         if self.core.demo {
             return self.warn("The demo does not write files.");
         }
-        if self.link_missing(link) {
+        if self.core.link_missing(link) {
             return self.warn(super::panel::MISSING);
         }
         let ext = kind_ext(&f.kind);
@@ -183,7 +183,7 @@ impl App {
         let uid = self.t().map_or(0, |t| t.uid);
         let job = Job::SaveNew { uid, link, rel: rel.clone(), view: f.view, body: f.body.clone(), place, password };
         // The old file is read, the new one written and listed on the worker; the tab is bound when it is back.
-        self.run_job(job, move || {
+        self.core.run_job(job, move || {
             let was = std::fs::read(&path).ok();
             let old = was.as_deref().map(|b| String::from_utf8_lossy(b).into_owned());
             let bytes = match file_bytes(&kind, &body, &sort, &project, target, old.as_deref()) {
@@ -327,7 +327,7 @@ impl App {
             .links
             .iter()
             // A SQL Content filter has no file form, so it is only kept in Quarry.
-            .filter(|l| f.kind != "where" && engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.link_missing(l.id))
+            .filter(|l| f.kind != "where" && engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.core.link_missing(l.id))
             .map(|l| (l.id, link_name(l.id), self.core.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
             .collect();
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {

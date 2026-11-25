@@ -28,6 +28,10 @@ impl App {
                         Dialog::Typed { title, expect, action } => Modal::Typed { title, expect, typed: String::new(), action },
                         Dialog::ShellWrite(ops) => Modal::ShellWrite(ops),
                         Dialog::MongoNewColl(f) => Modal::MongoNewColl(f),
+                        Dialog::Settings => Modal::Settings,
+                        Dialog::WhatsNew(w) => Modal::WhatsNew(w),
+                        Dialog::ErrorDetails(e) => Modal::ErrorDetails(e),
+                        Dialog::Text { title, body, code } => Modal::Text { title, body, code },
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {
@@ -48,6 +52,9 @@ impl App {
                         }
                     }
                 }
+                UiFx::Restart => self.restart_now(),
+                UiFx::OpenScript { r, how, conn } => self.open_script_on(&r, how, conn),
+                UiFx::OpenResolved { r, how, script, meta } => self.open_resolved(&r, how, *script, Some(meta)),
             }
         }
     }

@@ -191,6 +191,8 @@ pub struct Core {
     pub started: std::time::Instant,
     /// What the last actions left for the UI to do, drained by the app.
     pub ui_fx: Vec<crate::action::UiFx>,
+    /// Preferences changed since ui.json was last written; `flush_prefs` writes them.
+    pub prefs_dirty: bool,
 }
 
 impl Core {
@@ -299,6 +301,7 @@ impl Core {
             upd_popup: false,
             started: std::time::Instant::now(),
             ui_fx: Vec::new(),
+            prefs_dirty: false,
         }
     }
 

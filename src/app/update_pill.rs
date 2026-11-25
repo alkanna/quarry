@@ -1,7 +1,8 @@
 //! The header's update pill and its popover.
 
 use super::*;
-use crate::update::{Available, Kind, Release};
+use crate::update::Kind;
+use quarry_core::action::{Action, UpdateA};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
@@ -15,11 +16,8 @@ enum Look {
 
 enum PopAct {
     Btn(UpdBtn),
-    Notes(Release),
-}
-
-fn notes_of(a: &Available) -> Release {
-    Release { version: a.version.clone(), date: String::new(), sections: a.notes.clone() }
+    /// The notes of the release on offer.
+    Notes,
 }
 
 impl App {
@@ -109,7 +107,7 @@ impl App {
         });
         match act {
             Some(PopAct::Btn(b)) => self.upd_act(b),
-            Some(PopAct::Notes(r)) => self.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(vec![r], "")))),
+            Some(PopAct::Notes) => self.exec(Action::Update(UpdateA::OfferedNotes)),
             None => {}
         }
     }
@@ -206,9 +204,9 @@ impl App {
         ui.separator();
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            if let Some(a) = info.filter(|a| !a.notes.is_empty()) {
+            if info.is_some_and(|a| !a.notes.is_empty()) {
                 if quiet(ui, "Release notes").clicked() {
-                    act = Some(PopAct::Notes(notes_of(a)));
+                    act = Some(PopAct::Notes);
                 }
             }
             if let Upd::Failed { msg, .. } = &self.core.upd {

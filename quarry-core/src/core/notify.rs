@@ -259,9 +259,17 @@ impl Core {
         }
     }
 
+    /// Marks ui.json to be written; `flush_prefs` writes it once per frame, however many settings changed in it.
     pub fn save_prefs(&mut self) {
-        let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
-        self.write_config("ui.json", b);
+        self.prefs_dirty = true;
+    }
+
+    /// Writes ui.json when something marked it since the last flush.
+    pub fn flush_prefs(&mut self) {
+        if std::mem::take(&mut self.prefs_dirty) {
+            let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
+            self.write_config("ui.json", b);
+        }
     }
 
     /// A failure of work the user did not start, like listing a database's collections on

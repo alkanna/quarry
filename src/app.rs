@@ -74,7 +74,7 @@ mod update_pill;
 mod watch;
 mod whats_new;
 use column_menu::*;
-use auto_update::{HELD, UpdBtn};
+use auto_update::{HELD, UpdBtn, UpdBtnUi};
 use whats_new::WhatsNew;
 use errors::*;
 use config::*;
@@ -387,7 +387,6 @@ impl App {
                 app.core.tabs.push(t);
             }
             app.core.cur = app.core.prefs.cur_tab.min(app.core.tabs.len().saturating_sub(1));
-            let current = env!("CARGO_PKG_VERSION");
             if let Some(id) = app.core.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
                 app.core.active = Some(id);
             }
@@ -404,18 +403,9 @@ impl App {
                 app.connect(id);
             }
             app.agents_start();
-            if app.core.prefs.last_version != current {
-                // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
-                // earlier lack last_version, so updating from those shows them.
-                if ui_json.is_some() {
-                    let notes = crate::update::changelog(&app.core.prefs.last_version, current);
-                    if !notes.is_empty() {
-                        app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.core.prefs.last_version))));
-                    }
-                }
-                app.core.prefs.last_version = current.into();
-                app.save_prefs();
-            }
+            // A fresh install has no ui.json, so it skips the notes. Run now, so the broken-settings note below still wins.
+            app.core.whats_new_seen(ui_json.is_some());
+            app.run_fx();
             let broken: Vec<String> = [broken_conns, broken_prefs, broken_groups, broken_library].into_iter().flatten().collect();
             if !broken.is_empty() {
                 app.modal = Some(Modal::Text { title: "Some settings could not be loaded".into(), body: broken.join("\n\n"), code: false });
@@ -558,6 +548,7 @@ impl eframe::App for App {
         if self.core.prefs.always_writable {
             self.core.conns.iter_mut().for_each(|c| c.writable = true);
         }
+        self.core.flush_prefs();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -629,6 +620,8 @@ impl eframe::App for App {
         self.agents_approval(&ctx);
         self.screenshot(&ctx);
         self.vim_end(&ctx);
+        // Every setting changed this frame goes to ui.json in one write.
+        self.core.flush_prefs();
     }
 }
 fn human_bytes(n: usize) -> String {

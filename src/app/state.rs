@@ -70,14 +70,6 @@ impl App {
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
     /// Work a restart would lose. Settings does not count, since Restart sits in it; every other dialog may hold typed input.
     pub(super) fn busy_work(&self) -> bool {
-        self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Settings))
-            || !self.core.drafts.is_empty()
-            || !self.core.saving.is_empty()
-            || self.core.json_edit.is_some()
-            || self.core.insert.is_some()
-            || self.core.inline.is_some()
-            || self.core.new_field.is_some()
-            || self.core.tool.as_ref().is_some_and(|t| t.done.is_none())
-            || self.core.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
+        self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Settings)) || self.core.work_held()
     }
 }

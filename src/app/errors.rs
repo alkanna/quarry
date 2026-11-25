@@ -3,12 +3,11 @@
 
 use super::*;
 use db::{ErrKind, Fix};
-use quarry_core::core::notify::{fix_label, raised};
+use quarry_core::action::{Action, AppA, LibA, PrefsA};
+use quarry_core::core::notify::fix_label;
 use std::time::Instant;
 pub(crate) use quarry_core::state::errors::*;
 
-const OK_S: u64 = 8;
-const WARN_S: u64 = 6;
 const TOAST_W: f32 = 380.0;
 const PANEL_W: f32 = 620.0;
 
@@ -200,9 +199,7 @@ impl App {
 
     /// A note with buttons that fades like a success, such as a script waiting for its connection with Cancel.
     pub(super) fn toast_acts(&mut self, s: String, acts: Vec<(String, Act)>) {
-        self.core.err_seq += 1;
-        self.core.toasts.retain(|t| !(t.tone == Tone::Ok && t.title == s));
-        self.core.toasts.push(Toast { id: self.core.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+        self.core.toast_acts(s, acts)
     }
 
     /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
@@ -232,9 +229,7 @@ impl App {
                 self.explain();
             }
             Act::Fix(Fix::RaiseLimit) => {
-                self.core.prefs.timeout_ms = raised(self.core.prefs.timeout_ms);
-                self.save_prefs();
-                self.ok(format!("Time limit raised to {} s. Change it in Settings.", self.core.prefs.timeout_ms / 1000));
+                self.exec(Action::App(AppA::RaiseLimit));
                 if let Some((i, v)) = tab {
                     self.retry_view(i, v);
                 }
@@ -270,10 +265,10 @@ impl App {
             Act::EditGroup(g) => self.edit_group(g),
             Act::Unlock(c) => self.modal = Some(Modal::Unlock(c, None)),
             Act::Connect(c) => self.connect_active(c),
-            Act::Settings => self.open_tool_settings(),
+            Act::Settings => self.exec(Action::Prefs(PrefsA::Open(settings::SettingsCat::Tools))),
             Act::Details => {
                 if let Some(e) = e {
-                    self.modal = Some(Modal::ErrorDetails(Box::new(e.clone())));
+                    self.exec(Action::App(AppA::Details(e.id)));
                 }
             }
             Act::Copy => {
@@ -281,7 +276,7 @@ impl App {
                     ctx.copy_text(details_text(e));
                 }
             }
-            Act::CancelOpen => self.core.lib_ui.pending = None,
+            Act::CancelOpen => self.exec(Action::Library(LibA::CancelPending)),
             Act::ShowDup => {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };
@@ -333,19 +328,11 @@ impl App {
 
     /// The toasts, newest at the bottom, above the status bar.
     pub(super) fn toasts(&mut self, ctx: &egui::Context) {
-        let keep = self.core.prefs.keep_toasts;
-        // An Undo still ends on its timer: one left up for hours would revert an edit long forgotten.
-        let fades = |t: &Toast| t.tone != Tone::Err && (!keep || t.acts.iter().any(|(_, a)| matches!(a, Act::Undo(_) | Act::Restore(_))));
-        self.core.toasts.retain(|t| !fades(t) || t.at.elapsed().as_secs() < if t.tone == Tone::Ok { OK_S } else { WARN_S });
-        // Only the latest few fit; older errors stay in the status bar list.
-        while self.core.toasts.len() > 4 {
-            let i = self.core.toasts.iter().position(|t| t.tone != Tone::Err).unwrap_or(0);
-            self.core.toasts.remove(i);
-        }
+        let fading = self.core.toasts_tick();
         if self.core.toasts.is_empty() {
             return;
         }
-        if self.core.toasts.iter().any(fades) {
+        if fading {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         let mut close = None;
@@ -413,7 +400,7 @@ impl App {
             self.run_act(ctx, act, e.as_ref(), None);
         }
         if let Some(id) = close {
-            self.core.toasts.retain(|t| t.id != id);
+            self.exec(Action::App(AppA::Dismiss(id)));
         }
     }
 
@@ -614,7 +601,7 @@ impl App {
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Errors of this session"));
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Errors of this session");
         if r.clicked() {
-            self.core.errors_unseen = 0;
+            self.exec(Action::App(AppA::ErrorsSeen));
         }
         let mut pick = None;
         let mut clear = false;
@@ -654,11 +641,11 @@ impl App {
             });
         });
         if let Some(k) = pick {
-            self.modal = Some(Modal::ErrorDetails(Box::new(self.core.errors[k].clone())));
+            let id = self.core.errors[k].id;
+            self.exec(Action::App(AppA::Details(id)));
         }
         if clear {
-            self.core.errors.clear();
-            self.core.errors_unseen = 0;
+            self.exec(Action::App(AppA::ClearErrors));
         }
         if log {
             self.core.log.open = true;

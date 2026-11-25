@@ -1,6 +1,6 @@
 //! State behind src/app/settings.rs, which draws it.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SettingsCat {
     #[default]
     Appearance,

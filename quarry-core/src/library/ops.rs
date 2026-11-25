@@ -5,7 +5,7 @@ use super::tree::{Node, live_parent};
 use super::*;
 
 /// Where a moved item lands: the top level, inside a folder (at its end), or beside a row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DropAt {
     Root,
     Into(u64),

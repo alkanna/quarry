@@ -7,7 +7,7 @@
 //! except while a folder opens or closes, when `tree::lay_out` places them.
 
 use super::*;
-use crate::app::restore::Restore;
+use quarry_core::action::{Action, LibA};
 use crate::library::ops::{self, DropAt};
 use crate::library::tree::{self, Node, Row, Scans};
 use crate::library::{Library, ScriptRef};
@@ -88,7 +88,7 @@ fn dir_of(n: &Node) -> Option<(u64, PathBuf)> {
 }
 
 /// Why nothing goes into a linked folder whose scan found it gone.
-pub(in crate::app) const MISSING: &str = "That folder is not there. Reload it once it is back, or link the folder where it moved.";
+pub(in crate::app) use quarry_core::action::library::MISSING;
 
 /// What dropping `item` on `target` at `pos` would do, or why it cannot be done. Each link keeps its files to itself: a file
 /// moves between the folders of its own link, and leaves it only as a copy in the library.
@@ -514,10 +514,11 @@ impl App {
         let mut st = std::mem::take(&mut self.core.lib_ui.panel);
         let mut acts = Vec::new();
         self.library_body(ui, &mut st, &mut acts);
-        for a in acts {
-            self.apply_lib_act(ui.ctx(), &mut st, a);
-        }
+        // Back in Core before the actions run, since they select and open rows of it.
         self.core.lib_ui.panel = st;
+        for a in acts {
+            self.apply_lib_act(ui.ctx(), a);
+        }
     }
 
     fn library_body(&mut self, ui: &mut egui::Ui, st: &mut PanelUi, acts: &mut Vec<Act>) {
@@ -798,7 +799,7 @@ impl App {
         let at = st.sel.as_ref().and_then(|n| rows.iter().position(|r| r.node == *n));
         let kind = |n: &Node| match n {
             Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.kind.clone()).unwrap_or_default(),
-            Node::File { link, rel } => self.file_kind(*link, rel),
+            Node::File { link, rel } => self.core.file_kind(*link, rel),
             _ => String::new(),
         };
         let go = |st: &mut PanelUi, i: usize| {
@@ -926,7 +927,10 @@ impl App {
         let _ = st;
     }
 
-    fn apply_lib_act(&mut self, ctx: &egui::Context, st: &mut PanelUi, act: Act) {
+    /// Runs one of the panel's acts: the ones that change the library or the disk go through `LibA`, the rest are the
+    /// panel's own (folding, starting a rename, the clipboard, the file manager, dialogs).
+    fn apply_lib_act(&mut self, ctx: &egui::Context, act: Act) {
+        let lib = |a: LibA| Action::Library(a);
         match act {
             Act::Open(n, how) => {
                 if let Some(r) = n.script_ref() {
@@ -940,6 +944,7 @@ impl App {
             }
             Act::SaveCurrent => self.save_script(),
             Act::Toggle(n) => {
+                let st = &mut self.core.lib_ui.panel;
                 let open = !st.open.remove(&n);
                 if open {
                     st.open.insert(n.clone());
@@ -956,138 +961,36 @@ impl App {
                     Node::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()),
                 };
                 if let Some(name) = name {
+                    let st = &mut self.core.lib_ui.panel;
                     st.sel = Some(n.clone());
                     st.rename = Some((n, name, true));
                 }
             }
-            Act::Commit(n, text) => match &n {
-                Node::Link(id) => {
-                    let name = text.trim().to_string();
-                    if !name.is_empty() && let Some(l) = self.core.library.links.iter_mut().find(|l| l.id == *id) {
-                        l.name = name;
-                        self.save_library();
-                    }
-                }
-                Node::Dir { link, rel } | Node::File { link, rel } => {
-                    let is_dir = matches!(n, Node::Dir { .. });
-                    if let Some(new) = self.rename_linked(*link, rel, is_dir, &text) {
-                        let to = if is_dir { Node::Dir { link: *link, rel: new } } else { Node::File { link: *link, rel: new } };
-                        if st.open.remove(&n) {
-                            st.open.insert(to.clone());
-                        }
-                        st.sel = Some(to);
-                    }
-                }
-                _ => {
-                    if ops::rename(&mut self.core.library, &n, &text) {
-                        self.save_library();
-                    }
-                }
-            },
-            Act::Duplicate(id) => {
-                if let Some(new) = ops::duplicate(&mut self.core.library, id, crate::library::now_secs()) {
-                    self.save_library();
-                    st.sel = Some(Node::Script(new));
-                }
-            }
-            Act::Move(n, at) => match ops::move_to(&mut self.core.library, &n, at.clone()) {
-                Ok(()) => {
-                    if let DropAt::Into(f) = at {
-                        st.open.insert(Node::Folder(f));
-                    }
-                    self.save_library();
-                }
-                Err(e) => self.warn(e),
-            },
-            Act::MoveToNew(n) => {
-                let id = ops::new_folder(&mut self.core.library, None, "");
-                if ops::move_to(&mut self.core.library, &n, DropAt::Into(id)).is_ok() {
-                    st.open.insert(Node::Folder(id));
-                    st.query.clear();
-                    st.sel = Some(Node::Folder(id));
-                    let name = self.core.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
-                    st.rename = Some((Node::Folder(id), name, true));
-                }
-                self.save_library();
-            }
+            Act::Commit(node, text) => self.exec(lib(LibA::Commit { node, text })),
+            Act::Duplicate(id) => self.exec(lib(LibA::Duplicate(id))),
+            Act::Move(node, at) => self.exec(lib(LibA::Move { node, at })),
+            Act::MoveToNew(n) => self.exec(lib(LibA::MoveToNew(n))),
             Act::Copy(id) => {
                 if let Some(s) = self.core.library.scripts.iter().find(|s| s.id == id) {
                     ctx.copy_text(s.body.clone());
                     self.ok("Script text copied.");
                 }
             }
-            Act::Delete(Node::File { link, rel }) => {
-                if self.delete_linked_file(link, &rel) {
-                    st.sel = None;
-                }
-            }
-            Act::Delete(n) => {
-                let label = match &n {
-                    Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| format!("\"{}\"", s.name)),
-                    Node::Folder(id) => self.core.library.folders.iter().find(|f| f.id == *id).map(|f| format!("folder \"{}\"", f.name)),
-                    _ => None,
-                };
-                if let Some((folders, scripts)) = ops::delete(&mut self.core.library, &n) {
-                    self.forget_scripts(&scripts.iter().map(|s| s.id).collect::<Vec<_>>());
-                    self.save_library();
-                    let msg = match (&n, scripts.len()) {
-                        (Node::Folder(_), 0) => format!("Deleted {}.", label.unwrap_or_default()),
-                        (Node::Folder(_), k) => format!("Deleted {} and {k} script{}.", label.unwrap_or_default(), if k == 1 { "" } else { "s" }),
-                        _ => format!("Deleted {}.", label.unwrap_or_default()),
-                    };
-                    if st.sel.as_ref().is_some_and(|s| *s == n || matches!(s, Node::Script(id) if scripts.iter().any(|x| x.id == *id)) || matches!(s, Node::Folder(id) if folders.iter().any(|f| f.id == *id))) {
-                        st.sel = None;
-                    }
-                    self.toast_restore(msg, Restore::Saved { scripts, folders, written: None });
-                }
-            }
-            Act::NewFolder(parent) => {
-                let id = ops::new_folder(&mut self.core.library, parent, "");
-                if let Some(p) = parent {
-                    st.open.insert(Node::Folder(p));
-                }
-                st.query.clear();
-                self.save_library();
-                let name = self.core.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
-                st.sel = Some(Node::Folder(id));
-                st.rename = Some((Node::Folder(id), name, true));
-            }
+            Act::Delete(n) => self.exec(lib(LibA::Delete(n))),
+            Act::NewFolder(parent) => self.exec(lib(LibA::NewFolder(parent))),
             Act::FoldAll => {
+                let st = &mut self.core.lib_ui.panel;
                 for n in st.open.drain() {
                     fold::start(ctx, fold_id(&n), false);
                     st.folding.insert(n);
                 }
             }
-            Act::Scope(all) => {
-                self.core.prefs.lib_scope_all = all;
-                self.save_prefs();
-            }
+            Act::Scope(all) => self.exec(lib(LibA::Scope(all))),
             Act::Link => self.open_link_dialog(None),
             Act::Refuse(why) => self.warn(why),
-            Act::NewScript(link, dir) => {
-                if let Some(rel) = self.new_linked_script(link, &dir) {
-                    self.show_linked(st, link, &dir);
-                    let node = Node::File { link, rel: rel.clone() };
-                    let stem = rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    st.query.clear();
-                    st.sel = Some(node.clone());
-                    st.rename = Some((node, stem, true));
-                }
-            }
-            Act::NewDir(link, dir) => {
-                if let Some(rel) = self.new_linked_dir(link, &dir) {
-                    self.show_linked(st, link, &dir);
-                    let node = Node::Dir { link, rel: rel.clone() };
-                    let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    st.query.clear();
-                    st.sel = Some(node.clone());
-                    st.rename = Some((node, name, true));
-                }
-            }
-            Act::Reload(link) => {
-                self.rescan_link(link);
-                self.ok("Reading the folder again.");
-            }
+            Act::NewScript(link, dir) => self.exec(lib(LibA::NewScript { link, dir })),
+            Act::NewDir(link, dir) => self.exec(lib(LibA::NewDir { link, dir })),
+            Act::Reload(link) => self.exec(lib(LibA::Reload(link))),
             Act::Reveal(path, select) => {
                 if let Err(e) = super::linked::reveal(&path, select) {
                     self.err(format!("Could not open {}: {e}", path.display()));
@@ -1107,40 +1010,13 @@ impl App {
             },
             Act::UseOn(link) => self.open_link_dialog(Some(link)),
             Act::Locate(link) => self.open_locate_dialog(link),
-            Act::Unlink(link) => {
-                self.unlink(link);
-                st.open.retain(|n| !matches!(n, Node::Link(l) | Node::Dir { link: l, .. } | Node::File { link: l, .. } if *l == link));
-                if st.sel.as_ref().is_some_and(|n| matches!(n, Node::Link(l) | Node::Dir { link: l, .. } | Node::File { link: l, .. } if *l == link)) {
-                    st.sel = None;
-                }
-            }
+            Act::Unlink(link) => self.exec(lib(LibA::Unlink(link))),
             Act::Drop(item, plan) => match (item, plan) {
-                (Node::Script(id), Plan::Into { link, dir }) => {
-                    if let Some(rel) = self.script_to_link(id, link, &dir) {
-                        self.show_linked(st, link, &dir);
-                        st.sel = Some(Node::File { link, rel });
-                    }
-                }
-                (Node::File { link, rel }, Plan::Into { dir, .. }) => {
-                    if let Some(new) = self.move_linked_file(link, &rel, &dir) {
-                        self.show_linked(st, link, &dir);
-                        st.sel = Some(Node::File { link, rel: new });
-                    }
-                }
-                // The copy is selected, and its folder opened, once the file is read.
-                (Node::File { link, rel }, Plan::Out(at)) => self.file_to_quarry(link, &rel, at),
+                (Node::Script(id), Plan::Into { link, dir }) => self.exec(lib(LibA::ScriptToLink { id, link, dir })),
+                (Node::File { link, rel }, Plan::Into { dir, .. }) => self.exec(lib(LibA::MoveFile { link, rel, dir })),
+                (Node::File { link, rel }, Plan::Out(at)) => self.exec(lib(LibA::FileToQuarry { link, rel, at })),
                 _ => {}
             },
-        }
-    }
-
-    /// Opens a linked folder and the folders above `dir` in it, so a file just made or moved there shows.
-    fn show_linked(&mut self, st: &mut PanelUi, link: u64, dir: &Path) {
-        st.open.insert(Node::Link(link));
-        let mut at = PathBuf::new();
-        for c in dir.components() {
-            at.push(c);
-            st.open.insert(Node::Dir { link, rel: at.clone() });
         }
     }
 

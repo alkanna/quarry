@@ -81,6 +81,7 @@ impl App {
                 Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } | Msg::PgRoles { .. } => {}
                 Msg::SqlServer { .. } | Msg::PgServer { .. } => {}
                 Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => {}
+                Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) | Msg::LibFile { .. } => {}
                 Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
@@ -210,11 +211,13 @@ impl App {
                         Err(e) => self.fail_view(i, View::Compare, e, "compare"),
                     }
                 }
-                Msg::UpdateChecked(res) => self.on_update_checked(res),
-                Msg::UpdateInstalled(res) => self.on_update_installed(res),
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
-                Msg::LibScan { link, scan } => self.apply_scan(link, scan),
-                Msg::LibFile { job, out } => self.file_done(job, out),
+                // Link 0 is the Link a folder dialog's preview, which fills a form the app's Modal holds.
+                Msg::LibScan { scan, .. } => {
+                    if let Some(Modal::LinkFolder(f)) = &mut self.modal {
+                        f.got_preview(scan);
+                    }
+                }
                 Msg::Schema { req, res } => {
                     let Some(i) = self.core.tabs.iter().position(|t| t.schema.req == req) else { continue };
                     let t = &mut self.core.tabs[i];

@@ -8,7 +8,7 @@ use crate::db::sql::Engine;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// One thing a row stands for. Linked folders are rows too, so a drag, a menu or a key can name them.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Node {
     Link(u64),
     Dir { link: u64, rel: PathBuf },

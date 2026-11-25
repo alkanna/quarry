@@ -155,7 +155,7 @@ impl SideMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default, Debug)]
 pub enum Appearance {
     #[default]
     System,

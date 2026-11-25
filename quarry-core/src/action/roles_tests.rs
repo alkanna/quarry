@@ -313,6 +313,35 @@ fn all_actions() -> Vec<Action> {
     let tools = [ToolsA::Install, ToolsA::Dump { conn: 1, db: "d".into(), coll: None, path: "/tmp/a".into(), gzip: true }, ToolsA::Stop, ToolsA::Close];
     all.extend(tools.into_iter().map(Action::Tools));
     all.extend(super::conn_tests::conn_actions());
+    use crate::library::ops::DropAt;
+    use crate::library::tree::Node;
+    use crate::state::settings::SettingsCat;
+    all.extend([UpdateA::CheckNow, UpdateA::Press(UpdBtn::Restart), UpdateA::ShowNotes, UpdateA::OfferedNotes].map(Action::Update));
+    all.extend([AppA::Dismiss(1), AppA::Details(1), AppA::ErrorsSeen, AppA::ClearErrors, AppA::RaiseLimit].map(Action::App));
+    all.extend([PrefsA::Open(SettingsCat::Tools), PrefsA::Cat(SettingsCat::Reading), PrefsA::Zoom(1.25)].map(Action::Prefs));
+    all.extend(Pref::samples().into_iter().map(|p| Action::Prefs(PrefsA::Set(p))));
+    let rel = || std::path::PathBuf::from("reports/a.sql");
+    let l = [
+        LibA::CancelPending,
+        LibA::ConflictReload { tab: 1 },
+        LibA::ConflictKeep { tab: 1 },
+        LibA::ConflictCompare { tab: 1 },
+        LibA::Commit { node: Node::File { link: 1, rel: rel() }, text: "b".into() },
+        LibA::Duplicate(1),
+        LibA::Move { node: Node::Script(1), at: DropAt::Before(Node::Folder(2)) },
+        LibA::MoveToNew(Node::Script(1)),
+        LibA::Delete(Node::Folder(1)),
+        LibA::NewFolder(Some(1)),
+        LibA::Scope(true),
+        LibA::NewScript { link: 1, dir: "reports".into() },
+        LibA::NewDir { link: 1, dir: "".into() },
+        LibA::Reload(1),
+        LibA::Unlink(1),
+        LibA::ScriptToLink { id: 1, link: 1, dir: "".into() },
+        LibA::MoveFile { link: 1, rel: rel(), dir: "old".into() },
+        LibA::FileToQuarry { link: 1, rel: rel(), at: DropAt::Into(3) },
+    ];
+    all.extend(l.into_iter().map(Action::Library));
     all
 }
 
@@ -355,6 +384,19 @@ fn variant(a: &Action) -> String {
         },
         Action::Side(s) => match s {
             SideA::ToggleDb { .. } | SideA::OpenDb { .. } | SideA::Fold { .. } | SideA::Revealed | SideA::Asked { .. } | SideA::Schema { .. } | SideA::MongoNewDb { .. } | SideA::MongoNewColl { .. } | SideA::MongoCreate { .. } | SideA::MongoCreateView { .. } | SideA::Rename { .. } | SideA::Duplicate { .. } | SideA::DropDb { .. } | SideA::DropColl { .. } | SideA::Stats { .. } | SideA::ViewDef { .. } => {}
+        },
+        Action::Update(u) => match u {
+            UpdateA::CheckNow | UpdateA::Press(_) | UpdateA::ShowNotes | UpdateA::OfferedNotes => {}
+        },
+        Action::App(t) => match t {
+            AppA::Dismiss(_) | AppA::Details(_) | AppA::ErrorsSeen | AppA::ClearErrors | AppA::RaiseLimit => {}
+        },
+        // `Pref::samples` lists each setting, from the same macro that declares them.
+        Action::Prefs(p) => match p {
+            PrefsA::Open(_) | PrefsA::Cat(_) | PrefsA::Set(_) | PrefsA::Zoom(_) => {}
+        },
+        Action::Library(l) => match l {
+            LibA::CancelPending | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } => {}
         },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")

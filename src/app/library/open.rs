@@ -6,23 +6,6 @@ use crate::library::ScriptRef;
 pub(crate) use quarry_core::state::library::open::*;
 pub(crate) use quarry_core::state::library::open::Target;
 
-/// The view whose text is a script of `kind`.
-pub(in crate::app) fn view_of_kind(kind: &str) -> Option<View> {
-    Some(match kind {
-        "sql" => View::Sql,
-        "shell" => View::Shell,
-        "filter" | "where" => View::Documents,
-        "pipeline" => View::Aggregate,
-        _ => return None,
-    })
-}
-
-/// Whether a script of `kind` can run on a connection of `engine`: SQL on MySQL, MariaDB and PostgreSQL, filters and
-/// pipelines on MongoDB, Shell scripts on any.
-pub(in crate::app) fn kind_fits(kind: &str, engine: db::sql::Engine) -> bool {
-    crate::library::format::kind_runs_on(kind, engine).unwrap_or(false)
-}
-
 fn kind_label(kind: &str) -> &'static str {
     match kind {
         "sql" => "SQL script",
@@ -31,16 +14,6 @@ fn kind_label(kind: &str) -> &'static str {
         "pipeline" => "pipeline",
         _ => "Shell script",
     }
-}
-
-/// The database named in a connection address, such as shop in mysql://app@host:3306/shop?ssl-mode=REQUIRED. Empty
-/// when the address names none.
-pub(in crate::app) fn uri_db(uri: &str) -> String {
-    let Some((_, rest)) = uri.split_once("://") else { return String::new() };
-    // A masked or encoded password may hold a slash, so the host starts after the last @.
-    let host_on = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
-    let Some((_, path)) = host_on.split_once('/') else { return String::new() };
-    path.split(['?', '#']).next().unwrap_or_default().trim_matches('/').to_string()
 }
 
 impl App {
@@ -110,17 +83,8 @@ impl App {
         s.conn == conn && self.script_db(conn, &s.db) == db && (s.schema == schema || s.schema.is_empty() && schema == own_schema)
     }
 
-    /// The database a connection opens in when nothing names one: the one in its address, else the first that is not the
-    /// server's own (information_schema, mysql, admin and the like), never simply the first in the list.
     pub(in crate::app) fn default_db(&self, conn: u64) -> String {
-        let Some(c) = self.conn(conn) else { return String::new() };
-        let dbs: Vec<&str> = c.dbs.iter().map(|d| d.0.as_str()).collect();
-        let named = uri_db(&c.masked_uri);
-        if !named.is_empty() && (dbs.is_empty() || dbs.contains(&named.as_str())) {
-            return named;
-        }
-        let system = |d: &str| ["admin", "local", "config"].contains(&d) || db::sql::create::SYSTEM_SCHEMAS.contains(&d);
-        dbs.iter().find(|d| !system(d)).or(dbs.first()).map(|d| d.to_string()).unwrap_or_default()
+        self.core.default_db(conn)
     }
 
     /// Where a script runs: a saved script on its own connection, a linked file on the current tab's connection when the
@@ -138,7 +102,7 @@ impl App {
             }
             ScriptRef::File { link, rel } => {
                 let Some(l) = self.core.library.links.iter().find(|l| l.id == *link) else { return Target::None("That folder is no longer linked.".into()) };
-                let kind = self.file_kind(*link, rel);
+                let kind = self.core.file_kind(*link, rel);
                 let fits = |id: u64| self.conn(id).is_some_and(|c| crate::library::format::fits(l, &kind, id, c.meta.engine));
                 if let Some(c) = self.t().map(|t| t.sel.conn).into_iter().chain(self.core.active).find(|c| fits(*c)) {
                     return Target::On(c);
@@ -201,21 +165,6 @@ impl App {
         unchanged && !staged
     }
 
-    /// Scripts that left the library (deleted, or moved into a linked folder): tabs bound to them keep their text but are
-    /// unbound, so their next Cmd+S opens the Save dialog, and they leave the recent list and a pending open.
-    pub(in crate::app) fn forget_scripts(&mut self, ids: &[u64]) {
-        let gone = |r: &ScriptRef| matches!(r, ScriptRef::Saved(id) if ids.contains(id));
-        for t in &mut self.core.tabs {
-            if t.script.as_ref().is_some_and(|b| gone(&b.r)) {
-                t.script = None;
-            }
-        }
-        self.core.library.recent.retain(|r| !gone(r));
-        if self.core.lib_ui.pending.as_ref().is_some_and(|p| gone(&p.r)) {
-            self.core.lib_ui.pending = None;
-        }
-    }
-
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
         if let Some(t) = self.tm() {
@@ -271,7 +220,7 @@ impl App {
                 None => self.warn("That script is no longer in the library."),
             },
             // A linked file is read on the worker, and opens on `conn` when it is back.
-            ScriptRef::File { link, rel } => self.read_file_job(*link, rel, super::linked::Job::Open { r: r.clone(), how, conn }),
+            ScriptRef::File { link, rel } => self.core.read_file_job(*link, rel, super::linked::Job::Open { r: r.clone(), how, conn }),
         }
     }
 
@@ -414,7 +363,7 @@ impl App {
             if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
                 b.disk = meta;
             }
-            self.mark_seen(link, &rel, meta);
+            self.core.mark_seen(link, &rel, meta);
         }
     }
 
@@ -438,7 +387,7 @@ impl App {
             return self.warn("Nothing to save: the script is empty.");
         }
         // A tab bound to a linked file writes that file, or raises the conflict when it changed on disk.
-        if self.save_linked() {
+        if self.core.save_linked() {
             return;
         }
         let bound = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == tt.view).map(|b| b.r.clone());
@@ -565,7 +514,7 @@ impl App {
 
     /// Close a tab with unsaved script changes: save them first, close anyway, or keep the tab.
     pub(in crate::app) fn close_edited_dialog(&mut self, ui: &mut egui::Ui, uid: u64, keep: &mut bool) {
-        let Some(i) = self.tab_by_uid(uid) else {
+        let Some(i) = self.core.tab_by_uid(uid) else {
             *keep = false;
             return;
         };
@@ -731,31 +680,4 @@ impl App {
             self.open_script_on(&r, how, c);
         }
     }
-}
-
-/// Ties tab `t` to script binding `b`, the one place a tab is bound. A SQL tab bound to a Query script becomes a plain
-/// query tab, as one opened from the library is: its table's views would otherwise stay under the script's name, with
-/// nothing saying which table they show.
-pub(in crate::app) fn bind(t: &mut Tab, b: Bound) {
-    if b.view == View::Sql && t.sql.is_some() {
-        t.sel.coll.clear();
-    }
-    t.script = Some(b);
-}
-
-/// `App::script_snippet` where there is no App: `dialect` is the SQL dialect of the script's connection, looked up only for
-/// a SQL script that may hold values.
-pub(in crate::app) fn snippet_of(s: &crate::library::Script, dialect: impl FnOnce() -> db::sql::Dialect) -> Option<crate::library::snippet::Parsed> {
-    use crate::library::snippet::{self, Lang};
-    let parts: Vec<&str> = if s.kind == "filter" { vec![&s.body, &s.sort, &s.project] } else { vec![&s.body] };
-    if !parts.iter().any(|p| p.contains("{{")) {
-        return None;
-    }
-    let l = match s.kind.as_str() {
-        "sql" => dialect().into(),
-        "shell" => Lang::Shell,
-        "filter" => Lang::Query,
-        _ => return None,
-    };
-    Some(snippet::merge(parts.into_iter().map(|p| snippet::parse(p, l)))).filter(|p| p.is_snippet())
 }

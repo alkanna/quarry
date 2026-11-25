@@ -47,7 +47,7 @@ fn rescan(a: &mut App, link: u64, dir: &Path) {
         ScriptRef::File { rel, .. } => Some((rel.clone(), b.disk)),
         _ => None,
     }).collect();
-    a.apply_scan(link, disk::scan_reading(dir, &["sql".to_string()], None, &open));
+    a.core.apply_scan(link, disk::scan_reading(dir, &["sql".to_string()], None, &open));
 }
 
 #[test]

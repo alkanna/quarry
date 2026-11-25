@@ -54,80 +54,21 @@ pub(super) fn load_library() -> (Library, Option<String>) {
 
 impl App {
     pub(super) fn save_library(&mut self) {
-        // The demo's made-up scripts must never reach the real library file.
-        if self.core.demo {
-            return;
-        }
-        self.core.library.v = 1;
-        let b = serde_json::to_vec_pretty(&self.core.library).unwrap_or_default();
-        self.write_config("library.json", b);
+        self.core.save_library()
     }
 
-    /// Called every frame from `logic()`: scheduled library work, such as opening a script once its connection is ready
-    /// and rescanning linked folders. Timers use egui time and anything that changes asks for a repaint.
+    /// Called every frame from `logic()`: the library's timers in Core, the repaint they ask for, and the script they may
+    /// open.
     pub(super) fn library_tick(&mut self, ctx: &egui::Context) {
-        self.library_pending(ctx);
-        self.linked_tick(ctx);
+        let (now, focused) = ctx.input(|i| (i.time, i.viewport().focused.unwrap_or(true)));
+        if let Some(wait) = self.core.library_tick(now, focused) {
+            ctx.request_repaint_after(Duration::from_secs_f64(wait));
+        }
+        self.run_fx();
     }
 
-    /// Opens the script that waited for its connection, once the connection is ready. A connection that fails on a new
-    /// attempt drops it with one warning; one that never starts connecting (its address could not be read, say) drops it after
-    /// `WAIT_SECS`, so it never opens later out of the blue. A Run becomes a plain open if another tab is current by then.
-    fn library_pending(&mut self, ctx: &egui::Context) {
-        const WAIT_SECS: f64 = 15.0;
-        let Some(p) = self.core.lib_ui.pending.clone() else { return };
-        let Some(c) = self.conn(p.conn) else {
-            self.core.lib_ui.pending = None;
-            return self.warn(format!("{} was not opened: its connection was removed.", p.name));
-        };
-        let (ready, connecting, failed, attempt, cname) = (c.status == Status::Ready, c.status == Status::Connecting, matches!(c.status, Status::Failed(_)), c.attempt, c.meta.name.clone());
-        let now = ctx.input(|i| i.time);
-        if ready {
-            self.core.lib_ui.pending = None;
-            let moved = self.t().map(|t| t.uid) != p.uid;
-            let how = if p.how == open::How::Run && moved { open::How::Here } else { p.how };
-            return self.open_script_on(&p.r, how, p.conn);
-        }
-        if connecting {
-            if let Some(q) = self.core.lib_ui.pending.as_mut() {
-                (q.since, q.seen_connecting) = (None, true);
-            }
-            return;
-        }
-        // The failure the connection had when the script was asked for is not news: only a new attempt that fails is, or the
-        // one that was under way.
-        if failed && (attempt != p.attempt || p.seen_connecting) {
-            self.core.lib_ui.pending = None;
-            return self.warn(format!("{} was not opened: {cname} failed to connect.", p.name));
-        }
-        let since = p.since.unwrap_or(now);
-        if let Some(q) = self.core.lib_ui.pending.as_mut() {
-            q.since = Some(since);
-        }
-        if now - since >= WAIT_SECS {
-            self.core.lib_ui.pending = None;
-            self.warn(format!("{} was not opened: {cname} did not connect.", p.name));
-        } else {
-            ctx.request_repaint_after(Duration::from_secs_f64(WAIT_SECS - (now - since)));
-        }
-    }
-
-    /// Fills an empty library from the saved queries of ui.json, once: library.json is absent and the old map is not.
-    /// The old map stays in ui.json, frozen, for an older build.
     pub(super) fn migrate_library(&mut self) {
-        if self.core.prefs.library.is_empty() {
-            return;
-        }
-        let old: Vec<(String, Vec<crate::library::migrate::OldEntry>)> = self
-            .core.prefs
-            .library
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().map(|q| crate::library::migrate::OldEntry { name: q.name.clone(), filter: q.filter.clone(), sort: q.sort.clone(), project: q.project.clone(), pipeline: q.pipeline.clone(), sql: q.sql.clone() }).collect()))
-            .collect();
-        let now = crate::library::now_secs();
-        // Written even when nothing came over (every key was bad), so library.json exists and this never runs again.
-        crate::library::migrate::migrate_into(&mut self.core.library, &old, now);
-        self.save_library();
+        self.core.migrate_library()
     }
 }
 
