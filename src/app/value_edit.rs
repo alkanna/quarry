@@ -11,10 +11,7 @@ pub(super) enum ValueAct {
     Null,
 }
 
-/// A value the one-line editors cannot show faithfully, so double-click opens the large editor straight away.
-pub(super) fn is_long(s: &str) -> bool {
-    s.contains('\n') || s.len() > 500
-}
+pub(super) use quarry_core::core::drafts::is_long;
 
 /// The editor, its error and the footer, shared by the dialog and the panel. `null` labels a Set null button. `rows` is the
 /// panel's height in lines; None is the dialog, whose height follows the text. `dirty` is set by an edit.
@@ -108,17 +105,17 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
 impl App {
     /// The large editor shows in the docked panel rather than a dialog. A whole document always gets the dialog.
     pub(super) fn value_in_panel(&self) -> bool {
-        self.core.prefs.value_panel && (self.core.json_edit.as_ref().is_some_and(|je| !je.path.is_empty()) || self.core.sql_cell.as_ref().is_some_and(|e| e.big))
+        self.core.value_in_panel()
     }
 
     /// The large editor shows as a dialog, which takes the keys from the page.
     pub(super) fn value_dialog_open(&self) -> bool {
-        (self.core.json_edit.is_some() || self.core.sql_cell.as_ref().is_some_and(|e| e.big)) && !self.value_in_panel()
+        self.core.value_dialog_open()
     }
 
     /// The side panel holds text not applied yet, which opening another value would throw away.
     pub(super) fn panel_dirty(&self) -> bool {
-        self.value_in_panel() && (self.core.json_edit.as_ref().is_some_and(|j| j.dirty) || self.core.sql_cell.as_ref().is_some_and(|e| e.big && e.dirty))
+        self.core.panel_dirty()
     }
 
     /// The large editor as a dialog, from `modals`.

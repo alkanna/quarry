@@ -2,6 +2,7 @@
 //! The egui app keeps only what needs egui types, so the state can be built and tested without a window.
 
 pub mod notify;
+pub mod drafts;
 
 use crate::db::{self, Msg, UndoAction, Worker};
 use crate::state::cloud_sql;
