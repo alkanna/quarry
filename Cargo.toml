@@ -79,6 +79,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+quarry-core = { path = "quarry-core", features = ["test-support"] }
 # Already in the build through rust_xlsxwriter; the xlsx tests read the file back.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # Drives the real App without a window in the tests under src/app/ui_tests.

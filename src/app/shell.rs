@@ -57,13 +57,7 @@ pub(super) fn cursor_chain(q: &db::Query) -> String {
     proj.unwrap_or_default() + &db::mongosh_chain(q)
 }
 
-/// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
-/// would not resolve to the collection inside run(). Must match RESERVED in shell_runner.mjs.
-pub(super) const JS_RESERVED: [&str; 48] = [
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
-    "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
-    "with", "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await", "arguments", "eval",
-];
+pub(super) use crate::db::JS_RESERVED;
 
 /// The Shell's reference: how scripts work, every name the runner provides, the main methods and
 /// examples that can be loaded into the editor. Returns an example to load, if one was picked.

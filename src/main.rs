@@ -4,19 +4,14 @@
 // would be the extra layers the codebase keeps out.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-mod agents;
 mod app;
-mod cloudsql;
-mod db;
-mod library;
 #[cfg(target_os = "macos")]
 mod menu;
-mod ssh;
-mod sysmem;
 mod ui;
-mod update;
-mod vault;
 mod win_frame;
+
+// The core crate's modules keep their crate::db, crate::agents, ... paths here.
+use quarry_core::{agents, cloudsql, db, library, paths, ssh, sysmem, update, vault};
 
 /// QUARRY_NO_FOCUS runs benchmark and screenshot windows in the background: never the active app,
 /// so they cannot take focus from whatever the user is doing.

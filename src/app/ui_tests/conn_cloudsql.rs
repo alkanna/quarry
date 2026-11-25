@@ -88,7 +88,8 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     // Through the stub proxy to a real server: the test binary stands in for cloud-sql-proxy, set as in Settings.
     let Ok(uri) = std::env::var("QUARRY_TEST_POSTGRES") else { return };
     let live = db::sql::Addr::parse(&uri).unwrap();
-    *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = Some(format!("{}:{}", live.host, live.port));
+    *crate::cloudsql::stub::TEST.lock().unwrap() = "app::ui_tests::conn_cloudsql::stub_proxy";
+    *crate::cloudsql::stub::TARGET.lock().unwrap() = Some(format!("{}:{}", live.host, live.port));
     ui.h.state_mut().prefs.cloud_sql_proxy = std::env::current_exe().unwrap().display().to_string();
     // The answers are kept for the session: reopening lists the instances at once and asks nothing.
     ui.h.state_mut().open_cloud_browser(false);
@@ -117,7 +118,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.h.state_mut().connect_uri(id, saved.to_uri());
     ui.wait("the connection through the proxy", |a| a.conn(id).is_some_and(|c| c.status == Status::Ready));
     assert!(matches!(ui.app().conn(id).unwrap().tunnel, Some(db::Way::CloudSql(_))), "the proxy is kept with the connection");
-    *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = None;
+    *crate::cloudsql::stub::TARGET.lock().unwrap() = None;
 }
 
 const QUEUE: &str = r#"[
@@ -213,4 +214,11 @@ fn refresh_in_the_cloud_sql_browser_keeps_the_window_size_while_it_checks_again(
     ui.wait("the answer", |a| a.cloud.start.is_some());
     ui.settle();
     assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size after the answer");
+}
+
+/// The stand-in for cloud-sql-proxy that the stub runs in this test binary.
+#[test]
+#[ignore]
+fn stub_proxy() {
+    crate::cloudsql::stub::run();
 }

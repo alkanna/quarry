@@ -66,7 +66,7 @@ impl App {
     fn mem_lines(&self, ctx: &egui::Context, total: Option<u64>) -> Option<MemLines> {
         let mut parts = self.mem_parts();
         let known: usize = parts.iter().map(|p| p.1).sum();
-        let sys = crate::sysmem::latest(ctx)?;
+        let sys = crate::sysmem::latest({ let ctx = ctx.clone(); move || ctx.request_repaint() })?;
         // Textures get a line only where the system's window figure holds them (macOS); elsewhere they sit in the heap,
         // the GPU mappings or graphics memory outside the total.
         let tex = sys.window_has_textures.then(|| ctx.tex_manager().read().allocated().map(|(_, m)| m.bytes_used()).sum::<usize>());

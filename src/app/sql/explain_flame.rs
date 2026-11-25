@@ -189,7 +189,7 @@ mod tests {
         // In a 700 px chart Sort and Hash Join span it, and the scans under them are slivers: the user's plan, then a
         // captured one of the same shape.
         let user = crate::db::sql::plan::user_plan("(NOT (ANY ((si.id = (hashed SubPlan 1).col1) AND (b.id = (hashed SubPlan 1).col2))))");
-        for text in [user.as_str(), include_str!("../../db/sql/plan/fixtures/pg18-subjoin.json")] {
+        for text in [user.as_str(), include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-subjoin.json")] {
             check_labels(&parse(Dialect::Postgres, text).unwrap());
         }
     }

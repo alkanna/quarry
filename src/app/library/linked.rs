@@ -5,7 +5,7 @@ use super::*;
 use crate::app::restore::Restore;
 use crate::library::ops::{self, DropAt};
 use crate::library::tree::Node;
-use crate::library::{Library, Script, ScriptRef, disk, format};
+use crate::library::{Script, ScriptRef, disk, format};
 use std::time::{Duration, SystemTime};
 
 /// How often a followed link, or one with an open tab, is scanned again while the window has focus. Polling replaces a
@@ -79,13 +79,6 @@ fn link_place(l: &crate::library::Link, rel: &std::path::Path) -> String {
 
 fn file_label(rel: &std::path::Path) -> String {
     rel.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string()
-}
-
-impl Library {
-    /// The folder of a link and the file `rel` below it. None when the link is gone or `rel` would leave its folder.
-    pub(in crate::app) fn file_path(&self, link: u64, rel: &std::path::Path) -> Option<PathBuf> {
-        self.link_join(link, rel)
-    }
 }
 
 impl App {
@@ -242,7 +235,7 @@ impl App {
                 self.library.push_recent(r);
                 self.save_library();
                 self.mark_seen(link, &rel, meta);
-                match (replaced, self.library.file_path(link, &rel)) {
+                match (replaced, self.library.link_join(link, &rel)) {
                     (Some((old, new)), Some(path)) => self.toast_restore(format!("Replaced {} in {place}.", file_label(&rel)), Restore::Replaced { link, path, old, new }),
                     _ => self.ok(format!("Saved {} to {place}", file_label(&rel))),
                 }
@@ -369,7 +362,7 @@ impl App {
         let Some(t) = self.tabs.get(self.cur) else { return false };
         let Some(b) = t.script.as_ref().filter(|b| b.view == t.view) else { return false };
         let ScriptRef::File { link, rel } = b.r.clone() else { return false };
-        let Some(path) = self.library.file_path(link, &rel) else {
+        let Some(path) = self.library.link_join(link, &rel) else {
             self.warn("The folder this file belongs to is no longer linked.");
             return true;
         };
@@ -442,7 +435,7 @@ impl App {
     pub(in crate::app) fn conflict_reload(&mut self) {
         let Some(t) = self.tabs.get(self.cur) else { return };
         let Some(ScriptRef::File { link, rel }) = t.script.as_ref().map(|b| b.r.clone()) else { return };
-        let Some(path) = self.library.file_path(link, &rel) else { return };
+        let Some(path) = self.library.link_join(link, &rel) else { return };
         let uid = t.uid;
         self.run_job(Job::Reload { uid, link, rel }, move || FileOut::Read(read_script(&path)));
     }
@@ -579,7 +572,7 @@ impl App {
 
     /// Reads the file `rel` on the worker, then `job` goes on with it in `file_done`.
     pub(in crate::app) fn read_file_job(&mut self, link: u64, rel: &std::path::Path, job: Job) {
-        let Some(path) = self.library.file_path(link, rel) else { return self.warn("That folder is no longer linked.") };
+        let Some(path) = self.library.link_join(link, rel) else { return self.warn("That folder is no longer linked.") };
         self.run_job(job, move || FileOut::Read(read_script(&path)));
     }
 
@@ -587,7 +580,7 @@ impl App {
     /// time and length it had. The target is a header the person wrote or the keys of a .json file; without one it is the
     /// current tab's database on that connection, or the connection's default.
     pub(in crate::app) fn file_script_from(&self, link: u64, rel: &std::path::Path, loaded: Loaded, conn: Option<u64>) -> Result<(Script, Meta), String> {
-        self.library.file_path(link, rel).ok_or("That folder is no longer linked.")?;
+        self.library.link_join(link, rel).ok_or("That folder is no longer linked.")?;
         let (kind, tgt, sort, project) = match &loaded.parsed {
             Some(p) => (p.kind.clone(), p.target.clone(), p.sort.clone(), p.project.clone()),
             None => (format::kind_of_ext(&format::ext_of(rel)).unwrap_or("sql").to_string(), format::header(&loaded.text), String::new(), String::new()),
@@ -674,7 +667,7 @@ impl App {
     /// Renames a file or a folder below a link on disk, and returns its new path relative to the link. The files in a
     /// renamed folder keep their names.
     pub(in crate::app) fn rename_linked(&mut self, link: u64, rel: &std::path::Path, is_dir: bool, text: &str) -> Option<PathBuf> {
-        let from = self.library.file_path(link, rel)?;
+        let from = self.library.link_join(link, rel)?;
         let new = if is_dir {
             let name = text.trim();
             if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
@@ -728,7 +721,7 @@ impl App {
     /// Moves a file to the Trash on the worker, keeping its bytes for the Undo toast. A tab that holds it keeps its text but
     /// is unbound. True when the move started.
     pub(in crate::app) fn delete_linked_file(&mut self, link: u64, rel: &std::path::Path) -> bool {
-        let Some(path) = self.library.file_path(link, rel) else { return false };
+        let Some(path) = self.library.link_join(link, rel) else { return false };
         if self.demo {
             self.warn("The demo does not delete files.");
             return false;

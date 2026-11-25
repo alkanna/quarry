@@ -445,14 +445,7 @@ fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
     ChaCha20Poly1305::new(key.into()).decrypt(Nonce::try_from(nonce).ok()?.as_ref(), ct).ok()
 }
 
-pub(super) fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
-}
-
-/// Where Quarry installs the MongoDB Database Tools itself when they are missing.
-pub(crate) fn tools_dir() -> PathBuf {
-    config_dir().join("tools")
-}
+pub(crate) use crate::paths::{config_dir, tools_dir};
 
 /// Saves the connection's address in the Keychain.
 pub(super) fn store_uri(id: u64, uri: &str) -> keyring::Result<()> {

@@ -15,8 +15,8 @@ const CHANGE_W: f32 = 90.0;
 /// The statement of the demo's before and after plans, captured from PostgreSQL 18 before and after an index on
 /// bookings (provider, status).
 pub(in crate::app) const DEMO_STMT: &str = "SELECT b.id, s.name FROM bookings b JOIN services s ON s.id = b.service_id WHERE b.provider = 'ZEUS_AIR' AND b.status = 'DONE' ORDER BY b.created_at";
-pub(in crate::app) const DEMO_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before.json");
-pub(in crate::app) const DEMO_AFTER: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-after.json");
+pub(in crate::app) const DEMO_BEFORE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-before.json");
+pub(in crate::app) const DEMO_AFTER: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-after.json");
 
 impl App {
     /// QUARRY_TEST_PG=explain-compare and explain-flame: the join explained before the index, on Flame, or explained

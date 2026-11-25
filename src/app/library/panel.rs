@@ -1121,7 +1121,7 @@ impl App {
                 ctx.copy_text(path.to_string_lossy().into_owned());
                 self.ok("Path copied.");
             }
-            Act::CopyFileText(link, rel) => match self.library.file_path(link, &rel).map(|p| super::linked::read_script(&p)) {
+            Act::CopyFileText(link, rel) => match self.library.link_join(link, &rel).map(|p| super::linked::read_script(&p)) {
                 Some(Ok(l)) => {
                     ctx.copy_text(l.text);
                     self.ok("Script text copied.");

@@ -28,9 +28,9 @@ fn explain_state(ui: &UiApp) -> &crate::app::sql::explain::SqlExplain {
     }
 }
 
-const PG_JOIN: &str = include_str!("../../db/sql/plan/fixtures/pg18-join-analyze.json");
-const PG_SPILL: &str = include_str!("../../db/sql/plan/fixtures/pg18-spill-analyze.json");
-const PG_STALE: &str = include_str!("../../db/sql/plan/fixtures/pg18-stale-analyze.json");
+const PG_JOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-join-analyze.json");
+const PG_SPILL: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-spill-analyze.json");
+const PG_STALE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-stale-analyze.json");
 
 /// Whether some widget holds `part` as its text, which a code editor keeps as its value and not as a label.
 fn has_value(ui: &UiApp, part: &str) -> bool {
@@ -221,9 +221,9 @@ fn copy_puts_the_fix_on_the_clipboard_with_a_note() {
     assert!(ui.shows("Copied."), "copying said nothing");
 }
 
-const FIX_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before.json");
-const FIX_AFTER: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-after.json");
-const FIX_BEFORE_RUN: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before-analyze.json");
+const FIX_BEFORE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-before.json");
+const FIX_AFTER: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-after.json");
+const FIX_BEFORE_RUN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-before-analyze.json");
 
 /// The statement explained once on `before`, then again on `after`, as after creating an index.
 fn explain_twice(before: &'static str, after: &'static str) -> Option<UiApp> {
@@ -293,7 +293,7 @@ fn the_same_statement_in_another_database_is_not_compared() {
     assert!(ui.h.query_by_label("Compare").is_none(), "a plan from another database is compared");
 }
 
-const PG_DATEWRAP: &str = include_str!("../../db/sql/plan/fixtures/pg18-datewrap.json");
+const PG_DATEWRAP: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-datewrap.json");
 
 /// Whether the plan has the finding of an index its filter defeats, which rests on the catalog.
 fn defeated(p: &crate::db::sql::plan::Plan) -> bool {
@@ -342,7 +342,7 @@ fn a_flame_bar_selects_its_node_and_time_waits_for_analyze() {
     assert!(explain_state(&ui).flame_time, "Time did not switch the widths");
 }
 
-const PG_SCAN: &str = include_str!("../../db/sql/plan/fixtures/pg18-scan.json");
+const PG_SCAN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-scan.json");
 
 #[test]
 fn a_filtered_full_scan_shows_its_candidate_index_and_the_evidence() {
@@ -384,8 +384,8 @@ fn a_mysql_estimate_alone_suggests_no_index_and_says_why() {
     assert!(ui.h.query_by_label("CANDIDATE INDEX").is_none(), "a guess gave a candidate");
 }
 
-const HYPO_TRIAL: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-trial.json");
-const HYPO_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-before.json");
+const HYPO_TRIAL: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-hypo-trial.json");
+const HYPO_BEFORE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-hypo-before.json");
 
 fn trial(plan: &str) -> crate::db::sql::pg::hypo::Trial {
     crate::db::sql::pg::hypo::Trial { plan: plan.into(), index: "<13640>btree_bookings_provider_status".into() }
@@ -435,7 +435,7 @@ fn a_trial_the_planner_ignores_says_so() {
     assert!(ui.shows("The planner would not use this index."), "an unused index is not reported");
 }
 
-const PG_SUBJOIN: &str = include_str!("../../db/sql/plan/fixtures/pg18-subjoin.json");
+const PG_SUBJOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-subjoin.json");
 
 #[test]
 fn a_join_that_is_most_of_the_plan_is_explained_with_its_join_filter() {
@@ -478,7 +478,7 @@ fn the_compare_captions_end_on_their_columns_right_edge() {
 
 /// The statement of the design's MySQL frame, whose plan wraps an indexed column in DATE().
 const DATE_STMT: &str = "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'";
-const MY_JOIN: &str = include_str!("../../db/sql/plan/fixtures/mysql-join.json");
+const MY_JOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/mysql-join.json");
 
 #[test]
 fn a_filter_that_defeats_an_index_shows_it_rewritten_and_drafts_the_statement() {

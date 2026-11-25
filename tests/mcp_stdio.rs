@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-#[path = "../src/agents/link.rs"]
+#[path = "../quarry-core/src/agents/link.rs"]
 mod link;
 
 use serde_json::{Value, json};

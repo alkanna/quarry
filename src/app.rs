@@ -359,13 +359,7 @@ fn auto_fields<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Vec
     cols
 }
 
-pub(crate) fn collection_ref(coll: &str) -> String {
-    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) && !JS_RESERVED.contains(&coll) {
-        coll.to_string()
-    } else {
-        format!("db.collection({})", serde_json::Value::String(coll.into()))
-    }
-}
+pub(crate) use crate::db::collection_ref;
 
 impl App {
     /// The empty state both `new` and the test constructor start from, so a new field is added in one place.
