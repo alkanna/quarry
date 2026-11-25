@@ -4,52 +4,20 @@ use crate::app::results_bar::BarInfo;
 use crate::app::*;
 
 impl App {
-    /// Asks for the tab's current page. The answer is matched back to the tab by `req`.
     pub(in crate::app) fn reload_sql(&mut self, i: usize) {
-        // A Query tab that belongs to no table has no page to load.
-        if self.core.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
-            return;
-        }
-        let Some((db, space)) = self.core.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
-        self.core.req += 1;
-        let (req, size) = (self.core.req, self.page_size());
-        let t = &mut self.core.tabs[i];
-        (t.req, t.loading, t.size) = (req, true, size);
-        let q = crate::app::sql::bar::page_query(t);
-        if let Some(s) = t.sql.as_mut() {
-            s.ran = q.clone();
-            s.bar.dirty = false;
-        }
-        self.core.worker.sql_page(req, db, space, t.sel.coll.clone(), q, size, t.page * size);
+        self.core.reload_sql(i)
     }
 
-    /// Puts the WHERE and ORDER BY of tab `i`'s page in the table's history once the page loaded, so a filter the server
-    /// refused is not kept. They are saved in ui.json and listed in the menu, so a password in them is masked.
     pub(in crate::app) fn sql_remember_filter(&mut self, i: usize) {
-        let Some(t) = self.core.tabs.get(i).filter(|t| !t.sel.coll.is_empty()) else { return };
-        let Some(s) = t.sql.as_ref() else { return };
-        let (key, filter, order) = (t.coll_key(), db::redact_sql(&s.ran.filter).0, db::redact_sql(&s.ran.order).0);
-        let h = self.core.prefs.history.entry(key).or_default();
-        let before = (h.selector.first().cloned(), h.sort.first().cloned());
-        push_history(&mut h.selector, &filter);
-        push_history(&mut h.sort, &order);
-        // Paging and reloads repeat the same texts, which leave the lists as they were and need no write.
-        if (h.selector.first().cloned(), h.sort.first().cloned()) != before {
-            self.save_prefs();
-        }
+        self.core.sql_remember_filter(i)
     }
 
-    /// How the connection's last reported sql_mode reads quotes and backslashes. A connection without a server, as in
-    /// the offline demo, reads like a stock one.
     pub(in crate::app) fn sql_mode(&self, conn: u64) -> db::sql::ddl::Mode {
-        self.conn(conn).and_then(|c| c.sql.as_ref()).map_or(db::sql::ddl::Mode::DEFAULT, |d| db::sql::ddl::Mode::of(&d.sql_mode))
+        self.core.sql_mode(conn)
     }
 
-    /// The server refused or reported a newer sql_mode than the one the previews follow; they follow the new one now.
     pub(in crate::app) fn adopt_sql_mode(&mut self, conn: u64, mode: Option<String>) {
-        if let Some(m) = mode && let Some(d) = self.core.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
-            d.sql_mode = m;
-        }
+        self.core.adopt_sql_mode(conn, mode)
     }
 
     /// The SQL session of a connection for a statement about to run. The offline demo has no server, so it says so
@@ -58,9 +26,8 @@ impl App {
         self.core.sql_db_for(conn, missing)
     }
 
-    /// The open tab's dialect.
     pub(in crate::app) fn sql_dialect(&self) -> db::sql::Dialect {
-        self.dialect_of(self.t().map_or(0, |t| t.sel.conn))
+        self.core.sql_dialect()
     }
 
     /// Double click on a grouped row: its rows replace the grouped result.

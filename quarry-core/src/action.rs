@@ -27,6 +27,7 @@ use zeroize::Zeroize;
 pub mod roles;
 pub mod server;
 pub mod users;
+pub mod sql;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
