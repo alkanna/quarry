@@ -91,9 +91,9 @@ impl App {
         let strict = ddl::fk_whole_key_default(d, &version);
         let mut rules_req = 0;
         if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()).filter(|_| !pg) {
-            self.req += 1;
-            rules_req = self.req;
-            self.worker.sql_fk_rules(rules_req, sql);
+            self.core.req += 1;
+            rules_req = self.core.req;
+            self.core.worker.sql_fk_rules(rules_req, sql);
         }
         let (name, pairs) = match &from {
             Some(k) => (k.name.clone(), k.cols.iter().cloned().zip(k.ref_cols.iter().cloned()).collect()),
@@ -150,14 +150,14 @@ impl App {
         if self.is_pg(conn) {
             self.pg_load_tables(conn, db, schema);
             let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
-            return Some(self.conn(conn)?.tables_in(db, schema)?.iter().filter(|t| !self.views.has(conn, &key, t)).cloned().collect());
+            return Some(self.conn(conn)?.tables_in(db, schema)?.iter().filter(|t| !self.core.views.has(conn, &key, t)).cloned().collect());
         }
         let list = self.conn(conn)?.dbs.iter().find(|d| d.0 == schema)?.1.clone();
         match list {
-            Some(l) => Some(l.into_iter().filter(|t| !self.views.has(conn, schema, t)).collect()),
+            Some(l) => Some(l.into_iter().filter(|t| !self.core.views.has(conn, schema, t)).collect()),
             None => {
-                if self.sql_asked.insert((conn, schema.to_string())) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-                    self.worker.sql_tables(conn, sql, schema.to_string());
+                if self.core.sql_asked.insert((conn, schema.to_string())) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
+                    self.core.worker.sql_tables(conn, sql, schema.to_string());
                 }
                 None
             }
@@ -308,9 +308,9 @@ impl App {
                 f.parent = Some(f.own.clone());
                 f.parent_req = 0;
             } else if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.req += 1;
-                f.parent_req = self.req;
-                self.worker.sql_structure(self.req, sql, f.ref_db.clone(), f.ref_table.clone());
+                self.core.req += 1;
+                f.parent_req = self.core.req;
+                self.core.worker.sql_structure(self.core.req, sql, f.ref_db.clone(), f.ref_table.clone());
             }
         }
 
@@ -338,10 +338,10 @@ impl App {
         if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) && f.orphan_for.as_ref() != Some(ok) {
             let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
             if f.parent.is_some() && (!big || f.check) && let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.req += 1;
-                (f.orphan_req, f.orphan_for, f.orphans) = (self.req, okey.clone(), None);
+                self.core.req += 1;
+                (f.orphan_req, f.orphan_for, f.orphans) = (self.core.req, okey.clone(), None);
                 f.sample.clear();
-                self.worker.sql_orphans(self.req, sql, schema.clone(), table.clone(), k.clone());
+                self.core.worker.sql_orphans(self.core.req, sql, schema.clone(), table.clone(), k.clone());
             }
         }
 
@@ -445,7 +445,7 @@ impl App {
     pub(in crate::app) fn open_fk_row(&mut self, fk: &ForeignKey, row: &Document) {
         let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
-        if self.sql_cell.is_some() {
+        if self.core.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
         let (d, bs) = (self.sql_dialect(), self.sql_bs());

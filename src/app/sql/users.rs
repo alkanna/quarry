@@ -155,39 +155,39 @@ impl App {
         if self.users_dialect(conn) == Dialect::Postgres || self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres) {
             return self.open_pg_roles(conn);
         }
-        self.sql_users = Some(SqlUsersWin::new(conn));
+        self.core.sql_users = Some(SqlUsersWin::new(conn));
         self.sql_users_reload();
     }
 
     /// Asks for the account list again; the grants of the chosen account follow when it arrives.
     fn sql_users_reload(&mut self) {
-        let Some(conn) = self.sql_users.as_ref().map(|w| w.conn) else { return };
+        let Some(conn) = self.core.sql_users.as_ref().map(|w| w.conn) else { return };
         let Some(sql) = self.users_sql(conn) else { return };
-        self.req += 1;
-        let req = self.req;
-        if let Some(w) = &mut self.sql_users {
+        self.core.req += 1;
+        let req = self.core.req;
+        if let Some(w) = &mut self.core.sql_users {
             w.list_req = req;
             w.list = None;
         }
-        self.worker.sql_users(conn, req, sql);
+        self.core.worker.sql_users(conn, req, sql);
     }
 
     fn sql_users_ask_grants(&mut self) {
-        let Some((conn, acct)) = self.sql_users.as_ref().and_then(|w| w.account().map(|a| (w.conn, a))) else { return };
+        let Some((conn, acct)) = self.core.sql_users.as_ref().and_then(|w| w.account().map(|a| (w.conn, a))) else { return };
         let Some(sql) = self.users_sql(conn) else { return };
-        self.req += 1;
-        let req = self.req;
-        if let Some(w) = &mut self.sql_users {
+        self.core.req += 1;
+        let req = self.core.req;
+        if let Some(w) = &mut self.core.sql_users {
             w.grants_req = req;
             w.grants = None;
             w.rows.clear();
             w.adding = None;
         }
-        self.worker.sql_user_grants(conn, req, sql, acct);
+        self.core.worker.sql_user_grants(conn, req, sql, acct);
     }
 
     pub(in crate::app) fn sql_users_loaded(&mut self, conn: u64, req: u64, res: db::Res<UserList>) {
-        let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn && w.list_req == req) else { return };
+        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn && w.list_req == req) else { return };
         if let Ok(l) = &res {
             let has = |s: &Option<(String, String)>| s.as_ref().is_some_and(|(u, h)| l.accounts.iter().any(|a| &a.user == u && &a.host == h));
             if !has(&w.sel) {
@@ -199,7 +199,7 @@ impl App {
     }
 
     pub(in crate::app) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Loaded>) {
-        let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn && w.grants_req == req) else { return };
+        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn && w.grants_req == req) else { return };
         match res {
             Ok(l) => {
                 if let Some(acct) = w.account() {
@@ -224,7 +224,7 @@ impl App {
         for u in undo {
             self.push_undo(u);
         }
-        let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn) else { return };
+        let Some(w) = self.core.sql_users.as_mut().filter(|w| w.conn == conn) else { return };
         // An undo from Recent changes is not the window's Apply, so it does not end the Apply that may be running.
         if !matches!(op, Op::Undone | Op::UndoneRename) {
             w.busy = false;
@@ -245,8 +245,8 @@ impl App {
         if !self.conn_writable(conn) {
             return self.warn(NOTE_USER);
         }
-        self.req += 1;
-        self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.req })));
+        self.core.req += 1;
+        self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.core.req })));
     }
 
     pub(in crate::app) fn sql_user_drop_ask(&mut self, conn: u64, acct: Account) {
@@ -256,7 +256,7 @@ impl App {
     }
 
     pub(in crate::app) fn sql_user_drop_run(&mut self, conn: u64, acct: Account) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         let Some(c) = self.conn(conn) else { return };
@@ -264,13 +264,13 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = c.sql.clone() else { return self.warn_offline() };
-        self.worker.sql_user_drop(conn, sql, acct, false);
+        self.core.worker.sql_user_drop(conn, sql, acct, false);
     }
 
     /// Runs what the open tab has staged.
     fn sql_user_apply(&mut self) {
-        let Some((conn, acct, tab)) = self.sql_users.as_ref().and_then(|w| Some((w.conn, w.account()?, w.tab))) else { return };
-        if self.demo {
+        let Some((conn, acct, tab)) = self.core.sql_users.as_ref().and_then(|w| Some((w.conn, w.account()?, w.tab))) else { return };
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         let Some(c) = self.conn(conn) else { return };
@@ -278,7 +278,7 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = c.sql.clone() else { return self.warn_offline() };
-        let Some(w) = self.sql_users.as_mut() else { return };
+        let Some(w) = self.core.sql_users.as_mut() else { return };
         let plan = match tab {
             UTab::Databases | UTab::Global => None,
             UTab::Account => w.account_plan(&acct).ok(),
@@ -294,13 +294,13 @@ impl App {
         }
         w.busy = true;
         match plan {
-            Some(p) => self.worker.sql_user_account(conn, sql, acct, p, false),
-            None => self.worker.sql_user_edit(conn, sql, acct, edits, false),
+            Some(p) => self.core.worker.sql_user_account(conn, sql, acct, p, false),
+            None => self.core.worker.sql_user_edit(conn, sql, acct, edits, false),
         }
     }
 
     pub(in crate::app) fn sql_users_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.sql_users.take() else { return };
+        let Some(mut w) = self.core.sql_users.take() else { return };
         let conn = w.conn;
         let writable = self.conn_writable(conn);
         let conn_name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -380,9 +380,9 @@ impl App {
             match a {
                 Act::Pick(u, h) => pick = Some((u, h)),
                 Act::Apply => {
-                    self.sql_users = Some(w);
+                    self.core.sql_users = Some(w);
                     self.sql_user_apply();
-                    w = self.sql_users.take().unwrap();
+                    w = self.core.sql_users.take().unwrap();
                 }
                 Act::Close => open = false,
                 Act::NewUser => self.sql_new_user(conn),
@@ -392,17 +392,17 @@ impl App {
                         let current = w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default();
                         // MariaDB's SET PASSWORD sets the mysql_native_password part only, so an account that logs in another way is left alone.
                         let blocked = w.info.as_ref().filter(|_| matches!(dialect, Dialect::MariaDb)).and_then(|i| (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")).then(|| format!("{} logs in with {}; Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", a.label(), if i.chain { "more than one method".to_string() } else { i.plugin.clone() })));
-                        self.req += 1;
-                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin: String::new(), current, blocked, password: String::new(), again: String::new(), serial: self.req })));
+                        self.core.req += 1;
+                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin: String::new(), current, blocked, password: String::new(), again: String::new(), serial: self.core.req })));
                     } else {
                         self.modal = Some(Modal::Unlock(conn, None));
                     }
                 }
                 Act::Unlock => self.modal = Some(Modal::Unlock(conn, None)),
                 Act::Refresh => {
-                    self.sql_users = Some(w);
+                    self.core.sql_users = Some(w);
                     self.sql_users_reload();
-                    w = self.sql_users.take().unwrap();
+                    w = self.core.sql_users.take().unwrap();
                 }
             }
         }
@@ -413,7 +413,7 @@ impl App {
         if let Some(p) = pick {
             w.sel = Some(p);
         }
-        self.sql_users = Some(w);
+        self.core.sql_users = Some(w);
         if picked {
             self.sql_users_ask_grants();
         }
@@ -977,7 +977,7 @@ impl App {
         // Taken out of the form either way, so no copy stays in app state once Create was pressed.
         let password = std::mem::take(&mut f.password);
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        self.worker.sql_user_create(f.conn, sql, Account::named(&f.user, &f.host), password, false);
+        self.core.worker.sql_user_create(f.conn, sql, Account::named(&f.user, &f.host), password, false);
     }
 
     /// Change password: two masked fields, the plugin on MySQL, and a preview that shows '***'.
@@ -1056,7 +1056,7 @@ impl App {
         f.again.clear();
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let plugin = Some(f.plugin.clone()).filter(|p| !p.is_empty());
-        self.worker.sql_user_password(f.conn, sql, f.acct.clone(), plugin, password, false);
+        self.core.worker.sql_user_password(f.conn, sql, f.acct.clone(), plugin, password, false);
     }
 
     /// QUARRY_TEST_SQL=users, useraccount, userglobal or userlimits (the window on user "report"), or newuser (the + User dialog).
@@ -1064,7 +1064,7 @@ impl App {
         if !matches!(which, "users" | "newuser" | "useraccount" | "userglobal" | "userlimits") {
             return;
         }
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3) {
             c.writable = true;
         }
         if which == "newuser" {
@@ -1108,7 +1108,7 @@ impl App {
         if which != "users" {
             w.limits = if which == "userlimits" { w.limits } else { ["0".into(), "0".into(), "0".into(), "0".into()] };
         }
-        self.sql_users = Some(w);
+        self.core.sql_users = Some(w);
     }
 }
 

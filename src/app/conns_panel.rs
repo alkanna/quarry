@@ -203,8 +203,8 @@ impl App {
                     acts.push(PanelAct::NewConnIn(None));
                 }
                 if icon_btn(ui, "New group", glyphs::folder_plus).clicked() {
-                    self.conns_ui.adding = Some(String::new());
-                    self.conns_ui.focus_edit = true;
+                    self.core.conns_ui.adding = Some(String::new());
+                    self.core.conns_ui.focus_edit = true;
                 }
                 if icon_btn(ui, "Fold all", paint_fold_all).clicked() {
                     acts.push(PanelAct::FoldAll);
@@ -213,7 +213,7 @@ impl App {
         });
         ui.add_space(6.0);
         let r = ui.add(
-            egui::TextEdit::singleline(&mut self.conns_ui.filter)
+            egui::TextEdit::singleline(&mut self.core.conns_ui.filter)
                 .id(egui::Id::unique("conns-filter"))
                 .hint_text(RichText::new("Filter connections").color(FAINT()))
                 .desired_width(f32::INFINITY)
@@ -222,15 +222,15 @@ impl App {
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Filter connections"));
         ui.add_space(10.0);
 
-        let toks = tokens(&self.conns_ui.filter);
+        let toks = tokens(&self.core.conns_ui.filter);
         let all = self.conn_ids();
         let ctx = ui.ctx().clone();
         // A group still closing keeps its members in the list until they have folded away, while its own row reads closed
         // for the keys, the drops and the dots.
-        let mut rows = panel_rows(&self.conns, &self.groups, &self.conns_ui.filter, |g| g.open || fold::openness(&ctx, fold_id(g.id), false) > 0.0);
+        let mut rows = panel_rows(&self.core.conns, &self.core.groups, &self.core.conns_ui.filter, |g| g.open || fold::openness(&ctx, fold_id(g.id), false) > 0.0);
         for r in &mut rows {
             if let CRow::Group { id, open, .. } = r {
-                *open = !toks.is_empty() || self.groups.group(*id).is_some_and(|g| g.open);
+                *open = !toks.is_empty() || self.core.groups.group(*id).is_some_and(|g| g.open);
             }
         }
         let foot_h = 48.0;
@@ -238,8 +238,8 @@ impl App {
         egui::ScrollArea::vertical().id_salt("conns-panel").auto_shrink(false).max_height(room).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             auto_scroll_while_dragging(ui);
-            let cx = Cx { conns: &self.conns, by_id: self.conns.iter().map(|c| (c.meta.id, c)).collect(), groups: &self.groups, all: &all, active: self.active, toks: &toks };
-            draw_rows(ui, &rows, &cx, &mut self.conns_ui, &mut acts);
+            let cx = Cx { conns: &self.core.conns, by_id: self.core.conns.iter().map(|c| (c.meta.id, c)).collect(), groups: &self.core.groups, all: &all, active: self.core.active, toks: &toks };
+            draw_rows(ui, &rows, &cx, &mut self.core.conns_ui, &mut acts);
         });
         ui.add_space(4.0);
         ui.separator();
@@ -266,7 +266,7 @@ impl App {
                 self.show_sidebar();
             }
             PanelAct::Toggle(g) => {
-                if let Some(g) = self.groups.group_mut(g) {
+                if let Some(g) = self.core.groups.group_mut(g) {
                     g.open = !g.open;
                     fold::start(ctx, fold_id(g.id), g.open);
                     self.save_groups();
@@ -274,8 +274,8 @@ impl App {
             }
             PanelAct::FoldAll => {
                 // One press folds everything; with all folded already, the next one opens everything.
-                let any_open = self.groups.groups.iter().any(|g| g.open);
-                for g in &mut self.groups.groups {
+                let any_open = self.core.groups.groups.iter().any(|g| g.open);
+                for g in &mut self.core.groups.groups {
                     if g.open == any_open {
                         fold::start(ctx, fold_id(g.id), !any_open);
                     }
@@ -285,26 +285,26 @@ impl App {
             }
             PanelAct::Move(c, to) => {
                 let all = self.conn_ids();
-                if self.groups.place(c, to, &all) {
+                if self.core.groups.place(c, to, &all) {
                     self.save_groups();
                 }
             }
             PanelAct::NewGroup(name) => {
                 let name = name.trim();
                 if !name.is_empty() {
-                    self.groups.new_group(name);
+                    self.core.groups.new_group(name);
                     self.save_groups();
                 }
             }
             PanelAct::Rename(g, name) => {
                 let name = name.trim();
-                if let Some(g) = self.groups.group_mut(g).filter(|_| !name.is_empty()) {
+                if let Some(g) = self.core.groups.group_mut(g).filter(|_| !name.is_empty()) {
                     g.name = name.into();
                     self.save_groups();
                 }
             }
             PanelAct::Color(g, color) => {
-                if let Some(g) = self.groups.group_mut(g) {
+                if let Some(g) = self.core.groups.group_mut(g) {
                     g.color = color.into();
                     self.save_groups();
                 }
@@ -321,15 +321,15 @@ impl App {
             PanelAct::DeleteGroup(g) => self.delete_group(g),
             PanelAct::EditConn(id) => self.edit_conn(id),
             PanelAct::Connect(id) => {
-                self.active = Some(id);
-                if !self.demo {
+                self.core.active = Some(id);
+                if !self.core.demo {
                     self.connect(id);
                 }
             }
             PanelAct::Disconnect(id) => self.disconnect(id),
             PanelAct::Ungroup(id) => {
                 let all = self.conn_ids();
-                if self.groups.place(id, Place::Loose(None), &all) {
+                if self.core.groups.place(id, Place::Loose(None), &all) {
                     self.save_groups();
                 }
             }
@@ -347,9 +347,9 @@ impl App {
 
     /// Connects every member of a group that is not open yet. The Connections panel and the rail's folder menu share it.
     pub(super) fn connect_group(&mut self, g: u64) {
-        let ids: Vec<u64> = self.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
+        let ids: Vec<u64> = self.core.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
         for id in ids {
-            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.demo {
+            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.core.demo {
                 self.connect(id);
             }
         }
@@ -357,7 +357,7 @@ impl App {
 
     /// Closes every open member of a group, with one message for the whole group.
     pub(super) fn disconnect_group(&mut self, g: u64) {
-        let Some(group) = self.groups.group(g) else { return };
+        let Some(group) = self.core.groups.group(g) else { return };
         let (ids, name) = (group.members.clone(), group.name.clone());
         let mut n = 0;
         for id in ids {
@@ -371,11 +371,11 @@ impl App {
 
     /// Deletes a group. Its members are in no group afterwards, and the toast offers Undo.
     pub(super) fn delete_group(&mut self, id: u64) {
-        let Some(at) = self.groups.groups.iter().position(|g| g.id == id) else { return };
-        let g = self.groups.groups.remove(at);
+        let Some(at) = self.core.groups.groups.iter().position(|g| g.id == id) else { return };
+        let g = self.core.groups.groups.remove(at);
         let all = self.conn_ids();
         // The members follow the connections that were already loose, in saved order.
-        self.groups.loose = self.groups.loose_order(&all);
+        self.core.groups.loose = self.core.groups.loose_order(&all);
         self.save_groups();
         let (name, n) = (g.name.clone(), g.members.len());
         let msg = match n {
@@ -391,7 +391,7 @@ impl App {
         let db_ = |id: u64, name: &str, tag: &str, uri: &str, engine: db::sql::Engine, status: Status| Conn { masked_uri: uri.into(), ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine, ..Default::default() }, status) };
         use db::sql::Engine::{MySql, Postgres};
         let mongo = db::sql::Engine::default();
-        self.conns.extend([
+        self.core.conns.extend([
             db_(11, "prod-eu", "Production", "mongodb+srv://app:****@prod-eu.example.net", mongo, Status::Ready),
             db_(12, "prod-us", "Production", "mongodb+srv://app:****@prod-us.example.net", mongo, Status::Idle),
             db_(13, "billing", "Production", "postgres://billing:****@pg.internal:5432/billing", Postgres, Status::Ready),
@@ -401,34 +401,34 @@ impl App {
             db_(17, "sandbox", "Development", "mongodb://sandbox.internal:27017", mongo, Status::Idle),
         ]);
         let all = self.conn_ids();
-        let (prod, stage, local) = (self.groups.new_group("Production"), self.groups.new_group("Staging"), self.groups.new_group("Local"));
+        let (prod, stage, local) = (self.core.groups.new_group("Production"), self.core.groups.new_group("Staging"), self.core.groups.new_group("Local"));
         for (c, g) in [(11, prod), (12, prod), (13, prod), (2, stage), (14, stage), (1, local), (15, local)] {
-            self.groups.place(c, Place::Into(g, None), &all);
+            self.core.groups.place(c, Place::Into(g, None), &all);
         }
-        if let Some(g) = self.groups.group_mut(local) {
+        if let Some(g) = self.core.groups.group_mut(local) {
             g.open = false;
         }
         for (g, c) in [(prod, "red"), (stage, "amber"), (local, "teal")] {
-            if let Some(g) = self.groups.group_mut(g) {
+            if let Some(g) = self.core.groups.group_mut(g) {
                 g.color = c.into();
             }
         }
-        self.rail_order = vec![1, 11, 13, 16];
-        self.active = Some(11);
-        self.prefs.set_side_mode(SideMode::Connections);
-        self.prefs.sidebar_hidden = false;
+        self.core.rail_order = vec![1, 11, 13, 16];
+        self.core.active = Some(11);
+        self.core.prefs.set_side_mode(SideMode::Connections);
+        self.core.prefs.sidebar_hidden = false;
         match state {
-            "filter" => self.conns_ui.filter = "prod".into(),
-            "menu" => self.conns_ui.demo_menu = Some(prod),
+            "filter" => self.core.conns_ui.filter = "prod".into(),
+            "menu" => self.core.conns_ui.demo_menu = Some(prod),
             "new" => {
-                self.conns_ui.adding = Some("Analytics".into());
-                self.conns_ui.focus_edit = true;
+                self.core.conns_ui.adding = Some("Analytics".into());
+                self.core.conns_ui.focus_edit = true;
             }
             "edit" => self.edit_group(prod),
-            "drag" => self.conns_ui.demo_drop = Some(stage),
+            "drag" => self.core.conns_ui.demo_drop = Some(stage),
             "picker" => {
-                self.prefs.set_side_mode(SideMode::Explorer);
-                self.conns_ui.demo_picker = true;
+                self.core.prefs.set_side_mode(SideMode::Explorer);
+                self.core.conns_ui.demo_picker = true;
             }
             _ => {}
         }

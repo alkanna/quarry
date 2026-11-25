@@ -80,7 +80,7 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
 
 impl App {
     fn trig_state_mut(&mut self) -> Option<&mut crate::app::sql::structure::StructState> {
-        Some(&mut self.tabs.get_mut(self.cur)?.sql.as_mut()?.st)
+        Some(&mut self.core.tabs.get_mut(self.core.cur)?.sql.as_mut()?.st)
     }
 
     fn trig_state(&self) -> Option<&crate::app::sql::structure::StructState> {
@@ -98,7 +98,7 @@ impl App {
 
     pub(in crate::app) fn trig_new(&mut self) {
         let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-        if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
+        if let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
             s.st.trig_new = true;
             s.st.trig.entry(NEW.to_string()).or_insert_with(|| blank(pg));
         }
@@ -253,7 +253,7 @@ impl App {
                 }
             });
         });
-        if revert && let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
+        if revert && let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
             s.st.trig.remove(key);
             if key == NEW {
                 s.st.trig_new = false;
@@ -295,7 +295,7 @@ impl App {
     }
 
     fn run_trigger(&mut self, job: TrigJob, done: &str) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         // A locked connection asks first and runs the change when writes are allowed, as Apply does for the structure.
@@ -309,13 +309,13 @@ impl App {
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
         let Some((db, schema)) = self.sql_target(&sel) else { return self.warn_offline() };
         let (.., m) = self.alter_env();
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
             s.st.applying = true;
             // The draft of a trigger that is being made is cleared once the structure lists it under this name.
             s.st.trig_made = if let TrigJob::Create(c) = &job { Some(c.def.name.clone()) } else { None };
             s.st.trig_saving = if let TrigJob::Edit { was, .. } = &job { Some(was.name.clone()) } else { None };
         }
-        self.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
+        self.core.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
     }
 
     pub(in crate::app) fn drop_trigger(&mut self, name: String) {
@@ -330,12 +330,12 @@ impl App {
             return;
         }
         let body = "BEGIN\n  IF NEW.status = 'refunded' AND OLD.status <> 'paid' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only paid orders can be refunded';\n  END IF;\n  IF NEW.total < 0 THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'The total cannot be negative';\n  END IF;\nEND";
-        let Some(t) = self.tabs.first_mut() else { return };
+        let Some(t) = self.core.tabs.first_mut() else { return };
         let conn = t.sel.conn;
         if let Some(s) = t.sql.as_mut() {
             s.st.trig.insert("orders_before_update".into(), TrigDef { name: "orders_before_update".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: body.into(), pg: Default::default() });
         }
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
             c.writable = true;
         }
     }

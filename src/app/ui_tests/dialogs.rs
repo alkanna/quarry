@@ -45,10 +45,10 @@ fn delete_cancel_keeps_the_dialog_from_acting() {
     }) else {
         return;
     };
-    let before = ui.app().tabs[1].docs.len();
+    let before = ui.app().core.tabs[1].docs.len();
     ui.click("Cancel");
     assert!(ui.app().modal.is_none());
-    assert_eq!(ui.app().tabs[1].docs.len(), before);
+    assert_eq!(ui.app().core.tabs[1].docs.len(), before);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn the_dump_switches_and_radio_cards_change_the_form() {
 fn hidden_sleeping_connections_are_counted_and_can_be_shown() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
-        a.sql_server = Some(sql::server::SqlServerWin::demo(3, "processes"));
+        a.core.sql_server = Some(sql::server::SqlServerWin::demo(3, "processes"));
     }) else {
         return;
     };
@@ -140,7 +140,7 @@ fn a_role_pill_cross_takes_the_role_away_and_the_chip_gives_it_back() {
     };
     ui.show("Remove app_read");
     ui.click("Remove app_read");
-    let roles = |ui: &UiApp| ui.app().sql_users.as_ref().map(|w| w.roles_now.clone()).unwrap_or_default();
+    let roles = |ui: &UiApp| ui.app().core.sql_users.as_ref().map(|w| w.roles_now.clone()).unwrap_or_default();
     assert!(!roles(&ui).iter().any(|r| r == "app_read@%"), "the cross did not take the role away");
     // Taken away, it stays as a chip that gives it back.
     ui.click("app_read");
@@ -152,7 +152,7 @@ fn the_connections_menu_keeps_its_actions_on_screen_with_many_connections() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
         for i in 0..40u64 {
-            a.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
+            a.core.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
         }
     }) else {
         return;
@@ -165,7 +165,7 @@ fn the_connections_menu_keeps_its_actions_on_screen_with_many_connections() {
     assert!(screen.contains_rect(action), "New connection is off screen at {action:?} in {screen:?}");
     // The far end of the list is still reachable, by scrolling the list.
     ui.click("cluster-39");
-    assert_eq!(ui.app().active, Some(139), "the last connection could not be picked");
+    assert_eq!(ui.app().core.active, Some(139), "the last connection could not be picked");
 }
 
 #[test]
@@ -178,8 +178,8 @@ fn the_close_button_of_an_agent_approval_denies_it() {
     };
     ui.show("Allow once");
     ui.click("Close dialog");
-    assert_eq!(ui.app().agents.answered.len(), 1, "the close button did nothing");
-    assert!(matches!(ui.app().agents.answered[0].1, crate::app::agents::Answer::Deny), "the close button did not deny");
+    assert_eq!(ui.app().core.agents.answered.len(), 1, "the close button did nothing");
+    assert!(matches!(ui.app().core.agents.answered[0].1, crate::app::agents::Answer::Deny), "the close button did not deny");
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn a_short_dialog_after_a_tall_one_shrinks_to_its_content() {
 fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
     let Some(ui) = demo_ui(|a| {
         a.load_demo();
-        if let Some(c) = a.conns.iter_mut().find(|c| c.meta.id == 1) {
+        if let Some(c) = a.core.conns.iter_mut().find(|c| c.meta.id == 1) {
             c.writable = false;
         }
         a.mongo_new_coll(1, "shop".into());
@@ -227,14 +227,14 @@ fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
 fn the_server_windows_show_database_sizes_and_postgresql_counters() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
-        a.sql_server = Some(sql::server::SqlServerWin::demo(3, "overview"));
+        a.core.sql_server = Some(sql::server::SqlServerWin::demo(3, "overview"));
     }) else {
         return;
     };
     ui.show("DATABASE SIZES");
     let Some(mut ui) = demo_ui(|a| {
         a.load_pg_demo();
-        a.pg_server = Some(sql::pg_server::PgServerWin::demo(3, "server"));
+        a.core.pg_server = Some(sql::pg_server::PgServerWin::demo(3, "server"));
     }) else {
         return;
     };

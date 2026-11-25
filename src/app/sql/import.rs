@@ -54,7 +54,7 @@ impl App {
     pub(in crate::app) fn open_sql_import_with(&mut self, conn: u64, db: String, schema: String, table: String, src: Option<Source>) {
         // The pool of the table's database and the namespace a worker call takes: the schema on PostgreSQL, the database on MySQL.
         let Some((sql, ns)) = self.sql_target(&Sel { conn, db: db.clone(), schema: schema.clone(), coll: table.clone() }) else { return self.warn_offline() };
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         let src = match src {
@@ -72,9 +72,9 @@ impl App {
             Ok(f) => f,
             Err(e) => return self.err(e),
         };
-        self.req += 1;
-        self.worker.sql_table_info(self.req, sql, ns, table.clone());
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.req, info: None, file, dup: Dup::Stop, restore: None })));
+        self.core.req += 1;
+        self.core.worker.sql_table_info(self.core.req, sql, ns, table.clone());
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.core.req, info: None, file, dup: Dup::Stop, restore: None })));
     }
 
     /// The columns of the table arrived.
@@ -357,7 +357,7 @@ impl App {
         });
         let blocked = if !writable {
             Some("Allow writes on this connection first")
-        } else if self.sql_job.is_some() {
+        } else if self.core.sql_job.is_some() {
             Some("Another import or script is running")
         } else if f.dup == Dup::Update && info.pg && info.pk.is_empty() {
             Some("Update needs a primary key")
@@ -425,12 +425,12 @@ impl App {
         let Some(writable) = self.conn(f.conn).map(|c| c.writable) else { return self.warn_offline() };
         let Some((sql, ns)) = self.sql_target(&Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() }) else { return self.warn_offline() };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
-        self.req += 1;
-        let mut job = crate::app::sql::dump::SqlJob::new(self.req, f.conn, sql.clone(), ns.clone(), crate::app::sql::dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        self.core.req += 1;
+        let mut job = crate::app::sql::dump::SqlJob::new(self.core.req, f.conn, sql.clone(), ns.clone(), crate::app::sql::dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
         job.rolls_back = info.transactional();
-        self.worker.sql_import(job.req, f.conn, sql, ns, f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
-        self.sql_job = Some(job);
-        self.ok(format!("Importing {} rows into {}", group(&job_rows(&self.sql_job).to_string()), f.table));
+        self.core.worker.sql_import(job.req, f.conn, sql, ns, f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
+        self.core.sql_job = Some(job);
+        self.ok(format!("Importing {} rows into {}", group(&job_rows(&self.core.sql_job).to_string()), f.table));
     }
 
     /// QUARRY_TEST_SQL=import: the dialog over the orders table with a file that has one bad value, built offline.

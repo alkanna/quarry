@@ -1,11 +1,12 @@
 use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
+use quarry_core::core::Core;
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -92,7 +93,7 @@ use indexes::*;
 use server::*;
 use sql::server::*;
 use sql::pg_server::*;
-use sql::routines::{RAct, Routines};
+use sql::routines::RAct;
 use watch::*;
 use tabs::new_tab_click;
 use drafts::*;
@@ -154,189 +155,26 @@ const SHORTCUTS: [(&str, &str); 47] = [
 ];
 
 pub struct App {
-    worker: Worker,
-    rx: Receiver<Msg>,
-    conns: Vec<Conn>,
-    active: Option<u64>,
-    open_dbs: HashSet<(u64, String)>,
-    /// Sidebar TABLES / VIEWS groups folded shut, by connection, database and whether it is the views group.
-    side_closed: HashSet<(u64, String, bool)>,
-    /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
-    sql_asked: HashSet<(u64, String)>,
-    /// PostgreSQL: (connection, database, schema) whose table list was asked for.
-    pg_tables_asked: Asked,
-    /// The last plan of each statement explained this session, for the explain dialog's Compare tab.
-    explain_prev: db::sql::plan::compare::History,
-    /// Sidebar lists that failed to load, by connection and namespace key (a database, or a PostgreSQL database and
-    /// schema), so the sidebar shows the failure with a retry instead of an empty list that never fills.
-    side_err: HashMap<(u64, String), String>,
-    tabs: Vec<Tab>,
-    cur: usize,
-    req: u64,
-    json_edit: Option<JsonEdit>,
-    drafts: HashMap<String, Draft>,
-    saving: HashMap<String, Draft>,
-    /// Paths changed in the document being drawn, for tinting.
-    changed: HashSet<String>,
-    inline: Option<Inline>,
-    /// The SQL grid cell being edited in place.
-    sql_cell: Option<CellEdit>,
-    /// A MySQL duplicate-key toast's Show the other row, waiting for the table's indexes: (req, table, index, value).
-    dup_wait: Option<(u64, Sel, String, String)>,
-    new_field: Option<NewField>,
+    /// Everything that is not drawing: connections, tabs, windows, preferences and the worker.
+    core: Core,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
-    fold_busy: bool,
-    /// Set while drawing a document: whether any object or array section is closed, None when it
-    /// has none. The document's Expand all button reads last frame's answer to pick its label.
-    fold_seen: Option<bool>,
-    /// Key column width and full row span of the tree being drawn, so values line up and hover bands cover the whole card.
-    key_w: f32,
-    char_w: f32,
     tree_x: egui::Rangef,
-    insert: Option<String>,
-    /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
-    /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
-    copying: std::collections::HashSet<(u64, String, String)>,
-    /// A collection to open once the create that makes it is answered.
-    open_after: Option<(u64, String, String)>,
-    /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
-    export_job: Option<export::ExportJob>,
-    /// A CSV import or a script file running, shown in the status bar with a Cancel.
-    sql_job: Option<sql::dump::SqlJob>,
-    prefs: UiPrefs,
-    col_filter: String,
-    /// Column data actions cover the whole query instead of the loaded page.
-    col_scope_query: bool,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::MenuBar>,
     /// Menu picks that are not key presses, handled at the start of the next frame.
     #[cfg(target_os = "macos")]
     menu_acts: Vec<crate::menu::Act>,
-    new_pkg: String,
-    /// Views per namespace, shown differently in the sidebar.
-    views: Views,
-    /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
-    /// SQL input there first has focus, and again on the sidebar's Refresh.
-    sql_schema: HashMap<(u64, String), Arc<db::sql::schema::Schema>>,
-    /// The row estimate of each table of `sql_schema`, built once when the schema arrives, for the sidebar.
-    sql_rows: HashMap<(u64, String), HashMap<String, u64>>,
-    sql_schema_asked: HashSet<(u64, String)>,
-    /// Looked up column values per (connection, database), keyed `table.column`, and the lookups already sent.
-    sql_values: HashMap<(u64, String), Fields>,
-    sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
-    /// What the filter panel knows of a table's columns, by (connection, namespace, table), then column.
-    sql_facts: HashMap<(u64, String, String), HashMap<String, db::sql::facts::ColFacts>>,
-    sql_facts_asked: HashSet<(u64, String, String, String)>,
-    users: Option<UsersWin>,
-    sql_users: Option<sql::users::SqlUsersWin>,
-    pg_roles: Option<sql::pg_roles::PgRolesWin>,
-    server: Option<ServerWin>,
-    sql_server: Option<SqlServerWin>,
-    pg_server: Option<PgServerWin>,
-    /// The routines of each SQL schema the sidebar lists, and the window of the one that is open.
-    routines: Routines,
-    /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
-    /// the window was closed still reaches the person.
-    sql_kills: HashSet<u64>,
-    /// The answer to a connection form Test, with the request id it answers.
-    conn_test: Option<(u64, db::Res<String>)>,
-    /// When the connection form's Test was sent, to say how long it took.
-    test_started: Option<std::time::Instant>,
-    /// What the last Test learned from a SQL server, for the Advanced tab to offer.
-    test_info: Option<(u64, db::sql::TestInfo)>,
-    /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
-    idx_info: Option<(String, db::IndexInfo)>,
-    undo: Vec<UndoAction>,
-    /// Bytes of each undo entry by its time, measured the first time the memory tooltip needs them.
-    undo_bytes: std::cell::RefCell<HashMap<std::time::Instant, usize>>,
-    explain_req: u64,
     modal: Option<Modal>,
     /// An answer that arrived while a dialog was open, shown once that dialog closes.
     late_modals: Vec<Modal>,
-    status: String,
-    log: LogUi,
-    toasts: Vec<Toast>,
-    /// This session's errors, oldest first, for the status bar list.
-    errors: Vec<ErrEntry>,
-    /// Errors since the list was last opened, the count the status bar shows.
-    errors_unseen: usize,
-    err_seq: u64,
-    /// Opens the error list on its first frame, for the demo picture.
-    errors_open: bool,
-    ac: Ac,
-    /// Field values fetched from the server for suggestions, per collection key then path. Kept on
-    /// disk, so a new session suggests them before its own fetch comes back.
-    values: HashMap<String, HashMap<String, Vec<Bson>>>,
-    /// (collection key, path, typed text) already fetched this session; no text for the sample.
-    values_asked: HashSet<(String, String, Option<String>)>,
-    /// (collection key, path) asked and not answered yet.
-    values_pending: HashSet<(String, String)>,
-    /// (collection key, path) whose typed text is not looked up, and why.
-    values_note: HashMap<(String, String), &'static str>,
-    /// A string value being typed: when to look up values starting with it, collection key, path, text.
-    values_typed: Option<(std::time::Instant, String, String, String)>,
     /// Shell editor language server, started on the first edit of a script; it quits when idle,
     /// so it only runs while someone writes JavaScript.
     js: shell_ls::JsState,
-    tree_filter: String,
-    tools_installing: bool,
-    /// What gcloud told this session about Cloud SQL, so the browser reopens at once.
-    cloud: cloud_sql::CloudCache,
-    /// The "Add from Cloud SQL" browser, when open.
-    cloud_browser: Option<cloud_sql::CloudBrowser>,
-    /// The Settings category shown, kept while the app runs.
-    settings_cat: settings::SettingsCat,
-    /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
-    reveal: Option<(u64, String, Option<String>)>,
-    /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
-    rail_order: Vec<u64>,
-    /// Connection groups, from groups.json. Never part of ConnMeta, which an older Quarry rewrites without them.
-    groups: Groups,
-    /// The script library, from library.json.
-    library: crate::library::Library,
-    /// What the Connections panel and the Library panel remember while the app runs.
-    conns_ui: conns_panel::ConnsUi,
-    lib_ui: library::LibUi,
-    /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
-    restores: Vec<(u64, Restore)>,
-    /// Scroll the selected document row into view on its next draw, after keyboard selection.
-    scroll_sel: bool,
     /// Vim navigation outside the editors: pending keys, the grid action they asked for and what the grid drew.
     vnav: vim_nav::VimNav,
-    /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
-    tab_seen: Option<usize>,
-    demo: bool,
-    /// Nothing is read from or written to disk or the keychain. True in the demo and in tests; `demo` alone means fake offline data.
-    ephemeral: bool,
-    /// Whether the header draws the window buttons: on Windows once the native title bar is gone, and in the demo's
-    /// QUARRY_TEST_WINFRAME switch.
-    win_buttons: bool,
-    tool: Option<ToolRun>,
-    /// AI agents: saved settings, the link listener and connected sessions.
-    agents: agents::AgentsState,
-    /// CPU time of the last frame in milliseconds, for the frame rate readout.
-    frame_ms: f32,
     /// The current scroll gesture for `prefs.lock_scroll_axis`: distance so far, locked axis (true is vertical) and last scroll time.
     scroll_gesture: (egui::Vec2, Option<Option<bool>>, f64, egui::Vec2),
-    /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
-    usage: (std::time::Instant, Duration, f32, Option<u64>),
-    /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
-    fps: (f32, u32, f32),
-    /// Measured column widths per result set and column.
-    width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
-    /// Recently closed tabs, newest first.
-    closed: Vec<Tab>,
-    /// Uids of tabs left and tabs gone back from, for Cmd+[ and Cmd+], newest last.
-    nav_back: Vec<u64>,
-    nav_fwd: Vec<u64>,
-    upd: Upd,
-    /// Why the last automatic check failed, shown in Settings; those failures stay quiet otherwise.
-    update_note: String,
-    update_checked: Option<std::time::Instant>,
-    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
-    upd_popup: bool,
-    started: std::time::Instant,
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
 }
 
@@ -353,119 +191,20 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let _ = menu;
         let (tx, rx) = channel();
+        let worker = Worker::new(tx, { let ctx = cc.egui_ctx.clone(); std::sync::Arc::new(move || ctx.request_repaint()) });
         Self {
-            worker: Worker::new(tx, { let ctx = cc.egui_ctx.clone(); std::sync::Arc::new(move || ctx.request_repaint()) }),
-            rx,
-            conns: Vec::new(),
-            active: None,
-            open_dbs: HashSet::new(),
-            side_closed: HashSet::new(),
-            sql_asked: HashSet::new(),
-            pg_tables_asked: Asked::default(),
-            explain_prev: Default::default(),
-            side_err: HashMap::new(),
-            tabs: Vec::new(),
-            cur: 0,
-            req: 0,
-            json_edit: None,
-            drafts: HashMap::new(),
-            saving: HashMap::new(),
-            changed: HashSet::new(),
-            inline: None,
-            sql_cell: None,
-            dup_wait: None,
-            new_field: None,
+            core: Core::new(worker, rx, demo),
             fold: None,
-            fold_busy: false,
-            fold_seen: None,
-            key_w: 0.0,
-            char_w: 0.0,
             tree_x: egui::Rangef::NOTHING,
-            insert: None,
-            copying: Default::default(),
-            open_after: None,
-            export_job: None,
-            sql_job: None,
-            prefs: UiPrefs::default(),
-            col_filter: String::new(),
-            col_scope_query: false,
             #[cfg(target_os = "macos")]
             menu: menu.then(|| crate::menu::MenuBar::new(&cc.egui_ctx)),
             #[cfg(target_os = "macos")]
             menu_acts: Vec::new(),
-            new_pkg: String::new(),
-            views: Views::default(),
-            sql_schema: HashMap::new(),
-            sql_rows: HashMap::new(),
-            sql_schema_asked: HashSet::new(),
-            sql_values: HashMap::new(),
-            sql_values_asked: HashMap::new(),
-            sql_facts: HashMap::new(),
-            sql_facts_asked: HashSet::new(),
-            users: None,
-            sql_users: None,
-            pg_roles: None,
-            server: None,
-            sql_server: None,
-            pg_server: None,
-            routines: Routines::default(),
-            sql_kills: HashSet::new(),
-            conn_test: None,
-            test_started: None,
-            test_info: None,
-            idx_info: None,
-            undo: Vec::new(),
-            undo_bytes: Default::default(),
-            explain_req: 0,
             modal: None,
             late_modals: Vec::new(),
-            status: "Ready. All connections start read-only.".into(),
-            toasts: Vec::new(),
-            errors: Vec::new(),
-            errors_unseen: 0,
-            err_seq: 0,
-            errors_open: false,
-            ac: Ac::default(),
-            values: HashMap::new(),
-            values_asked: HashSet::new(),
-            values_pending: HashSet::new(),
-            values_note: HashMap::new(),
-            values_typed: None,
             js: Default::default(),
-            log: LogUi::default(),
-            tree_filter: String::new(),
-            tools_installing: false,
-            cloud: Default::default(),
-            cloud_browser: None,
-            settings_cat: Default::default(),
-            reveal: None,
-            rail_order: Vec::new(),
-            groups: Groups::default(),
-            library: Default::default(),
-            conns_ui: Default::default(),
-            lib_ui: Default::default(),
-            restores: Vec::new(),
-            scroll_sel: false,
             vnav: Default::default(),
-            tab_seen: None,
-            demo,
-            ephemeral: demo,
-            win_buttons: false,
-            tool: None,
-            agents: Default::default(),
-            width_cache: HashMap::new(),
-            frame_ms: 0.0,
             scroll_gesture: Default::default(),
-            usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
-            fps: (0.0, 0, 0.0),
-            closed: Vec::new(),
-            nav_back: Vec::new(),
-            nav_fwd: Vec::new(),
-            upd: Upd::Idle,
-            update_note: String::new(),
-            update_checked: None,
-            upd_popup: false,
-            started: std::time::Instant::now(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
         }
     }
@@ -475,9 +214,9 @@ impl App {
     pub fn for_test(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx, Look::default());
         let mut app = Self::blank(cc, false, false, None);
-        app.ephemeral = true;
+        app.core.ephemeral = true;
         // A save runs on the click alone, and no timer-driven save can change the draft under a test.
-        (app.prefs.confirm_save, app.prefs.auto_save) = (false, false);
+        (app.core.prefs.confirm_save, app.core.prefs.auto_save) = (false, false);
         app
     }
 
@@ -487,13 +226,13 @@ impl App {
         let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
         // Screenshot runs stay off the real menu bar.
         let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
-        app.win_buttons = window_buttons::install(cc);
+        app.core.win_buttons = window_buttons::install(cc);
         // shortcut: the window opens decorated and loses them on the first frame when opted in, so it may flash; build the viewport from ui.json to avoid that.
         #[cfg(target_os = "linux")]
         app.set_titlebar(&cc.egui_ctx);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
-            (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);
+            (app.core.prefs.show_fps, app.core.prefs.show_mem, app.core.prefs.show_cpu) = (true, true, true);
         }
         // Test fixture: QUARRY_TEST_JSON=<file of Extended JSON documents> makes screenshot mode
         // show those documents through the same message path real query results take. A .jsonl
@@ -501,7 +240,7 @@ impl App {
         // benchmarks measure what a query leaves behind rather than the parse of one big array.
         let fixture = std::env::var("QUARRY_TEST_JSON").ok().filter(|_| demo);
         if let Some(path) = fixture {
-            app.demo = false;
+            app.core.demo = false;
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let rows: Vec<db::Row> = if path.ends_with(".jsonl") {
                 text.lines().filter_map(|l| db::parse_doc(l).ok()).filter_map(|d| db::Row::from_doc(&d).ok()).collect()
@@ -513,14 +252,14 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into(), ..Default::default() };
-            app.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
-            app.active = Some(1);
-            app.open_dbs.insert((1, "fixture".into()));
+            app.core.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
+            app.core.active = Some(1);
+            app.core.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, Open::Here);
-            app.req += 1;
-            app.tabs[0].req = app.req;
+            app.core.req += 1;
+            app.core.tabs[0].req = app.core.req;
             let n = rows.len() as u64;
-            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)), approx: false });
+            app.core.worker.send(Msg::Docs { req: app.core.req, res: Ok((rows, n, 3)), approx: false });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in either theme regardless of the system, and with
@@ -531,27 +270,27 @@ impl App {
                 Appearance::Dark.apply(&cc.egui_ctx);
             }
             if std::env::var("QUARRY_TEST_READING").is_ok() {
-                let p = &mut app.prefs;
+                let p = &mut app.core.prefs;
                 (p.ui_scale, p.soft, p.reading_line, p.group_digits, p.keep_toasts) = (1.25, true, true, true, true);
                 p.ui_font = "OpenDyslexic".into();
             }
             // QUARRY_TEST_THEME=<name> shows that theme in its own mode; the font switches take a name from the Settings lists.
             if let Ok(name) = std::env::var("QUARRY_TEST_THEME") {
                 let light = LIGHT_THEMES.iter().any(|t| t.name == name);
-                *(if light { &mut app.prefs.light_theme } else { &mut app.prefs.dark_theme }) = name;
-                app.prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
-                app.prefs.appearance.apply(&cc.egui_ctx);
+                *(if light { &mut app.core.prefs.light_theme } else { &mut app.core.prefs.dark_theme }) = name;
+                app.core.prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
+                app.core.prefs.appearance.apply(&cc.egui_ctx);
             }
             if let Ok(a) = std::env::var("QUARRY_TEST_ACCENT") {
-                app.prefs.accent = a;
+                app.core.prefs.accent = a;
             }
             if let Ok(f) = std::env::var("QUARRY_TEST_UI_FONT") {
-                app.prefs.ui_font = f;
+                app.core.prefs.ui_font = f;
             }
             if let Ok(f) = std::env::var("QUARRY_TEST_DATA_FONT") {
-                app.prefs.data_font = f;
+                app.core.prefs.data_font = f;
             }
-            style(&cc.egui_ctx, app.prefs.look());
+            style(&cc.egui_ctx, app.core.prefs.look());
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
                 cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
@@ -561,41 +300,41 @@ impl App {
             let (metas, broken_conns) = parse_config_list::<ConnMeta>(&config_dir().join("connections.json"));
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
-            app.prefs = prefs;
-            app.prefs.migrate();
-            app.values = load_values();
-            app.prefs.appearance.apply(&cc.egui_ctx);
+            app.core.prefs = prefs;
+            app.core.prefs.migrate();
+            app.core.values = load_values();
+            app.core.prefs.appearance.apply(&cc.egui_ctx);
             // A hand-edited size that is not offered shows and applies as 100 %.
-            app.prefs.ui_scale = app.prefs.look().scale;
-            if app.prefs.look() != Look::default() {
-                style(&cc.egui_ctx, app.prefs.look());
+            app.core.prefs.ui_scale = app.core.prefs.look().scale;
+            if app.core.prefs.look() != Look::default() {
+                style(&cc.egui_ctx, app.core.prefs.look());
             }
             let alive: Vec<u64> = metas.iter().map(|m| m.id).collect();
             let (groups, broken_groups) = groups::load_groups();
             let library_existed = config_dir().join("library.json").exists();
             let (library, broken_library) = library::load_library();
-            app.groups = groups;
-            app.library = library;
+            app.core.groups = groups;
+            app.core.library = library;
             // The first run with a library: the queries saved in ui.json move over, once. ui.json keeps them as they were.
             // A library.json that could not be read at all was moved aside and left an empty library; the old queries are
             // still in ui.json, so they come over again rather than staying lost.
-            if library::should_migrate(library_existed, broken_library.is_some(), &app.library) {
+            if library::should_migrate(library_existed, broken_library.is_some(), &app.core.library) {
                 app.migrate_library();
             }
             // Connections removed since the last run leave their groups, but their scripts stay.
-            if app.groups.prune(&alive) {
+            if app.core.groups.prune(&alive) {
                 app.save_groups();
             }
             crate::vault::migrate(&secret_names(metas.iter().map(|m| m.id)));
             for meta in metas {
                 let masked = stored_uri(meta.id).ok().map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
+                app.core.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
             }
-            app.active = app.conns.first().map(|c| c.meta.id);
+            app.core.active = app.core.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.
-            app.values.retain(|k, _| app.conns.iter().any(|c| k.starts_with(&format!("{}/", c.meta.id))));
+            app.core.values.retain(|k, _| app.core.conns.iter().any(|c| k.starts_with(&format!("{}/", c.meta.id))));
             // Reopen the tabs of the last session; they load once their connection is connected.
-            for st in app.prefs.open_tabs.clone() {
+            for st in app.core.prefs.open_tabs.clone() {
                 if app.conn(st.conn).is_none() {
                     continue;
                 }
@@ -644,36 +383,36 @@ impl App {
                     t.script = app.rebind(&t, r);
                 }
                 t.seed_ran();
-                app.tabs.push(t);
+                app.core.tabs.push(t);
             }
-            app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
+            app.core.cur = app.core.prefs.cur_tab.min(app.core.tabs.len().saturating_sub(1));
             let current = env!("CARGO_PKG_VERSION");
-            if let Some(id) = app.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
-                app.active = Some(id);
+            if let Some(id) = app.core.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
+                app.core.active = Some(id);
             }
             // The active tab wins over the saved connection, so the sidebar starts on the tab's connection like after a tab switch.
-            if let Some(t) = app.tabs.get(app.cur) {
-                app.active = Some(t.sel.conn);
+            if let Some(t) = app.core.tabs.get(app.core.cur) {
+                app.core.active = Some(t.sel.conn);
             }
             // Every connection open last time comes back open, in its rail order. The connections of reopened tabs
             // count too, for settings saved before open_conns existed.
             let mut seen = std::collections::HashSet::new();
-            let open: Vec<u64> = app.prefs.open_conns.iter().copied().chain(app.active).chain(app.tabs.iter().map(|t| t.sel.conn)).filter(|id| app.conn(*id).is_some() && seen.insert(*id)).collect();
-            app.rail_order = open.clone();
+            let open: Vec<u64> = app.core.prefs.open_conns.iter().copied().chain(app.core.active).chain(app.core.tabs.iter().map(|t| t.sel.conn)).filter(|id| app.conn(*id).is_some() && seen.insert(*id)).collect();
+            app.core.rail_order = open.clone();
             for id in open {
                 app.connect(id);
             }
             app.agents_start();
-            if app.prefs.last_version != current {
+            if app.core.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
                 if ui_json.is_some() {
-                    let notes = crate::update::changelog(&app.prefs.last_version, current);
+                    let notes = crate::update::changelog(&app.core.prefs.last_version, current);
                     if !notes.is_empty() {
-                        app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.prefs.last_version))));
+                        app.modal = Some(Modal::WhatsNew(Box::new(WhatsNew::new(notes, &app.core.prefs.last_version))));
                     }
                 }
-                app.prefs.last_version = current.into();
+                app.core.prefs.last_version = current.into();
                 app.save_prefs();
             }
             let broken: Vec<String> = [broken_conns, broken_prefs, broken_groups, broken_library].into_iter().flatten().collect();
@@ -691,9 +430,9 @@ impl App {
         match a {
             Act::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Act::CheckUpdates => self.check_now(),
-            Act::Export if !self.tabs.is_empty() => self.export(),
+            Act::Export if !self.core.tabs.is_empty() => self.export(),
             Act::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
-            Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),
+            Act::Insert if !self.core.tabs.is_empty() => self.core.insert = Some("{\n  \n}".into()),
             Act::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             _ => {}
         }
@@ -702,7 +441,7 @@ impl App {
     /// Keeps one scroll gesture on the axis it started on, so a slightly diagonal trackpad swipe
     /// does not drift off the row the eye follows. See `scroll_axis` for when a gesture locks.
     pub(super) fn lock_scroll_axis(&mut self, ctx: &egui::Context) {
-        if !self.prefs.lock_scroll_axis {
+        if !self.core.prefs.lock_scroll_axis {
             return;
         }
         let (d, started, t) = ctx.input(|i| (i.smooth_scroll_delta, i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })), i.time));
@@ -797,7 +536,7 @@ impl eframe::App for App {
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
         self.poll(ctx);
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
-        crate::ui::vim::set_on(ctx, self.prefs.vim);
+        crate::ui::vim::set_on(ctx, self.core.prefs.vim);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
         // frames ask for focus once the window is visible (a no-op when it already has it).
         if ctx.cumulative_frame_nr() < 3 && crate::takes_focus() {
@@ -814,16 +553,16 @@ impl eframe::App for App {
         }
         self.library_tick(ctx);
         // Set every frame so connections added or reconnected later need no extra handling.
-        if self.prefs.always_writable {
-            self.conns.iter_mut().for_each(|c| c.writable = true);
+        if self.core.prefs.always_writable {
+            self.core.conns.iter_mut().for_each(|c| c.writable = true);
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.frame_ms = frame.info().cpu_usage.unwrap_or(0.0) * 1000.0;
+        self.core.frame_ms = frame.info().cpu_usage.unwrap_or(0.0) * 1000.0;
         // QUARRY_FRAME_LOG prints each frame's CPU time, for measuring with a fixture.
         if std::env::var("QUARRY_FRAME_LOG").is_ok() {
-            eprintln!("frame_ms {:.3}", self.frame_ms);
+            eprintln!("frame_ms {:.3}", self.core.frame_ms);
         }
         let ctx = ui.ctx().clone();
         self.lock_scroll_axis(&ctx);
@@ -835,29 +574,29 @@ impl eframe::App for App {
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         #[cfg(target_os = "linux")]
-        if self.win_buttons {
+        if self.core.win_buttons {
             window_buttons::resize_edges(&ctx);
         }
         self.top_bar(ui);
         self.status_bar(ui);
         let corner = self.rail(ui);
-        if !self.prefs.sidebar_hidden {
+        if !self.core.prefs.sidebar_hidden {
             self.sidebar(ui);
         }
         vim_nav::side_done(&ctx);
         self.query_log(ui);
-        if !self.prefs.open_inline && self.selected_doc().is_some() {
+        if !self.core.prefs.open_inline && self.selected_doc().is_some() {
             self.inspector(ui);
         }
         self.value_panel(ui);
         // After the side panels, so the strip spans only the workspace.
-        if !self.tabs.is_empty() {
+        if !self.core.tabs.is_empty() {
             self.tab_strip(ui);
         }
         egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 })).show(ui, |ui| {
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test-central-left"), ui.max_rect().left() - 20.0));
-            if self.tabs.is_empty() {
+            if self.core.tabs.is_empty() {
                 self.welcome(ui);
             } else {
                 self.collection(ui);

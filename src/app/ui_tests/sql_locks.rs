@@ -5,7 +5,7 @@ use super::*;
 
 fn locks_window(a: &mut App) {
     a.load_sql_demo();
-    a.sql_server = Some(SqlServerWin::demo(3, "processes"));
+    a.core.sql_server = Some(SqlServerWin::demo(3, "processes"));
 }
 
 #[test]
@@ -38,7 +38,7 @@ fn an_idle_blocker_offers_kill_connection_only_and_it_takes_two_clicks() {
     // The second click comes after the guard that keeps a double click from sending the first.
     ui.click("Kill connection");
     assert!(!ui.shows("End connection 8790?"), "the confirmed Kill left its question on screen");
-    assert!(ui.app().sql_server.is_some(), "the window closed with the kill");
+    assert!(ui.app().core.sql_server.is_some(), "the window closed with the kill");
 }
 
 #[test]

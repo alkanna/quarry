@@ -46,7 +46,7 @@ impl PrefsLook for UiPrefs {
 
 impl App {
     pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
         if let Err(err) = write_atomic(&config_dir(), file, &bytes) {
@@ -55,17 +55,17 @@ impl App {
     }
 
     pub(super) fn save_conns(&mut self) {
-        let metas: Vec<&ConnMeta> = self.conns.iter().map(|c| &c.meta).collect();
+        let metas: Vec<&ConnMeta> = self.core.conns.iter().map(|c| &c.meta).collect();
         let b = serde_json::to_vec_pretty(&metas).unwrap_or_default();
         self.write_config("connections.json", b);
     }
 
     pub(super) fn save_values(&mut self) {
         // The demo must not touch the keychain, and without a key nothing is written in plain text.
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
-        if let Some(b) = cache_key().and_then(|k| seal(k, &mongodb::bson::to_vec(&self.values).ok()?)) {
+        if let Some(b) = cache_key().and_then(|k| seal(k, &mongodb::bson::to_vec(&self.core.values).ok()?)) {
             self.write_config("values.bson", b);
         }
     }
@@ -75,17 +75,17 @@ impl App {
     /// collection the request was made in, which a tab switch may have left.
     /// Returns whether a lookup was sent, so the caller redraws to show it running.
     pub(super) fn want_values(&mut self, key: String, path: String, prefix: Option<String>) -> bool {
-        if key != self.col_key(false) || !self.values_asked.insert((key.clone(), path.clone(), prefix.clone())) {
+        if key != self.col_key(false) || !self.core.values_asked.insert((key.clone(), path.clone(), prefix.clone())) {
             return false;
         }
         let Some(t) = self.target() else { return false };
-        self.values_pending.insert((key.clone(), path.clone()));
-        self.worker.field_values(key, t, path, prefix);
+        self.core.values_pending.insert((key.clone(), path.clone()));
+        self.core.worker.field_values(key, t, path, prefix);
         true
     }
 
     pub(super) fn values_done(&mut self, key: String, path: String, prefix: Option<String>, res: db::Res<Option<Vec<Bson>>>) {
-        self.values_pending.remove(&(key.clone(), path.clone()));
+        self.core.values_pending.remove(&(key.clone(), path.clone()));
         // Suggestions are best effort: a refused or slow lookup keeps what the page offers. A typed
         // lookup that did not run says why under the list.
         let note = match &res {
@@ -94,24 +94,24 @@ impl App {
             _ => None,
         };
         if let Some(n) = note {
-            self.values_note.insert((key.clone(), path.clone()), n);
+            self.core.values_note.insert((key.clone(), path.clone()), n);
         }
         let Ok(Some(mut vals)) = res else { return };
         vals.retain(suggestible);
         vals.truncate(db::FIELD_VALUES_MAX);
         let found = HashMap::from([(path, vals)]);
-        for t in self.tabs.iter_mut().filter(|t| t.coll_key() == key) {
+        for t in self.core.tabs.iter_mut().filter(|t| t.coll_key() == key) {
             merge_values(Arc::make_mut(&mut t.field_info), &found);
         }
         // Values found by what was typed are kept for the session only, so the file holds samples.
         if prefix.is_none() {
-            self.values.entry(key).or_default().extend(found);
+            self.core.values.entry(key).or_default().extend(found);
             self.save_values();
         }
     }
 
     pub(super) fn save_prefs(&mut self) {
-        let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
+        let b = serde_json::to_vec_pretty(&self.core.prefs).unwrap_or_default();
         self.write_config("ui.json", b);
     }
 }

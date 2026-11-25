@@ -17,7 +17,7 @@ impl App {
             Ok(q) => {
                 let (f, so, p) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone());
                 let key = self.col_key(false);
-                let h = self.prefs.history.entry(key).or_default();
+                let h = self.core.prefs.history.entry(key).or_default();
                 push_history(&mut h.selector, &f);
                 push_history(&mut h.sort, &so);
                 push_history(&mut h.project, &p);
@@ -101,15 +101,15 @@ impl App {
             if self.writable_target().is_some() {
                 self.modal = Some(Modal::AggWrite(p));
             }
-        } else if self.demo {
+        } else if self.core.demo {
             self.ok("Offline demo: nothing to run.");
         } else {
             match self.target() {
                 Some(target) => {
-                    self.req += 1;
-                    let req = self.req;
+                    self.core.req += 1;
+                    let req = self.core.req;
                     self.tm().unwrap().agg_req = req;
-                    self.worker.aggregate(req, target, p);
+                    self.core.worker.aggregate(req, target, p);
                 }
                 None => self.warn_offline(),
             }

@@ -122,14 +122,14 @@ fn clash<'a>(links: &'a [Link], scans: &crate::library::tree::Scans, dir: &std::
 impl App {
     /// The engine a new link is for: that of the current tab's connection, else of the active one.
     fn link_engine(&self) -> Engine {
-        let id = self.t().map(|t| t.sel.conn).or(self.active);
+        let id = self.t().map(|t| t.sel.conn).or(self.core.active);
         id.and_then(|id| self.conn(id)).map(|c| c.meta.engine).unwrap_or_default()
     }
 
     /// Opens the Link a folder dialog, editing the link `edit` when given.
     pub(in crate::app) fn open_link_dialog(&mut self, edit: Option<u64>) {
         let mut f = LinkForm { sql: true, js: true, json: true, follow: true, on: "conns".into(), engine: self.link_engine(), ..Default::default() };
-        match edit.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
+        match edit.and_then(|id| self.core.library.links.iter().find(|l| l.id == id)) {
             Some(l) => {
                 f.edit = Some(l.id);
                 f.path = l.path.to_string_lossy().into_owned();
@@ -142,7 +142,7 @@ impl App {
                 f.follow = l.follow;
             }
             None => {
-                if let Some(id) = self.t().map(|t| t.sel.conn).or(self.active) {
+                if let Some(id) = self.t().map(|t| t.sel.conn).or(self.core.active) {
                     f.conns = vec![id];
                 }
             }
@@ -213,7 +213,7 @@ impl App {
         if !path.is_empty() && !fresh && f.asking.is_none() && now - f.typed_at >= TYPING_PAUSE {
             f.asking = Some(path.clone());
             let (root, all) = (expand(&path), ["sql", "js", "json"].map(String::from).to_vec());
-            self.worker.blocking(move || db::Msg::LibScan { link: 0, scan: disk::scan(&root, &all, None) });
+            self.core.worker.blocking(move || db::Msg::LibScan { link: 0, scan: disk::scan(&root, &all, None) });
         } else if !path.is_empty() && !fresh {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TYPING_PAUSE));
         }
@@ -256,7 +256,7 @@ impl App {
                         gone = Some(id);
                     }
                 }
-                if self.conns.iter().any(|c| !f.conns.contains(&c.meta.id)) {
+                if self.core.conns.iter().any(|c| !f.conns.contains(&c.meta.id)) {
                     use egui::containers::menu::{MenuButton, MenuConfig};
                     // Stays open while the filter is typed in; a pick closes it.
                     let menu = MenuButton::from_button(egui::Button::new(RichText::new("+ Add").color(PRIMARY()))).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
@@ -265,7 +265,7 @@ impl App {
                         ui.set_width(320.0);
                         crate::app::conns_panel::picker_filter(ui, &mut f.pick.picker_filter, false);
                         // A whole group at once, for a folder a team uses on all its servers.
-                        let whole: Vec<(String, Vec<u64>)> = self.groups.groups.iter().map(|g| (g.name.clone(), g.members.iter().copied().filter(|m| self.conn(*m).is_some() && !f.conns.contains(m)).collect::<Vec<u64>>())).filter(|(_, m)| !m.is_empty()).collect();
+                        let whole: Vec<(String, Vec<u64>)> = self.core.groups.groups.iter().map(|g| (g.name.clone(), g.members.iter().copied().filter(|m| self.conn(*m).is_some() && !f.conns.contains(m)).collect::<Vec<u64>>())).filter(|(_, m)| !m.is_empty()).collect();
                         for (name, members) in whole {
                             if ui.add(egui::Button::new(format!("All of {name}")).shortcut_text(members.len().to_string())).clicked() {
                                 f.conns.extend(members);
@@ -273,7 +273,7 @@ impl App {
                             }
                         }
                         ui.separator();
-                        let picked = egui::ScrollArea::vertical().id_salt("link-add").max_height(280.0).show(ui, |ui| crate::app::conns_panel::picker_list_in(ui, &self.conns, &self.groups, &mut f.pick, None, false, &f.conns, &|_| None)).inner;
+                        let picked = egui::ScrollArea::vertical().id_salt("link-add").max_height(280.0).show(ui, |ui| crate::app::conns_panel::picker_list_in(ui, &self.core.conns, &self.core.groups, &mut f.pick, None, false, &f.conns, &|_| None)).inner;
                         if let Some(id) = picked {
                             f.conns.push(id);
                             ui.close();
@@ -330,8 +330,8 @@ impl App {
         let dir = expand(&f.path);
         let found = f.preview.as_ref().is_some_and(|(p, s)| *p == f.path.trim() && !s.missing);
         let canon = f.preview.as_ref().filter(|(p, _)| *p == f.path.trim()).and_then(|(_, s)| s.canon.clone());
-        let others: Vec<Link> = self.library.links.iter().filter(|l| Some(l.id) != f.edit).cloned().collect();
-        let clash = (!edit).then(|| clash(&others, &self.lib_ui.scans, &dir, canon.as_deref()).map(|l| l.name.clone())).flatten();
+        let others: Vec<Link> = self.core.library.links.iter().filter(|l| Some(l.id) != f.edit).cloned().collect();
+        let clash = (!edit).then(|| clash(&others, &self.core.lib_ui.scans, &dir, canon.as_deref()).map(|l| l.name.clone())).flatten();
         let problem = if f.path.trim().is_empty() {
             Some("Choose a folder".to_string())
         } else if let Some(n) = clash {
@@ -357,18 +357,18 @@ impl App {
         });
         if save {
             let name = if f.name.trim().is_empty() { folder_name(&dir) } else { f.name.trim().to_string() };
-            let id = f.edit.unwrap_or_else(|| self.library.next_id());
+            let id = f.edit.unwrap_or_else(|| self.core.library.next_id());
             let link = Link { id, path: dir, name: name.clone(), on: f.on.clone(), conns: if f.on == "conns" { f.conns.clone() } else { Vec::new() }, engine: if f.on == "engine" { format::engine_key(f.engine).into() } else { String::new() }, exts: f.exts(), follow: f.follow };
-            match self.library.links.iter_mut().find(|l| l.id == id) {
+            match self.core.library.links.iter_mut().find(|l| l.id == id) {
                 Some(l) => *l = link,
-                None => self.library.links.push(link),
+                None => self.core.library.links.push(link),
             }
             self.save_library();
             // A folder that moved is read from scratch: the old scan said it was missing.
             if f.locate {
-                self.lib_ui.scans.remove(&id);
+                self.core.lib_ui.scans.remove(&id);
             }
-            self.lib_ui.rescan.insert(id);
+            self.core.lib_ui.rescan.insert(id);
             self.ok(if f.locate { format!("{name} found.") } else if edit { format!("{name} updated.") } else { format!("Linked {name}.") });
             *keep = false;
         }

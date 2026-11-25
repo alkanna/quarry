@@ -18,7 +18,7 @@ fn a_json_value_opens_in_full_laid_out() {
 /// Row 2's note set to `note`, as if the table held it.
 pub(super) fn set_note(ui: &mut UiApp, note: &str) {
     let app = ui.h.state_mut();
-    let t = &mut app.tabs[app.cur];
+    let t = &mut app.core.tabs[app.core.cur];
     let mut d = Rows::Raw(&t.docs).owned(1).expect("row 2");
     d.insert("note", note);
     t.docs[1] = db::Row::from_doc(&d).unwrap();
@@ -51,7 +51,7 @@ fn the_eye_on_a_hovered_cell_opens_the_value_on_a_read_only_connection() {
     ui.settle();
     ui.click("View note row 2");
     assert_eq!(shown_text(&ui).as_deref(), Some("Leave at the door"));
-    assert!(ui.app().modal.is_some() && ui.app().conns.iter().all(|c| !c.writable), "viewing asked for write access");
+    assert!(ui.app().modal.is_some() && ui.app().core.conns.iter().all(|c| !c.writable), "viewing asked for write access");
 }
 
 #[test]
@@ -82,14 +82,14 @@ fn the_large_editor_switches_between_text_and_tree() {
     let json = "{\n  \"door\": \"back\",\n  \"floors\": [1, 2]\n}";
     set_note(&mut ui, json);
     ui.h.state_mut().sql_open_cell(1, "note".into());
-    ui.wait("the large editor", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+    ui.wait("the large editor", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
     ui.click("Tree");
     ui.show("Expand all");
     // A leaf's key is its own label; a folding row's label also holds its size.
     ui.show("door");
     ui.click("Text");
     assert!(ui.h.query_all_by_label("Expand all").next().is_none(), "the tree stayed after Text");
-    assert_eq!(ui.app().sql_cell.as_ref().map(|e| e.text.as_str()), Some(json), "switching changed the text");
+    assert_eq!(ui.app().core.sql_cell.as_ref().map(|e| e.text.as_str()), Some(json), "switching changed the text");
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn query_headers_with_one_name_twice_reorder_without_losing_a_column() {
         a.load_sql_demo();
         a.sql_query_demo();
         // A join returns two columns of one name.
-        if let Some(s) = a.tabs.last_mut().and_then(|t| t.sql.as_mut()) {
+        if let Some(s) = a.core.tabs.last_mut().and_then(|t| t.sql.as_mut()) {
             s.sets[0].cols[1].name = "name".into();
         }
     }) else { return };

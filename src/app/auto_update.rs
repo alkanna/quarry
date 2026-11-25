@@ -9,14 +9,14 @@ impl App {
     /// Checks GitHub 5 seconds after launch and then daily. An installed update waits for Restart:
     /// Quarry never restarts by itself, and the new version also starts on the next launch.
     pub(super) fn auto_update(&mut self, ctx: &egui::Context) {
-        if let Upd::Downloading { .. } = self.upd {
+        if let Upd::Downloading { .. } = self.core.upd {
             // The progress lives in atomics the worker writes, so nothing else would redraw it.
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
-        if let Upd::UpToDate(at) = self.upd {
+        if let Upd::UpToDate(at) = self.core.upd {
             let left = std::time::Duration::from_secs(UP_TO_DATE_S).saturating_sub(at.elapsed());
             if left.is_zero() {
-                self.upd = Upd::Idle;
+                self.core.upd = Upd::Idle;
             } else {
                 ctx.request_repaint_after(left);
             }
@@ -27,22 +27,22 @@ impl App {
         }
         const FIRST_CHECK_S: u64 = 5;
         const CHECK_EVERY_S: u64 = 24 * 3600;
-        let due = match self.update_checked {
-            None => self.started.elapsed().as_secs() >= FIRST_CHECK_S,
+        let due = match self.core.update_checked {
+            None => self.core.started.elapsed().as_secs() >= FIRST_CHECK_S,
             Some(t) => t.elapsed().as_secs() >= CHECK_EVERY_S,
         };
-        if self.update_checked.is_none() {
+        if self.core.update_checked.is_none() {
             ctx.request_repaint_after(std::time::Duration::from_secs(FIRST_CHECK_S));
         }
         // A failed or offered update is checked again daily, so a newer release or a retry is picked up.
-        if due && !matches!(self.upd, Upd::Checking { .. } | Upd::Downloading { .. } | Upd::Ready(_)) {
+        if due && !matches!(self.core.upd, Upd::Checking { .. } | Upd::Downloading { .. } | Upd::Ready(_)) {
             self.check_update(false);
         }
     }
 
     /// Dev builds and the demo never install releases.
     pub(super) fn can_update(&self) -> bool {
-        !self.demo && !cfg!(debug_assertions)
+        !self.core.demo && !cfg!(debug_assertions)
     }
 
     /// Restarts into the installed update. The process exits without running destructors, so every connection's tunnel
@@ -54,19 +54,19 @@ impl App {
 
     /// Drops every SSH tunnel and Cloud SQL proxy, which stops them.
     pub(super) fn close_ways(&mut self) {
-        for c in &mut self.conns {
+        for c in &mut self.core.conns {
             c.tunnel = None;
         }
     }
 
     /// `manual` decides whether the answer is shown when there is nothing new; it lives in the Checking state only.
     pub(super) fn check_update(&mut self, manual: bool) {
-        self.update_checked = Some(std::time::Instant::now());
-        self.upd = Upd::Checking { manual };
-        self.worker.blocking(|| Msg::UpdateChecked(crate::update::check()));
+        self.core.update_checked = Some(std::time::Instant::now());
+        self.core.upd = Upd::Checking { manual };
+        self.core.worker.blocking(|| Msg::UpdateChecked(crate::update::check()));
         // A running dump or restore keeps its program open; Windows cannot replace it then.
-        if self.tool.as_ref().is_none_or(|t| t.done.is_some()) {
-            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::update_db_tools(&tools_dir())));
+        if self.core.tool.as_ref().is_none_or(|t| t.done.is_some()) {
+            self.core.worker.blocking(|| Msg::ToolsInstalled(crate::update::update_db_tools(&tools_dir())));
         }
     }
 
@@ -74,29 +74,29 @@ impl App {
     /// Dev builds and the demo cannot update, so they show Settings > Updates, which says so.
     pub(super) fn check_now(&mut self) {
         if !self.can_update() {
-            self.settings_cat = settings::SettingsCat::Updates;
+            self.core.settings_cat = settings::SettingsCat::Updates;
             self.modal = Some(Modal::Settings);
             return;
         }
-        match self.upd {
+        match self.core.upd {
             Upd::Idle | Upd::UpToDate(_) | Upd::Failed { info: None, .. } => self.check_update(true),
             // An automatic check is already asking; its answer is shown as if asked for.
-            Upd::Checking { manual: false } => self.upd = Upd::Checking { manual: true },
+            Upd::Checking { manual: false } => self.core.upd = Upd::Checking { manual: true },
             _ => {}
         }
-        self.upd_popup = true;
+        self.core.upd_popup = true;
     }
 
     pub(super) fn start_download(&mut self, info: crate::update::Available) {
         // The demo's made-up states offer the same buttons, which must not fetch anything.
         if !self.can_update() {
-            self.upd = Upd::Available(info);
+            self.core.upd = Upd::Available(info);
             return;
         }
         let prog = Arc::new(crate::update::Progress::default());
         let (i, p) = (info.clone(), prog.clone());
-        self.worker.blocking(move || Msg::UpdateInstalled(crate::update::download(&i, &p)));
-        self.upd = Upd::Downloading { info, prog, started: std::time::Instant::now() };
+        self.core.worker.blocking(move || Msg::UpdateInstalled(crate::update::download(&i, &p)));
+        self.core.upd = Upd::Downloading { info, prog, started: std::time::Instant::now() };
     }
 
     fn restart_now(&mut self) {
@@ -110,7 +110,7 @@ impl App {
     }
 
     pub(super) fn upd_btn(&self) -> Option<UpdBtn> {
-        match &self.upd {
+        match &self.core.upd {
             Upd::Idle | Upd::UpToDate(_) => self.can_update().then_some(UpdBtn::Check),
             Upd::Checking { .. } => None,
             Upd::Available(_) => Some(UpdBtn::Update),
@@ -124,8 +124,8 @@ impl App {
     pub(super) fn upd_act(&mut self, b: UpdBtn) {
         match b {
             // Retry downloads the release again when one was found, else asks GitHub again.
-            UpdBtn::Update | UpdBtn::Retry if self.upd.info().is_some() => {
-                if let Some(a) = self.upd.info().cloned() {
+            UpdBtn::Update | UpdBtn::Retry if self.core.upd.info().is_some() => {
+                if let Some(a) = self.core.upd.info().cloned() {
                     self.start_download(a);
                 }
             }
@@ -136,7 +136,7 @@ impl App {
                 }
             }
             UpdBtn::Cancel => {
-                if let Upd::Downloading { prog, .. } = &self.upd {
+                if let Upd::Downloading { prog, .. } = &self.core.upd {
                     prog.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
@@ -146,10 +146,10 @@ impl App {
 
     pub(super) fn update_status(&self) -> (String, String) {
         let current = env!("CARGO_PKG_VERSION");
-        let checked = self.update_checked.map_or("New releases are checked at launch and once a day".to_string(), |t| format!("checked {}", ago(t.elapsed().as_secs())));
-        match &self.upd {
-            Upd::Idle if !self.update_note.is_empty() => (format!("Quarry {current}"), self.update_note.clone()),
-            Upd::Idle | Upd::UpToDate(_) if self.update_checked.is_some() => (format!("Quarry {current}"), format!("Up to date  ·  {checked}")),
+        let checked = self.core.update_checked.map_or("New releases are checked at launch and once a day".to_string(), |t| format!("checked {}", ago(t.elapsed().as_secs())));
+        match &self.core.upd {
+            Upd::Idle if !self.core.update_note.is_empty() => (format!("Quarry {current}"), self.core.update_note.clone()),
+            Upd::Idle | Upd::UpToDate(_) if self.core.update_checked.is_some() => (format!("Quarry {current}"), format!("Up to date  ·  {checked}")),
             Upd::Idle | Upd::UpToDate(_) => (format!("Quarry {current}"), checked),
             Upd::Checking { .. } => (format!("Quarry {current}"), "Checking for updates…".into()),
             Upd::Available(a) => (format!("Quarry {} is available", a.version), format!("You are running {current}")),
@@ -165,27 +165,27 @@ impl App {
     }
 
     pub(super) fn on_update_checked(&mut self, res: db::Res<Option<crate::update::Available>>) {
-        let manual = matches!(self.upd, Upd::Checking { manual: true });
+        let manual = matches!(self.core.upd, Upd::Checking { manual: true });
         if res.is_ok() {
-            self.update_note.clear();
+            self.core.update_note.clear();
         }
-        self.upd = match res {
-            Ok(Some(info)) if self.prefs.auto_update => return self.start_download(info),
+        self.core.upd = match res {
+            Ok(Some(info)) if self.core.prefs.auto_update => return self.start_download(info),
             Ok(Some(info)) => Upd::Available(info),
             Ok(None) if manual => Upd::UpToDate(std::time::Instant::now()),
             Ok(None) => Upd::Idle,
             Err(msg) if manual => Upd::Failed { info: None, msg },
             // Offline or rate-limited checks stay quiet; the reason shows in Settings.
             Err(e) => {
-                self.update_note = format!("Last check failed: {e}");
+                self.core.update_note = format!("Last check failed: {e}");
                 Upd::Idle
             }
         };
     }
 
     pub(super) fn on_update_installed(&mut self, res: db::Res<String>) {
-        let Upd::Downloading { info, prog, .. } = std::mem::replace(&mut self.upd, Upd::Idle) else { return };
-        self.upd = match res {
+        let Upd::Downloading { info, prog, .. } = std::mem::replace(&mut self.core.upd, Upd::Idle) else { return };
+        self.core.upd = match res {
             Ok(_) => Upd::Ready(info),
             Err(_) if prog.cancel.load(std::sync::atomic::Ordering::Relaxed) => Upd::Available(info),
             Err(msg) => Upd::Failed { info: Some(info), msg },

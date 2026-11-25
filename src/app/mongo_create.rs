@@ -97,8 +97,8 @@ impl App {
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.warn_offline();
         };
-        self.open_after = Some((conn, db.clone(), name.clone()));
-        self.worker.db_change(conn, client, db.clone(), cmd, format!("Created {db}.{name}"));
+        self.core.open_after = Some((conn, db.clone(), name.clone()));
+        self.core.worker.db_change(conn, client, db.clone(), cmd, format!("Created {db}.{name}"));
     }
 }
 

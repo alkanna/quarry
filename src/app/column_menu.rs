@@ -285,7 +285,7 @@ impl App {
         let key = self.col_key(agg);
         let Some(t) = self.t() else { return };
         let dialect = self.sql_dialect();
-        let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
+        let label = self.core.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
             HeadAct::AddSort if t.sql.is_some() => {
                 let t = self.tm().unwrap();
@@ -311,9 +311,9 @@ impl App {
                 let w = match wp {
                     WidthPreset::Min => Some(COL_MIN_W),
                     WidthPreset::Optimal => None,
-                    WidthPreset::Max => Some(super::table::optimal_width(ui, docs, c, &label, !self.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
+                    WidthPreset::Max => Some(super::table::optimal_width(ui, docs, c, &label, !self.core.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
                 };
-                let widths = &mut self.prefs.cols.entry(key).or_default().widths;
+                let widths = &mut self.core.prefs.cols.entry(key).or_default().widths;
                 match w {
                     Some(w) => widths.insert(c.into(), w),
                     None => widths.remove(c),
@@ -383,7 +383,7 @@ impl App {
                 let w = match wp {
                     WidthPreset::Min => Some(COL_MIN_W),
                     WidthPreset::Optimal => None,
-                    WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
+                    WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.core.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
                 };
                 if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
                     let widths = &mut s.qprefs.entry(names).or_default().widths;
@@ -411,7 +411,7 @@ impl App {
         });
         let is_sql = sql.is_some();
         let noun = if is_sql { "rows" } else { "documents" };
-        if agg || !self.col_scope_query {
+        if agg || !self.core.col_scope_query {
             // As the table shows them, unsaved edits included.
             let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), is_sql) {
                 (Some(mut d), true) => d.remove(c),
@@ -436,12 +436,12 @@ impl App {
             let q = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.ran.clone()).unwrap_or_default();
             self.ok(format!("Reading {c} from every matching row…"));
             let src = col.map_or_else(|| c.to_string(), |x| x.src);
-            return self.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
+            return self.core.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
         }
         let Some(target) = self.target() else { return self.warn_offline() };
         let sort = self.t().unwrap().query.sort.clone();
         self.ok(format!("Reading {c} from every matching document…"));
-        self.worker.column_values(sel.conn, target, op, c.into(), matched, sort);
+        self.core.worker.column_values(sel.conn, target, op, c.into(), matched, sort);
     }
 
     /// Copies or shows a data action's result. Groups never get here: they open `Modal::Grouped`.

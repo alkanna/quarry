@@ -28,10 +28,10 @@ impl App {
 
     /// `shown_doc` for row `i` of a table, found by its _id without decoding the row.
     pub(super) fn shown_row(&self, rows: Rows, i: usize, agg: bool) -> Option<Document> {
-        if agg || self.drafts.is_empty() {
+        if agg || self.core.drafts.is_empty() {
             return None;
         }
-        self.drafts.get(&self.draft_key_of(rows.id(i).as_ref())).map(|x| x.current.clone())
+        self.core.drafts.get(&self.draft_key_of(rows.id(i).as_ref())).map(|x| x.current.clone())
     }
 
     /// Keeps an edit as unsaved instead of writing it, so several edits go out in one save.
@@ -46,14 +46,14 @@ impl App {
         };
         let key = self.draft_key(d);
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        self.inline = None;
-        self.new_field = None;
-        self.json_edit = None;
-        let n = stage_draft(&mut self.drafts, &key, &sel, d, new);
+        self.core.inline = None;
+        self.core.new_field = None;
+        self.core.json_edit = None;
+        let n = stage_draft(&mut self.core.drafts, &key, &sel, d, new);
         if n == 0 {
             return self.ok("No changes left on this document");
         }
-        if self.prefs.auto_save && self.sel_writable() {
+        if self.core.prefs.auto_save && self.sel_writable() {
             self.write_draft(&key);
         } else {
             self.ok(format!("{n} unsaved change(s). Press Save on the document when ready."));
@@ -71,12 +71,12 @@ impl App {
     }
 
     pub(super) fn save_draft(&mut self, key: &str) {
-        let Some(dr) = self.drafts.get(key) else { return };
+        let Some(dr) = self.core.drafts.get(key) else { return };
         if !self.conn(dr.conn).is_some_and(|c| c.writable) {
             let key = key.to_string();
             return self.modal = Some(Modal::Unlock(dr.conn, Some(Box::new(move |a: &mut App| a.save_draft(&key)))));
         }
-        if self.prefs.confirm_save && !self.prefs.always_writable {
+        if self.core.prefs.confirm_save && !self.core.prefs.always_writable {
             let changes = db::diff(&dr.original, &dr.current);
             self.modal = Some(Modal::Save { tag: key.to_string(), changes });
         } else {
@@ -85,22 +85,22 @@ impl App {
     }
 
     pub(super) fn write_draft(&mut self, key: &str) {
-        if self.drafts.get(key).is_some_and(|d| self.conn(d.conn).is_some_and(|c| c.sql.is_some())) {
+        if self.core.drafts.get(key).is_some_and(|d| self.conn(d.conn).is_some_and(|c| c.sql.is_some())) {
             return self.write_sql_drafts(vec![key.to_string()]);
         }
-        let Some(dr) = self.drafts.remove(key) else { return };
+        let Some(dr) = self.core.drafts.remove(key) else { return };
         let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), schema: dr.schema.clone(), coll: dr.coll.clone() }) else {
-            self.drafts.insert(key.to_string(), dr);
+            self.core.drafts.insert(key.to_string(), dr);
             return self.warn_offline();
         };
-        self.worker.save(key.to_string(), dr.conn, target, dr.original.clone(), dr.current.clone());
-        self.saving.insert(key.to_string(), dr);
+        self.core.worker.save(key.to_string(), dr.conn, target, dr.original.clone(), dr.current.clone());
+        self.core.saving.insert(key.to_string(), dr);
     }
 
     /// Unsaved documents of the open collection.
     pub(super) fn tab_drafts(&self) -> Vec<String> {
         let Some(t) = self.t() else { return Vec::new() };
-        drafts_of(&self.drafts, &t.sel)
+        drafts_of(&self.core.drafts, &t.sel)
     }
 }
 

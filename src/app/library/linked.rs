@@ -71,21 +71,21 @@ impl App {
     /// follows changes or one of its files is open. One scan per link runs at a time.
     pub(super) fn linked_tick(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        let regained = focused && !self.lib_ui.was_focused;
-        self.lib_ui.was_focused = focused;
+        let regained = focused && !self.core.lib_ui.was_focused;
+        self.core.lib_ui.was_focused = focused;
         // Links whose scans are set by hand, as the demo does, never touch the disk.
-        if self.lib_ui.frozen {
+        if self.core.lib_ui.frozen {
             return;
         }
         let now = ctx.input(|i| i.time);
         let mut next: Option<f64> = None;
-        for (id, follow) in self.library.links.iter().map(|l| (l.id, l.follow)).collect::<Vec<_>>() {
-            if self.lib_ui.scanning.contains(&id) {
+        for (id, follow) in self.core.library.links.iter().map(|l| (l.id, l.follow)).collect::<Vec<_>>() {
+            if self.core.lib_ui.scanning.contains(&id) {
                 continue;
             }
-            let open = self.tabs.iter().any(|t| matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link, .. }) if *link == id));
-            let last = self.lib_ui.scan_at.get(&id).copied();
-            let asked = self.lib_ui.rescan.remove(&id);
+            let open = self.core.tabs.iter().any(|t| matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link, .. }) if *link == id));
+            let last = self.core.lib_ui.scan_at.get(&id).copied();
+            let asked = self.core.lib_ui.rescan.remove(&id);
             let polled = focused && (follow || open);
             let due = last.is_none() || asked || regained || (polled && now - last.unwrap_or(0.0) >= POLL_SECS);
             if due {
@@ -101,44 +101,44 @@ impl App {
     }
 
     fn start_scan(&mut self, id: u64, now: f64) {
-        let Some(l) = self.library.links.iter().find(|l| l.id == id) else { return };
+        let Some(l) = self.core.library.links.iter().find(|l| l.id == id) else { return };
         let (path, exts) = (l.path.clone(), l.exts.clone());
-        let prev = self.lib_ui.scans.get(&id).cloned();
+        let prev = self.core.lib_ui.scans.get(&id).cloned();
         // The files open in tabs are read in full by the scan when they changed, so `apply_scan` never reads on this thread.
         let open: Vec<(PathBuf, disk::Meta)> = self
-            .tabs
+            .core.tabs
             .iter()
             .filter_map(|t| match t.script.as_ref()? {
                 Bound { r: ScriptRef::File { link, rel }, disk, .. } if *link == id && crate::library::safe_rel(rel) => Some((rel.clone(), *disk)),
                 _ => None,
             })
             .collect();
-        self.lib_ui.scanning.insert(id);
-        self.lib_ui.scan_at.insert(id, now);
-        self.worker.blocking(move || db::Msg::LibScan { link: id, scan: disk::scan_reading(&path, &exts, prev.as_ref(), &open) });
+        self.core.lib_ui.scanning.insert(id);
+        self.core.lib_ui.scan_at.insert(id, now);
+        self.core.worker.blocking(move || db::Msg::LibScan { link: id, scan: disk::scan_reading(&path, &exts, prev.as_ref(), &open) });
     }
 
     /// Runs `work` on the worker for the job `job`; its answer comes back to `file_done`.
     pub(in crate::app) fn run_job(&mut self, job: Job, work: impl FnOnce() -> FileOut + Send + 'static) {
-        self.lib_ui.job_seq += 1;
-        let id = self.lib_ui.job_seq;
-        self.lib_ui.jobs.insert(id, job);
-        self.worker.blocking(move || db::Msg::LibFile { job: id, out: work() });
+        self.core.lib_ui.job_seq += 1;
+        let id = self.core.lib_ui.job_seq;
+        self.core.lib_ui.jobs.insert(id, job);
+        self.core.worker.blocking(move || db::Msg::LibFile { job: id, out: work() });
     }
 
     pub(in crate::app) fn tab_by_uid(&self, uid: u64) -> Option<usize> {
-        self.tabs.iter().position(|t| t.uid == uid)
+        self.core.tabs.iter().position(|t| t.uid == uid)
     }
 
     /// The binding of tab `uid` when it is still to the file `rel` of `link`.
     fn bound_to(&mut self, uid: u64, link: u64, rel: &std::path::Path) -> Option<&mut Bound> {
         let i = self.tab_by_uid(uid)?;
-        self.tabs[i].script.as_mut().filter(|b| matches!(&b.r, ScriptRef::File { link: l, rel: r } if *l == link && r == rel))
+        self.core.tabs[i].script.as_mut().filter(|b| matches!(&b.r, ScriptRef::File { link: l, rel: r } if *l == link && r == rel))
     }
 
     /// A linked-file job finished on the worker.
     pub(in crate::app) fn file_done(&mut self, job: u64, out: FileOut) {
-        let Some(job) = self.lib_ui.jobs.remove(&job) else { return };
+        let Some(job) = self.core.lib_ui.jobs.remove(&job) else { return };
         match (job, out) {
             (Job::Open { r, how, conn }, FileOut::Read(res)) => {
                 let ScriptRef::File { link, rel } = &r else { return };
@@ -157,7 +157,7 @@ impl App {
                     if self.bound_to(uid, link, &rel).is_none() {
                         return;
                     }
-                    let Some(t) = self.tab_by_uid(uid).map(|i| &mut self.tabs[i]) else { return };
+                    let Some(t) = self.tab_by_uid(uid).map(|i| &mut self.core.tabs[i]) else { return };
                     // Reload throws the tab's edits away, so the toast keeps them for Undo.
                     let mine = bound_text(t).filter(|m| *m != now.text).map(String::from);
                     set_bound_text(t, &now.text, now.parsed.as_ref());
@@ -206,20 +206,20 @@ impl App {
                 let r = ScriptRef::File { link, rel: rel.clone() };
                 // Other tabs open on the file it replaced see the change now, as a scan would show it: a clean one that
                 // follows takes the new text, an edited one gets the conflict banner.
-                let others: Vec<usize> = (0..self.tabs.len()).filter(|i| self.tabs[*i].uid != uid && self.tabs[*i].script.as_ref().is_some_and(|b| b.r == r)).collect();
+                let others: Vec<usize> = (0..self.core.tabs.len()).filter(|i| self.core.tabs[*i].uid != uid && self.core.tabs[*i].script.as_ref().is_some_and(|b| b.r == r)).collect();
                 for i in others {
                     self.file_changed(i, link, &rel, Loaded { text: body.clone(), parsed: None, meta });
                 }
                 match (view, self.tab_by_uid(uid)) {
-                    (Some(v), Some(i)) if self.tabs[i].view == v => {
-                        super::open::bind(&mut self.tabs[i], Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
+                    (Some(v), Some(i)) if self.core.tabs[i].view == v => {
+                        super::open::bind(&mut self.core.tabs[i], Bound { r: r.clone(), view: v, base: body, disk: meta, conflict: None });
                     }
                     _ => {}
                 }
-                self.library.push_recent(r);
+                self.core.library.push_recent(r);
                 self.save_library();
                 self.mark_seen(link, &rel, meta);
-                match (replaced, self.library.link_join(link, &rel)) {
+                match (replaced, self.core.library.link_join(link, &rel)) {
                     (Some((old, new)), Some(path)) => self.toast_restore(format!("Replaced {} in {place}.", file_label(&rel)), Restore::Replaced { link, path, old, new }),
                     _ => self.ok(format!("Saved {} to {place}", file_label(&rel))),
                 }
@@ -244,12 +244,12 @@ impl App {
 
     /// Whether the last scan of a link found its folder gone. Nothing is written there until a scan finds it again.
     pub(in crate::app) fn link_missing(&self, link: u64) -> bool {
-        self.lib_ui.scans.get(&link).is_some_and(|s| s.missing)
+        self.core.lib_ui.scans.get(&link).is_some_and(|s| s.missing)
     }
 
     /// Asks for a new scan of a link at the next frame, such as after Reload or a file was written.
     pub(in crate::app) fn rescan_link(&mut self, id: u64) {
-        self.lib_ui.rescan.insert(id);
+        self.core.lib_ui.rescan.insert(id);
     }
 
     /// A scan arrived. Link 0 is the Link a folder dialog's preview. Otherwise it is stored, and any open tab whose file
@@ -261,13 +261,13 @@ impl App {
             }
             return;
         }
-        self.lib_ui.scanning.remove(&link);
-        if !self.library.links.iter().any(|l| l.id == link) {
-            self.lib_ui.scans.remove(&link);
+        self.core.lib_ui.scanning.remove(&link);
+        if !self.core.library.links.iter().any(|l| l.id == link) {
+            self.core.lib_ui.scans.remove(&link);
             return;
         }
         let changed: Vec<(usize, PathBuf)> = self
-            .tabs
+            .core.tabs
             .iter()
             .enumerate()
             .filter_map(|(i, t)| match t.script.as_ref()? {
@@ -280,21 +280,21 @@ impl App {
             .collect();
         // A file that differs from what Quarry last read or wrote of it gets a dot in the panel until it is opened or saved.
         // The first scan of a file is its baseline, so nothing shows changed at startup.
-        let base = self.lib_ui.baseline.entry(link).or_default();
+        let base = self.core.lib_ui.baseline.entry(link).or_default();
         for e in &scan.entries {
             match base.get(&e.rel) {
                 None => {
                     base.insert(e.rel.clone(), (e.mtime, e.len));
                 }
                 Some(m) if *m != (e.mtime, e.len) => {
-                    self.lib_ui.changed.insert((link, e.rel.clone()));
+                    self.core.lib_ui.changed.insert((link, e.rel.clone()));
                 }
                 _ => {}
             }
         }
         let mut scan = scan;
         let texts = std::mem::take(&mut scan.texts);
-        self.lib_ui.scans.insert(link, scan);
+        self.core.lib_ui.scans.insert(link, scan);
         for (i, rel) in changed {
             if let Some((_, now)) = texts.iter().find(|(r, _)| *r == rel) {
                 self.file_changed(i, link, &rel, now.clone());
@@ -309,10 +309,10 @@ impl App {
     /// 3. otherwise the tab keeps its text and shows the conflict banner.
     /// `now` is the file as the scan read it on the worker.
     fn file_changed(&mut self, i: usize, link: u64, rel: &std::path::Path, now: Loaded) {
-        let Some(t) = self.tabs.get_mut(i) else { return };
+        let Some(t) = self.core.tabs.get_mut(i) else { return };
         let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t).map(String::from)) else { return };
         let follow = match &b.r {
-            ScriptRef::File { link, .. } => self.library.links.iter().find(|l| l.id == *link).is_some_and(|l| l.follow),
+            ScriptRef::File { link, .. } => self.core.library.links.iter().find(|l| l.id == *link).is_some_and(|l| l.follow),
             _ => false,
         };
         let meta = now.meta;
@@ -343,14 +343,14 @@ impl App {
     /// Cmd+S on a tab bound to a linked file: writes the file, or raises the conflict when it changed on disk since the tab
     /// loaded it. True when the tab is bound to a linked file and this handled the key.
     pub(in crate::app) fn save_linked(&mut self) -> bool {
-        let Some(t) = self.tabs.get(self.cur) else { return false };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return false };
         let Some(b) = t.script.as_ref().filter(|b| b.view == t.view) else { return false };
         let ScriptRef::File { link, rel } = b.r.clone() else { return false };
-        let Some(path) = self.library.link_join(link, &rel) else {
+        let Some(path) = self.core.library.link_join(link, &rel) else {
             self.warn("The folder this file belongs to is no longer linked.");
             return true;
         };
-        if self.demo {
+        if self.core.demo {
             self.warn("The demo does not write files.");
             return true;
         }
@@ -364,7 +364,7 @@ impl App {
         }
         // One save of a file at a time: a second one sent before the first is back would carry the same old time and text,
         // and both would write through the same temp file.
-        if self.lib_ui.jobs.values().any(|j| matches!(j, Job::Save { link: l, rel: r, .. } if *l == link && *r == rel)) {
+        if self.core.lib_ui.jobs.values().any(|j| matches!(j, Job::Save { link: l, rel: r, .. } if *l == link && *r == rel)) {
             return true;
         }
         let (base, was, uid) = (b.base.clone(), b.disk, t.uid);
@@ -375,7 +375,7 @@ impl App {
             project: t.proj_txt.clone(),
             target: format::Target { db: t.sel.db.clone(), schema: String::new(), coll: t.sel.coll.clone() },
         });
-        let root = self.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone()).unwrap_or_default();
+        let root = self.core.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone()).unwrap_or_default();
         // The base the tab gets is the text sent, so an edit typed while the write runs still shows as an edit.
         let sent = text.clone();
         self.run_job(Job::Save { uid, link, rel, text }, move || FileOut::Saved(disk::save_file(&root, &path, was, &base, &sent, json)));
@@ -384,7 +384,7 @@ impl App {
 
     /// The conflict banner above the editor of a tab whose file changed on disk under unsaved edits.
     pub(in crate::app) fn conflict_banner(&mut self, ui: &mut egui::Ui) {
-        let Some(t) = self.tabs.get(self.cur) else { return };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return };
         let Some(b) = t.script.as_ref().filter(|b| b.conflict.is_some() && b.view == t.view) else { return };
         let ScriptRef::File { rel, .. } = &b.r else { return };
         let name = file_label(rel);
@@ -417,16 +417,16 @@ impl App {
 
     /// Reload: the tab takes the text of the file, read on the worker.
     pub(in crate::app) fn conflict_reload(&mut self) {
-        let Some(t) = self.tabs.get(self.cur) else { return };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return };
         let Some(ScriptRef::File { link, rel }) = t.script.as_ref().map(|b| b.r.clone()) else { return };
-        let Some(path) = self.library.link_join(link, &rel) else { return };
+        let Some(path) = self.core.library.link_join(link, &rel) else { return };
         let uid = t.uid;
         self.run_job(Job::Reload { uid, link, rel }, move || FileOut::Read(read_script(&path)));
     }
 
     /// Keep mine: the file's text becomes the base, so the tab still counts as edited and Cmd+S replaces the file.
     pub(in crate::app) fn conflict_keep(&mut self) {
-        if let Some(b) = self.tabs.get_mut(self.cur).and_then(|t| t.script.as_mut()) {
+        if let Some(b) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.script.as_mut()) {
             if let Some(text) = b.conflict.take() {
                 b.base = text;
             }
@@ -435,7 +435,7 @@ impl App {
 
     /// Compare: the lines of the tab against those of the file, in a text window.
     pub(in crate::app) fn conflict_compare(&mut self) {
-        let Some(t) = self.tabs.get(self.cur) else { return };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return };
         let (Some(b), Some(mine)) = (t.script.as_ref(), bound_text(t)) else { return };
         let (Some(theirs), ScriptRef::File { rel, .. }) = (b.conflict.clone(), &b.r) else { return };
         let body = match disk::diff_text(mine, &theirs) {
@@ -498,13 +498,13 @@ impl App {
     /// What Quarry last read or wrote of a file, so the panel can tell that it changed since. A change found later by a scan
     /// puts a dot on its row until the file is opened or saved here.
     pub(in crate::app) fn mark_seen(&mut self, link: u64, rel: &std::path::Path, meta: Meta) {
-        self.lib_ui.changed.remove(&(link, rel.to_path_buf()));
+        self.core.lib_ui.changed.remove(&(link, rel.to_path_buf()));
         match meta {
             Some(m) => {
-                self.lib_ui.baseline.entry(link).or_default().insert(rel.to_path_buf(), m);
+                self.core.lib_ui.baseline.entry(link).or_default().insert(rel.to_path_buf(), m);
             }
             None => {
-                if let Some(b) = self.lib_ui.baseline.get_mut(&link) {
+                if let Some(b) = self.core.lib_ui.baseline.get_mut(&link) {
                     b.remove(rel);
                 }
             }
@@ -513,7 +513,7 @@ impl App {
 
     /// Puts the file `rel` into the stored scan of its link at once, so a file made here shows before the next scan.
     pub(in crate::app) fn add_entry(&mut self, link: u64, rel: &std::path::Path) {
-        let Some(root) = self.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone()) else { return };
+        let Some(root) = self.core.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone()) else { return };
         let Some(e) = disk::entry_of(&root, rel) else { return };
         self.insert_entry(link, e);
     }
@@ -523,40 +523,40 @@ impl App {
         let rel = e.rel.clone();
         let rel = rel.as_path();
         self.mark_seen(link, rel, Some((e.mtime, e.len)));
-        let scan = self.lib_ui.scans.entry(link).or_default();
+        let scan = self.core.lib_ui.scans.entry(link).or_default();
         scan.missing = false;
         scan.entries.retain(|x| x.rel != rel);
         scan.entries.push(e);
         scan.entries.sort_by(|a, b| a.rel.to_string_lossy().to_lowercase().cmp(&b.rel.to_string_lossy().to_lowercase()));
         scan.empty_dirs.retain(|d| !rel.starts_with(d));
-        self.lib_ui.rescan.insert(link);
+        self.core.lib_ui.rescan.insert(link);
     }
 
     pub(in crate::app) fn drop_entry(&mut self, link: u64, rel: &std::path::Path) {
-        if let Some(s) = self.lib_ui.scans.get_mut(&link) {
+        if let Some(s) = self.core.lib_ui.scans.get_mut(&link) {
             s.entries.retain(|x| x.rel != rel);
         }
         self.mark_seen(link, rel, None);
-        self.lib_ui.rescan.insert(link);
+        self.core.lib_ui.rescan.insert(link);
     }
 
     /// The kind of a linked file: what its scan found, else its extension tells.
     pub(in crate::app) fn file_kind(&self, link: u64, rel: &std::path::Path) -> String {
-        kind_in(&self.lib_ui.scans, link, rel)
+        kind_in(&self.core.lib_ui.scans, link, rel)
     }
 
     /// The connection a copy of a linked file is kept for in the library: the current tab's, then the active one, then any
     /// other the link is used on. Nothing runs on it, so unlike opening a file (`script_target`) it never asks.
     pub(in crate::app) fn file_conn(&self, link: u64, rel: &std::path::Path) -> Option<u64> {
-        let l = self.library.links.iter().find(|l| l.id == link)?;
+        let l = self.core.library.links.iter().find(|l| l.id == link)?;
         let kind = self.file_kind(link, rel);
-        let order = self.t().map(|t| t.sel.conn).into_iter().chain(self.active).chain(self.conns.iter().map(|c| c.meta.id));
+        let order = self.t().map(|t| t.sel.conn).into_iter().chain(self.core.active).chain(self.core.conns.iter().map(|c| c.meta.id));
         order.into_iter().find(|id| self.conn(*id).is_some_and(|c| format::fits(l, &kind, *id, c.meta.engine)))
     }
 
     /// Reads the file `rel` on the worker, then `job` goes on with it in `file_done`.
     pub(in crate::app) fn read_file_job(&mut self, link: u64, rel: &std::path::Path, job: Job) {
-        let Some(path) = self.library.link_join(link, rel) else { return self.warn("That folder is no longer linked.") };
+        let Some(path) = self.core.library.link_join(link, rel) else { return self.warn("That folder is no longer linked.") };
         self.run_job(job, move || FileOut::Read(read_script(&path)));
     }
 
@@ -564,7 +564,7 @@ impl App {
     /// time and length it had. The target is a header the person wrote or the keys of a .json file; without one it is the
     /// current tab's database on that connection, or the connection's default.
     pub(in crate::app) fn file_script_from(&self, link: u64, rel: &std::path::Path, loaded: Loaded, conn: Option<u64>) -> Result<(Script, Meta), String> {
-        self.library.link_join(link, rel).ok_or("That folder is no longer linked.")?;
+        self.core.library.link_join(link, rel).ok_or("That folder is no longer linked.")?;
         let (kind, tgt, sort, project) = match &loaded.parsed {
             Some(p) => (p.kind.clone(), p.target.clone(), p.sort.clone(), p.project.clone()),
             None => (format::kind_of_ext(&format::ext_of(rel)).unwrap_or("sql").to_string(), format::header(&loaded.text), String::new(), String::new()),
@@ -588,7 +588,7 @@ impl App {
 
     /// Re-points the tabs bound to a file that moved, or unbinds them when it is gone (`to` None). Their text stays.
     fn retarget(&mut self, link: u64, from: &std::path::Path, to: Option<PathBuf>) {
-        for t in &mut self.tabs {
+        for t in &mut self.core.tabs {
             if let Some(b) = t.script.as_mut()
                 && matches!(&b.r, ScriptRef::File { link: l, rel } if *l == link && rel == from)
             {
@@ -600,20 +600,20 @@ impl App {
         }
         match &to {
             Some(n) => {
-                for r in &mut self.library.recent {
+                for r in &mut self.core.library.recent {
                     if matches!(r, ScriptRef::File { link: l, rel } if *l == link && rel == from) {
                         *r = ScriptRef::File { link, rel: n.clone() };
                     }
                 }
             }
-            None => self.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: l, rel } if *l == link && rel == from)),
+            None => self.core.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: l, rel } if *l == link && rel == from)),
         }
     }
 
     /// New script in a linked folder: an empty file of the first kind the link shows, named "New script", which the panel
     /// then lets the person name. Returns its path relative to the link.
     pub(in crate::app) fn new_linked_script(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
-        let l = self.library.links.iter().find(|l| l.id == link)?;
+        let l = self.core.library.links.iter().find(|l| l.id == link)?;
         let ext = ["sql", "js", "json"].into_iter().find(|e| l.exts.iter().any(|x| x == e)).unwrap_or("sql");
         let root = l.path.clone();
         let body: &[u8] = if ext == "json" { b"{\n  \"filter\": {}\n}\n" } else { b"" };
@@ -632,13 +632,13 @@ impl App {
 
     /// New folder in a linked folder. It is empty, so the scan lists it among its empty folders.
     pub(in crate::app) fn new_linked_dir(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
-        let at = self.library.link_join(link, dir)?;
+        let at = self.core.library.link_join(link, dir)?;
         let name = disk::unique_name(&at, "New folder");
         match std::fs::create_dir(at.join(&name)) {
             Ok(()) => {
                 let rel = dir.join(&name);
-                self.lib_ui.scans.entry(link).or_default().empty_dirs.push(rel.clone());
-                self.lib_ui.rescan.insert(link);
+                self.core.lib_ui.scans.entry(link).or_default().empty_dirs.push(rel.clone());
+                self.core.lib_ui.rescan.insert(link);
                 Some(rel)
             }
             Err(e) => {
@@ -651,7 +651,7 @@ impl App {
     /// Renames a file or a folder below a link on disk, and returns its new path relative to the link. The files in a
     /// renamed folder keep their names.
     pub(in crate::app) fn rename_linked(&mut self, link: u64, rel: &std::path::Path, is_dir: bool, text: &str) -> Option<PathBuf> {
-        let from = self.library.link_join(link, rel)?;
+        let from = self.core.library.link_join(link, rel)?;
         let new = if is_dir {
             let name = text.trim();
             if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
@@ -669,7 +669,7 @@ impl App {
         };
         match new {
             Ok(to) => {
-                let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
+                let root = self.core.library.links.iter().find(|l| l.id == link)?.path.clone();
                 let new_rel = to.strip_prefix(&root).ok()?.to_path_buf();
                 if new_rel != rel {
                     if is_dir {
@@ -692,21 +692,21 @@ impl App {
 
     /// A folder moved: tabs bound to files in it follow, and the link is read again.
     fn dir_moved(&mut self, link: u64, old: &std::path::Path, new: &std::path::Path) {
-        let moved: Vec<PathBuf> = self.lib_ui.scans.get(&link).map(|s| s.entries.iter().filter(|e| e.rel.starts_with(old)).map(|e| e.rel.clone()).collect()).unwrap_or_default();
+        let moved: Vec<PathBuf> = self.core.lib_ui.scans.get(&link).map(|s| s.entries.iter().filter(|e| e.rel.starts_with(old)).map(|e| e.rel.clone()).collect()).unwrap_or_default();
         for f in moved {
             if let Ok(rest) = f.strip_prefix(old) {
                 self.retarget(link, &f, Some(new.join(rest)));
             }
         }
-        self.lib_ui.scans.remove(&link);
-        self.lib_ui.rescan.insert(link);
+        self.core.lib_ui.scans.remove(&link);
+        self.core.lib_ui.rescan.insert(link);
     }
 
     /// Moves a file to the Trash on the worker, keeping its bytes for the Undo toast. A tab that holds it keeps its text but
     /// is unbound. True when the move started.
     pub(in crate::app) fn delete_linked_file(&mut self, link: u64, rel: &std::path::Path) -> bool {
-        let Some(path) = self.library.link_join(link, rel) else { return false };
-        if self.demo {
+        let Some(path) = self.core.library.link_join(link, rel) else { return false };
+        if self.core.demo {
             self.warn("The demo does not delete files.");
             return false;
         }
@@ -717,8 +717,8 @@ impl App {
 
     /// Moves a file into another folder of the same link, never over a file that is there.
     pub(in crate::app) fn move_linked_file(&mut self, link: u64, rel: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
-        let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
-        let (from, at) = (self.library.link_join(link, rel)?, self.library.link_join(link, dir)?);
+        let root = self.core.library.links.iter().find(|l| l.id == link)?.path.clone();
+        let (from, at) = (self.core.library.link_join(link, rel)?, self.core.library.link_join(link, dir)?);
         let name = rel.file_name()?.to_string_lossy().into_owned();
         let to = at.join(disk::unique_name(&at, &name));
         if let Err(e) = std::fs::rename(&from, &to) {
@@ -730,7 +730,7 @@ impl App {
         self.drop_entry(link, rel);
         self.add_entry(link, &new_rel);
         self.save_library();
-        if let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() {
+        if let Some(l) = self.core.library.links.iter().find(|l| l.id == link).cloned() {
             self.ok(format!("Moved {name} to {}.", link_place(&l, &new_rel)));
         }
         Some(new_rel)
@@ -739,8 +739,8 @@ impl App {
     /// A script kept by Quarry written into a linked folder as a file. The Quarry copy is removed and Undo puts it back (the
     /// file goes again, unless it was edited since). Refused when the folder does not show files of that kind.
     pub(in crate::app) fn script_to_link(&mut self, id: u64, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
-        let s = self.library.scripts.iter().find(|s| s.id == id)?.clone();
-        let l = self.library.links.iter().find(|l| l.id == link)?.clone();
+        let s = self.core.library.scripts.iter().find(|s| s.id == id)?.clone();
+        let l = self.core.library.links.iter().find(|l| l.id == link)?.clone();
         // A SQL Content filter has no file form: as .json it would read back as a Mongo filter, as .sql as a script.
         if s.kind == "where" {
             self.warn(format!("\"{}\" is a table filter, which is only kept in Quarry. It stays where it is.", s.name));
@@ -751,7 +751,7 @@ impl App {
             self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
             return None;
         }
-        if self.demo {
+        if self.core.demo {
             self.warn("The demo does not write files.");
             return None;
         }
@@ -776,7 +776,7 @@ impl App {
         };
         let rel = path.strip_prefix(&l.path).ok()?.to_path_buf();
         self.add_entry(link, &rel);
-        if let Some((folders, scripts)) = ops::delete(&mut self.library, &Node::Script(id)) {
+        if let Some((folders, scripts)) = ops::delete(&mut self.core.library, &Node::Script(id)) {
             self.forget_scripts(&[id]);
             self.save_library();
             self.toast_restore(format!("Moved \"{}\" to disk as {}. It left the library.", s.name, link_place(&l, &rel)), Restore::Saved { scripts, folders, written: Some((link, rel.clone(), bytes.clone())) });
@@ -791,23 +791,23 @@ impl App {
     }
 
     fn copy_into_library(&mut self, mut s: Script, rel: &std::path::Path, at: DropAt) {
-        s.id = self.library.next_id();
+        s.id = self.core.library.next_id();
         s.updated = crate::library::now_secs();
         if let Some(n) = rel.file_stem() {
             s.name = n.to_string_lossy().into_owned();
         }
         let (id, name) = (s.id, s.name.clone());
-        self.library.scripts.push(s);
+        self.core.library.scripts.push(s);
         if let DropAt::Into(f) = at {
-            self.lib_ui.panel.open.insert(Node::Folder(f));
+            self.core.lib_ui.panel.open.insert(Node::Folder(f));
         }
-        if let Err(e) = ops::move_to(&mut self.library, &Node::Script(id), at) {
+        if let Err(e) = ops::move_to(&mut self.core.library, &Node::Script(id), at) {
             self.warn(e);
         }
-        self.lib_ui.panel.sel = Some(Node::Script(id));
+        self.core.lib_ui.panel.sel = Some(Node::Script(id));
         self.save_library();
-        let folder = self.library.scripts.iter().find(|s| s.id == id).and_then(|s| crate::library::tree::live_parent(&self.library, s.folder));
-        let place = ops::folder_path(&self.library, folder);
+        let folder = self.core.library.scripts.iter().find(|s| s.id == id).and_then(|s| crate::library::tree::live_parent(&self.core.library, s.folder));
+        let place = ops::folder_path(&self.core.library, folder);
         let place = if place.is_empty() { "the top of the library".to_string() } else { place };
         self.ok(format!("Copied {name} to {place}. The file stays in the folder."));
     }
@@ -815,22 +815,22 @@ impl App {
     /// Unlink: the link and what Quarry remembers of it go, the files stay on disk. Tabs bound to its files keep their text
     /// and are unbound, and the toast says how many, with an Undo that links the folder again and binds them back.
     pub(in crate::app) fn unlink(&mut self, link: u64) {
-        let Some(at) = self.library.links.iter().position(|l| l.id == link) else { return };
-        self.library.reserve_ids();
-        let l = self.library.links.remove(at);
-        let recent: Vec<(usize, ScriptRef)> = self.library.recent.iter().enumerate().filter(|(_, r)| matches!(r, ScriptRef::File { link: x, .. } if *x == link)).map(|(i, r)| (i, r.clone())).collect();
-        self.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: x, .. } if *x == link));
+        let Some(at) = self.core.library.links.iter().position(|l| l.id == link) else { return };
+        self.core.library.reserve_ids();
+        let l = self.core.library.links.remove(at);
+        let recent: Vec<(usize, ScriptRef)> = self.core.library.recent.iter().enumerate().filter(|(_, r)| matches!(r, ScriptRef::File { link: x, .. } if *x == link)).map(|(i, r)| (i, r.clone())).collect();
+        self.core.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: x, .. } if *x == link));
         let mut tabs = Vec::new();
-        for t in &mut self.tabs {
+        for t in &mut self.core.tabs {
             if matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: x, .. }) if *x == link)
                 && let Some(b) = t.script.take()
             {
                 tabs.push((t.uid, b));
             }
         }
-        self.lib_ui.scans.remove(&link);
-        self.lib_ui.changed.retain(|(x, _)| *x != link);
-        self.lib_ui.baseline.remove(&link);
+        self.core.lib_ui.scans.remove(&link);
+        self.core.lib_ui.changed.retain(|(x, _)| *x != link);
+        self.core.lib_ui.baseline.remove(&link);
         self.save_library();
         let name = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
         let unbound = match tabs.len() {
@@ -845,19 +845,19 @@ impl App {
     /// are bound to their files again. Their disk state is checked at the scan that follows.
     pub(in crate::app) fn relink(&mut self, l: crate::library::Link, at: usize, tabs: Vec<(u64, Bound)>, recent: Vec<(usize, ScriptRef)>) {
         let (id, name) = (l.id, if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() });
-        if self.library.links.iter().any(|x| x.id == id) {
+        if self.core.library.links.iter().any(|x| x.id == id) {
             return;
         }
-        self.library.links.insert(at.min(self.library.links.len()), l);
+        self.core.library.links.insert(at.min(self.core.library.links.len()), l);
         for (i, r) in recent {
-            if !self.library.recent.contains(&r) {
-                let i = i.min(self.library.recent.len());
-                self.library.recent.insert(i, r);
+            if !self.core.library.recent.contains(&r) {
+                let i = i.min(self.core.library.recent.len());
+                self.core.library.recent.insert(i, r);
             }
         }
-        self.library.recent.truncate(crate::library::RECENT_MAX);
+        self.core.library.recent.truncate(crate::library::RECENT_MAX);
         for (uid, b) in tabs {
-            if let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid && t.script.is_none() && t.view == b.view) {
+            if let Some(t) = self.core.tabs.iter_mut().find(|t| t.uid == uid && t.script.is_none() && t.view == b.view) {
                 super::open::bind(t, b);
             }
         }
@@ -903,29 +903,29 @@ impl App {
             return false;
         }
         self.demo_library("panel");
-        self.lib_ui.panel.sel = None;
-        self.lib_ui.frozen = true;
+        self.core.lib_ui.panel.sel = None;
+        self.core.lib_ui.frozen = true;
         let link = |id, name: &str, path: &str| crate::library::Link { id, name: name.into(), path: path.into(), on: "engine".into(), engine: "mysql".into(), exts: ["sql", "js", "json"].map(String::from).to_vec(), follow: true, ..Default::default() };
         if state != "link" {
-            self.library.links.push(link(100, "shop-queries", "/Users/demo/work/shop-queries"));
-            self.lib_ui.scans.insert(100, demo_scan(&DEMO_FILES));
-            let st = &mut self.lib_ui.panel;
+            self.core.library.links.push(link(100, "shop-queries", "/Users/demo/work/shop-queries"));
+            self.core.lib_ui.scans.insert(100, demo_scan(&DEMO_FILES));
+            let st = &mut self.core.lib_ui.panel;
             st.open.insert(Node::Link(100));
             st.open.insert(Node::Dir { link: 100, rel: "reports".into() });
-            self.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
+            self.core.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
         }
         // The Library shows the scripts that fit the current tab's connection, so the .sql link needs a MySQL tab in front.
         if matches!(state, "linked" | "missing") {
             let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
             t.view = View::Sql;
-            self.tabs = vec![t];
-            self.cur = 0;
+            self.core.tabs = vec![t];
+            self.core.cur = 0;
         }
         match state {
-            "linked" => self.lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
+            "linked" => self.core.lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
             "missing" => {
-                self.library.links.push(link(101, "legacy-exports", "/Volumes/archive/exports"));
-                self.lib_ui.scans.insert(101, disk::Scan { missing: true, ..Default::default() });
+                self.core.library.links.push(link(101, "legacy-exports", "/Volumes/archive/exports"));
+                self.core.lib_ui.scans.insert(101, disk::Scan { missing: true, ..Default::default() });
             }
             "link" => {
                 self.open_link_dialog(None);
@@ -953,8 +953,8 @@ impl App {
                     q.query = mine;
                 }
                 t.script = Some(Bound { r: ScriptRef::File { link: 100, rel }, view: View::Sql, base, disk: None, conflict: Some(theirs) });
-                self.tabs = vec![t];
-                self.cur = 0;
+                self.core.tabs = vec![t];
+                self.core.cur = 0;
             }
         }
         true

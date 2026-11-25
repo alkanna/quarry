@@ -7,7 +7,7 @@ impl App {
         let mut open_file = false;
         let mut start = false;
         let writable = self.sel_writable();
-        let t = &mut self.tabs[self.cur];
+        let t = &mut self.core.tabs[self.core.cur];
         let im = &mut t.import;
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
@@ -101,7 +101,7 @@ impl App {
         if open_file && let Some(path) = rfd::FileDialog::new().add_filter("Data", &["json", "jsonl", "ndjson", "csv", "tsv", "txt"]).pick_file() {
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    let im = &mut self.tabs[self.cur].import;
+                    let im = &mut self.core.tabs[self.core.cur].import;
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
                     im.kind = match ext.as_str() {
                         "csv" | "tsv" => db::ImportKind::Csv,
@@ -122,14 +122,14 @@ impl App {
             if !writable {
                 self.ask_unlock();
             } else {
-                let im = &self.tabs[self.cur].import;
+                let im = &self.core.tabs[self.core.cur].import;
                 let n = match &im.parsed {
                     Some(Ok(d)) => d.len(),
                     _ => 0,
                 };
                 if im.upsert {
                     let key = im.upsert_by.trim().to_string();
-                    let coll = self.tabs[self.cur].sel.coll.clone();
+                    let coll = self.core.tabs[self.core.cur].sel.coll.clone();
                     self.modal = Some(Modal::Typed {
                         title: format!("Upsert {n} documents into {coll} by {key}? Matching documents are updated with the imported fields."),
                         expect: coll,

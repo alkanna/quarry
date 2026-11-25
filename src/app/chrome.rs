@@ -7,11 +7,11 @@ use crate::ui::dnd;
 impl App {
     /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
     pub(super) fn remember_tabs(&mut self) {
-        if self.ephemeral || self.shot.is_some() {
+        if self.core.ephemeral || self.shot.is_some() {
             return;
         }
         let tabs: Vec<SavedTab> = self
-            .tabs
+            .core.tabs
             .iter()
             .map(|t| SavedTab {
                 conn: t.sel.conn,
@@ -49,12 +49,12 @@ impl App {
                 script: t.script.as_ref().map(|b| b.r.clone()),
             })
             .collect();
-        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
-        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
-            self.prefs.open_tabs = tabs;
-            self.prefs.cur_tab = self.cur;
-            self.prefs.last_conn = self.active;
-            self.prefs.open_conns = open;
+        let open: Vec<u64> = self.core.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
+        if tabs != self.core.prefs.open_tabs || self.core.cur != self.core.prefs.cur_tab || self.core.active != self.core.prefs.last_conn || open != self.core.prefs.open_conns {
+            self.core.prefs.open_tabs = tabs;
+            self.core.prefs.cur_tab = self.core.cur;
+            self.core.prefs.last_conn = self.core.active;
+            self.core.prefs.open_conns = open;
             self.save_prefs();
         }
     }
@@ -62,7 +62,7 @@ impl App {
     /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
     /// stay off while it is open; a new kind of window belongs in this list.
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.routines.window_open() || self.tool.is_some() || !self.agents.asks.is_empty() || self.agents.activity_open || self.agents.rules.is_some()
+        self.modal.is_some() || self.core.cloud_browser.is_some() || self.core.insert.is_some() || self.value_dialog_open() || self.core.users.is_some() || self.core.server.is_some() || self.core.sql_users.is_some() || self.core.pg_roles.is_some() || self.core.sql_server.is_some() || self.core.pg_server.is_some() || self.core.routines.window_open() || self.core.tool.is_some() || !self.core.agents.asks.is_empty() || self.core.agents.activity_open || self.core.agents.rules.is_some()
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -76,15 +76,15 @@ impl App {
         // would also open the Save dialog. A view that holds no script (a table's Structure, Indexes and the like) leaves
         // the key alone. The cell editor of a SQL grid owns the key while it is open.
         // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
-        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
+        if self.core.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
             self.save_script_as();
         }
-        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd, Key::S) {
+        if self.core.sql_cell.is_none() && self.tab_has_text() && k(cmd, Key::S) {
             self.save_script();
         }
         // Cmd+O opens the library picker of the view on screen; a view with no script has none.
         if self.tab_has_text() && k(cmd, Key::O) {
-            self.lib_ui.open_picker = true;
+            self.core.lib_ui.open_picker = true;
         }
         if k(cmd | shift, Key::L) {
             self.focus_library();
@@ -94,7 +94,7 @@ impl App {
             self.reopen_tab();
         }
         if k(cmd, Key::W) {
-            self.ask_close_tab(self.cur);
+            self.ask_close_tab(self.core.cur);
         }
         if k(cmd, Key::K) {
             self.open_palette();
@@ -105,7 +105,7 @@ impl App {
         let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
         // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself. The tree has the keys
         // only while it is on screen and no text field has taken them, so a flag left from a click never holds the editor's.
-        let tree_keys = self.lib_ui.panel.focus && !self.prefs.sidebar_hidden && self.prefs.side_mode() == SideMode::Library && !ctx.text_edit_focused();
+        let tree_keys = self.core.lib_ui.panel.focus && !self.core.prefs.sidebar_hidden && self.core.prefs.side_mode() == SideMode::Library && !ctx.text_edit_focused();
         let query_view = query_view && !tree_keys;
         if query_view && k(cmd | shift, Key::Enter) {
             self.sql_run(true, false);
@@ -119,10 +119,10 @@ impl App {
                 self.explain();
             }
         }
-        if k(cmd | shift, Key::R) && let Some(id) = self.active.filter(|_| !self.demo) {
+        if k(cmd | shift, Key::R) && let Some(id) = self.core.active.filter(|_| !self.core.demo) {
             self.connect(id);
         }
-        if k(cmd, Key::R) && !self.tabs.is_empty() {
+        if k(cmd, Key::R) && !self.core.tabs.is_empty() {
             self.reload();
         }
         // "/" only while nothing is being typed into, so it never steals a slash from a field.
@@ -131,7 +131,7 @@ impl App {
             self.show_sidebar();
             ctx.memory_mut(|m| m.request_focus(egui::Id::unique("tree-filter")));
         }
-        if k(cmd, Key::F) && !self.tabs.is_empty() {
+        if k(cmd, Key::F) && !self.core.tabs.is_empty() {
             self.set_view(View::Documents);
             self.focus_query(ctx);
         }
@@ -142,18 +142,18 @@ impl App {
             self.new_conn_modal();
         }
         if k(cmd, Key::L) {
-            self.log.open = !self.log.open;
+            self.core.log.open = !self.core.log.open;
         }
         if k(cmd, Key::Slash) {
             self.shortcuts_modal();
         }
-        let n = self.tabs.len();
+        let n = self.core.tabs.len();
         if n > 0 {
             if k(ctrl | shift, Key::Tab) || k(cmd | shift, Key::OpenBracket) || k(cmd | shift, Key::OpenCurlyBracket) {
-                self.go_tab((self.cur + n - 1) % n);
+                self.go_tab((self.core.cur + n - 1) % n);
             }
             if k(ctrl, Key::Tab) || k(cmd | shift, Key::CloseBracket) || k(cmd | shift, Key::CloseCurlyBracket) {
-                self.go_tab((self.cur + 1) % n);
+                self.go_tab((self.core.cur + 1) % n);
             }
             const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             // The palette shows these as each view's position in MONGO_VIEWS.
@@ -178,7 +178,7 @@ impl App {
         }
         // Plain keys only act when no text field, menu or cell editor wants them. The boolean switch and the calendar
         // leave no text field focused but still read the arrows and letters.
-        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
+        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.core.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.core.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
             let (up, down) = (k(none, Key::ArrowUp), k(none, Key::ArrowDown));
             let (prev, next) = (k(none, Key::PageUp), k(none, Key::PageDown));
             let nav = self.t().filter(|t| matches!(t.view, View::Documents | View::Aggregate)).map(|t| {
@@ -196,7 +196,7 @@ impl App {
                         self.tm().unwrap().expanded.remove(&prev);
                     }
                     self.select(agg, i, false);
-                    self.scroll_sel = true;
+                    self.core.scroll_sel = true;
                 }
                 if let Some(p) = go {
                     self.tm().unwrap().page = p;
@@ -208,7 +208,7 @@ impl App {
                 let len = s.cur_set().map_or(0, |x| x.rows.len());
                 if len > 0 {
                     s.qsel = Some(step(s.qsel, down, len));
-                    self.scroll_sel = true;
+                    self.core.scroll_sel = true;
                 }
             }
         }
@@ -217,11 +217,11 @@ impl App {
             return;
         }
         // The calendar of a date closes before the editor under it.
-        if let Some(i) = &mut self.inline && let Some(o) = i.pick.take() {
+        if let Some(i) = &mut self.core.inline && let Some(o) = i.pick.take() {
             i.text = o;
             return;
         }
-        if self.inline.take().is_some() || self.new_field.take().is_some() {
+        if self.core.inline.take().is_some() || self.core.new_field.take().is_some() {
             return;
         }
         if let Some(t) = self.tm() {
@@ -241,7 +241,7 @@ impl App {
                 return;
             }
         }
-        self.tree_filter.clear();
+        self.core.tree_filter.clear();
     }
 
     /// The Documents view's query: rules mode opens the filter panel, SQL mode focuses its WHERE field, and Mongo its query.
@@ -263,7 +263,7 @@ impl App {
     }
 
     pub(super) fn go_tab(&mut self, i: usize) {
-        if i != self.cur && i < self.tabs.len() {
+        if i != self.core.cur && i < self.core.tabs.len() {
             self.set_cur(i);
             self.reset_doc_state();
         }
@@ -278,7 +278,7 @@ impl App {
         t.view = v;
         t.selected = None;
         // The editor belongs to the Content grid; another view must never inherit it.
-        self.sql_cell = None;
+        self.core.sql_cell = None;
         self.reset_doc_state();
         if v == View::Indexes {
             self.load_indexes();
@@ -337,10 +337,10 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            let win = self.win_buttons;
+            let win = self.core.win_buttons;
             ui.horizontal_centered(|ui| {
                 if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), glyphs::sidebar, "Toggle sidebar", "Show or hide the sidebar").clicked() {
-                    self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
+                    self.core.prefs.sidebar_hidden = !self.core.prefs.sidebar_hidden;
                     self.save_prefs();
                 }
                 ui.add_space(4.0);
@@ -355,8 +355,8 @@ impl App {
                     if win {
                         ui.add_space(window_buttons::BUTTONS_W - 4.0);
                     }
-                    self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
-                    let n = self.undo.len();
+                    self.core.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
+                    let n = self.core.undo.len();
                     let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
                     if quiet_enabled(ui, n > 0, undo).on_hover_text("Recent writes you can take back").clicked() {
                         self.modal = Some(Modal::Undo);
@@ -377,13 +377,13 @@ impl App {
 
     /// Refreshes the memory and CPU readouts once a second, and asks for the repaint that shows them.
     fn sample_usage(&mut self, ctx: &egui::Context) {
-        let (at, cpu_then, pct, _) = self.usage;
+        let (at, cpu_then, pct, _) = self.core.usage;
         let wall = at.elapsed();
         if wall >= Duration::from_secs(1) || cpu_then.is_zero() {
             let (mem, cpu_now) = process_usage();
             // A sample older than 2 s is from before the readouts were hidden, so it only starts a new second.
             let pct = if cpu_then.is_zero() || wall > Duration::from_secs(2) { pct } else { cpu_now.saturating_sub(cpu_then).as_secs_f32() / wall.as_secs_f32() * 100.0 };
-            self.usage = (std::time::Instant::now(), cpu_now, pct, mem);
+            self.core.usage = (std::time::Instant::now(), cpu_now, pct, mem);
         }
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -395,7 +395,7 @@ impl App {
             ui.painter().hline(full.x_range(), full.top() + 0.5, Stroke::new(1.0, LINE()));
             ui.horizontal_centered(|ui| {
                 // The active connection: its state, then where it is and what it runs.
-                if let Some(c) = self.active.and_then(|id| self.conn(id)).filter(|_| self.prefs.show_server) {
+                if let Some(c) = self.core.active.and_then(|id| self.conn(id)).filter(|_| self.core.prefs.show_server) {
                     let (dot_r, dot_resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(dot_r.center(), 4.0, status_color(&c.status));
                     let state = match &c.status {
@@ -408,12 +408,12 @@ impl App {
                     ui.label(RichText::new(c.server.status_line(&c.masked_uri)).font(FontId::monospace(TXT_CAPTION)).color(MUTED()));
                     ui.add_space(10.0);
                 }
-                if self.prefs.show_fps {
+                if self.core.prefs.show_fps {
                     // Averaged over half a second of frames: one frame's dt swings above the refresh
                     // rate when an input event lands just after a vsync. Idle gaps are left out, but
                     // not the Shell's 100 ms repaints while a script runs.
                     let dt = ui.input(|i| i.unstable_dt);
-                    let (sum, n, shown) = &mut self.fps;
+                    let (sum, n, shown) = &mut self.core.fps;
                     if dt < 0.25 {
                         *sum += dt;
                         *n += 1;
@@ -422,19 +422,19 @@ impl App {
                         *shown = *n as f32 / sum.max(0.000_1);
                         (*sum, *n) = (0.0, 0);
                     }
-                    let rate = self.fps.2.max(1.0);
-                    let color = if self.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
-                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                    let rate = self.core.fps.2.max(1.0);
+                    let color = if self.core.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
+                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.core.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
                 }
-                if self.prefs.show_mem || self.prefs.show_cpu {
+                if self.core.prefs.show_mem || self.core.prefs.show_cpu {
                     self.sample_usage(ui.ctx());
-                    let (_, _, cpu, mem) = self.usage;
-                    if self.prefs.show_mem {
+                    let (_, _, cpu, mem) = self.core.usage;
+                    if self.core.prefs.show_mem {
                         let text = mem.map_or("mem n/a".into(), |b| format!("mem {:>9}", human_bytes(b as usize)));
                         // Built only while hovered: it walks every row of every tab.
                         fixed_readout(ui, text, "mem 0000.0 MB", MUTED()).on_hover_ui(|ui| self.mem_tip(ui, mem));
                     }
-                    if self.prefs.show_cpu {
+                    if self.core.prefs.show_cpu {
                         let color = if cpu >= 80.0 { WARNING() } else { MUTED() };
                         fixed_readout(ui, format!("cpu {:>3.0}%", cpu), "cpu 000%", color).on_hover_text("Quarry's CPU use over the last second, in percent of one core.");
                     }
@@ -442,13 +442,13 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.agents_pill(ui);
                     let log = RichText::new("Query log").size(TXT_CAPTION);
-                    if quiet(ui, if self.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
-                        self.log.open = !self.log.open;
+                    if quiet(ui, if self.core.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                        self.core.log.open = !self.core.log.open;
                     }
-                    let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
+                    let connected = self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
                     let tip = if connected { "Server status" } else { "Server status (connect first)" };
                     if quiet_enabled(ui, connected, RichText::new("Server").size(TXT_CAPTION)).on_hover_text(tip).clicked()
-                        && let Some(conn) = self.active
+                        && let Some(conn) = self.core.active
                     {
                         self.open_server(conn);
                     }
@@ -463,8 +463,8 @@ impl App {
                         if self.export_progress(ui) || self.sql_job_progress(ui) {
                             return;
                         }
-                        let first = self.status.lines().next().unwrap_or_default();
-                        ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(FAINT())).truncate()).on_hover_text(self.status.as_str());
+                        let first = self.core.status.lines().next().unwrap_or_default();
+                        ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(FAINT())).truncate()).on_hover_text(self.core.status.as_str());
                     });
                 });
             });
@@ -481,7 +481,7 @@ impl App {
         let mut tab_move: Option<dnd::Move> = None;
         // Move left or Move right picked in a tab's menu.
         let mut menu_move: Option<dnd::Move> = None;
-        let has_closed = !self.closed.is_empty();
+        let has_closed = !self.core.closed.is_empty();
         const TAB_MIN_W: f32 = 146.0;
         // Left of the name: the engine logo and its gap. Right: the close cross.
         const TAB_PAD_L: f32 = 38.0;
@@ -489,11 +489,11 @@ impl App {
         const TAB_PAD_R: f32 = 34.0;
         const PLUS_W: f32 = 32.0;
         const LIST_W: f32 = 84.0;
-        let n = self.tabs.len();
+        let n = self.core.tabs.len();
         // The name is left as a placeholder so its color can follow hover, which is known only after layout.
-        let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
+        let titles: Vec<_> = self.core.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
-            job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
+            job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.core.cur { W_MEDIUM } else { 400.0 }, 0.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
                 View::Indexes => Some("indexes"),
@@ -528,8 +528,8 @@ impl App {
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
-        let moved = self.tab_seen != Some(self.cur);
-        self.tab_seen = Some(self.cur);
+        let moved = self.core.tab_seen != Some(self.core.cur);
+        self.core.tab_seen = Some(self.core.cur);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // egui's own edge fades, opaque, show there are more tabs now that the scrollbar is hidden.
@@ -542,11 +542,11 @@ impl App {
                 .show(ui, |ui| {
                     // Tabs drag sideways to reorder; the engine's drag sits under each tab's own click, so a click picks,
                     // a middle click closes and the right click opens the menu as before.
-                    let keys: Vec<egui::Id> = self.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
+                    let keys: Vec<egui::Id> = self.core.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
                     tab_move = dnd::reorder(ui, egui::Id::unique("tab-strip"), dnd::Items::horizontal(&widths, TAB_STRIP_H).keys(&keys), |ui, i, st| {
-                        let t = &self.tabs[i];
+                        let t = &self.core.tabs[i];
                         let (title, sub) = titles[i].clone();
-                        let active = i == self.cur;
+                        let active = i == self.core.cur;
                         let rect = ui.max_rect();
                         let resp = ui.interact(rect, ui.scope_id().with("tab"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, format!("Tab {}", self.tab_name(i))));
@@ -671,16 +671,16 @@ impl App {
         });
         if let Some(m) = tab_move.or(menu_move) {
             // The current tab stays current wherever it or the others move; nothing else is kept by tab index.
-            let c = self.cur;
-            self.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };
-            m.apply(&mut self.tabs);
-            self.tab_seen = Some(self.cur);
+            let c = self.core.cur;
+            self.core.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };
+            m.apply(&mut self.core.tabs);
+            self.core.tab_seen = Some(self.core.cur);
             ui.ctx().request_repaint();
             return;
         }
         if pick.is_some() {
             // Scroll even when the picked tab was already active but scrolled out of view.
-            self.tab_seen = None;
+            self.core.tab_seen = None;
         }
         if reopen {
             return self.reopen_tab();
@@ -696,18 +696,18 @@ impl App {
                 TabClose::Right => j <= i,
                 TabClose::All => false,
             };
-            let cur = self.cur;
-            let all = std::mem::take(&mut self.tabs);
+            let cur = self.core.cur;
+            let all = std::mem::take(&mut self.core.tabs);
             for (j, t) in all.into_iter().enumerate() {
                 if keep(j) {
-                    self.tabs.push(t);
+                    self.core.tabs.push(t);
                 } else {
                     self.remember_closed(t);
                 }
             }
             // Stay on the same tab when it survives, else on the clicked one, else the nearest.
-            self.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.tabs.len().saturating_sub(1));
-            self.set_cur(self.cur);
+            self.core.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.core.tabs.len().saturating_sub(1));
+            self.set_cur(self.core.cur);
             self.reset_doc_state();
         } else if let Some(i) = close {
             self.ask_close_tab(i);
@@ -715,20 +715,20 @@ impl App {
             self.go_tab(i);
         }
         if dup {
-            let t = &self.tabs[self.cur];
+            let t = &self.core.tabs[self.core.cur];
             let mut n = Tab::new(t.sel.clone());
             (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
             // Copy what ran, not the typed texts, so edits the source never ran stay marked as unrun.
             n.ran_txt = t.ran_txt.clone();
-            self.tabs.insert(self.cur + 1, n);
-            self.set_cur(self.cur + 1);
+            self.core.tabs.insert(self.core.cur + 1, n);
+            self.set_cur(self.core.cur + 1);
             self.reset_doc_state();
             self.reload();
         }
     }
 
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
-        if let Some(id) = self.active.filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Failed(_)))) {
+        if let Some(id) = self.core.active.filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Failed(_)))) {
             return self.conn_failed_card(ui, id);
         }
         ui.vertical_centered(|ui| {
@@ -748,8 +748,8 @@ impl App {
     }
 
     pub(super) fn new_conn_modal(&mut self) {
-        self.conn_test = None;
-        self.test_info = None;
+        self.core.conn_test = None;
+        self.core.test_info = None;
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }
 }

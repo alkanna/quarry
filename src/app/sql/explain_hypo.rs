@@ -98,10 +98,10 @@ impl App {
             return;
         }
         let Some(create) = hypo::create_sql(&fix).map(str::to_string) else { return };
-        self.req += 1;
-        (x.hypo_wait, x.hypo, x.hypo_cmp) = (Some((self.req, fix.sql)), None, false);
+        self.core.req += 1;
+        (x.hypo_wait, x.hypo, x.hypo_cmp) = (Some((self.core.req, fix.sql)), None, false);
         x.leave_empty_compare();
-        self.worker.sql_explain_hypo(self.req, x.db.clone(), x.schema.clone(), create, x.stmt.clone(), x.locked);
+        self.core.worker.sql_explain_hypo(self.core.req, x.db.clone(), x.schema.clone(), create, x.stmt.clone(), x.locked);
     }
 
     /// The answer of a trial of the open dialog.
@@ -135,9 +135,9 @@ impl App {
     pub(in crate::app) fn demo_explain_hypo(&mut self, trial: hypo::Trial) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
         let fix = x.plan.as_ref().and_then(|p| p.findings.iter().find_map(|f| f.fix.as_ref().filter(|fx| fx.kind == plan::FixKind::Index))).map(|fx| fx.sql.clone()).expect("a candidate index");
-        self.req += 1;
-        x.hypo_wait = Some((self.req, fix));
-        let req = self.req;
+        self.core.req += 1;
+        x.hypo_wait = Some((self.core.req, fix));
+        let req = self.core.req;
         self.sql_explain_hypo(req, Ok(trial));
     }
 }

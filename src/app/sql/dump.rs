@@ -47,12 +47,12 @@ impl App {
         let schema = if pg { Some(schema).filter(|s| !s.is_empty()).unwrap_or_else(|| c.pg_picked(&db).to_string()) } else { String::new() };
         let names: Vec<String> = if pg { c.tables_in(&db, &schema).cloned().unwrap_or_default() } else { c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default() };
         // The estimates are kept per database by table name, which a second schema of the same name would confuse.
-        let est = self.sql_schema.get(&(conn, db.clone())).filter(|_| !pg);
+        let est = self.core.sql_schema.get(&(conn, db.clone())).filter(|_| !pg);
         let ns = ns_key(&db, &schema);
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.has(conn, &ns, n);
+                let view = self.core.views.has(conn, &ns, n);
                 Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows), bytes: None }
             })
             .collect();
@@ -70,10 +70,10 @@ impl App {
         let conn_name = c.meta.name.clone();
         let path = dirs::download_dir().unwrap_or_default().join(format!("{db}-{}.sql", today())).display().to_string();
         // The sizes come later; until then the footer counts rows only.
-        self.req += 1;
-        let size_req = self.req;
+        self.core.req += 1;
+        let size_req = self.core.req;
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_table_sizes(size_req, sql.at(&db), if pg { schema.clone() } else { db.clone() });
+            self.core.worker.sql_table_sizes(size_req, sql.at(&db), if pg { schema.clone() } else { db.clone() });
         }
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, grants: false, owners: false, path, size_req })));
     }
@@ -277,7 +277,7 @@ impl App {
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            let busy = self.export_job.is_some();
+            let busy = self.core.export_job.is_some();
             go = ui.add_enabled(ready && !busy, primary_button(ui, if total > 0 { format!("Export {} rows", group(&total.to_string())) } else { "Export".to_string() }, PRIMARY())).on_disabled_hover_text(if busy { "An export is already running" } else { "Pick something to export" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -308,10 +308,10 @@ impl App {
                 DumpPlan { schema: space.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None, grants: pg && f.grants, owners: pg && f.owners }
             }
         };
-        self.req += 1;
-        let job = crate::app::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sql.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
-        self.worker.sql_dump(job.req, sql, plan, PathBuf::from(f.path.trim()), job.count.clone(), job.id.clone(), job.cancel.clone());
-        self.export_job = Some(job);
+        self.core.req += 1;
+        let job = crate::app::export::ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sql.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        self.core.worker.sql_dump(job.req, sql, plan, PathBuf::from(f.path.trim()), job.count.clone(), job.id.clone(), job.cancel.clone());
+        self.core.export_job = Some(job);
         self.ok(format!("Exporting {} to {}", if total > 0 { format!("about {} rows", group(&total.to_string())) } else { "the structure".to_string() }, f.path.trim()));
     }
 
@@ -339,7 +339,7 @@ impl App {
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            let busy = self.sql_job.is_some();
+            let busy = self.core.sql_job.is_some();
             go = ui.add_enabled(writable && !busy, primary_button(ui, "Run file", ALERT())).on_disabled_hover_text(if busy { "Another import or script is running" } else { "Allow writes on this connection first" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -352,10 +352,10 @@ impl App {
             let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
             let sql = sql.at(&f.db);
             let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
-            self.req += 1;
-            let job = SqlJob::new(self.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.script_len());
-            self.worker.sql_run_file(job.req, sql, space, f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
-            self.sql_job = Some(job);
+            self.core.req += 1;
+            let job = SqlJob::new(self.core.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.script_len());
+            self.core.worker.sql_run_file(job.req, sql, space, f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
+            self.core.sql_job = Some(job);
             self.ok(format!("Running {}", f.name));
             *keep = false;
         } else if unlock {
@@ -367,19 +367,19 @@ impl App {
 
     /// An import or a script finished: report it, keep its undo, and reload what it changed.
     pub(in crate::app) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
-        let Some(j) = self.sql_job.take_if(|j| j.req == req) else { return };
+        let Some(j) = self.core.sql_job.take_if(|j| j.req == req) else { return };
         // A script can create or drop anything anywhere, and one that failed or was stopped kept what ran before.
         if j.kind == JobKind::Script && j.db.dialect == db::sql::Dialect::Postgres {
             // The database list of a PostgreSQL server is not what a script changes; its schemas and tables are, in the database the
             // run was for, and the tabs of that database follow what the server has now.
             let database = j.db.pg_database();
             self.pg_refresh(j.conn, &database);
-            let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == database && !self.tabs[i].sel.coll.is_empty()).collect();
+            let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel.conn == j.conn && self.core.tabs[i].sel.db == database && !self.core.tabs[i].sel.coll.is_empty()).collect();
             for i in open {
                 self.reload_of(i);
             }
         } else if j.kind == JobKind::Script {
-            self.worker.sql_lists(j.conn, j.db.clone(), j.schema.clone());
+            self.core.worker.sql_lists(j.conn, j.db.clone(), j.schema.clone());
         }
         match res {
             Ok(d) => {
@@ -391,7 +391,7 @@ impl App {
                 if j.kind == JobKind::Import {
                     // A tab is the table's when its database and namespace, resolved as a read of it resolves them, are the job's: another
                     // PostgreSQL database or schema can hold a table of the same name.
-                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| crate::app::sql::alter::answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
+                    let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| crate::app::sql::alter::answers_tab(&self.core.tabs[i].sel, self.sql_target(&self.core.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
                     for i in tabs {
                         self.reload_of(i);
                     }
@@ -412,18 +412,18 @@ impl App {
     pub(in crate::app) fn sql_lists_done(&mut self, conn: u64, schema: String, res: db::Res<(Vec<String>, Option<Vec<String>>)>) {
         let Ok((dbs, tables)) = res else { return };
         let mut dropped = Vec::new();
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
             let old = std::mem::take(&mut c.dbs);
             dropped = old.iter().filter(|o| !dbs.contains(&o.0)).map(|o| o.0.clone()).collect();
             c.dbs = dbs.iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == *d).and_then(|o| o.1.clone()))).collect();
         }
         for d in &dropped {
-            self.open_dbs.remove(&(conn, d.clone()));
-            self.sql_asked.remove(&(conn, d.clone()));
+            self.core.open_dbs.remove(&(conn, d.clone()));
+            self.core.sql_asked.remove(&(conn, d.clone()));
             self.forget_schema(conn, d);
         }
         self.remove_tabs(|t| t.sel.conn == conn && tab_gone(&t.sel, &dbs, &schema, tables.as_deref()));
-        let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.db == schema && !self.tabs[i].sel.coll.is_empty()).collect();
+        let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel.conn == conn && self.core.tabs[i].sel.db == schema && !self.core.tabs[i].sel.coll.is_empty()).collect();
         for i in open {
             self.reload_of(i);
         }
@@ -434,7 +434,7 @@ impl App {
 
     /// The status bar readout of a running import or script, with Cancel. True while one runs.
     pub(in crate::app) fn sql_job_progress(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(j) = &self.sql_job else { return false };
+        let Some(j) = &self.core.sql_job else { return false };
         spin(ui);
         let (rows, bytes) = (j.prog.rows.load(Ordering::Relaxed), j.prog.bytes.load(Ordering::Relaxed));
         let text = match j.kind {
@@ -443,7 +443,7 @@ impl App {
         };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
         if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import && j.rolls_back { "Stop and roll everything back" } else if j.kind == JobKind::Import { "Stop. This table's engine cannot roll back, so rows written so far stay." } else { "Interrupt the running statement and stop. Statements that already ran stay applied." }).clicked() {
-            self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
+            self.core.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true

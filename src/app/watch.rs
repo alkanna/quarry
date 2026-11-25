@@ -90,24 +90,24 @@ impl App {
     }
 
     fn start_watch(&mut self) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: nothing to watch.");
         }
         let Some(target) = self.target() else { return self.warn_offline() };
-        self.req += 1;
-        let req = self.req;
+        self.core.req += 1;
+        let req = self.core.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let w = &mut self.tm().unwrap().watch;
         w.req = req;
         w.cancel = Some(tx);
         w.err = None;
-        self.worker.watch(req, target, rx);
+        self.core.worker.watch(req, target, rx);
     }
 
     /// Stops every stream whose view is not on screen, so a hidden Watch never keeps reading.
     pub(super) fn stop_hidden_watches(&mut self) {
-        let cur = self.cur;
-        for (i, t) in self.tabs.iter_mut().enumerate() {
+        let cur = self.core.cur;
+        for (i, t) in self.core.tabs.iter_mut().enumerate() {
             if t.watch.running() && (i != cur || t.view != View::Watch) {
                 t.watch.stop();
             }
@@ -115,8 +115,8 @@ impl App {
     }
 
     pub(super) fn watch_event(&mut self, req: u64, ev: Document) {
-        let cur = self.cur;
-        let Some((i, t)) = self.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
+        let cur = self.core.cur;
+        let Some((i, t)) = self.core.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
         // Fails only for keys BSON cannot hold, which a server never sends.
         if let Ok(r) = db::Row::from_doc(&watch_row(ev)) {
             t.watch.rows.push(r);
@@ -135,7 +135,7 @@ impl App {
     }
 
     pub(super) fn watch_done(&mut self, req: u64, res: db::Res<()>) {
-        let Some(t) = self.tabs.iter_mut().find(|t| t.watch.req == req) else { return };
+        let Some(t) = self.core.tabs.iter_mut().find(|t| t.watch.req == req) else { return };
         t.watch.stop();
         t.watch.err = res.err().map(|e| watch_err(&e));
     }

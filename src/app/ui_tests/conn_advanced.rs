@@ -39,7 +39,7 @@ fn run(var: &str) {
     // A value shaped right but refused by the server shows under its row after Test.
     add_setting(&mut ui, "work_mem", "1kB");
     ui.click("Test");
-    ui.wait("the Test answer", |a| a.conn_test.is_some());
+    ui.wait("the Test answer", |a| a.core.conn_test.is_some());
     ui.show("Connected, but the server refused 1 setting. See the marked rows on the Advanced tab.");
     let t = std::time::Instant::now();
     while ui.h.query_all_by_label_contains("outside the valid range").next().is_none() {

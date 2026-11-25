@@ -37,7 +37,7 @@ impl App {
     /// Users of all databases with their roles, custom roles, and user actions. Writes need the
     /// connection unlocked; dropping a user asks for its name.
     pub(super) fn users_window(&mut self, ctx: &egui::Context) {
-        let Some(mut u) = self.users.take() else { return };
+        let Some(mut u) = self.core.users.take() else { return };
         let conn = u.conn;
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let client = self.conn(conn).and_then(|c| c.client.clone());
@@ -185,7 +185,7 @@ impl App {
                 _ => {
                     if let Some(client) = client.clone() {
                         u.edit = None;
-                        self.worker.db_change(conn, client, db, cmd, done);
+                        self.core.worker.db_change(conn, client, db, cmd, done);
                     }
                 }
             }
@@ -194,7 +194,7 @@ impl App {
             self.modal = Some(Modal::Typed { title: format!("Drop the user {user} of {db}? Apps that log in with it will stop working."), expect: user.clone(), typed: String::new(), action: Danger::DropUser { conn, db, user } });
         }
         if open && !(r.should_close() && self.modal.is_none()) {
-            self.users = Some(u);
+            self.core.users = Some(u);
         }
     }
 
@@ -202,8 +202,8 @@ impl App {
     /// (usersInfo / rolesInfo with showBuiltinRoles false, renderer ~156395).
     pub(super) fn load_users(&mut self, conn: u64) {
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else { return };
-        self.worker.command(client.clone(), "admin".into(), doc! { "usersInfo": { "forAllDBs": true } }, "users");
-        self.worker.command(client, "admin".into(), doc! { "rolesInfo": 1, "showBuiltinRoles": false }, "roles");
+        self.core.worker.command(client.clone(), "admin".into(), doc! { "usersInfo": { "forAllDBs": true } }, "users");
+        self.core.worker.command(client, "admin".into(), doc! { "rolesInfo": 1, "showBuiltinRoles": false }, "roles");
     }
 }
 

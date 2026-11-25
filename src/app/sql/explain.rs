@@ -39,7 +39,7 @@ impl App {
             return self.warn(e);
         }
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
-        let t = &self.tabs[self.cur];
+        let t = &self.core.tabs[self.core.cur];
         let (tab_db, database) = (t.sel.db.clone(), run_db(t));
         let (db, schema) = run_target(t, db);
         let writable = self.conn_writable(conn);
@@ -82,18 +82,18 @@ impl App {
     }
 
     fn sql_explain_send(&mut self, x: &mut SqlExplain, analyze: Option<Analyze>) {
-        self.req += 1;
+        self.core.req += 1;
         // A fresh handle per run, so a Stop for an old run never reaches this one.
-        (x.req, x.busy, x.asked, x.run, x.stopped) = (self.req, true, analyze, Default::default(), false);
+        (x.req, x.busy, x.asked, x.run, x.stopped) = (self.core.req, true, analyze, Default::default(), false);
         let script = plan::explain_script(x.dialect, &x.stmt, analyze);
-        self.worker.sql_explain(self.req, x.db.clone(), x.schema.clone(), script, !self.conn_writable(x.conn), x.run.clone());
+        self.core.worker.sql_explain(self.core.req, x.db.clone(), x.schema.clone(), script, !self.conn_writable(x.conn), x.run.clone());
     }
 
     /// Ends the run in flight on the server, which also rolls back an ANALYZE of a write and frees its locks.
     pub(in crate::app) fn sql_explain_stop(&mut self, x: &mut SqlExplain) {
         if x.busy {
             x.stopped = true;
-            self.worker.sql_kill(x.db.clone(), x.run.conn.load(std::sync::atomic::Ordering::SeqCst), x.run.cancel.clone());
+            self.core.worker.sql_kill(x.db.clone(), x.run.conn.load(std::sync::atomic::Ordering::SeqCst), x.run.cancel.clone());
         }
     }
 
@@ -132,9 +132,9 @@ impl App {
                     // A rerun of the same statement scans the same tables, so the evidence already read still holds.
                     let held = !wants.is_empty() && x.ev.as_ref().is_some_and(|e| e.covers(&wants));
                     if !wants.is_empty() && !held {
-                        self.req += 1;
-                        x.ev_req = Some(self.req);
-                        self.worker.sql_explain_evidence(self.req, x.db.clone(), x.schema.clone(), wants);
+                        self.core.req += 1;
+                        x.ev_req = Some(self.core.req);
+                        self.core.worker.sql_explain_evidence(self.core.req, x.db.clone(), x.schema.clone(), wants);
                     }
                     held
                 };
@@ -148,7 +148,7 @@ impl App {
                 // The last plan of the same statement, kept for the session, is what Compare shows when this one differs.
                 let now = crate::library::now_secs();
                 let p = Arc::new(p);
-                x.prev = self.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
+                x.prev = self.core.explain_prev.swap(history_key(x, p.analyzed), p.clone(), now).map(|(plan, at)| Prev { diff: compare::diff(&plan, &p), plan, at }).filter(|v| v.diff.differs);
                 x.leave_empty_compare();
                 (x.plan, x.unread) = (Some(p), None);
             }
@@ -171,7 +171,7 @@ impl App {
             Arc::make_mut(p).refind(x.dialect, Some(&ev), pooler);
             // Each plan is compared with the findings it showed: the plan kept for the next Compare and this Compare's
             // new side follow the strip. `differs` reads no findings, so the Compare tab stays as it was.
-            self.explain_prev.update(&key, p.clone());
+            self.core.explain_prev.update(&key, p.clone());
             if let Some(prev) = &mut x.prev {
                 prev.diff.refind(&prev.plan, p);
             }
@@ -189,9 +189,9 @@ impl App {
     #[cfg(test)]
     pub(in crate::app) fn demo_explain_evidence(&mut self, ev: plan::Evidence) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        self.req += 1;
-        x.ev_req = Some(self.req);
-        let req = self.req;
+        self.core.req += 1;
+        x.ev_req = Some(self.core.req);
+        let req = self.core.req;
         self.sql_explain_evidence(req, ev);
     }
 
@@ -323,7 +323,7 @@ impl App {
                     *keep = false;
                     self.sql_explain_stop(x);
                     self.sql_new_query(x.conn, x.tab_db.clone());
-                    if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
                         s.query = sql;
                         // The draft runs where the plan was made, not where the sidebar happens to be.
                         if x.dialect == Dialect::Postgres {
@@ -356,7 +356,7 @@ impl App {
     /// The classic EXPLAIN rows, in a Query tab of their own.
     fn sql_explain_rows(&mut self, x: &SqlExplain) {
         self.sql_new_query(x.conn, x.tab_db.clone());
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
             s.query = format!("EXPLAIN {}", x.stmt.trim().trim_end_matches(';'));
         }
         self.sql_run(true, false);

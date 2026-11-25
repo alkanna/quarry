@@ -118,7 +118,7 @@ fn rows_that_point_at_nothing_are_shown_and_the_key_is_not_added() {
             see(ui, "add the key as NOT VALID");
         }
         apply_now(ui);
-        ui.wait("the server to refuse the key", |a| !a.errors.is_empty());
+        ui.wait("the server to refuse the key", |a| !a.core.errors.is_empty());
         assert_eq!(keys(fx, &child), "", "the key was added over rows that point at nothing");
         if fx.is_pg() {
             assert!(ui.app().last_problem().contains("3 rows of"), "{}", ui.app().last_problem());
@@ -168,7 +168,7 @@ fn a_locked_connection_asks_to_unlock_before_a_relation_is_applied() {
         point_at(ui, &parent, "id");
         see(ui, "Every existing row has a match");
         // locked while the dialog is open: Apply now still works and asks
-        ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.h.run_steps(2);
         assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now is disabled on a locked connection");
         apply_now(ui);

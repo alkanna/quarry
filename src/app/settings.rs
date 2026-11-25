@@ -9,7 +9,7 @@ const SETTINGS_SIDE_W: f32 = 188.0;
 impl App {
     /// Opens Settings on the category that holds the Bun and database tool paths.
     pub(super) fn open_tool_settings(&mut self) {
-        self.settings_cat = SettingsCat::Tools;
+        self.core.settings_cat = SettingsCat::Tools;
         self.modal = Some(Modal::Settings);
     }
 
@@ -17,26 +17,26 @@ impl App {
     pub(super) fn zoom_keys(&mut self, ctx: &egui::Context) {
         let cmd = egui::Modifiers::COMMAND;
         let (up, down, reset) = ctx.input_mut(|i| (i.consume_key(cmd, Key::Equals) || i.consume_key(cmd, Key::Plus), i.consume_key(cmd, Key::Minus), i.consume_key(cmd, Key::Num0)));
-        let at = SCALES.iter().position(|s| s.0 == self.prefs.scale()).unwrap_or(0);
+        let at = SCALES.iter().position(|s| s.0 == self.core.prefs.scale()).unwrap_or(0);
         let to = match (up, down, reset) {
             (_, _, true) => 0,
             (true, _, _) => (at + 1).min(SCALES.len() - 1),
             (_, true, _) => at.saturating_sub(1),
             _ => return,
         };
-        if SCALES[to].0 != self.prefs.scale() {
-            self.prefs.ui_scale = SCALES[to].0;
-            style(ctx, self.prefs.look());
+        if SCALES[to].0 != self.core.prefs.scale() {
+            self.core.prefs.ui_scale = SCALES[to].0;
+            style(ctx, self.core.prefs.look());
             self.save_prefs();
         }
     }
 
     pub(super) fn settings(&mut self, ctx: &egui::Context) {
         let mut keep = true;
-        let look = self.prefs.look();
+        let look = self.core.prefs.look();
         // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
         let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.own_titlebar, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel, p.lock_scroll_axis, p.vim));
-        let before = saved(&self.prefs);
+        let before = saved(&self.core.prefs);
         let r = banded(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
             let screen = ui.ctx().content_rect();
             let w = SETTINGS_W.min(screen.width() - 2.0 * DIALOG_MARGIN - 2.0);
@@ -55,7 +55,7 @@ impl App {
                 let mut rows = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(egui::vec2(10.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
                 rows.spacing_mut().item_spacing.y = 2.0;
                 for (cat, label) in CATS {
-                    let on = self.settings_cat == cat;
+                    let on = self.core.settings_cat == cat;
                     let resp = side_row(&mut rows, ROW_H, 0.0, on, label, |p, r| {
                         let c = r.left_center() + egui::vec2(7.0, 0.0);
                         cat_icon(p, cat, c, if on { PRIMARY() } else { MUTED() });
@@ -64,13 +64,13 @@ impl App {
                         p.galley(egui::pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0 + dy), g, TEXT());
                     });
                     if resp.clicked() {
-                        self.settings_cat = cat;
+                        self.core.settings_cat = cat;
                     }
                 }
                 ui.allocate_ui_with_layout(egui::vec2(w - side_w, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     // Opening a category or connection page always starts at the top, also one seen before, so the
                     // view it was last scrolled to is reset when the view changes rather than kept per view.
-                    let view = (self.settings_cat, self.agents.page);
+                    let view = (self.core.settings_cat, self.core.agents.page);
                     let seen = egui::Id::unique("settings-scroll-view");
                     let moved = ui.ctx().data_mut(|d| d.get_temp::<(SettingsCat, Option<u64>)>(seen).is_some_and(|v| v != view));
                     ui.ctx().data_mut(|d| d.insert_temp(seen, view));
@@ -83,8 +83,8 @@ impl App {
                             ui.set_width(w - side_w - 48.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
                             // A connection's agent page draws its own breadcrumb in place of the title.
-                            if !(self.settings_cat == SettingsCat::Agents && self.agents.page.is_some()) {
-                                let title = CATS.iter().find(|c| c.0 == self.settings_cat).map_or("", |c| c.1);
+                            if !(self.core.settings_cat == SettingsCat::Agents && self.core.agents.page.is_some()) {
+                                let title = CATS.iter().find(|c| c.0 == self.core.settings_cat).map_or("", |c| c.1);
                                 ui.label(semibold(RichText::new(title).size(TXT_SUBHEAD).color(BRIGHT())));
                                 ui.add_space(6.0);
                             }
@@ -104,15 +104,15 @@ impl App {
             });
         });
         // The pref unlocks every connection each frame, so turning it off has to lock them back.
-        if before.2 && !self.prefs.always_writable {
-            self.conns.iter_mut().for_each(|c| c.writable = false);
+        if before.2 && !self.core.prefs.always_writable {
+            self.core.conns.iter_mut().for_each(|c| c.writable = false);
         }
-        if self.prefs.look() != look {
-            style(ctx, self.prefs.look());
+        if self.core.prefs.look() != look {
+            style(ctx, self.core.prefs.look());
             // Column widths were measured in the old font and number display.
-            self.width_cache.clear();
+            self.core.width_cache.clear();
         }
-        if before != saved(&self.prefs) || self.prefs.look() != look {
+        if before != saved(&self.core.prefs) || self.core.prefs.look() != look {
             self.save_prefs();
         }
         if !keep || r.should_close() {
@@ -121,20 +121,20 @@ impl App {
     }
 
     fn settings_pane(&mut self, ui: &mut egui::Ui) {
-        match self.settings_cat {
+        match self.core.settings_cat {
             SettingsCat::Appearance => {
                 settings_section(ui, "THEME", |ui| {
                     setting_row(ui, "Mode", "System follows the light or dark setting of your computer.", |ui| {
-                        let was = self.prefs.appearance;
-                        segmented(ui, &mut self.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
-                        if self.prefs.appearance != was {
-                            self.prefs.appearance.apply(ui.ctx());
+                        let was = self.core.prefs.appearance;
+                        segmented(ui, &mut self.core.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
+                        if self.core.prefs.appearance != was {
+                            self.core.prefs.appearance.apply(ui.ctx());
                         }
                     });
-                    let look = self.prefs.look();
+                    let look = self.core.prefs.look();
                     for light in [false, true] {
                         ui.separator();
-                        let note = if self.prefs.appearance == Appearance::System {
+                        let note = if self.core.prefs.appearance == Appearance::System {
                             if light { "used when the system is light" } else { "used when the system is dark" }
                         } else if is_light() == light {
                             "in use"
@@ -147,26 +147,26 @@ impl App {
                             ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
                         });
                         if let Some(i) = theme_cards(ui, light, &look) {
-                            *(if light { &mut self.prefs.light_theme } else { &mut self.prefs.dark_theme }) = themes(light)[i].name.into();
+                            *(if light { &mut self.core.prefs.light_theme } else { &mut self.core.prefs.dark_theme }) = themes(light)[i].name.into();
                         }
                     }
                     ui.separator();
                     setting_row(ui, "Background", "Soft lowers the contrast between text and background, for less glare.", |ui| {
-                        segmented(ui, &mut self.prefs.soft, &[(false, "Standard"), (true, "Soft")]);
+                        segmented(ui, &mut self.core.prefs.soft, &[(false, "Standard"), (true, "Soft")]);
                     });
                     ui.separator();
                     setting_row(ui, "Accent", "Each theme has its own. Override it for every theme.", |ui| {
                         if let Some(i) = accent_swatches(ui, &look) {
-                            self.prefs.accent = accent_name(i).into();
+                            self.core.prefs.accent = accent_name(i).into();
                         }
                     });
                     #[cfg(target_os = "linux")]
                     {
                         ui.separator();
                         setting_row(ui, "Title bar", "Window uses the title bar of your window manager, or Quarry's own with its header buttons. Tiling window managers such as i3 or Hyprland work best with the window manager's.", |ui| {
-                            let was = self.prefs.own_titlebar;
-                            segmented(ui, &mut self.prefs.own_titlebar, &[(false, "Window manager"), (true, "Quarry")]);
-                            if self.prefs.own_titlebar != was {
+                            let was = self.core.prefs.own_titlebar;
+                            segmented(ui, &mut self.core.prefs.own_titlebar, &[(false, "Window manager"), (true, "Quarry")]);
+                            if self.core.prefs.own_titlebar != was {
                                 self.set_titlebar(ui.ctx());
                             }
                         });
@@ -174,19 +174,19 @@ impl App {
                 });
                 settings_section(ui, "TEXT", |ui| {
                     setting_row(ui, "Interface size", "Makes text, buttons and rows bigger together. Also Cmd+= and Cmd+- anywhere.", |ui| {
-                        segmented(ui, &mut self.prefs.ui_scale, &SCALES);
+                        segmented(ui, &mut self.core.prefs.ui_scale, &SCALES);
                     });
                     ui.separator();
-                    let look = self.prefs.look();
+                    let look = self.core.prefs.look();
                     setting_row(ui, "Interface font", "OpenDyslexic has heavier letter bottoms that some people with dyslexia find easier to read.", |ui| {
                         if let Some(i) = font_combo(ui, "ui-font", &UI_FONTS, look.ui_font) {
-                            self.prefs.ui_font = UI_FONTS[i].0.into();
+                            self.core.prefs.ui_font = UI_FONTS[i].0.into();
                         }
                     });
                     ui.separator();
                     setting_row(ui, "Data font", "For values, queries and the Shell.", |ui| {
                         if let Some(i) = font_combo(ui, "data-font", &DATA_FONTS, look.data_font) {
-                            self.prefs.data_font = DATA_FONTS[i].0.into();
+                            self.core.prefs.data_font = DATA_FONTS[i].0.into();
                         }
                     });
                 });
@@ -194,71 +194,71 @@ impl App {
             SettingsCat::Reading => {
                 settings_section(ui, "TABLES", |ui| {
                     setting_row(ui, "Reading line", "Highlights the whole row under the pointer, so your eye keeps its place across wide tables.", |ui| {
-                        toggle(ui, &mut self.prefs.reading_line);
+                        toggle(ui, &mut self.core.prefs.reading_line);
                     });
                     ui.separator();
                     setting_row(ui, "Group digits", "Shows 1 234 567 instead of 1234567. Only the display changes: copy, edit and export keep the raw value.", |ui| {
-                        toggle(ui, &mut self.prefs.group_digits);
+                        toggle(ui, &mut self.core.prefs.group_digits);
                     });
                     ui.separator();
                     setting_row(ui, "Scroll straight", "A swipe that starts down or across stays on that line. Diagonal swipes move freely.", |ui| {
-                        toggle(ui, &mut self.prefs.lock_scroll_axis);
+                        toggle(ui, &mut self.core.prefs.lock_scroll_axis);
                     });
                 });
                 settings_section(ui, "MESSAGES", |ui| {
                     setting_row(ui, "Keep messages until closed", "Warnings and confirmations stay on screen until you close them, instead of fading after a few seconds. An Undo offer still ends on its timer.", |ui| {
-                        toggle(ui, &mut self.prefs.keep_toasts);
+                        toggle(ui, &mut self.core.prefs.keep_toasts);
                     });
                 });
             }
             SettingsCat::Documents => {
                 settings_section(ui, "", |ui| {
                     setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
-                        segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
+                        segmented(ui, &mut self.core.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
                     });
                     ui.separator();
                     setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
-                        stepper(ui, "Columns shown", &mut self.prefs.default_cols, 3, 30);
+                        stepper(ui, "Columns shown", &mut self.core.prefs.default_cols, 3, 30);
                     });
                     ui.separator();
                     setting_row(ui, "Big objects in columns", "Objects and arrays too long for a cell show their size, or their first characters as in Mingo. Small ones always show in full.", |ui| {
-                        segmented(ui, &mut self.prefs.object_preview, &[(false, "Size"), (true, "First characters")]);
+                        segmented(ui, &mut self.core.prefs.object_preview, &[(false, "Size"), (true, "First characters")]);
                     });
                 });
             }
             SettingsCat::Editing => {
                 settings_section(ui, "", |ui| {
                     setting_row(ui, "Auto-save edits", "Write each edit right away and offer Undo for 8 seconds.", |ui| {
-                        toggle(ui, &mut self.prefs.auto_save);
+                        toggle(ui, &mut self.core.prefs.auto_save);
                     });
                     ui.separator();
                     setting_row(ui, "Always allow writes", "Skip read-only mode on every connection and save edits without showing the changes first.", |ui| {
-                        toggle(ui, &mut self.prefs.always_writable);
+                        toggle(ui, &mut self.core.prefs.always_writable);
                     });
                     ui.separator();
                     setting_row(ui, "Vim motions", "Modal editing in the code editors, which open in Normal mode: i to type, Esc to go back. Elsewhere h j k l move in the grid and lists, and Ctrl+h j k l between the sidebar, the query and the grid.", |ui| {
-                        toggle(ui, &mut self.prefs.vim);
+                        toggle(ui, &mut self.core.prefs.vim);
                     });
                     ui.separator();
                     setting_row(ui, "Long values", "Where Shift+Enter or the button at the end of an inline editor opens a value. A value with line breaks opens there directly.", |ui| {
-                        segmented(ui, &mut self.prefs.value_panel, &[(false, "Dialog"), (true, "Side panel")]);
+                        segmented(ui, &mut self.core.prefs.value_panel, &[(false, "Dialog"), (true, "Side panel")]);
                     });
                     ui.separator();
-                    let auto = self.prefs.auto_save || self.prefs.always_writable;
+                    let auto = self.core.prefs.auto_save || self.core.prefs.always_writable;
                     setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
-                        ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
+                        ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.core.prefs.confirm_save));
                     });
                 });
-                ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(TXT_SMALL).color(FAINT()));
+                ui.label(RichText::new(if self.core.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(TXT_SMALL).color(FAINT()));
             }
             SettingsCat::Tools => {
                 settings_section(ui, "QUERIES", |ui| {
                     setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
-                        egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.core.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
                             menu_look(ui);
                             // Same presets as the original's preferences.
                             for s in [5, 10, 30, 60, 300, 3600] {
-                                ui.selectable_value(&mut self.prefs.timeout_ms, s * 1000, format!("{s} s"));
+                                ui.selectable_value(&mut self.core.prefs.timeout_ms, s * 1000, format!("{s} s"));
                             }
                         });
                     });
@@ -269,21 +269,21 @@ impl App {
                         None => "Bun was not found. Install it from bun.sh or enter its path.".to_string(),
                     };
                     setting_row(ui, "Bun runtime", &desc, |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.core.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
                     });
                 });
                 let desc = self.gcloud_found_text();
                 settings_section(ui, "CLOUD SQL", |ui| {
                     setting_row(ui, "gcloud", &desc, |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.prefs.gcloud).hint_text("automatic").desired_width(190.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.core.prefs.gcloud).hint_text("automatic").desired_width(190.0));
                     });
                     ui.separator();
                     setting_row(ui, "Cloud SQL proxy", "Found automatically, or downloaded by Quarry. Set a path only to use another build.", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.prefs.cloud_sql_proxy).hint_text("automatic").desired_width(190.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.core.prefs.cloud_sql_proxy).hint_text("automatic").desired_width(190.0));
                     });
                 });
                 settings_section(ui, "DATABASE TOOLS", |ui| {
-                    for (i, (name, path)) in [("mongodump", &mut self.prefs.mongodump), ("mongorestore", &mut self.prefs.mongorestore)].into_iter().enumerate() {
+                    for (i, (name, path)) in [("mongodump", &mut self.core.prefs.mongodump), ("mongorestore", &mut self.core.prefs.mongorestore)].into_iter().enumerate() {
                         if i > 0 {
                             ui.separator();
                         }
@@ -304,19 +304,19 @@ impl App {
             SettingsCat::StatusBar => {
                 settings_section(ui, "", |ui| {
                     setting_row(ui, "Server", "The connection's host, MongoDB version and replica set, with a dot for whether it is connected.", |ui| {
-                        toggle(ui, &mut self.prefs.show_server);
+                        toggle(ui, &mut self.core.prefs.show_server);
                     });
                     ui.separator();
                     setting_row(ui, "Frame rate", "Frames per second and the time each frame takes. Quarry follows your display's refresh rate (vsync), up to 120 Hz on ProMotion screens.", |ui| {
-                        toggle(ui, &mut self.prefs.show_fps);
+                        toggle(ui, &mut self.core.prefs.show_fps);
                     });
                     ui.separator();
                     setting_row(ui, "Memory", "How much memory Quarry uses. Same number as Activity Monitor's Memory column on macOS, resident memory elsewhere.", |ui| {
-                        toggle(ui, &mut self.prefs.show_mem);
+                        toggle(ui, &mut self.core.prefs.show_mem);
                     });
                     ui.separator();
                     setting_row(ui, "CPU", "Quarry's CPU use over the last second, in percent of one core like Activity Monitor.", |ui| {
-                        toggle(ui, &mut self.prefs.show_cpu);
+                        toggle(ui, &mut self.core.prefs.show_cpu);
                     });
                 });
             }
@@ -332,7 +332,7 @@ impl App {
                             if b.show(ui, held).clicked() {
                                 clicked = Some(b);
                             }
-                        } else if matches!(self.upd, Upd::Checking { .. }) {
+                        } else if matches!(self.core.upd, Upd::Checking { .. }) {
                             spin(ui);
                         }
                     });
@@ -344,7 +344,7 @@ impl App {
                 ui.add_space(12.0);
                 settings_section(ui, "AUTOMATIC UPDATES", |ui| {
                     setting_row(ui, "Download and install new releases", "In the background, installed only when they match their published checksum. Off: the header offers each release and you pick when.", |ui| {
-                        toggle(ui, &mut self.prefs.auto_update);
+                        toggle(ui, &mut self.core.prefs.auto_update);
                     });
                 });
                 if let Some(b) = clicked {

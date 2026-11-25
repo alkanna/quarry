@@ -151,7 +151,7 @@ impl App {
         let target = if db.is_empty() { self.conn_name(conn) } else { format!("{} \u{b7} {db}", self.conn_name(conn)) };
         // A tab of a saved script offers to make where it runs now that script's default.
         let saved = t.script.as_ref().and_then(|b| match b.r {
-            crate::library::ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == id),
+            crate::library::ScriptRef::Saved(id) => self.core.library.scripts.iter().find(|s| s.id == id),
             _ => None,
         });
         let make_default = saved.filter(|s| !self.runs_at(s, conn, &db, &schema, &t.sel.schema)).map(|s| (s.id, conn, db, schema));
@@ -161,12 +161,12 @@ impl App {
     /// The strip, drawn when `src` on the current tab has values. Returns whether the editor shows them filled in.
     pub(in crate::app) fn snippet_strip(&mut self, ui: &mut egui::Ui, src: Src) -> bool {
         let Some(strip) = self.strip_of(src) else { return false };
-        let Some(t) = self.tabs.get_mut(self.cur) else { return false };
+        let Some(t) = self.core.tabs.get_mut(self.core.cur) else { return false };
         let toggle = src != Src::Bar;
         if strip_ui(ui, &strip, &mut t.snip, toggle) {
             self.make_snippet_default(&strip);
         }
-        toggle && self.tabs[self.cur].snip.filled
+        toggle && self.core.tabs[self.core.cur].snip.filled
     }
 
     pub(in crate::app) fn make_snippet_default(&mut self, s: &Strip) {
@@ -250,7 +250,7 @@ impl App {
         });
         if apply && let Some(ph) = ph {
             *keep = false;
-            let Some(t) = self.tabs.iter_mut().find(|t| t.uid == f.uid) else { return };
+            let Some(t) = self.core.tabs.iter_mut().find(|t| t.uid == f.uid) else { return };
             t.snip.filled = false;
             let Some(text) = text_mut(t, f.src) else { return };
             // The text may have changed under the dialog; only the literal it was opened on is replaced.

@@ -160,7 +160,7 @@ impl App {
         for n in ["db", "sql", "table", "require", "console", "log", "_", "dayjs", "ObjectId", "ISODate", "randomId", "UUIDv4", "UUIDv1"] {
             add(n, "a name the shell provides".into());
         }
-        for p in &self.prefs.shell_packages {
+        for p in &self.core.prefs.shell_packages {
             add(&package_ident(p), format!("the name of the package {}", db::package_spec(p).0));
         }
         // The runner tells this tab's own connection apart from an attachment by its name.
@@ -181,15 +181,15 @@ impl App {
     pub(super) fn attach_demo(&mut self) {
         let colls = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { dbs, masked_uri: "mongodb://app:****@travels.internal:27017".into(), server: ServerInfo { version: version.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, status) };
-        self.conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
+        self.core.conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
         for (id, name, tag, product, version) in [(6, "shop-staging", "Staging", "MySQL", "8.0.36"), (7, "analytics", "Internal", "MariaDB", "11.4.2")] {
-            self.conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
+            self.core.conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("attach") {
             self.modal = Some(Modal::Attach(Box::new(AttachForm { conn: Some(5), db: "app".into(), name: "travels".into(), name_set: true, focused: true, ..Default::default() })));
             return;
         }
-        let t = &mut self.tabs[0];
+        let t = &mut self.core.tabs[0];
         t.shell.attached = vec![Attached { conn: 5, db: "app".into(), name: "travels".into(), ..Default::default() }];
         t.shell.code = "// Paid orders this week, with the traveller tier stored in Mongo
 async function run() {
@@ -223,24 +223,24 @@ async function run() {
     /// one. Collections of a Mongo connection arrive when it connects. Demo mode has no server.
     pub(super) fn attach_load(&mut self, conn: u64, db: &str) {
         let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        if self.demo {
+        if self.core.demo {
             return;
         }
         if sql.dialect == db::sql::Dialect::Postgres {
             // The schema is the attachment's own, so each PostgreSQL attachment on `db` asks for its tables. Every tab, since
             // an agent may fill one in the background.
-            let mut schemas: Vec<String> = self.tabs.iter().flat_map(|t| &t.shell.attached).filter(|a| a.conn == conn && a.db == db).map(|a| pg_schema(&a.schema).to_string()).collect();
+            let mut schemas: Vec<String> = self.core.tabs.iter().flat_map(|t| &t.shell.attached).filter(|a| a.conn == conn && a.db == db).map(|a| pg_schema(&a.schema).to_string()).collect();
             schemas.sort();
             schemas.dedup();
             for s in schemas {
                 // The columns type the attachment's tables in the editor, as the schema of a MySQL attachment does.
                 self.ask_sql_schema(conn, sql.at(db), ns_key(db, &s), s.clone());
-                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
+                self.core.worker.pg_shell_list(conn, sql.clone(), db.to_string(), s);
             }
             return;
         }
-        if self.sql_asked.insert((conn, db.to_string())) {
-            self.worker.sql_tables(conn, sql.clone(), db.to_string());
+        if self.core.sql_asked.insert((conn, db.to_string())) {
+            self.core.worker.sql_tables(conn, sql.clone(), db.to_string());
         }
         self.ask_sql_schema(conn, sql, db.to_string(), db.to_string());
     }
@@ -330,8 +330,8 @@ async function run() {
                 let names: Vec<String> = if pg { a.tables.clone() } else { c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default() };
                 // A PostgreSQL schema is cached per schema of its database; until it arrives the tables are typed loosely.
                 let typed = if pg {
-                    AttTyped::Sql(self.sql_schema.get(&(a.conn, ns_key(&a.db, pg_schema(&a.schema)))).cloned())
-                } else if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
+                    AttTyped::Sql(self.core.sql_schema.get(&(a.conn, ns_key(&a.db, pg_schema(&a.schema)))).cloned())
+                } else if c.meta.engine.is_sql() { AttTyped::Sql(self.core.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
                 Some(AttachedInfo { name: a.name.clone(), names, typed })
             })
             .collect()
@@ -351,7 +351,7 @@ async function run() {
         }
         ui.add_space(6.0);
         let q = f.filter.trim().to_lowercase();
-        let rows: Vec<u64> = self.conns.iter().filter(|c| q.is_empty() || c.meta.name.to_lowercase().contains(&q) || c.meta.tag.to_lowercase().contains(&q)).map(|c| c.meta.id).collect();
+        let rows: Vec<u64> = self.core.conns.iter().filter(|c| q.is_empty() || c.meta.name.to_lowercase().contains(&q) || c.meta.tag.to_lowercase().contains(&q)).map(|c| c.meta.id).collect();
         let mut pick = None;
         // Four whole rows of ROW_STEP, so the list never stops on half a row.
         const ROW_STEP: f32 = 42.0;
@@ -394,7 +394,7 @@ async function run() {
             f.schemas = None;
             f.schema.clear();
             match (f.conn, chosen.and_then(|c| c.sql.clone())) {
-                (Some(conn), Some(sql)) => self.worker.pg_shell_list(conn, sql, f.db.clone(), String::new()),
+                (Some(conn), Some(sql)) => self.core.worker.pg_shell_list(conn, sql, f.db.clone(), String::new()),
                 _ => f.schemas = Some(Err("not connected".into())),
             }
         }
@@ -527,7 +527,7 @@ async function run() {
         }
         if !schema.is_empty() && !d.contains_key("error") {
             let tables = names("tables");
-            for t in &mut self.tabs {
+            for t in &mut self.core.tabs {
                 for a in t.shell.attached.iter_mut().filter(|a| a.conn == conn && a.db == database && (a.schema == schema || a.schema.is_empty() && schema == PG_SCHEMA)) {
                     a.tables = tables.clone();
                 }

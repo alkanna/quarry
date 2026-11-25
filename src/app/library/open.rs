@@ -81,7 +81,7 @@ impl App {
         }
         let (view, base) = match &r {
             ScriptRef::Saved(id) => {
-                let s = self.library.scripts.iter().find(|s| s.id == *id)?;
+                let s = self.core.library.scripts.iter().find(|s| s.id == *id)?;
                 (view_of_kind(&s.kind)?, s.body.clone())
             }
             ScriptRef::File { .. } => {
@@ -129,21 +129,21 @@ impl App {
     pub(in crate::app) fn script_target(&self, r: &ScriptRef) -> Target {
         match r {
             ScriptRef::Saved(id) => {
-                let Some(s) = self.library.scripts.iter().find(|s| s.id == *id) else { return Target::None("That script is no longer in the library.".into()) };
+                let Some(s) = self.core.library.scripts.iter().find(|s| s.id == *id) else { return Target::None("That script is no longer in the library.".into()) };
                 if self.conn(s.conn).is_some() {
                     return Target::On(s.conn);
                 }
-                let fit: Vec<u64> = self.conns.iter().filter(|c| kind_fits(&s.kind, c.meta.engine)).map(|c| c.meta.id).collect();
+                let fit: Vec<u64> = self.core.conns.iter().filter(|c| kind_fits(&s.kind, c.meta.engine)).map(|c| c.meta.id).collect();
                 if fit.is_empty() { Target::None("The connection of this script was removed, and no other connection can run it.".into()) } else { Target::Ask(fit) }
             }
             ScriptRef::File { link, rel } => {
-                let Some(l) = self.library.links.iter().find(|l| l.id == *link) else { return Target::None("That folder is no longer linked.".into()) };
+                let Some(l) = self.core.library.links.iter().find(|l| l.id == *link) else { return Target::None("That folder is no longer linked.".into()) };
                 let kind = self.file_kind(*link, rel);
                 let fits = |id: u64| self.conn(id).is_some_and(|c| crate::library::format::fits(l, &kind, id, c.meta.engine));
-                if let Some(c) = self.t().map(|t| t.sel.conn).into_iter().chain(self.active).find(|c| fits(*c)) {
+                if let Some(c) = self.t().map(|t| t.sel.conn).into_iter().chain(self.core.active).find(|c| fits(*c)) {
                     return Target::On(c);
                 }
-                let fit: Vec<u64> = self.conns.iter().map(|c| c.meta.id).filter(|c| fits(*c)).collect();
+                let fit: Vec<u64> = self.core.conns.iter().map(|c| c.meta.id).filter(|c| fits(*c)).collect();
                 if fit.is_empty() { Target::None("No connection this folder is used on can run that file.".into()) } else { Target::Ask(fit) }
             }
         }
@@ -154,7 +154,7 @@ impl App {
         match self.script_target(r) {
             Target::On(c) => {
                 let wanted = match r {
-                    ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.db.clone()).unwrap_or_default(),
+                    ScriptRef::Saved(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.db.clone()).unwrap_or_default(),
                     ScriptRef::File { .. } => String::new(),
                 };
                 let db = self.script_db(c, &wanted);
@@ -187,7 +187,7 @@ impl App {
     /// Whether tab `i` is one that opening a script can replace: it holds no text of the person's beyond the script it
     /// was opened from, and that is unchanged.
     pub(in crate::app) fn tab_clean(&self, i: usize, kind: &str) -> bool {
-        let Some(t) = self.tabs.get(i) else { return false };
+        let Some(t) = self.core.tabs.get(i) else { return false };
         let text = match (kind, t.sql.as_ref()) {
             ("sql", Some(s)) if t.view == View::Sql && t.sel.coll.is_empty() => s.query.as_str(),
             _ => return false,
@@ -205,14 +205,14 @@ impl App {
     /// unbound, so their next Cmd+S opens the Save dialog, and they leave the recent list and a pending open.
     pub(in crate::app) fn forget_scripts(&mut self, ids: &[u64]) {
         let gone = |r: &ScriptRef| matches!(r, ScriptRef::Saved(id) if ids.contains(id));
-        for t in &mut self.tabs {
+        for t in &mut self.core.tabs {
             if t.script.as_ref().is_some_and(|b| gone(&b.r)) {
                 t.script = None;
             }
         }
-        self.library.recent.retain(|r| !gone(r));
-        if self.lib_ui.pending.as_ref().is_some_and(|p| gone(&p.r)) {
-            self.lib_ui.pending = None;
+        self.core.library.recent.retain(|r| !gone(r));
+        if self.core.lib_ui.pending.as_ref().is_some_and(|p| gone(&p.r)) {
+            self.core.lib_ui.pending = None;
         }
     }
 
@@ -221,7 +221,7 @@ impl App {
         if let Some(t) = self.tm() {
             bind(t, Bound { r: r.clone(), view, base, disk: None, conflict: None });
         }
-        self.library.push_recent(r);
+        self.core.library.push_recent(r);
         self.save_library();
     }
 
@@ -232,20 +232,20 @@ impl App {
         // Run on a snippet asks for its values first, whether from Cmd+K, the Library panel or a picker.
         if how == How::Run
             && let ScriptRef::Saved(id) = r
-            && self.library.scripts.iter().any(|s| s.id == *id && self.script_snippet(s).is_some())
+            && self.core.library.scripts.iter().any(|s| s.id == *id && self.script_snippet(s).is_some())
         {
             return self.open_snippet_form(*id, None);
         }
         // A script already open in another tab is switched to: a second copy comes only from New tab or a duplicated tab.
         // Opened again on the tab it is in, it takes its saved text back, and Undo keeps the edits it replaced.
         if how == How::Here
-            && let Some(i) = self.tabs.iter().position(|t| t.script.as_ref().is_some_and(|b| &b.r == r))
+            && let Some(i) = self.core.tabs.iter().position(|t| t.script.as_ref().is_some_and(|b| &b.r == r))
         {
-            if i != self.cur || !self.tab_edited(i) {
+            if i != self.core.cur || !self.tab_edited(i) {
                 return self.set_cur(i);
             }
             if let ScriptRef::Saved(id) = r
-                && let Some(s) = self.library.scripts.iter().find(|s| s.id == *id).cloned()
+                && let Some(s) = self.core.library.scripts.iter().find(|s| s.id == *id).cloned()
             {
                 return self.reload_bound(i, &s);
             }
@@ -263,7 +263,7 @@ impl App {
     /// `open_script` on the connection `conn`, which the person picked or the target rule gave.
     pub(in crate::app) fn open_script_on(&mut self, r: &ScriptRef, how: How, conn: u64) {
         match r {
-            ScriptRef::Saved(id) => match self.library.scripts.iter().find(|s| s.id == *id).cloned() {
+            ScriptRef::Saved(id) => match self.core.library.scripts.iter().find(|s| s.id == *id).cloned() {
                 Some(mut s) => {
                     s.conn = conn;
                     self.open_resolved(r, how, s, None)
@@ -278,7 +278,7 @@ impl App {
     /// The name a script shows: a saved script's own, a linked file's file name.
     pub(in crate::app) fn script_name(&self, r: &ScriptRef) -> String {
         match r {
-            ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()).unwrap_or_default(),
+            ScriptRef::Saved(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()).unwrap_or_default(),
             ScriptRef::File { rel, .. } => rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         }
     }
@@ -304,10 +304,10 @@ impl App {
         if matches!(s.kind.as_str(), "filter" | "pipeline" | "where") && (s.coll.is_empty() || s.db.is_empty()) {
             return self.warn(format!("\"{}\" names no collection. Save it again from the collection it belongs to.", s.name));
         }
-        if !status_ready && !self.demo {
+        if !status_ready && !self.core.demo {
             let uid = self.t().map(|t| t.uid);
             let seen_connecting = self.conn(s.conn).is_some_and(|c| c.status == Status::Connecting);
-            self.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, seen_connecting, name: s.name.clone() });
+            self.core.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, seen_connecting, name: s.name.clone() });
             // activate connects only an idle connection; a failed one is tried again.
             if self.conn(s.conn).is_some_and(|c| matches!(c.status, Status::Failed(_))) {
                 self.connect(s.conn);
@@ -316,7 +316,7 @@ impl App {
             self.toast_acts(format!("Opening {} when {cname} connects", s.name), vec![("Cancel".into(), crate::app::errors::Act::CancelOpen)]);
             return;
         }
-        self.lib_ui.pending = None;
+        self.core.lib_ui.pending = None;
         let new_tab = how == How::NewTab;
         // Run is "Run all". On a writable connection a script that can change data is opened, not run, with a notice
         // above the editor, and the person runs it from there. A read-only connection keeps its own gates.
@@ -325,7 +325,7 @@ impl App {
         match s.kind.as_str() {
             "sql" => {
                 let db = self.script_db(s.conn, &s.db);
-                let reuse = !new_tab && self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == s.conn && t.sel.db == db);
+                let reuse = !new_tab && self.tab_clean(self.core.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == s.conn && t.sel.db == db);
                 if !reuse {
                     self.sql_new_query(s.conn, db);
                 }
@@ -408,7 +408,7 @@ impl App {
             other => return self.warn(format!("This build does not know scripts of kind \"{other}\".")),
         }
         if writes && let Some(uid) = self.t().map(|t| t.uid) {
-            self.lib_ui.writes.insert(uid);
+            self.core.lib_ui.writes.insert(uid);
         }
         if let Some((link, rel, meta)) = file {
             if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
@@ -444,10 +444,10 @@ impl App {
         let bound = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == tt.view).map(|b| b.r.clone());
         // A bound linked file is written by the linked folders' code; until then it takes the dialog.
         if let Some(ScriptRef::Saved(id)) = bound
-            && let Some(i) = self.library.scripts.iter().position(|s| s.id == id)
+            && let Some(i) = self.core.library.scripts.iter().position(|s| s.id == id)
         {
             let tab_conn = self.t().map(|t| t.sel.conn);
-            let sc = &mut self.library.scripts[i];
+            let sc = &mut self.core.library.scripts[i];
             (sc.body, sc.sort, sc.project, sc.updated) = (tt.body.clone(), tt.sort.clone(), tt.project.clone(), crate::library::now_secs());
             // The database and collection the tab runs on now are part of what is saved, as the Save dialog keeps them. A script
             // opened on another connection keeps its own, which name places on its own server.
@@ -484,23 +484,23 @@ impl App {
 
     /// Cmd+Shift+L: the Library panel on screen with the keys on its tree.
     pub(in crate::app) fn focus_library(&mut self) {
-        if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Library {
-            self.prefs.set_side_mode(SideMode::Library);
-            self.prefs.sidebar_hidden = false;
+        if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Library {
+            self.core.prefs.set_side_mode(SideMode::Library);
+            self.core.prefs.sidebar_hidden = false;
             self.save_prefs();
         }
-        self.lib_ui.focus_tree = true;
+        self.core.lib_ui.focus_tree = true;
     }
 
     /// The chip's Show in library: the panel on screen with the script selected and the folders above it open.
     pub(in crate::app) fn show_in_library(&mut self, r: &ScriptRef) {
         use crate::library::tree::Node;
         self.focus_library();
-        let st = &mut self.lib_ui.panel;
+        let st = &mut self.core.lib_ui.panel;
         st.query.clear();
         let node = match r {
             ScriptRef::Saved(id) => {
-                let lib = &self.library;
+                let lib = &self.core.library;
                 let mut at = lib.scripts.iter().find(|s| s.id == *id).and_then(|s| crate::library::tree::live_parent(lib, s.folder));
                 // Bounded, since a hand-edited file could hold a loop of folders.
                 for _ in 0..32 {
@@ -510,8 +510,8 @@ impl App {
                 }
                 // A script of another connection shows only in the All connections scope.
                 let conn = lib.scripts.iter().find(|s| s.id == *id).map(|s| s.conn);
-                if conn.is_some() && conn != self.t().map(|t| t.sel.conn).or(self.active) {
-                    self.prefs.lib_scope_all = true;
+                if conn.is_some() && conn != self.t().map(|t| t.sel.conn).or(self.core.active) {
+                    self.core.prefs.lib_scope_all = true;
                 }
                 Node::Script(*id)
             }
@@ -525,7 +525,7 @@ impl App {
                 Node::File { link: *link, rel: rel.clone() }
             }
         };
-        let st = &mut self.lib_ui.panel;
+        let st = &mut self.core.lib_ui.panel;
         st.sel = Some(node);
         st.focus = true;
     }
@@ -539,7 +539,7 @@ impl App {
 
     /// Puts saved script `s` back in tab `i`, which is bound to it, with a toast whose Undo restores the replaced text.
     fn reload_bound(&mut self, i: usize, s: &crate::library::Script) {
-        let t = &mut self.tabs[i];
+        let t = &mut self.core.tabs[i];
         let mine = super::linked::bound_text(t).map(String::from);
         super::linked::set_bound_text(t, &s.body, None);
         if t.script.as_ref().is_some_and(|b| b.view == View::Documents) {
@@ -557,7 +557,7 @@ impl App {
 
     /// Closes tab `i`, or asks first when it holds changes to its script that are not saved.
     pub(in crate::app) fn ask_close_tab(&mut self, i: usize) {
-        match self.tabs.get(i) {
+        match self.core.tabs.get(i) {
             Some(t) if self.tab_edited(i) => self.modal = Some(Modal::CloseEdited(t.uid)),
             _ => self.close_tab(i),
         }
@@ -607,13 +607,13 @@ impl App {
 
     /// Whether tab `i` holds changes to the script it is bound to that are not saved to it yet.
     pub(in crate::app) fn tab_edited(&self, i: usize) -> bool {
-        self.tabs.get(i).is_some_and(|t| t.script.as_ref().is_some_and(|b| super::linked::bound_text(t).is_some_and(|x| x != b.base)))
+        self.core.tabs.get(i).is_some_and(|t| t.script.as_ref().is_some_and(|b| super::linked::bound_text(t).is_some_and(|x| x != b.base)))
     }
 
     /// The connection the Library panel scopes to: the one picked in the rail, like the rest of the sidebar, else the
     /// current tab's.
     pub(in crate::app) fn lib_conn(&self) -> Option<u64> {
-        self.active.filter(|c| self.conn(*c).is_some()).or(self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()))
+        self.core.active.filter(|c| self.conn(*c).is_some()).or(self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()))
     }
 
     /// A SQL script with a password in it is saved as typed, since one with the password cut out would not run, and the
@@ -635,7 +635,7 @@ impl App {
     /// here runs it through the view's own gates (the Shell and a pipeline with a write stage still ask first).
     fn writes_banner(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
-        if !self.lib_ui.writes.contains(&t.uid) {
+        if !self.core.lib_ui.writes.contains(&t.uid) {
             return;
         }
         let (uid, view, conn) = (t.uid, t.view, t.sel.conn);
@@ -663,7 +663,7 @@ impl App {
         if act == 0 {
             return;
         }
-        self.lib_ui.writes.remove(&uid);
+        self.core.lib_ui.writes.remove(&uid);
         if act == 1 {
             match view {
                 View::Sql => self.sql_run(true, false),
@@ -685,13 +685,13 @@ impl App {
         dialog_head(ui, &Head::new("Which connection?").sub(f.name.clone()).glyph(glyphs::plug));
         // Grouped by the connection groups, in their order, then the connections in no group.
         let mut sections: Vec<(String, Vec<u64>)> = Vec::new();
-        for g in &self.groups.groups {
+        for g in &self.core.groups.groups {
             let ids: Vec<u64> = g.members.iter().copied().filter(|c| f.conns.contains(c)).collect();
             if !ids.is_empty() {
                 sections.push((g.name.to_uppercase(), ids));
             }
         }
-        let loose: Vec<u64> = f.conns.iter().copied().filter(|c| self.groups.group_of(*c).is_none()).collect();
+        let loose: Vec<u64> = f.conns.iter().copied().filter(|c| self.core.groups.group_of(*c).is_none()).collect();
         if !loose.is_empty() {
             sections.push((if sections.is_empty() { String::new() } else { "NOT IN A GROUP".into() }, loose));
         }

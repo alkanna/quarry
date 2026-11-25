@@ -236,7 +236,7 @@ impl App {
                 // and the page. The body is clipped at the panel instead, so a row that cannot shrink is cut, never widens it.
                 let room = ui.available_rect_before_wrap();
                 let mut body = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Min)));
-                match self.prefs.side_mode() {
+                match self.core.prefs.side_mode() {
                     // A panel that is not built yet shows the explorer, so a setting from a newer build never leaves the sidebar empty.
                     SideMode::Connections if conns_panel::READY => self.conns_panel(&mut body),
                     SideMode::Library if library::panel::READY => self.library_panel(&mut body),
@@ -251,11 +251,11 @@ impl App {
     /// The Tables and Scripts switch that heads the explorer and the library. Neither panel is closed by it: it only says
     /// which one the sidebar shows, so the rail's tiles stay the one way to change connection.
     pub(super) fn side_switch(&mut self, ui: &mut egui::Ui) {
-        let was = self.prefs.side_mode();
+        let was = self.core.prefs.side_mode();
         let mut mode = was;
         segmented_fill(ui, &mut mode, &[(SideMode::Explorer, "Tables", true), (SideMode::Library, "Scripts", library::panel::READY)]);
         if mode != was {
-            self.prefs.set_side_mode(mode);
+            self.core.prefs.set_side_mode(mode);
             self.save_prefs();
         }
     }
@@ -266,23 +266,23 @@ impl App {
         ui.add_space(8.0);
         self.conn_picker(ui);
         ui.add_space(8.0);
-        let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
+        let hint = if self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
         let r = ui.add(
-            egui::TextEdit::singleline(&mut self.tree_filter)
+            egui::TextEdit::singleline(&mut self.core.tree_filter)
                 .id(egui::Id::unique("tree-filter"))
                 .hint_text(RichText::new(hint).color(FAINT()))
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
         );
-        if !r.has_focus() && self.tree_filter.is_empty() {
+        if !r.has_focus() && self.core.tree_filter.is_empty() {
             let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
             let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
             paint_kbd(ui.painter(), kr, g);
         }
         r.on_hover_text("Press / or Cmd+Shift+F");
         ui.add_space(14.0);
-        let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
-        let mongo_conn = self.active.and_then(|id| self.conn(id)).filter(|c| !c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| c.meta.id);
+        let sql_conn = self.core.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+        let mongo_conn = self.core.active.and_then(|id| self.conn(id)).filter(|c| !c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| c.meta.id);
         let mut new_db = None;
         ui.horizontal(|ui| {
             if let Some(id) = mongo_conn {
@@ -316,7 +316,7 @@ impl App {
     /// for what can be done to the connection. Changing connection is the rail's job, so the card lists none.
     pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
         // Looked up on the field, not through `conn`, so the actions below can borrow other fields of the app mutably.
-        let cur = self.active.and_then(|id| self.conns.iter().find(|c| c.meta.id == id));
+        let cur = self.core.active.and_then(|id| self.core.conns.iter().find(|c| c.meta.id == id));
         let width = ui.available_width();
         let Some(c) = cur else {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 40.0), Sense::click());
@@ -416,7 +416,7 @@ impl App {
         if let Some((id, act)) = users {
             self.side_act(id, act);
         }
-        if let Some(id) = refresh && !self.demo {
+        if let Some(id) = refresh && !self.core.demo {
             self.connect(id);
         }
         if let Some(id) = server {
@@ -438,12 +438,12 @@ impl App {
     /// Opens the connection form for a saved connection.
     pub(super) fn edit_conn(&mut self, id: u64) {
         if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
-            self.conn_test = None;
-            self.test_info = None;
+            self.core.conn_test = None;
+            self.core.test_info = None;
             // Opening the form with an empty address would overwrite the stored one on save,
             // unless there is none, which is when re-entering it is the way out.
             // Demo ids overlap real ones, so the demo must not show the user's real secrets.
-            let uri = if self.ephemeral {
+            let uri = if self.core.ephemeral {
                 self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
             } else {
                 match stored_uri(id) {
@@ -452,7 +452,7 @@ impl App {
                     Err(e) => return self.err(uri_err(e)),
                 }
             };
-            let stored = |what: &str| if self.ephemeral { String::new() } else { secret(id, what).unwrap_or_default() };
+            let stored = |what: &str| if self.core.ephemeral { String::new() } else { secret(id, what).unwrap_or_default() };
             let mut form = ConnForm {
                 id: Some(id),
                 name: meta.name.clone(),
@@ -489,8 +489,8 @@ impl App {
     }
 
     pub(super) fn activate(&mut self, id: u64) {
-        self.active = Some(id);
-        if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.demo {
+        self.core.active = Some(id);
+        if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.core.demo {
             self.connect(id);
         }
     }
@@ -498,9 +498,9 @@ impl App {
     /// Opens the explorer if it was collapsed from the rail or showing another panel, remembering that for the next launch.
     /// Callers reach for the tree: a jump, `/` or Cmd+Shift+F.
     pub(super) fn show_sidebar(&mut self) {
-        if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Explorer {
-            self.prefs.sidebar_hidden = false;
-            self.prefs.set_side_mode(SideMode::Explorer);
+        if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Explorer {
+            self.core.prefs.sidebar_hidden = false;
+            self.core.prefs.set_side_mode(SideMode::Explorer);
             self.save_prefs();
         }
     }
@@ -514,11 +514,11 @@ impl App {
             Jump::Coll(s) => (s.conn, Some(s.db.clone())),
         };
         self.activate(id);
-        self.reveal = db.clone().map(|d| (id, d, if let Jump::Coll(s) = &j { Some(s.coll.clone()) } else { None }));
+        self.core.reveal = db.clone().map(|d| (id, d, if let Jump::Coll(s) = &j { Some(s.coll.clone()) } else { None }));
         // Reveal the target in the tree, which a leftover filter could hide.
         if let Some(db) = db {
-            self.tree_filter.clear();
-            self.open_dbs.insert((id, db));
+            self.core.tree_filter.clear();
+            self.core.open_dbs.insert((id, db));
         }
         if let Jump::Coll(sel) = j {
             self.open_collection(sel, how);
@@ -526,13 +526,13 @@ impl App {
     }
 
     pub(super) fn db_tree(&mut self, ui: &mut egui::Ui) {
-        let Some(id) = self.active else {
+        let Some(id) = self.core.active else {
             ui.add_space(8.0);
             ui.label(RichText::new("No connections yet.").color(MUTED()));
             return;
         };
         ui.spacing_mut().item_spacing.y = 2.0;
-        let filter = self.tree_filter.to_lowercase();
+        let filter = self.core.tree_filter.to_lowercase();
         let cur_sel = self.t().map(|t| t.sel.clone());
         let mut toggle = None;
         let mut open_recent: Option<String> = None;
@@ -582,7 +582,7 @@ impl App {
             let writable = c.writable;
             // Quick switching for a long list: the databases opened last, above the full list. A filter is looking for
             // something else, and a short list has them all in sight.
-            let recent: Vec<&String> = if filter.is_empty() && c.dbs.len() > RECENT_MIN_DBS { self.prefs.recent_dbs(id).iter().filter(|d| c.dbs.iter().any(|(n, _)| n == *d)).take(3).collect() } else { Vec::new() };
+            let recent: Vec<&String> = if filter.is_empty() && c.dbs.len() > RECENT_MIN_DBS { self.core.prefs.recent_dbs(id).iter().filter(|d| c.dbs.iter().any(|(n, _)| n == *d)).take(3).collect() } else { Vec::new() };
             if !recent.is_empty() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -611,7 +611,7 @@ impl App {
                 let shown: Vec<&String> = if pg { c.tables_in(db_name, picked).into_iter().flatten().collect() } else { colls.iter().flatten().collect() };
                 let mut matches: Vec<&String> = shown.into_iter().filter(|n| contains_ci(n, &filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
-                let pending: Vec<&String> = self.copying.iter().filter(|c| c.0 == id && c.1 == *db_name).map(|c| &c.2).collect();
+                let pending: Vec<&String> = self.core.copying.iter().filter(|c| c.0 == id && c.1 == *db_name).map(|c| &c.2).collect();
                 if !pending.is_empty() {
                     let extra: Vec<&String> = pending.iter().copied().filter(|n| !matches.contains(n) && contains_ci(n, &filter)).collect();
                     matches.extend(extra);
@@ -621,14 +621,14 @@ impl App {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
-                let db_views = self.views.of(id, &ns);
+                let db_views = self.core.views.of(id, &ns);
                 let is_view_of = |n: &String| db_views.is_some_and(|v| v.contains(n.as_str()));
                 let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
                 if sql {
                     matches.sort_by_key(|n| is_view_of(n));
                 }
-                let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
-                if sql && is_open && colls.is_none() && c.status == Status::Ready && !self.sql_asked.contains(&(id, db_name.clone())) {
+                let is_open = !filter.is_empty() || self.core.open_dbs.contains(&(id, db_name.clone()));
+                if sql && is_open && colls.is_none() && c.status == Status::Ready && !self.core.sql_asked.contains(&(id, db_name.clone())) {
                     lazy.push(db_name.clone());
                 }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
@@ -641,7 +641,7 @@ impl App {
                     p.text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { TEXT() });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::monospace(TXT_CAPTION), FAINT());
                 });
-                if matches!(&self.reveal, Some((c, d, None)) if *c == id && d == db_name) {
+                if matches!(&self.core.reveal, Some((c, d, None)) if *c == id && d == db_name) {
                     r.scroll_to_me(Some(egui::Align::Center));
                     revealed = true;
                 }
@@ -760,7 +760,7 @@ impl App {
                     // Nothing listed yet: a row says the list is on its way, or why it failed with a retry, so an open
                     // database never sits empty. A PostgreSQL database loads its schemas, then the picked schema's tables.
                     let loaded = if pg { c.pg.contains_key(db_name) && (picked.is_empty() || c.tables_in(db_name, picked).is_some()) } else { colls.is_some() };
-                    let failed = self.side_err.get(&(id, db_name.clone())).or_else(|| self.side_err.get(&(id, ns.clone())));
+                    let failed = self.core.side_err.get(&(id, db_name.clone())).or_else(|| self.core.side_err.get(&(id, ns.clone())));
                     if let Some(e) = failed {
                         let r = side_row(ui, SIDE_ROW_H, 18.0, false, "Could not list. Retry", |p, r| {
                             p.text(egui::pos2(r.left() + 6.0, r.center().y), egui::Align2::LEFT_CENTER, "Could not list. Retry", FontId::proportional(TXT_SMALL), ALERT());
@@ -776,9 +776,9 @@ impl App {
                         });
                     }
                     let matches_len = matches.len();
-                    let schema = if sql { self.sql_schema.get(&(id, ns.clone())) } else { None };
-                    let est_rows = self.sql_rows.get(&(id, ns.clone()));
-                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, ns.clone(), v)));
+                    let schema = if sql { self.core.sql_schema.get(&(id, ns.clone())) } else { None };
+                    let est_rows = self.core.sql_rows.get(&(id, ns.clone()));
+                    let group_hidden = [false, true].map(|v| sql && self.core.side_closed.contains(&(id, ns.clone(), v)));
                     // One row of the list. It is a closure so a group's rows can be drawn inside the fold that animates them.
                     let mut row = |ui: &mut egui::Ui, coll: &String| {
                             let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
@@ -822,7 +822,7 @@ impl App {
                                 (false, true) => r.on_hover_text(coll.as_str()),
                                 (false, false) => r,
                             };
-                            if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
+                            if matches!(&self.core.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
                                 r.scroll_to_me(Some(egui::Align::Center));
                                 revealed = true;
                             }
@@ -951,15 +951,15 @@ impl App {
             }
         }
         if revealed {
-            self.reveal = None;
+            self.core.reveal = None;
         }
         for k in folded {
-            if !self.side_closed.remove(&k) {
-                self.side_closed.insert(k);
+            if !self.core.side_closed.remove(&k) {
+                self.core.side_closed.insert(k);
             }
         }
         for d in lazy {
-            self.sql_asked.insert((id, d.clone()));
+            self.core.sql_asked.insert((id, d.clone()));
             self.side_act(id, SideAct::Refresh(d));
         }
         if connect {
@@ -968,8 +968,8 @@ impl App {
         if let Some(d) = retry {
             let pre = ns_key(&d, "x");
             let pre = &pre[..pre.len() - 1];
-            self.side_err.retain(|k, _| k.0 != id || (k.1 != d && !k.1.starts_with(pre)));
-            self.sql_asked.insert((id, d.clone()));
+            self.core.side_err.retain(|k, _| k.0 != id || (k.1 != d && !k.1.starts_with(pre)));
+            self.core.sql_asked.insert((id, d.clone()));
             self.side_act(id, SideAct::Refresh(d));
         }
         if let Some((d, schema)) = pick_schema {
@@ -978,14 +978,14 @@ impl App {
         if let Some(d) = open_recent {
             // Like a click on the database in the tree, except that it never closes one that is open, and the tree scrolls to it.
             fold::start(ui.ctx(), db_fold_id(id, &d), true);
-            self.reveal = Some((id, d.clone(), None));
-            self.open_dbs.insert((id, d));
+            self.core.reveal = Some((id, d.clone(), None));
+            self.core.open_dbs.insert((id, d));
         }
         if let Some(d) = toggle {
-            let open = !self.open_dbs.remove(&(id, d.clone()));
+            let open = !self.core.open_dbs.remove(&(id, d.clone()));
             fold::start(ui.ctx(), db_fold_id(id, &d), open);
             if open {
-                self.open_dbs.insert((id, d));
+                self.core.open_dbs.insert((id, d));
             }
         }
         if let Some((s, how)) = open {
@@ -1018,9 +1018,9 @@ impl App {
             (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
             (Some(sql), _) => {
                 self.sql_refresh_schema(conn, db, "");
-                self.worker.sql_tables(conn, sql, db.to_string());
+                self.core.worker.sql_tables(conn, sql, db.to_string());
             }
-            (None, Some(client)) => self.worker.collections(conn, client, db.to_string()),
+            (None, Some(client)) => self.core.worker.collections(conn, client, db.to_string()),
             (None, None) => return false,
         }
         true
@@ -1085,18 +1085,18 @@ impl App {
                 self.refresh_db(conn, &db);
             }
             SideAct::Users => {
-                self.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
+                self.core.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
                 self.load_users(conn);
             }
             SideAct::Server => {
-                self.req += 1;
-                self.server = Some(ServerWin::new(conn, self.req));
+                self.core.req += 1;
+                self.core.server = Some(ServerWin::new(conn, self.core.req));
             }
             SideAct::DropDb(db) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
             }
-            SideAct::Stats(db, coll) => self.worker.coll_stats(client, db, coll, "stats".into()),
-            SideAct::ViewDef(db, coll) => self.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
+            SideAct::Stats(db, coll) => self.core.worker.coll_stats(client, db, coll, "stats".into()),
+            SideAct::ViewDef(db, coll) => self.core.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
             SideAct::Rename(db, coll) => self.modal = Some(Modal::RenameColl { conn, db, name: coll.clone(), coll }),
             SideAct::Duplicate(db, coll) => self.modal = Some(Modal::DuplicateColl { conn, db, name: format!("{coll}_copy"), coll }),
             SideAct::Dump(db, coll) => {

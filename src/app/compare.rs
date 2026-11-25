@@ -5,19 +5,19 @@ use super::*;
 impl App {
     /// Compares this tab's collection with another one, by `_id`, and copies differences over.
     pub(super) fn compare_view(&mut self, ui: &mut egui::Ui) {
-        let i = self.cur;
-        let src = self.tabs[i].sel.clone();
-        if self.tabs[i].compare.conn == 0 {
-            let c = &mut self.tabs[i].compare;
+        let i = self.core.cur;
+        let src = self.core.tabs[i].sel.clone();
+        if self.core.tabs[i].compare.conn == 0 {
+            let c = &mut self.core.tabs[i].compare;
             (c.conn, c.db) = (src.conn, src.db.clone());
         }
-        let conns: Vec<(u64, String)> = self.conns.iter().filter(|c| c.client.is_some() || self.demo).map(|c| (c.meta.id, c.meta.name.clone())).collect();
-        let dbs = self.conn(self.tabs[i].compare.conn).map(|c| c.dbs.clone()).unwrap_or_default();
+        let conns: Vec<(u64, String)> = self.core.conns.iter().filter(|c| c.client.is_some() || self.core.demo).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+        let dbs = self.conn(self.core.tabs[i].compare.conn).map(|c| c.dbs.clone()).unwrap_or_default();
         let mut load_colls = None;
         let mut run = false;
         let mut sync = false;
-        let failed = self.tabs[i].failed.iter().any(|f| f.view == View::Compare);
-        let c = &mut self.tabs[i].compare;
+        let failed = self.core.tabs[i].failed.iter().any(|f| f.view == View::Compare);
+        let c = &mut self.core.tabs[i].compare;
         toolbar(ui, |ui| {
             ui.set_width(ui.available_width());
             caption(ui, format!("COMPARE  ·  {}.{} is the source, documents are matched by _id and field order is ignored", src.db, src.coll));
@@ -118,35 +118,35 @@ impl App {
         if moved {
             self.drop_agg_row();
         }
-        if failed && self.tabs[i].compare.result.is_none() && !self.tabs[i].compare.running {
+        if failed && self.core.tabs[i].compare.result.is_none() && !self.core.tabs[i].compare.running {
             self.failed_panel(ui, View::Compare);
         }
-        if self.tabs[i].compare.result.is_some() {
+        if self.core.tabs[i].compare.result.is_some() {
             // The same table as documents, reading the list where the comparison keeps it.
             self.results(ui, true);
         }
-        let c = &mut self.tabs[i].compare;
+        let c = &mut self.core.tabs[i].compare;
         let (tc, tdb, tcoll) = (c.conn, c.db.clone(), c.coll.clone());
         if let Some(d) = load_colls && let Some(client) = self.conn(tc).and_then(|c| c.client.clone()) {
-            self.worker.collections(tc, client, d);
+            self.core.worker.collections(tc, client, d);
         }
         if run {
             let (Some(a), Some(b)) = (self.conn(src.conn).and_then(|c| c.client.clone()), self.conn(tc).and_then(|c| c.client.clone())) else {
-                return self.warn(if self.demo { "Offline demo: nothing to compare." } else { "Connect both sides first." });
+                return self.warn(if self.core.demo { "Offline demo: nothing to compare." } else { "Connect both sides first." });
             };
-            self.req += 1;
-            let req = self.req;
+            self.core.req += 1;
+            let req = self.core.req;
             let to = self.timeout();
             self.drop_agg_row();
-            let c = &mut self.tabs[i].compare;
+            let c = &mut self.core.tabs[i].compare;
             c.set_result(None);
             (c.req, c.running, c.ran) = (req, true, (tc, tdb.clone(), tcoll.clone()));
-            self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
+            self.core.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
         } else if sync {
             if !self.conn(tc).is_some_and(|c| c.writable) {
                 return self.modal = Some(Modal::Unlock(tc, None));
             }
-            let c = &self.tabs[i].compare;
+            let c = &self.core.tabs[i].compare;
             let r = c.result.as_ref().unwrap();
             let n = |on: bool, k: usize| if on { k } else { 0 };
             let title = format!(

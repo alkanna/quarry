@@ -24,7 +24,7 @@ fn notes_of(a: &Available) -> Release {
 
 impl App {
     fn pill_state(&self) -> Option<(String, Look)> {
-        Some(match &self.upd {
+        Some(match &self.core.upd {
             Upd::Idle | Upd::Checking { manual: false } => return None,
             Upd::Checking { manual: true } => ("Checking for updates".into(), Look::Ring(None)),
             Upd::UpToDate(_) => ("Up to date".into(), Look::UpToDate),
@@ -44,7 +44,7 @@ impl App {
 
     pub(super) fn update_pill(&mut self, ui: &mut egui::Ui) {
         // Taken even when the pill is hidden, so a stale request never opens the popover later on its own.
-        let open = std::mem::take(&mut self.upd_popup);
+        let open = std::mem::take(&mut self.core.upd_popup);
         let Some((label, look)) = self.pill_state() else { return };
         let (fill, edge, ink) = match look {
             Look::Ready => (SUCCESS(), Color32::TRANSPARENT, ON_PRIMARY()),
@@ -117,7 +117,7 @@ impl App {
     fn update_popover(&self, ui: &mut egui::Ui) -> Option<PopAct> {
         let mut act = None;
         let current = env!("CARGO_PKG_VERSION");
-        let (title, sub, tone, glyph): (String, String, Color32, glyphs::Glyph) = match &self.upd {
+        let (title, sub, tone, glyph): (String, String, Color32, glyphs::Glyph) = match &self.core.upd {
             Upd::Idle | Upd::Checking { .. } => ("Checking for updates".into(), format!("You have {current}"), PRIMARY(), glyphs::download),
             Upd::UpToDate(_) => (format!("Quarry {current}"), "This is the latest release".into(), SUCCESS(), glyphs::check),
             Upd::Available(a) => (format!("Quarry {}", a.version), format!("Ready to download  ·  you have {current}"), PRIMARY(), glyphs::download),
@@ -136,7 +136,7 @@ impl App {
             });
         });
         ui.add_space(8.0);
-        match &self.upd {
+        match &self.core.upd {
             Upd::Idle | Upd::Checking { .. } => pad(ui, |ui| {
                 ui.horizontal(|ui| {
                     spin(ui);
@@ -179,7 +179,7 @@ impl App {
             Upd::Failed { msg, .. } => pad(ui, |ui| wrap(ui, msg, TEXT())),
             Upd::UpToDate(_) | Upd::Available(_) => {}
         }
-        let info = self.upd.info();
+        let info = self.core.upd.info();
         let total = info.map_or(0, |a| a.notes.iter().map(|s| s.entries.len()).sum::<usize>());
         if let Some(a) = info.filter(|_| total > 0) {
             ui.separator();
@@ -199,7 +199,7 @@ impl App {
                 }
             });
         }
-        if matches!(self.upd, Upd::Idle | Upd::Checking { .. } | Upd::UpToDate(_)) {
+        if matches!(self.core.upd, Upd::Idle | Upd::Checking { .. } | Upd::UpToDate(_)) {
             ui.add_space(2.0);
             return None;
         }
@@ -211,7 +211,7 @@ impl App {
                     act = Some(PopAct::Notes(notes_of(a)));
                 }
             }
-            if let Upd::Failed { msg, .. } = &self.upd {
+            if let Upd::Failed { msg, .. } = &self.core.upd {
                 if quiet(ui, "Copy details").clicked() {
                     ui.ctx().copy_text(msg.clone());
                 }

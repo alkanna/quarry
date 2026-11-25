@@ -61,14 +61,14 @@ fn a_table_is_built_through_the_dialog_and_taken_back() {
         } else {
             assert_eq!(fx.one(&format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'")), "id");
         }
-        assert_eq!(ui.app().undo.len(), 1, "the create is in the list of recent changes");
+        assert_eq!(ui.app().core.undo.len(), 1, "the create is in the list of recent changes");
         // Take it back through the list: the table is empty, so it goes and its tab closes.
         ui.quiet();
         ui.click("Undo (1)");
         ui.click("Undo change 1");
         until(fx, ui, "the undo to land", |fx| !table_exists(fx, &table));
-        ui.wait("the tab of the removed table to close", |a| !a.tabs.iter().any(|t| t.sel.coll == table));
-        assert!(ui.app().undo.is_empty(), "the used entry is gone");
+        ui.wait("the tab of the removed table to close", |a| !a.core.tabs.iter().any(|t| t.sel.coll == table));
+        assert!(ui.app().core.undo.is_empty(), "the used entry is gone");
     });
 }
 
@@ -83,7 +83,7 @@ fn a_table_with_rows_is_not_taken_back() {
         ui.type_text(&table);
         ui.click("Create table");
         until(fx, ui, "the table to be made", |fx| table_exists(fx, &table));
-        ui.wait("the entry", |a| a.undo.len() == 1);
+        ui.wait("the entry", |a| a.core.undo.len() == 1);
         let q = fx.qualified(&table);
         fx.sql(&format!("INSERT INTO {q} (id) VALUES (1)"));
         ui.quiet();
@@ -91,7 +91,7 @@ fn a_table_with_rows_is_not_taken_back() {
         ui.click("Undo change 1");
         ui.wait("the refusal", |a| a.last_problem().contains("has rows"));
         assert!(table_exists(fx, &table), "a refused undo drops nothing");
-        assert_eq!(ui.app().undo.len(), 1, "the entry stays so it can be tried again");
+        assert_eq!(ui.app().core.undo.len(), 1, "the entry stays so it can be tried again");
         fx.sql(&format!("DROP TABLE {q}"));
     });
 }
@@ -116,8 +116,8 @@ fn a_table_is_dropped_only_through_the_typed_confirmation() {
         ui.settle();
         ui.click("Drop table");
         until(fx, ui, "the table to be dropped", |fx| !table_exists(fx, &table));
-        ui.wait("its tab to close", |a| !a.tabs.iter().any(|t| t.sel.coll == table));
-        assert!(ui.app().undo.is_empty(), "a drop has no undo");
+        ui.wait("its tab to close", |a| !a.core.tabs.iter().any(|t| t.sel.coll == table));
+        assert!(ui.app().core.undo.is_empty(), "a drop has no undo");
     });
 }
 
@@ -158,7 +158,7 @@ fn a_drop_that_slips_past_the_dialog_on_a_locked_connection_is_refused_by_the_wo
         assert!(!ui.app().conn(CONN).unwrap().writable);
         let sql = ui.app().pg_session(CONN).expect("a session");
         ui.h.state_mut().pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
-        ui.wait("the refusal", |a| !a.errors.is_empty());
+        ui.wait("the refusal", |a| !a.core.errors.is_empty());
         assert!(table_exists(fx, &table), "the worker dropped a table on a locked connection");
     });
 }
@@ -273,8 +273,8 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         }
         // A Query tab with text that was never run, and another session of someone else, which makes the server refuse the drop.
         ui.h.state_mut().side_act(CONN, SideAct::NewQuery(db.clone()));
-        ui.wait("the Query tab", |a| a.tabs.iter().any(|t| t.sel.db == db));
-        ui.h.state_mut().tabs.iter_mut().filter(|t| t.sel.db == db).for_each(|t| {
+        ui.wait("the Query tab", |a| a.core.tabs.iter().any(|t| t.sel.db == db));
+        ui.h.state_mut().core.tabs.iter_mut().filter(|t| t.sel.db == db).for_each(|t| {
             if let Some(s) = t.sql.as_mut() {
                 s.query = "select 'unsaved work'".into();
             }
@@ -298,7 +298,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.click("Drop database");
         ui.wait("the server's refusal", |a| a.last_problem().contains("55006"));
         assert!(exists(fx), "a refused drop drops nothing");
-        assert!(ui.app().tabs.iter().any(|t| t.sel.db == db && t.sql.as_ref().is_some_and(|s| s.query == "select 'unsaved work'")), "the tab and its text are still there");
+        assert!(ui.app().core.tabs.iter().any(|t| t.sel.db == db && t.sql.as_ref().is_some_and(|s| s.query == "select 'unsaved work'")), "the tab and its text are still there");
         // With the other session gone the same drop works, and only then do the tabs close.
         rt.block_on(async {
             use sqlx::Connection;
@@ -311,7 +311,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.settle();
         ui.click("Drop database");
         until(fx, ui, "the database to be dropped", |fx| !exists(fx));
-        ui.wait("its tabs to close", |a| !a.tabs.iter().any(|t| t.sel.db == db));
+        ui.wait("its tabs to close", |a| !a.core.tabs.iter().any(|t| t.sel.db == db));
     });
 }
 
@@ -367,7 +367,7 @@ fn a_table_is_built_with_a_unique_a_check_a_key_to_another_schema_and_an_index()
         assert!(cons.contains("CHECK ((ref > 0))") && cons.contains("UNIQUE (id, ref)") && cons.contains(&format!("FOREIGN KEY (ref) REFERENCES {ps}.parent_t(pid)")), "{cons}");
         assert_eq!(fx.one(&format!("SELECT count(*) FROM pg_index WHERE indrelid = 'public.{table}'::regclass AND NOT indisunique")).trim(), "1", "the index on ref");
         // The undo drops the child with its key, which locks the parent in the other schema too.
-        ui.wait("the entry", |a| a.undo.len() == 1);
+        ui.wait("the entry", |a| a.core.undo.len() == 1);
         ui.quiet();
         ui.click("Undo (1)");
         ui.click("Undo change 1");

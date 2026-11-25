@@ -40,7 +40,7 @@ fn editor_label(ui: &mut egui::Ui, text: &mut String, width: f32, label: &str) -
 
 impl App {
     pub(in crate::app) fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
-        if self.demo {
+        if self.core.demo {
             return None;
         }
         self.conn(conn)?.sql.clone()
@@ -56,7 +56,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.pg_new_db(conn));
         }
         if let Some(sql) = self.pg_session(conn) {
-            self.worker.pg_db_choices(conn, sql);
+            self.core.worker.pg_db_choices(conn, sql);
         }
         self.modal = Some(Modal::PgNewDb(Box::new(PgNewDb { conn, name: String::new(), opts: DbOpts::default(), choices: None, load_err: None, focused: false })));
     }
@@ -102,7 +102,7 @@ impl App {
             return self.warn(why);
         }
         if let Some(sql) = self.pg_session(conn) {
-            self.worker.pg_drop_info(conn, sql, database.clone(), schema.clone(), table.clone(), !self.conn_writable(conn));
+            self.core.worker.pg_drop_info(conn, sql, database.clone(), schema.clone(), table.clone(), !self.conn_writable(conn));
         }
         self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database, schema, table, kind, typed: String::new(), opt: false, info: None })));
     }
@@ -111,11 +111,11 @@ impl App {
     /// refuse the drop for its connections and blame another session, and WITH (FORCE) would kill the work halfway.
     /// A script can touch anything in its database, and an import is known by its schema only, so a table drop is held for both.
     fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
-        let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql::dump::JobKind::Script || j.schema == schema);
+        let job = self.core.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql::dump::JobKind::Script || j.schema == schema);
         let what = match job {
             Some(j) if j.kind == sql::dump::JobKind::Import => "an import",
             Some(_) => "a script file",
-            None if self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == database && t.shell.cancel.is_some()) => "a shell script",
+            None if self.core.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == database && t.shell.cancel.is_some()) => "a shell script",
             None => return None,
         };
         Some(format!("Quarry is running {what} in {database}. Stop it first, then drop."))
@@ -132,19 +132,19 @@ impl App {
         // The worker checks again so a lock taken while the confirmation was open still holds.
         let ro = !self.conn_writable(conn);
         match kind {
-            DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, ro),
-            DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, ro),
-            DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, ro),
+            DropKind::Database => self.core.worker.pg_drop_db(conn, sql, database, opt, ro),
+            DropKind::Schema => self.core.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, ro),
+            DropKind::Table | DropKind::View => self.core.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, ro),
             DropKind::Truncate => unreachable!("PostgreSQL empties a table through pg_truncate_ask, not the drop dialog"),
         }
     }
 
     /// What the open tabs of a database hold that closing them would lose: staged row edits, staged structure changes and Query text.
     pub(in crate::app) fn pg_unsaved_in(&self, conn: u64, database: &str) -> (usize, usize, usize) {
-        let edits = self.drafts.values().filter(|d| d.conn == conn && d.db == database).count();
+        let edits = self.core.drafts.values().filter(|d| d.conn == conn && d.db == database).count();
         let mut staged = 0;
         let mut queries = 0;
-        for t in self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == database) {
+        for t in self.core.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == database) {
             if let Some(s) = &t.sql {
                 staged += s.st.staged.len();
                 queries += usize::from(!s.query.trim().is_empty());
@@ -160,7 +160,7 @@ impl App {
             Ok(s) => self.ok(s),
             Err(e) => return self.err(e),
         }
-        if let (Some(dbs), Some(c)) = (dbs, self.conns.iter_mut().find(|c| c.meta.id == conn)) {
+        if let (Some(dbs), Some(c)) = (dbs, self.core.conns.iter_mut().find(|c| c.meta.id == conn)) {
             let old = std::mem::take(&mut c.dbs);
             c.dbs = dbs.into_iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == d).and_then(|o| o.1.clone()))).collect();
         }
@@ -170,23 +170,23 @@ impl App {
         match what {
             Ddl::CreatedDb => {
                 // Its schemas load when the row opens, so nothing is marked asked.
-                self.open_dbs.insert((conn, schema.clone()));
-                self.reveal = Some((conn, schema, None));
+                self.core.open_dbs.insert((conn, schema.clone()));
+                self.core.reveal = Some((conn, schema, None));
             }
             Ddl::DroppedDb => {
                 self.purge_undo(conn, &schema, "", "");
                 self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == schema);
-                self.open_dbs.remove(&(conn, schema.clone()));
-                self.sql_asked.remove(&(conn, schema.clone()));
+                self.core.open_dbs.remove(&(conn, schema.clone()));
+                self.core.sql_asked.remove(&(conn, schema.clone()));
                 self.forget_schema(conn, &schema);
-                self.pg_tables_asked.forget(conn, Some(&schema), None);
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                self.core.pg_tables_asked.forget(conn, Some(&schema), None);
+                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.pg.remove(&schema);
                     c.tables.remove(&schema);
                 }
             }
             Ddl::CreatedSchema => {
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.pg.entry(database.clone()).or_default().picked = schema.clone();
                 }
                 self.pg_refresh(conn, &database);
@@ -195,7 +195,7 @@ impl App {
                 self.purge_undo(conn, &database, &schema, "");
                 self.remove_tabs(|t| in_schema(t, &schema));
                 self.forget_schema(conn, &ns_key(&database, &schema));
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                     if let Some(p) = c.pg.get_mut(&database).filter(|p| p.picked == schema) {
                         p.picked.clear();
                     }
@@ -278,7 +278,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_db(f.conn, sql, f.name.clone(), f.opts.clone(), !writable);
+                    self.core.worker.pg_create_db(f.conn, sql, f.name.clone(), f.opts.clone(), !writable);
                 }
                 *keep = false;
             }
@@ -322,7 +322,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create schema", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_schema(f.conn, sql.at(&f.database), f.name.clone(), !writable);
+                    self.core.worker.pg_create_schema(f.conn, sql.at(&f.database), f.name.clone(), !writable);
                 }
                 *keep = false;
             }
@@ -410,7 +410,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_table(f.conn, sql.at(&f.database), f.spec(), !writable);
+                    self.core.worker.pg_create_table(f.conn, sql.at(&f.database), f.spec(), !writable);
                 }
                 *keep = false;
             }

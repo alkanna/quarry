@@ -33,8 +33,8 @@ fn a_mongo_filter_typed_without_enter_is_edited_and_enter_runs_it() {
 fn sql_text_typed_without_enter_is_edited() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = true;
+    let cur = app.core.cur;
+    app.core.tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = true;
     ui.h.run_steps(3);
     assert!(!dirty(&ui), "an untouched SQL bar is out of date");
     focus(&mut ui, "SQL-WHERE");
@@ -92,7 +92,7 @@ fn a_mongo_header_sort_leaves_the_line_clean() {
     ui.h.run_steps(3);
     assert!(!dirty(&ui), "an untouched bar is out of date");
     let a = ui.app();
-    let col = crate::app::table::visible_cols(a.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())[3].clone();
+    let col = crate::app::table::visible_cols(a.core.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())[3].clone();
     ui.mouse_hold(&col, 0);
     ui.click("Sort ascending");
     assert!(ui.app().t().is_some_and(|t| t.sort_txt.contains(&col)), "the header menu did not sort on {col}");

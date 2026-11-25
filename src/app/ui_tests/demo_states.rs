@@ -17,7 +17,7 @@ fn draw(then: impl FnOnce(&mut App)) -> Option<UiApp> {
     }
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
     let a = h.state_mut();
-    a.demo = true;
+    a.core.demo = true;
     a.load_demo();
     then(a);
     h.run_steps(4);
@@ -30,7 +30,7 @@ fn every_connections_state_draws() {
         let Some(ui) = draw(|a| a.demo_conns(s)) else { return };
         // Every member the loader placed is a saved connection, so no group row counts one the panel cannot show.
         let alive = ui.app().conn_ids();
-        for g in &ui.app().groups.groups {
+        for g in &ui.app().core.groups.groups {
             assert!(g.members.iter().all(|m| alive.contains(m)), "{s}: group {} holds a connection that does not exist: {:?}", g.name, g.members);
         }
     }
@@ -41,7 +41,7 @@ fn every_library_state_draws() {
     for s in LIBRARY {
         let Some(ui) = draw(|a| a.demo_library(s)) else { return };
         let a = ui.app();
-        assert!(a.library.links.iter().all(|l| a.lib_ui.scans.contains_key(&l.id)), "{s}: a demo link has no made-up scan, so it would read the disk");
+        assert!(a.core.library.links.iter().all(|l| a.core.lib_ui.scans.contains_key(&l.id)), "{s}: a demo link has no made-up scan, so it would read the disk");
     }
 }
 

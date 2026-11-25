@@ -67,11 +67,11 @@ impl App {
         let Some(t) = self.t() else { return };
         let conn = t.sel.conn;
         let bound = t.script.as_ref().and_then(|b| match &b.r {
-            ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id),
+            ScriptRef::Saved(id) => self.core.library.scripts.iter().find(|s| s.id == *id),
             _ => None,
         });
-        let name = bound.map_or_else(|| comment_name(&tt.body).unwrap_or_else(|| self.tab_name(self.cur)), |s| s.name.clone());
-        let last = self.lib_ui.last_folder.filter(|id| self.library.folders.iter().any(|f| f.id == *id));
+        let name = bound.map_or_else(|| comment_name(&tt.body).unwrap_or_else(|| self.tab_name(self.core.cur)), |s| s.name.clone());
+        let last = self.core.lib_ui.last_folder.filter(|id| self.core.library.folders.iter().any(|f| f.id == *id));
         let folder = bound.map_or(last, |s| s.folder);
         let (cname, product, version) = self.conn(conn).map(|c| (c.meta.name.clone(), c.server.product.clone(), c.server.version.clone())).unwrap_or_default();
         let engine = if product.is_empty() { "mongod".to_string() } else { product };
@@ -104,27 +104,27 @@ impl App {
         let name = f.name.trim().to_string();
         let mut folder = f.folder;
         if let Some(n) = f.new_folder.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            folder = Some(match self.library.folders.iter().find(|x| crate::library::tree::live_parent(&self.library, x.parent).is_none() && x.name == n) {
+            folder = Some(match self.core.library.folders.iter().find(|x| crate::library::tree::live_parent(&self.core.library, x.parent).is_none() && x.name == n) {
                 Some(x) => x.id,
                 None => {
-                    let id = self.library.next_id();
-                    self.library.folders.push(crate::library::Folder { id, name: n.to_string(), parent: None });
+                    let id = self.core.library.next_id();
+                    self.core.library.folders.push(crate::library::Folder { id, name: n.to_string(), parent: None });
                     id
                 }
             });
         }
         let mut replaced = None;
-        let id = match same_place(&self.library, f, &name, folder) {
+        let id = match same_place(&self.core.library, f, &name, folder) {
             Some(i) => {
                 // Kept for the toast's Undo, since the old text is otherwise gone.
-                replaced = Some(self.library.scripts[i].clone());
-                let s = &mut self.library.scripts[i];
+                replaced = Some(self.core.library.scripts[i].clone());
+                let s = &mut self.core.library.scripts[i];
                 (s.body, s.sort, s.project, s.db, s.schema, s.updated) = (f.body.clone(), f.sort.clone(), f.project.clone(), f.db.clone(), f.schema.clone(), crate::library::now_secs());
                 s.id
             }
             None => {
-                let id = self.library.next_id();
-                self.library.scripts.push(Script {
+                let id = self.core.library.next_id();
+                self.core.library.scripts.push(Script {
                     id,
                     name: name.clone(),
                     kind: f.kind.clone(),
@@ -142,11 +142,11 @@ impl App {
                 id
             }
         };
-        self.lib_ui.last_folder = folder;
+        self.core.lib_ui.last_folder = folder;
         match f.view.filter(|v| self.t().is_some_and(|t| t.view == *v)) {
             Some(v) => self.bind_script(ScriptRef::Saved(id), v, f.body.clone()),
             None => {
-                self.library.push_recent(ScriptRef::Saved(id));
+                self.core.library.push_recent(ScriptRef::Saved(id));
                 self.save_library();
             }
         }
@@ -161,8 +161,8 @@ impl App {
     /// Writes the script as a file in a linked folder: the text as it is, never with a header added, or the JSON shape for a
     /// filter or pipeline. A file of that name is replaced. The tab is bound to it, so the next Cmd+S writes it again.
     fn commit_save_linked(&mut self, f: &SaveForm, link: u64) {
-        let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() else { return self.warn("That folder is no longer linked.") };
-        if self.demo {
+        let Some(l) = self.core.library.links.iter().find(|l| l.id == link).cloned() else { return self.warn("That folder is no longer linked.") };
+        if self.core.demo {
             return self.warn("The demo does not write files.");
         }
         if self.link_missing(link) {
@@ -174,7 +174,7 @@ impl App {
         }
         let file = self.file_for(f, f.name.trim());
         let rel = f.dir.join(&file);
-        let Some(path) = self.library.link_join(link, &rel) else { return self.warn("That folder is outside the linked folder.") };
+        let Some(path) = self.core.library.link_join(link, &rel) else { return self.warn("That folder is outside the linked folder.") };
         let (root, sub) = (l.path.clone(), f.dir.clone());
         let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
         let (kind, body, sort, project) = (f.kind.clone(), f.body.clone(), f.sort.clone(), f.project.clone());
@@ -207,7 +207,7 @@ impl App {
     }
 
     fn styled_file(&self, f: &SaveForm, name: &str, ext: &str) -> String {
-        let siblings: Vec<String> = f.link.and_then(|l| self.lib_ui.scans.get(&l)).map(|s| s.entries.iter().filter(|e| e.rel.parent().unwrap_or(std::path::Path::new("")) == f.dir).filter_map(|e| e.rel.file_name().map(|n| n.to_string_lossy().into_owned())).collect()).unwrap_or_default();
+        let siblings: Vec<String> = f.link.and_then(|l| self.core.lib_ui.scans.get(&l)).map(|s| s.entries.iter().filter(|e| e.rel.parent().unwrap_or(std::path::Path::new("")) == f.dir).filter_map(|e| e.rel.file_name().map(|n| n.to_string_lossy().into_owned())).collect()).unwrap_or_default();
         styled_name(name, ext, &siblings)
     }
 
@@ -242,7 +242,7 @@ impl App {
                         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "New folder name"));
                     });
                 }
-                if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
+                if let Some(l) = f.link.and_then(|id| self.core.library.links.iter().find(|l| l.id == id)) {
                     let ext = kind_ext(&f.kind);
                     let default = self.styled_file(f, f.name.trim(), ext);
                     rows.row("File", "", |ui| {
@@ -274,7 +274,7 @@ impl App {
                 });
             });
             let folder = if f.new_folder.is_some() { None } else { f.folder };
-            if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
+            if let Some(l) = f.link.and_then(|id| self.core.library.links.iter().find(|l| l.id == id)) {
                 let file = self.file_for(f, &name);
                 // Looked up once per path, not every frame: on a network drive each look is a round trip.
                 let path = l.path.join(&f.dir).join(&file);
@@ -285,16 +285,16 @@ impl App {
                 if !name.is_empty() && f.exists.as_ref().is_some_and(|(_, there)| *there) {
                     field_note(ui, &format!("Replaces {file} in this folder."), WARNING());
                 }
-            } else if f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, folder).is_some() {
+            } else if f.new_folder.is_none() && !name.is_empty() && same_place(&self.core.library, f, &name, folder).is_some() {
                 field_note(ui, &format!("Replaces the saved \"{name}\" in this folder."), WARNING());
             }
         });
-        let linked_ok = f.link.is_none_or(|id| self.library.links.iter().find(|l| l.id == id).is_some_and(|l| l.exts.iter().any(|e| e == kind_ext(&f.kind))));
+        let linked_ok = f.link.is_none_or(|id| self.core.library.links.iter().find(|l| l.id == id).is_some_and(|l| l.exts.iter().any(|e| e == kind_ext(&f.kind))));
         let ok = !name.is_empty() && !new_folder_empty && linked_ok;
         let mut save = false;
         dialog_foot(ui, |ui| {
             // Saving over a script of the same name says so on the button, and the toast after it offers Undo.
-            let replaces = f.link.is_none() && f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, f.folder).is_some();
+            let replaces = f.link.is_none() && f.new_folder.is_none() && !name.is_empty() && same_place(&self.core.library, f, &name, f.folder).is_some();
             save = ui.add_enabled(ok, primary_button(ui, if replaces { "Replace" } else { "Save" }, PRIMARY())).clicked() || (enter && ok);
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -310,9 +310,9 @@ impl App {
     /// The Folder dropdown: linked folders first (the linked folders' code fills that section), then the folders Quarry
     /// keeps with their subfolders indented and a check on the current one, No folder, and New folder.
     fn folder_combo(&mut self, ui: &mut egui::Ui, f: &mut SaveForm) {
-        let rows = folder_rows(&self.library);
-        let name_of = |id: u64| self.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
-        let link_name = |id: u64| self.library.links.iter().find(|l| l.id == id).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
+        let rows = folder_rows(&self.core.library);
+        let name_of = |id: u64| self.core.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
+        let link_name = |id: u64| self.core.library.links.iter().find(|l| l.id == id).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
         let shown = match (&f.new_folder, f.folder, f.link) {
             (_, _, Some(id)) if f.dir.as_os_str().is_empty() => link_name(id),
             (_, _, Some(id)) => format!("{} / {}", link_name(id), f.dir.display()),
@@ -323,12 +323,12 @@ impl App {
         // The linked folders the script can be written to: used on its connection and showing files of its kind.
         let engine = self.conn(f.conn).map(|c| c.meta.engine);
         let linked: Vec<(u64, String, Vec<PathBuf>)> = self
-            .library
+            .core.library
             .links
             .iter()
             // A SQL Content filter has no file form, so it is only kept in Quarry.
             .filter(|l| f.kind != "where" && engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.link_missing(l.id))
-            .map(|l| (l.id, link_name(l.id), self.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
+            .map(|l| (l.id, link_name(l.id), self.core.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
             .collect();
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
             menu_look(ui);
@@ -341,7 +341,7 @@ impl App {
 
     /// The rows of the Folder dropdown: linked folders and their subfolders, the folders Quarry keeps, No folder and New folder.
     fn folder_items(&self, ui: &mut egui::Ui, f: &mut SaveForm, rows: &[(u64, usize)], linked: &[(u64, String, Vec<PathBuf>)]) {
-        let name_of = |id: u64| self.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
+        let name_of = |id: u64| self.core.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
         if !linked.is_empty() {
             section_head(ui, "LINKED FOLDERS", None);
         }

@@ -33,10 +33,10 @@ enum Do {
 impl App {
     /// Enter on a snippet in the palette: its values start from the last run's, else their defaults.
     pub(in crate::app) fn open_snippet_form(&mut self, id: u64, query: Option<String>) {
-        let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
+        let Some(s) = self.core.library.scripts.iter().find(|s| s.id == id) else { return self.warn("That script is no longer in the library.") };
         let p = self.script_snippet(s).unwrap_or_default();
         // By name, so a value renamed or moved in the statement never takes another one's last value.
-        let mut values = self.lib_ui.snippet_values.get(&id).cloned().unwrap_or_default();
+        let mut values = self.core.lib_ui.snippet_values.get(&id).cloned().unwrap_or_default();
         for v in &p.vars {
             values.entry(v.name.clone()).or_insert_with(|| v.default.clone().unwrap_or_default());
         }
@@ -51,16 +51,16 @@ impl App {
 
     /// A connection that is not open, or failed, starts connecting now, so it is ready by the time the values are in.
     fn wake_conn(&mut self, conn: u64) {
-        if !self.demo && self.conn(conn).is_some_and(|c| c.status.can_connect()) {
+        if !self.core.demo && self.conn(conn).is_some_and(|c| c.status.can_connect()) {
             self.connect(conn);
         }
     }
 
     /// The connections a snippet can run on: the ones of its own engine, since its SQL was written for that one.
     fn snippet_conns(&self, id: u64) -> Vec<u64> {
-        let Some(s) = self.library.scripts.iter().find(|s| s.id == id) else { return Vec::new() };
+        let Some(s) = self.core.library.scripts.iter().find(|s| s.id == id) else { return Vec::new() };
         let engine = self.conn(s.conn).map(|c| c.meta.engine);
-        self.conns.iter().filter(|c| match engine {
+        self.core.conns.iter().filter(|c| match engine {
             Some(e) => c.meta.engine == e,
             // Its connection is gone: any one its kind runs on, never a Mongo one for SQL or the reverse.
             None => crate::library::format::kind_runs_on(&s.kind, c.meta.engine).unwrap_or(false),
@@ -103,9 +103,9 @@ impl App {
             (true, true, Stage::Confirm) => Bar::Confirm,
             _ => Bar::Keys,
         };
-        let ready = c.is_some_and(|c| c.status == Status::Ready || self.demo);
+        let ready = c.is_some_and(|c| c.status == Status::Ready || self.core.demo);
         let failed = c.is_some_and(|c| matches!(c.status, Status::Failed(_)));
-        let saved_default = self.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| f.conn.is_some_and(|c| self.runs_at(s, c, &f.db, &f.schema, "")));
+        let saved_default = self.core.library.scripts.iter().find(|s| s.id == f.id).is_some_and(|s| f.conn.is_some_and(|c| self.runs_at(s, c, &f.db, &f.schema, "")));
         let cname = c.map_or_else(|| "Pick a connection".to_string(), |c| c.meta.name.clone());
         let prod = c.is_some_and(|c| c.meta.tag.eq_ignore_ascii_case("production"));
         let mut todo: Vec<Do> = Vec::new();
@@ -326,7 +326,7 @@ impl App {
                 }
                 Do::Target(c, db) => {
                     if Some(c) != f.conn {
-                        f.schema = self.library.scripts.iter().find(|s| s.id == f.id && s.conn == c).map(|s| s.schema.clone()).unwrap_or_default();
+                        f.schema = self.core.library.scripts.iter().find(|s| s.id == f.id && s.conn == c).map(|s| s.schema.clone()).unwrap_or_default();
                     }
                     f.conn = Some(c);
                     f.memo = None;
@@ -343,7 +343,7 @@ impl App {
                 Do::Unlock => {
                     let Some(conn) = f.conn else { continue };
                     // Kept now, so "Stay read-only", which drops the form, does not drop what was typed.
-                    self.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    self.core.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     let mut back = f;
                     back.stage = Stage::Confirm;
                     self.ask_unlock_on(conn, move |a| a.modal = Some(Modal::Snippet(back)));
@@ -352,7 +352,7 @@ impl App {
                 Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
                 Do::Run => {
                     let (Ok(text), Some(conn)) = (filled.clone(), f.conn) else { continue };
-                    self.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    self.core.lib_ui.snippet_values.insert(f.id, f.values.clone());
                     // The database is worked out now that the connection is ready, as opening a script does.
                     if f.db.is_empty() {
                         f.db = self.default_db(conn);
@@ -372,7 +372,7 @@ impl App {
 
     /// Make default, from the form or a snippet's tab: the script runs on `conn` and `db` from Cmd+K from now on.
     pub(in crate::app) fn set_snippet_default(&mut self, id: u64, conn: u64, db: &str, schema: &str) {
-        crate::library::ops::set_target(&mut self.library, id, conn, db, schema);
+        crate::library::ops::set_target(&mut self.core.library, id, conn, db, schema);
         self.save_library();
         let at = if db.is_empty() { self.conn_name(conn) } else { format!("{} \u{b7} {db}", self.conn_name(conn)) };
         self.ok(format!("Runs on {at} by default"));
@@ -433,7 +433,7 @@ impl App {
             return self.run_mongo_snippet(f, conn, text);
         }
         // Only a blank Query tab is taken, not one bound to a script, whose template would be lost.
-        let reuse = self.tab_clean(self.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == conn && t.sel.db == f.db && t.script.is_none());
+        let reuse = self.tab_clean(self.core.cur, "sql") && self.t().is_some_and(|t| t.sel.conn == conn && t.sel.db == f.db && t.script.is_none());
         if !reuse {
             self.sql_new_query(conn, f.db.clone());
         }
@@ -497,7 +497,7 @@ impl App {
         use crate::library::Script;
         // Over the Mongo demo: shell (a Shell script with values) and docs (the Documents bar with values).
         if matches!(state, "shell" | "docs") {
-            let Some(t) = self.tabs.get_mut(1) else { return };
+            let Some(t) = self.core.tabs.get_mut(1) else { return };
             if state == "shell" {
                 t.view = View::Shell;
                 t.shell.code = "async function run() {\n  return await orders.find({\n    status: {{status:paid|shipped|refunded=paid}},\n    createdAt: { $gte: {{from:date}} },\n  }).limit({{n:int=20}}).toArray();\n}".into();
@@ -507,32 +507,32 @@ impl App {
                 t.sort_txt = "{ createdAt: -1 }".into();
             }
             t.snip.vals.insert("from".into(), "2026-11-01".into());
-            self.cur = 1;
+            self.core.cur = 1;
             return;
         }
-        (self.conns, self.tabs) = (Vec::new(), Vec::new());
-        self.open_dbs.clear();
+        (self.core.conns, self.core.tabs) = (Vec::new(), Vec::new());
+        self.core.open_dbs.clear();
         self.load_sql_demo();
         self.sql_query_demo();
         self.demo_scripts();
-        let folder = |a: &App, name: &str| a.library.folders.iter().find(|f| f.name == name).map(|f| f.id);
+        let folder = |a: &App, name: &str| a.core.library.folders.iter().find(|f| f.name == name).map(|f| f.id);
         let add = |a: &mut App, name: &str, body: &str, folder: Option<u64>| {
-            let id = a.library.next_id();
-            a.library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), folder, updated: 1_731_400_000, ..Default::default() });
+            let id = a.core.library.next_id();
+            a.core.library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), folder, updated: 1_731_400_000, ..Default::default() });
             id
         };
         let (reports, maint) = (folder(self, "Reports"), folder(self, "Maintenance"));
         let read = add(self, "Orders on a day", "SELECT o.id, o.customer_id, o.total, o.status\nFROM orders o\nWHERE DATE(o.created_at) = {{day:date}}\n  AND o.status = {{status:paid|pending|refunded=paid}}\nORDER BY o.created_at\nLIMIT {{limit:int=100}};", reports);
         let write = add(self, "Mark orders shipped", "UPDATE orders SET status = 'shipped', shipped_at = NOW()\nWHERE id IN ({{ids:int list}});", maint);
         let named = |v: &[(&str, &str)]| -> snippet::Values { v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
-        self.lib_ui.snippet_values.insert(read, named(&[("day", "2026-11-03"), ("status", "paid"), ("limit", "100")]));
-        self.lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
+        self.core.lib_ui.snippet_values.insert(read, named(&[("day", "2026-11-03"), ("status", "paid"), ("limit", "100")]));
+        self.core.lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
         match state {
             "palette" => self.open_palette_with("orders".into()),
             "form" => self.open_snippet_form(read, Some("orders".into())),
             "write" | "locked" => {
                 if state == "write"
-                    && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3)
+                    && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3)
                 {
                     c.writable = true;
                 }

@@ -115,7 +115,7 @@ fn schemas() -> Vec<PgSchema> {
 impl App {
     /// QUARRY_TEST_PG=schemas has no pointer to click with, so the demo opens the schema menu itself once the first frames settled.
     pub(super) fn demo_opens_schema_menu(&self, ctx: &egui::Context) -> bool {
-        self.demo && (60..63).contains(&ctx.cumulative_frame_nr()) && std::env::var("QUARRY_TEST_PG").as_deref() == Ok("schemas")
+        self.core.demo && (60..63).contains(&ctx.cumulative_frame_nr()) && std::env::var("QUARRY_TEST_PG").as_deref() == Ok("schemas")
     }
 
     /// The PostgreSQL demo: a production connection with three databases, three schemas in `analytics` and an open orders table.
@@ -133,29 +133,29 @@ impl App {
         ]);
         let tables = HashMap::from([(DB.to_string(), by_schema)]);
         let bare = |d: &str| (d.to_string(), None);
-        self.conns.push(Conn {
+        self.core.conns.push(Conn {
             tables,
             dbs: vec![(DB.into(), Some(vec![SCHEMA.into(), "reporting".into(), "staging".into()])), bare("postgres"), bare("billing")],
             masked_uri: "postgresql://analyst:****@analytics-prod.internal:5432/analytics".into(),
             server: ServerInfo { version: "18.1".into(), product: "PostgreSQL".into(), host: "analytics-prod.internal:5432".into(), tls: true, ..Default::default() },
             ..Conn::new(ConnMeta { id: CONN, name: "analytics-prod".into(), tag: "Production".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready)
         });
-        self.active = Some(CONN);
-        self.open_dbs.insert((CONN, DB.into()));
+        self.core.active = Some(CONN);
+        self.core.open_dbs.insert((CONN, DB.into()));
         // The demo never lists anything, so every database and schema counts as asked.
         for d in [DB, "postgres", "billing"] {
-            self.sql_asked.insert((CONN, d.into()));
+            self.core.sql_asked.insert((CONN, d.into()));
         }
         for s in [SCHEMA, "reporting", "staging"] {
-            self.pg_tables_asked.insert(CONN, DB, s);
+            self.core.pg_tables_asked.insert(CONN, DB, s);
         }
-        if let Some(c) = self.conns.last_mut() {
+        if let Some(c) = self.core.conns.last_mut() {
             c.pg.insert(DB.into(), PgNs { schemas: schemas(), picked: SCHEMA.into() });
         }
         for v in VIEWS {
-            self.views.add(CONN, &ns_key(DB, SCHEMA), v);
+            self.core.views.add(CONN, &ns_key(DB, SCHEMA), v);
         }
-        self.views.add(CONN, &ns_key(DB, "reporting"), "v_active_accounts");
+        self.core.views.add(CONN, &ns_key(DB, "reporting"), "v_active_accounts");
         self.pg_schema_demo();
 
         let sel = |coll: &str| Sel { conn: CONN, db: DB.into(), schema: SCHEMA.into(), coll: coll.into() };
@@ -171,10 +171,10 @@ impl App {
         t.sort_txt = "created_at DESC".into();
         t.filter_txt = "status = 'paid' AND total > 50".into();
         pg_bar_demo(which, &mut t);
-        self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.core.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.demo_facts(CONN, ns_key(DB, SCHEMA));
-        self.cur = 0;
-        self.status = "Offline demo: no database is connected.".into();
+        self.core.cur = 0;
+        self.core.status = "Offline demo: no database is connected.".into();
         self.pg_structure_demo(which);
         match which {
             "query" => self.pg_query_demo(),
@@ -185,14 +185,14 @@ impl App {
             "shell" => self.pg_shell_demo(),
             "acquery" => self.pg_acquery_demo(),
             "edit" => self.sql_demo_stage(),
-            "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
+            "select" => self.core.tabs[0].checked = [1, 2, 4, 5].into(),
             "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
             "cloudsql" | "cloudsql-form" | "cloudsql-missing" | "cloudsql-adc" => self.pg_cloud_demo(which),
             "server" | "server-settings" | "server-activity" | "server-locks" | "server-counters" | "server-confirm" | "server-locked" | "server-limited" => {
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == CONN) {
+                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == CONN) {
                     c.writable = which != "server-locked";
                 }
-                self.pg_server = Some(PgServerWin::demo(CONN, which));
+                self.core.pg_server = Some(PgServerWin::demo(CONN, which));
             }
             "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
             // Plans captured from a PostgreSQL 18 server: a filtered full scan, and a sort that spilled under ANALYZE.
@@ -229,7 +229,7 @@ impl App {
         self.put_sql_schema(CONN, ns_key(DB, SCHEMA), Arc::new(schema));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
-        self.sql_values.insert((CONN, ns_key(DB, SCHEMA)), vals);
+        self.core.sql_values.insert((CONN, ns_key(DB, SCHEMA)), vals);
     }
 
     /// The orders table of the design as the Structure, Info, Relations and Triggers views show it: a bigint identity
@@ -242,7 +242,7 @@ impl App {
             "triggers" => View::Triggers,
             _ => return,
         };
-        let Some(t) = self.tabs.first_mut() else { return };
+        let Some(t) = self.core.tabs.first_mut() else { return };
         t.view = view;
         t.selected = None;
         if let Some(s) = t.sql.as_mut() {
@@ -276,13 +276,13 @@ impl App {
             s.caret = query.lines().take(6).map(|l| l.chars().count() + 1).sum::<usize>() - 1;
             (s.query, s.sets) = (query.into(), vec![first, refused, last]);
         }
-        self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        self.core.tabs.push(t);
+        self.core.cur = self.core.tabs.len() - 1;
     }
 
     /// The Shell of the design: a finished run and its Queries panel, with PostgreSQL's `$1` placeholders.
     fn pg_shell_demo(&mut self) {
-        let t = &mut self.tabs[0];
+        let t = &mut self.core.tabs[0];
         t.view = View::Shell;
         t.selected = None;
         t.shell.code = "async function run() {\n  const rows = await sql`\n    SELECT customer_id, count(*) AS n FROM orders\n    WHERE status = ${'paid'} GROUP BY customer_id HAVING count(*) > 3`\n  for (const r of rows) {\n    r.last = await orders.findOne({ customer_id: r.customer_id }, { orderBy: '-id' })\n  }\n  return rows\n}".into();
@@ -307,8 +307,8 @@ impl App {
             s.caret = s.query.chars().count();
             s.bar.preset.ac = true;
         }
-        self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        self.core.tabs.push(t);
+        self.core.cur = self.core.tabs.len() - 1;
     }
 
     /// The connection form on the PostgreSQL card: `connform` on the Standard tab, `paste` with the pasted string filled in
@@ -373,16 +373,16 @@ impl App {
         instances.insert("acme-sandbox".into(), Err("Cloud SQL: gcloud failed: ERROR: (gcloud.sql.instances.list) HTTPError 403: Cloud SQL Admin API has not been used in project acme-sandbox before or it is disabled.".into()));
         let proxy = (which != "cloudsql-missing").then(|| PathBuf::from("/opt/homebrew/bin/cloud-sql-proxy"));
         // A load id that is not 0, so nothing asks gcloud.
-        self.cloud = super::cloud_sql::CloudCache { req: 1, start: Some(Start { gcloud: Some("/opt/homebrew/bin/gcloud".into()), proxy, components: true, account: Some("jane@example.com".into()), projects: Ok(projects), adc: which != "cloudsql-adc" }), instances, ..Default::default() };
+        self.core.cloud = super::cloud_sql::CloudCache { req: 1, start: Some(Start { gcloud: Some("/opt/homebrew/bin/gcloud".into()), proxy, components: true, account: Some("jane@example.com".into()), projects: Ok(projects), adc: which != "cloudsql-adc" }), instances, ..Default::default() };
         if which == "cloudsql-form" {
-            let inst = self.cloud.instance("acme-prod:europe-west1:orders-db").cloned();
+            let inst = self.core.cloud.instance("acme-prod:europe-west1:orders-db").cloned();
             let mut f = ConnForm { tag: "Production".into(), ..Default::default() };
             if let Some(i) = &inst {
-                super::cloud_sql::use_instance(&mut f, i, self.cloud.account());
+                super::cloud_sql::use_instance(&mut f, i, self.core.cloud.account());
             }
             self.modal = Some(Modal::Conn(Box::new(f)));
         } else {
-            self.cloud_browser = Some(super::cloud_sql::CloudBrowser { stopped: true, sel: Some("acme-prod:europe-west1:orders-db".into()), adc_for: (which == "cloudsql-adc").then(|| "acme-prod:europe-west1:orders-db".into()), ..Default::default() });
+            self.core.cloud_browser = Some(super::cloud_sql::CloudBrowser { stopped: true, sel: Some("acme-prod:europe-west1:orders-db".into()), adc_for: (which == "cloudsql-adc").then(|| "acme-prod:europe-west1:orders-db".into()), ..Default::default() });
         }
     }
 }

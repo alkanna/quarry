@@ -10,7 +10,7 @@ use mongodb::bson::doc;
 const VAR: &str = "QUARRY_TEST_MONGO";
 
 fn tab_of(a: &App, coll: &str) -> usize {
-    a.tabs.iter().position(|t| t.sel.coll == coll).unwrap_or_else(|| panic!("no tab shows {coll}"))
+    a.core.tabs.iter().position(|t| t.sel.coll == coll).unwrap_or_else(|| panic!("no tab shows {coll}"))
 }
 
 /// Opens `first` from the sidebar and `second` in a new tab with Cmd+click, then makes `first` current again. A plain
@@ -20,7 +20,7 @@ fn open_two(ui: &mut UiApp, first: &str, second: &str) {
     ui.show(second);
     ui.h.get_by_label(second).click_modifiers(egui::Modifiers::COMMAND);
     ui.settle();
-    ui.wait("the second tab's rows", |a| a.tabs.len() == 2 && a.t().is_some_and(|t| t.sel.coll == second && !t.loading && !t.docs.is_empty()));
+    ui.wait("the second tab's rows", |a| a.core.tabs.len() == 2 && a.t().is_some_and(|t| t.sel.coll == second && !t.loading && !t.docs.is_empty()));
     go_tab(ui, first);
 }
 
@@ -62,7 +62,7 @@ fn drop_collection_drops_the_collection_it_names() {
     let mut ui = confirm_on_another_tab(&f, "Drop collection…");
     ui.wait("the first collection to be dropped", |_| !f.exists(0));
     assert!(f.exists(1) && f.all_in(1) == seed(), "the tab that became current was dropped");
-    ui.wait("the dropped collection's tab to close", |x| x.tabs.iter().all(|t| t.sel.coll != f.names[0]));
+    ui.wait("the dropped collection's tab to close", |x| x.core.tabs.iter().all(|t| t.sel.coll != f.names[0]));
 }
 
 #[test]
@@ -79,17 +79,17 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
 
     // An inline edit is not staged: its row holds only some fields, so saving it would fail or drop the others.
     ui.double_click_cell("name", 1);
-    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.wait("the inline editor", |a| a.core.inline.is_some());
     ui.type_over("changed");
     ui.h.key_press(egui::Key::Enter);
     ui.settle();
-    assert!(ui.app().drafts.is_empty(), "a projected row was staged");
+    assert!(ui.app().core.drafts.is_empty(), "a projected row was staged");
     assert!(ui.said(refused), "no warning for the edit: {}", ui.app().last_problem());
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
 
     // Delete opens no dialog. Toasts are cleared between steps, since a second warning with the same title replaces the first.
-    ui.h.state_mut().toasts.clear();
+    ui.h.state_mut().core.toasts.clear();
     ui.click("Select row 1");
     ui.click("Delete…");
     assert!(!matches!(ui.app().modal, Some(Modal::Delete(..))), "Delete opened its dialog on projected rows");
@@ -97,9 +97,9 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
 
     // Duplicate opens no insert editor, which would hold only the projected fields. The document open under its row has a
     // Duplicate of its own; the selection bar floats above it, so its button is the last one.
-    ui.h.state_mut().toasts.clear();
+    ui.h.state_mut().core.toasts.clear();
     ui.click_last("Duplicate");
-    assert!(ui.app().insert.is_none(), "Duplicate opened the insert editor on a projected row");
+    assert!(ui.app().core.insert.is_none(), "Duplicate opened the insert editor on a projected row");
     assert!(ui.said(refused), "no warning for Duplicate: {}", ui.app().last_problem());
     assert_eq!(f.all(), seed());
 }
@@ -113,7 +113,7 @@ fn a_count_past_the_time_limit_still_shows_the_page() {
     let Some(f) = Fixture::new("slowcount", docs) else { return };
     let mut ui = ui_app(VAR).unwrap();
     // Set once connected, since the query timeout also bounds the connect.
-    ui.h.state_mut().prefs.timeout_ms = 1500;
+    ui.h.state_mut().core.prefs.timeout_ms = 1500;
     ui.open_table(DB, "", &f.names[0]);
     let a = ui.h.state_mut();
     a.tm().unwrap().filter_txt = r#"{ $expr: { $function: { body: "function(id) { if (id < 60) return true; var end = Date.now() + 10; while (Date.now() < end) {} return true; }", args: ["$_id"], lang: "js" } } }"#.into();
@@ -136,12 +136,12 @@ fn a_failed_undo_stays_in_the_list() {
     ui.click("Select row 2");
     ui.click("Delete…");
     ui.click("Delete");
-    ui.wait("the delete and its undo entry", |a| a.undo.len() == 1 && a.t().is_some_and(|t| !t.loading && t.docs.len() == 2));
+    ui.wait("the delete and its undo entry", |a| a.core.undo.len() == 1 && a.t().is_some_and(|t| !t.loading && t.docs.len() == 2));
     // The document comes back another way, so putting it back again fails on its _id.
     f.rt.block_on(async { f.coll(0).insert_one(doc! { "_id": 2, "name": "beta", "qty": 2 }).await.unwrap() });
     // The dialog stays open until the answer, whose error toast brings a Close button of its own.
     ui.undo_latest_open();
-    ui.wait("the failed undo to come back", |a| a.undo.len() == 1 && a.last_problem().contains("E11000"));
+    ui.wait("the failed undo to come back", |a| a.core.undo.len() == 1 && a.last_problem().contains("E11000"));
     assert_eq!(f.all(), seed());
     ui.close_recent_changes();
     // Once the blocker is gone, the same entry still undoes the delete.
@@ -159,19 +159,19 @@ fn a_write_for_another_tab_keeps_the_open_editor() {
     go_tab(&mut ui, &b);
     ui.unlock();
     ui.double_click_cell("name", 1);
-    ui.wait("the inline editor", |x| x.inline.is_some());
+    ui.wait("the inline editor", |x| x.core.inline.is_some());
     ui.type_over("typing");
     // A write for the other tab's collection finishes while the editor is open.
     let app = ui.h.state_mut();
-    let sel = app.tabs[tab_of(app, &a)].sel.clone();
+    let sel = app.core.tabs[tab_of(app, &a)].sel.clone();
     let target = app.target_for(&sel).unwrap();
-    app.worker.insert(CONN, target, doc! { "_id": 10, "name": "delta" }, None);
+    app.core.worker.insert(CONN, target, doc! { "_id": 10, "name": "delta" }, None);
     let mut want = seed();
     want.push(doc! { "_id": 10, "name": "delta" });
     f.expect(&mut ui, want);
-    ui.wait("the other tab to reload", |x| x.tabs[tab_of(x, &a)].docs.len() == 4 && !x.tabs[tab_of(x, &a)].loading);
+    ui.wait("the other tab to reload", |x| x.core.tabs[tab_of(x, &a)].docs.len() == 4 && !x.core.tabs[tab_of(x, &a)].loading);
     ui.settle();
-    assert!(ui.app().inline.as_ref().is_some_and(|i| i.text == "typing"), "a write for another tab closed the editor");
+    assert!(ui.app().core.inline.as_ref().is_some_and(|i| i.text == "typing"), "a write for another tab closed the editor");
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn duplicate_tab_keeps_a_typed_filter_marked_unrun() {
     ui.h.get_by_label(&format!("Tab {coll}")).click_secondary();
     ui.settle();
     ui.click("Duplicate");
-    ui.wait("the copy's rows", |a| a.tabs.len() == 2 && a.cur == 1 && a.t().is_some_and(|t| !t.loading));
+    ui.wait("the copy's rows", |a| a.core.tabs.len() == 2 && a.core.cur == 1 && a.t().is_some_and(|t| !t.loading));
     let t = ui.app().t().unwrap();
     assert_eq!(t.filter_txt, "{ qty: 2 }");
     assert_eq!(t.docs.len(), 3, "the copy ran the typed filter");
@@ -211,7 +211,7 @@ fn a_pasted_query_for_another_collection_keeps_that_tabs_work() {
     app.tm().unwrap().filter_txt = pasted.clone();
     app.run_query();
     ui.wait("the pasted query in a tab", |x| x.t().is_some_and(|t| t.sel.coll == b && t.filter_txt == pasted && !t.loading && t.docs.len() == 1));
-    let tabs = &ui.app().tabs;
+    let tabs = &ui.app().core.tabs;
     assert_eq!(tabs.len(), 3, "the pasted query took the tab that held work");
     let kept: Vec<&Tab> = tabs.iter().filter(|t| t.sel.coll == b && t.filter_txt == "{ qty: 2 }").collect();
     assert_eq!(kept.len(), 1, "the second tab's own query was overwritten");
@@ -251,9 +251,9 @@ fn a_reconnect_locks_writes_again() {
     ui.double_click_cell("name", 1);
     ui.show("Stay read-only");
     ui.click("Stay read-only");
-    assert!(ui.app().inline.is_none() && ui.app().drafts.is_empty());
+    assert!(ui.app().core.inline.is_none() && ui.app().core.drafts.is_empty());
     // Always allow writes turns them back on after a reconnect.
-    ui.h.state_mut().prefs.always_writable = true;
+    ui.h.state_mut().core.prefs.always_writable = true;
     ui.connect(CONN, &uri);
     ui.assert_ready(CONN);
     ui.settle();

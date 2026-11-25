@@ -167,33 +167,33 @@ impl App {
                 ctx.request_repaint_after(POLL);
                 let sizes = !s.sz_wait && (s.refresh || s.sizes_at.is_none_or(|t| now.duration_since(t) >= SIZES_EVERY));
                 if sizes {
-                    self.req += 1;
-                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.req, true, Some(now));
-                    self.worker.pg_server_sizes(db.clone(), self.req);
+                    self.core.req += 1;
+                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.core.req, true, Some(now));
+                    self.core.worker.pg_server_sizes(db.clone(), self.core.req);
                 }
                 let due = s.refresh || s.ov.is_none() || s.ov_next.is_none_or(|t| now >= t);
                 if s.ov_wait || !due {
                     return;
                 }
-                self.req += 1;
-                (s.ov_req, s.ov_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_overview(db.clone(), self.req);
+                self.core.req += 1;
+                (s.ov_req, s.ov_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.pg_server_overview(db.clone(), self.core.req);
             }
             PgTab::Settings => {
                 if s.set_wait || !(s.refresh || s.settings.is_none()) {
                     return;
                 }
-                self.req += 1;
-                (s.set_req, s.set_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_settings(db.clone(), self.req);
+                self.core.req += 1;
+                (s.set_req, s.set_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.pg_server_settings(db.clone(), self.core.req);
             }
             PgTab::Counters => {
                 if s.cnt_wait || !(s.refresh || s.counters.is_none()) {
                     return;
                 }
-                self.req += 1;
-                (s.cnt_req, s.cnt_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_counters(db.clone(), self.req);
+                self.core.req += 1;
+                (s.cnt_req, s.cnt_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.pg_server_counters(db.clone(), self.core.req);
             }
             PgTab::Activity | PgTab::Locks => {
                 if s.auto {
@@ -207,9 +207,9 @@ impl App {
                 if blockers {
                     s.blk_at = Some(now);
                 }
-                self.req += 1;
-                (s.act_req, s.act_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_activity(db.clone(), self.req, blockers);
+                self.core.req += 1;
+                (s.act_req, s.act_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.pg_server_activity(db.clone(), self.core.req, blockers);
             }
         }
     }
@@ -217,10 +217,10 @@ impl App {
     pub(in crate::app) fn pg_server_done(&mut self, req: u64, ans: Answer) {
         // A Cancel or Terminate is told even when the window is gone, and only once.
         if let Answer::Signal(res) = &ans {
-            if !self.sql_kills.remove(&req) {
+            if !self.core.sql_kills.remove(&req) {
                 return;
             }
-            if let (Ok(_), Some(s)) = (res, self.pg_server.as_mut()) {
+            if let (Ok(_), Some(s)) = (res, self.core.pg_server.as_mut()) {
                 (s.refresh, s.act_next) = (true, None);
             }
             match res.clone() {
@@ -229,23 +229,23 @@ impl App {
             }
             return;
         }
-        let Some(s) = self.pg_server.as_mut() else { return };
+        let Some(s) = self.core.pg_server.as_mut() else { return };
         if let Some(e) = s.take(req, ans, Instant::now()) {
             self.err(e);
         }
     }
 
     pub(in crate::app) fn pg_server_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.pg_server.take() else { return };
+        let Some(mut s) = self.core.pg_server.take() else { return };
         let conn = s.conn;
         let db = self.conn(conn).and_then(|c| c.sql.clone());
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| format!("{} {}", c.server.product, c.server.version)).unwrap_or_default();
-        if let (Some(db), false) = (&db, self.demo) {
+        if let (Some(db), false) = (&db, self.core.demo) {
             self.pg_server_poll(ctx, &mut s, db);
         }
-        let live = db.is_some() || self.demo;
-        s.writable = self.conn(conn).map_or(self.demo, |c| c.writable);
+        let live = db.is_some() || self.core.demo;
+        s.writable = self.conn(conn).map_or(self.core.demo, |c| c.writable);
         s.own = self.own_sessions(conn);
         // A confirmation armed before the lock is dropped.
         if !s.writable {
@@ -305,17 +305,17 @@ impl App {
             self.ok("Copied the query");
         }
         if let (Some(r), Some(db)) = (acts.fetch, &db) {
-            self.req += 1;
-            s.copy_req = self.req;
-            self.worker.pg_server_query(db.clone(), self.req, &r);
+            self.core.req += 1;
+            s.copy_req = self.core.req;
+            self.core.worker.pg_server_query(db.clone(), self.core.req, &r);
         }
         if let (Some(c), Some(db)) = (acts.send, db) {
-            self.req += 1;
-            self.sql_kills.insert(self.req);
-            self.worker.pg_server_signal(db, self.req, Target::of(&c.s, s.server()), c.terminate, !s.writable);
+            self.core.req += 1;
+            self.core.sql_kills.insert(self.core.req);
+            self.core.worker.pg_server_signal(db, self.core.req, Target::of(&c.s, s.server()), c.terminate, !s.writable);
         }
         if open && !(r.should_close() && self.modal.is_none()) {
-            self.pg_server = Some(s);
+            self.core.pg_server = Some(s);
         }
     }
 }

@@ -5,7 +5,7 @@ use super::*;
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         self.view_requests();
-        while let Ok(m) = self.rx.try_recv() {
+        while let Ok(m) = self.core.rx.try_recv() {
             match m {
                 Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
                 Msg::Agent(ev) => self.on_agent(ctx, ev),
@@ -31,7 +31,7 @@ impl App {
                     }
                 }
                 Msg::SqlStructure { req, res } => {
-                    if let Some((_, sel, index, value)) = self.dup_wait.take_if(|w| w.0 == req) {
+                    if let Some((_, sel, index, value)) = self.core.dup_wait.take_if(|w| w.0 == req) {
                         self.sql_dup_index(sel, &index, value, res);
                         continue;
                     }
@@ -43,7 +43,7 @@ impl App {
                     if let Some(keys) = self.modal.as_mut().and_then(Modal::new_keys_mut) && keys.parent_loaded(req, &res) {
                         continue;
                     }
-                    if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
+                    if let Some(s) = self.core.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
                         s.st.finish(res);
                     }
                 }
@@ -92,14 +92,14 @@ impl App {
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
-                        self.side_err.remove(&(conn, db.clone()));
-                        self.views.set(conn, &db, views);
-                        if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
+                        self.core.side_err.remove(&(conn, db.clone()));
+                        self.core.views.set(conn, &db, views);
+                        if let Some(d) = self.core.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
                             d.1 = Some(v);
                         }
                     }
                     Err(e) => {
-                        self.side_err.insert((conn, db.clone()), e.clone());
+                        self.core.side_err.insert((conn, db.clone()), e.clone());
                         self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}"))
                     }
                 },
@@ -109,15 +109,15 @@ impl App {
                 Msg::WatchDone { req, res } => self.watch_done(req, res),
                 Msg::IndexInfo { key, res } => match res {
                     Ok(i) => {
-                        self.idx_info = Some((key.clone(), i));
+                        self.core.idx_info = Some((key.clone(), i));
                         self.refresh_idx_rows(&key);
                     }
                     Err(e) => self.err(e),
                 },
                 Msg::Docs { req, res, approx } => self.on_docs(req, res, approx),
-                Msg::Indexes { req, res } => match (res, self.tabs.iter().position(|t| t.idx_req == req)) {
+                Msg::Indexes { req, res } => match (res, self.core.tabs.iter().position(|t| t.idx_req == req)) {
                     (Ok(v), Some(i)) => {
-                        let t = &mut self.tabs[i];
+                        let t = &mut self.core.tabs[i];
                         t.clear_failed(View::Indexes);
                         t.set_indexes(v);
                         let key = t.sel.key();
@@ -126,7 +126,7 @@ impl App {
                     (Err(e), Some(i)) => self.fail_view(i, View::Indexes, e, "list the indexes"),
                     _ => {}
                 },
-                Msg::Explained { req, res } if req == self.explain_req => match res {
+                Msg::Explained { req, res } if req == self.core.explain_req => match res {
                     Ok(raw) => {
                         self.show_late(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false });
                     }
@@ -139,7 +139,7 @@ impl App {
                     }
                 }
                 Msg::StagePreview { req, res } => {
-                    let Some(st) = self.tabs.iter_mut().flat_map(|t| std::iter::once(&mut t.agg_input).chain(t.stages.iter_mut())).find(|s| s.req == req) else { continue };
+                    let Some(st) = self.core.tabs.iter_mut().flat_map(|t| std::iter::once(&mut t.agg_input).chain(t.stages.iter_mut())).find(|s| s.req == req) else { continue };
                     st.req = 0;
                     match res {
                         Ok((n, docs, ms)) => {
@@ -176,9 +176,9 @@ impl App {
                 },
                 Msg::RefFound { conn, db, coll, path, value, res } => match res {
                     Ok(Some((target, preview))) => {
-                        self.prefs.relations.entry(format!("{conn}/{db}")).or_default().push(Relation { coll: coll.clone(), path: path.clone(), target: target.clone(), preview: preview.clone() });
+                        self.core.prefs.relations.entry(format!("{conn}/{db}")).or_default().push(Relation { coll: coll.clone(), path: path.clone(), target: target.clone(), preview: preview.clone() });
                         self.save_prefs();
-                        let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll).map(|t| t.req).collect();
+                        let reqs: Vec<u64> = self.core.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll).map(|t| t.req).collect();
                         for r in reqs {
                             self.load_related(r);
                         }
@@ -190,7 +190,7 @@ impl App {
                 },
                 Msg::Analyzed { conn, db, res } => match res {
                     Ok(found) => {
-                        let list = self.prefs.relations.entry(format!("{conn}/{db}")).or_default();
+                        let list = self.core.prefs.relations.entry(format!("{conn}/{db}")).or_default();
                         let mut added = 0;
                         for (coll, path, target, preview) in found {
                             if !list.iter().any(|r| r.coll == coll && r.path == path) {
@@ -199,7 +199,7 @@ impl App {
                             }
                         }
                         self.save_prefs();
-                        let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db).map(|t| t.req).collect();
+                        let reqs: Vec<u64> = self.core.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db).map(|t| t.req).collect();
                         for r in reqs {
                             self.load_related(r);
                         }
@@ -211,8 +211,8 @@ impl App {
                     Err(e) => self.err(format!("Could not analyze relations: {e}")),
                 },
                 Msg::Compared { req, res } => {
-                    let Some(i) = self.tabs.iter().position(|t| t.compare.req == req) else { continue };
-                    let t = &mut self.tabs[i];
+                    let Some(i) = self.core.tabs.iter().position(|t| t.compare.req == req) else { continue };
+                    let t = &mut self.core.tabs[i];
                     t.compare.running = false;
                     match res {
                         Ok(r) => {
@@ -223,7 +223,7 @@ impl App {
                     }
                 }
                 Msg::ToolLog(line) => {
-                    if let Some(t) = &mut self.tool {
+                    if let Some(t) = &mut self.core.tool {
                         t.log.push(line);
                         if t.log.len() > 2000 {
                             t.log.drain(..500);
@@ -234,7 +234,7 @@ impl App {
                 Msg::UpdateInstalled(res) => self.on_update_installed(res),
                 Msg::ToolsInstalled(res) => {
                     // Only a click shows failures; a background update that fails stays quiet, like the app's own.
-                    let manual = std::mem::take(&mut self.tools_installing);
+                    let manual = std::mem::take(&mut self.core.tools_installing);
                     match res {
                         Ok(Some(v)) => self.ok(format!("{} the MongoDB Database Tools {v} in {}", if manual { "Installed" } else { "Updated" }, tools_dir().display())),
                         Ok(None) => {}
@@ -246,7 +246,7 @@ impl App {
                 Msg::LibScan { link, scan } => self.apply_scan(link, scan),
                 Msg::LibFile { job, out } => self.file_done(job, out),
                 Msg::ToolDone(res) => {
-                    if let Some(t) = &mut self.tool {
+                    if let Some(t) = &mut self.core.tool {
                         t.cancel = None;
                         t.done = Some(res.clone());
                     }
@@ -257,17 +257,17 @@ impl App {
                 }
                 Msg::Tested { req, res, info } => {
                     // A SQL test already says how long it took; the others get the time measured here.
-                    let started = self.test_started.take();
+                    let started = self.core.test_started.take();
                     let res = res.map(|m| match started {
                         Some(t) if !m.contains(" ms") => format!("{}  ·  {} ms", m.trim_end_matches('.'), t.elapsed().as_millis()),
                         _ => m,
                     });
-                    self.conn_test = Some((req, res));
-                    self.test_info = info.map(|i| (req, i));
+                    self.core.conn_test = Some((req, res));
+                    self.core.test_info = info.map(|i| (req, i));
                 }
                 Msg::Schema { req, res } => {
-                    let Some(i) = self.tabs.iter().position(|t| t.schema.req == req) else { continue };
-                    let t = &mut self.tabs[i];
+                    let Some(i) = self.core.tabs.iter().position(|t| t.schema.req == req) else { continue };
+                    let t = &mut self.core.tabs[i];
                     t.schema.running = false;
                     match res {
                         Ok((stats, n, ms)) => {
@@ -281,12 +281,12 @@ impl App {
                     }
                 }
                 Msg::ShellLog { req, level, text } => {
-                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                    if let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) {
                         t.shell.push_log(level, text);
                     }
                 }
                 Msg::ShellQuery { req, q } => {
-                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                    if let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) {
                         // The panel keeps the latest queries only, a loop can run millions.
                         let mut q = q;
                         if q.text.len() > 2000 {
@@ -303,7 +303,7 @@ impl App {
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms, query_ms } => {
-                    let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
+                    let Some(t) = self.core.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
                     t.rows_replaced();
                     let sql = t.sql.is_some();
                     let sh = &mut t.shell;
@@ -334,7 +334,7 @@ impl App {
 
     fn on_connected(&mut self, conn: u64, attempt: u64, res: db::Res<(mongodb::Client, Vec<String>, Option<crate::ssh::Tunnel>)>) {
         // A connect the user stopped (Disconnect, removal) or replaced is dropped, and its tunnel with it.
-        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
+        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
         match res {
             Ok((client, dbs, tunnel)) => {
                 // Trust the SSH host key the first time; later a different key is refused.
@@ -346,30 +346,30 @@ impl App {
                 c.tunnel = tunnel.map(db::Way::Ssh);
                 // Load every database's collections up front so the list can show counts.
                 for d in &dbs {
-                    self.worker.collections(conn, client.clone(), d.clone());
+                    self.core.worker.collections(conn, client.clone(), d.clone());
                 }
                 // Version, replica set and host for the status bar.
-                self.worker.command(client.clone(), "admin".into(), doc! { "buildInfo": 1 }, &format!("srv-build:{conn}"));
-                self.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
+                self.core.worker.command(client.clone(), "admin".into(), doc! { "buildInfo": 1 }, &format!("srv-build:{conn}"));
+                self.core.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
                 c.client = Some(client);
                 c.status = Status::Ready;
                 c.forget_lists();
                 c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                self.pg_tables_asked.forget(conn, None, None);
+                self.core.pg_tables_asked.forget(conn, None, None);
                 let n = c.meta.name.clone();
                 self.ok(format!("Connected to {n} (read-only)"));
                 if let Some(fp) = trusted {
                     self.save_conns();
                     self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
                 }
-                let here = self.cur;
-                for i in 0..self.tabs.len() {
-                    if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
-                        self.cur = i;
+                let here = self.core.cur;
+                for i in 0..self.core.tabs.len() {
+                    if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
+                        self.core.cur = i;
                         self.run_query();
                     }
                 }
-                self.cur = here;
+                self.core.cur = here;
 
             }
             Err(e) => {
@@ -381,7 +381,7 @@ impl App {
 
     fn on_sql_connected(&mut self, conn: u64, attempt: u64, res: db::Res<(db::sql::Db, Vec<String>, Option<db::Way>)>) {
         // Dropping a stopped or replaced connect's answer also stops its Cloud SQL proxy or SSH tunnel.
-        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
+        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
         match res {
             Ok((sql, dbs, tunnel)) => {
                 let mut trusted = None;
@@ -391,16 +391,16 @@ impl App {
                 }
                 c.tunnel = tunnel;
                 // A server can hold hundreds of schemas, so only those on screen load now.
-                self.sql_asked.retain(|k| k.0 != conn);
-                let wanted: Vec<String> = dbs.iter().filter(|d| self.open_dbs.contains(&(conn, (*d).clone())) || self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
+                self.core.sql_asked.retain(|k| k.0 != conn);
+                let wanted: Vec<String> = dbs.iter().filter(|d| self.core.open_dbs.contains(&(conn, (*d).clone())) || self.core.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
                 let pg = sql.dialect == db::sql::Dialect::Postgres;
                 for d in wanted {
-                    self.sql_asked.insert((conn, d.clone()));
+                    self.core.sql_asked.insert((conn, d.clone()));
                     // A PostgreSQL database lists its schemas first; the tables of the picked one follow.
                     if pg {
-                        self.worker.sql_schemas(conn, sql.clone(), d);
+                        self.core.worker.sql_schemas(conn, sql.clone(), d);
                     } else {
-                        self.worker.sql_tables(conn, sql.clone(), d);
+                        self.core.worker.sql_tables(conn, sql.clone(), d);
                     }
                 }
                 c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: match sql.dialect { db::sql::Dialect::MySql => "MySQL", db::sql::Dialect::MariaDb => "MariaDB", db::sql::Dialect::Postgres => "PostgreSQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
@@ -408,15 +408,15 @@ impl App {
                 c.status = Status::Ready;
                 c.forget_lists();
                 c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                self.pg_tables_asked.forget(conn, None, None);
+                self.core.pg_tables_asked.forget(conn, None, None);
                 let n = c.meta.name.clone();
                 self.ok(format!("Connected to {n} (read-only)"));
                 if let Some(fp) = trusted {
                     self.save_conns();
                     self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
                 }
-                for i in 0..self.tabs.len() {
-                    if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                for i in 0..self.core.tabs.len() {
+                    if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
                         self.reload_of(i);
                     }
                 }
@@ -432,7 +432,7 @@ impl App {
         match (tag.as_str(), res) {
             (t, Ok(d)) if t.starts_with("srv-") => {
                 let (kind, id) = t.split_once(':').unwrap_or_default();
-                if let Some(c) = self.conns.iter_mut().find(|c| id.parse() == Ok(c.meta.id)) {
+                if let Some(c) = self.core.conns.iter_mut().find(|c| id.parse() == Ok(c.meta.id)) {
                     if kind == "srv-build" {
                         c.server.version = d.get_str("version").unwrap_or_default().to_string();
                     } else {
@@ -450,7 +450,7 @@ impl App {
                     Some(Bson::Double(n)) => *n as u64,
                     _ => 0,
                 };
-                for tab in self.tabs.iter_mut().filter(|tab| [tab.sel.conn.to_string().as_str(), &tab.sel.db, &tab.sel.coll] == key[..]) {
+                for tab in self.core.tabs.iter_mut().filter(|tab| [tab.sel.conn.to_string().as_str(), &tab.sel.db, &tab.sel.coll] == key[..]) {
                     tab.stats = Some((n("count"), n("size"), n("nindexes")));
                 }
             }
@@ -458,27 +458,27 @@ impl App {
             // Nice to have: a server that refuses these just shows less.
             (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
             // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
-            ("users", Err(e)) if db::is_unauthorized(&e) && self.users.as_ref().is_some_and(|u| !u.self_only) => {
-                let conn = self.users.as_ref().map(|u| u.conn).unwrap_or_default();
+            ("users", Err(e)) if db::is_unauthorized(&e) && self.core.users.as_ref().is_some_and(|u| !u.self_only) => {
+                let conn = self.core.users.as_ref().map(|u| u.conn).unwrap_or_default();
                 if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
-                    self.worker.command(client, "admin".into(), doc! { "connectionStatus": 1 }, "users-self");
+                    self.core.worker.command(client, "admin".into(), doc! { "connectionStatus": 1 }, "users-self");
                 }
-                if let Some(u) = &mut self.users {
+                if let Some(u) = &mut self.core.users {
                     u.self_only = true;
                 }
             }
             ("users", r) => {
-                if let Some(u) = &mut self.users {
+                if let Some(u) = &mut self.core.users {
                     u.users = Some(r.map(|d| d.get_array("users").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
                 }
             }
             ("users-self", r) => {
-                if let Some(u) = &mut self.users {
+                if let Some(u) = &mut self.core.users {
                     u.users = Some(r.map(|d| self_users(&d)));
                 }
             }
             ("roles", r) => {
-                if let Some(u) = &mut self.users {
+                if let Some(u) = &mut self.core.users {
                     u.roles = Some(r.map(|d| d.get_array("roles").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
                 }
             }
@@ -510,7 +510,7 @@ impl App {
             (tag, Ok(d)) if tag.starts_with("validator:") => {
                 let req: u64 = tag["validator:".len()..].parse().unwrap_or(0);
                 let opts = d.get_document("cursor").ok().and_then(|c| c.get_array("firstBatch").ok()).and_then(|a| a.first()).and_then(|x| x.as_document()).and_then(|x| x.get_document("options").ok()).cloned().unwrap_or_default();
-                if let Some(t) = self.tabs.iter_mut().find(|t| t.schema.vreq == req) {
+                if let Some(t) = self.core.tabs.iter_mut().find(|t| t.schema.vreq == req) {
                     let s = &mut t.schema;
                     s.vtext = opts.get_document("validator").map(db::to_edit_json).unwrap_or_default();
                     s.vlevel = match opts.get_str("validationLevel") {
@@ -531,14 +531,14 @@ impl App {
     fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, dropped: Option<String>, res: db::Res<String>) {
         if let Some(to) = copied {
             // Listed now so the row does not blink out before the reload below answers.
-            if res.is_ok() && let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
+            if res.is_ok() && let Some(l) = self.core.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
                 l.push(to.clone());
                 l.sort();
             }
-            self.copying.remove(&(conn, db.clone(), to));
+            self.core.copying.remove(&(conn, db.clone(), to));
         }
-        let open = self.open_after.take_if(|o| o.0 == conn && o.1 == db);
-        if res.is_ok() && open.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) && !c.dbs.iter().any(|d| d.0 == db) {
+        let open = self.core.open_after.take_if(|o| o.0 == conn && o.1 == db);
+        if res.is_ok() && open.is_some() && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) && !c.dbs.iter().any(|d| d.0 == db) {
             // A new database is listed now so its collection has a row to open under.
             c.dbs.push((db.clone(), None));
             c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -556,24 +556,24 @@ impl App {
             }
             Err(e) => {
                 self.err(e);
-                if dropped.is_some_and(|c| c.is_empty()) && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                if dropped.is_some_and(|c| c.is_empty()) && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.dbs.push((db.clone(), None));
                     c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
                 }
             }
         }
         // The server may normalise the validator, so show what it kept.
-        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && t.sel.db == db) {
+        for t in self.core.tabs.iter_mut().filter(|t| t.sel.conn == conn && t.sel.db == db) {
             t.schema.vloaded = false;
         }
         if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
             if db == "*" {
                 self.connect(conn);
             } else {
-                self.worker.collections(conn, client, db);
+                self.core.worker.collections(conn, client, db);
             }
         }
-        if self.users.as_ref().is_some_and(|u| u.conn == conn) {
+        if self.core.users.as_ref().is_some_and(|u| u.conn == conn) {
             self.load_users(conn);
         }
         // Hiding an index or switching the profiler changes what the Indexes view shows.
@@ -583,8 +583,8 @@ impl App {
     }
 
     fn on_docs(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u64, u128)>, approx: bool) {
-        let Some(i) = self.tabs.iter().position(|t| t.req == req) else { return };
-        let t = &mut self.tabs[i];
+        let Some(i) = self.core.tabs.iter().position(|t| t.req == req) else { return };
+        let t = &mut self.core.tabs[i];
         t.rows_replaced();
         t.loading = false;
         t.count_approx = approx;
@@ -592,11 +592,11 @@ impl App {
             Ok((docs, count, ms)) => {
                 // Deleting the last page's rows leaves the tab past the end; step back to the new last page.
                 let last = count.saturating_sub(1) / self.page_size();
-                if docs.is_empty() && self.tabs[i].page > last {
-                    self.tabs[i].page = last;
+                if docs.is_empty() && self.core.tabs[i].page > last {
+                    self.core.tabs[i].page = last;
                     return self.reload_of(i);
                 }
-                let Self { tabs, values, .. } = self;
+                let Core { tabs, values, .. } = &mut self.core;
                 let t = &mut tabs[i];
                 // A query that works again clears an earlier error.
                 t.clear_failed(View::Documents);
@@ -637,7 +637,7 @@ impl App {
                 self.load_related(req);
                 if let Some(s) = ask && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone()) {
                     let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);
-                    self.worker.coll_stats(client, s.db, s.coll, tag);
+                    self.core.worker.coll_stats(client, s.db, s.coll, tag);
                 }
             }
             Err(e) => {
@@ -654,14 +654,14 @@ impl App {
     }
 
     fn on_aggregated(&mut self, req: u64, res: db::Res<(Vec<db::Row>, u128)>) {
-        let Some(i) = self.tabs.iter().position(|t| t.agg_req == req) else {
+        let Some(i) = self.core.tabs.iter().position(|t| t.agg_req == req) else {
             // A superseded run or a closed tab: its error goes to the list, not over the newer run.
             if let Err(e) = res {
                 self.err_quiet(e, None, None, "Aggregate".into());
             }
             return;
         };
-        let t = &mut self.tabs[i];
+        let t = &mut self.core.tabs[i];
         t.agg_req = 0;
         t.rows_replaced();
         match res {
@@ -704,7 +704,7 @@ impl App {
                 // Reopen the refused insert so the typed document is not lost, but
                 // only over the collection it was meant for.
                 if let Some((db, coll, text)) = retry && self.t().is_some_and(|t| t.sel.space() == db && t.sel.coll == coll) {
-                    self.insert = Some(text);
+                    self.core.insert = Some(text);
                 }
                 self.err(e);
             }
@@ -720,7 +720,7 @@ impl App {
         }
         // The worker only knows the database and collection, so a same-named
         // collection on another connection may reload too, which is harmless.
-        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.space() == at.0 && self.tabs[i].sel.coll == at.1).collect();
+        let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel.space() == at.0 && self.core.tabs[i].sel.coll == at.1).collect();
         for i in tabs {
             if reload {
                 self.reload_of(i);
@@ -731,7 +731,7 @@ impl App {
     }
 
     fn on_saved(&mut self, tag: String, res: db::Res<String>, undo: Option<UndoAction>) {
-        let dr = self.saving.remove(&tag);
+        let dr = self.core.saving.remove(&tag);
         let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), schema: d.schema.clone(), coll: d.coll.clone() });
         match res {
             Ok(s) => {
@@ -742,7 +742,7 @@ impl App {
                 // Keep the edits so nothing typed is lost; the person can reload and redo. An edit staged on the
                 // same row while this save was in flight is newer, so it wins over the failed one.
                 if let Some(dr) = dr {
-                    self.drafts.entry(tag).or_insert(dr);
+                    self.core.drafts.entry(tag).or_insert(dr);
                 }
                 self.err(e);
             }
@@ -751,8 +751,8 @@ impl App {
             self.push_undo(u);
         }
         // Waits for the collection's other saves so the reload shows all of them.
-        if let Some(sel) = sel.filter(|s| !self.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.schema == s.schema && d.coll == s.coll)) {
-            let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel == sel).collect();
+        if let Some(sel) = sel.filter(|s| !self.core.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.schema == s.schema && d.coll == s.coll)) {
+            let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sel == sel).collect();
             for i in tabs {
                 self.reload_of(i);
             }
@@ -763,38 +763,38 @@ impl App {
 impl App {
     /// Documents per page, from the setting; a hand-edited value is kept in range.
     pub(super) fn page_size(&self) -> u64 {
-        self.prefs.page_size.clamp(1, db::PAGE_SIZE_MAX)
+        self.core.prefs.page_size.clamp(1, db::PAGE_SIZE_MAX)
     }
 
     pub(super) fn reload(&mut self) {
-        self.reload_of(self.cur);
+        self.reload_of(self.core.cur);
     }
 
     pub(super) fn reload_of(&mut self, i: usize) {
-        if self.demo {
+        if self.core.demo {
             return;
         }
-        if let Some(t) = self.tabs.get_mut(i) {
+        if let Some(t) = self.core.tabs.get_mut(i) {
             t.agent_changed = false;
         }
-        if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
+        if self.core.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
             return self.reload_sql(i);
         }
         // A Shell tab opened from the library has no collection to read.
-        if self.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
+        if self.core.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
             return;
         }
-        let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
+        let Some(target) = self.core.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
-        self.req += 1;
-        let req = self.req;
+        self.core.req += 1;
+        let req = self.core.req;
         let size = self.page_size();
-        let t = &mut self.tabs[i];
+        let t = &mut self.core.tabs[i];
         t.req = req;
         t.loading = true;
         t.size = size;
         let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
-        self.worker.find(req, target, q, page, size);
+        self.core.worker.find(req, target, q, page, size);
         // Indexes also feed the Sort history (as in the original) and the indexed-field marks, so
         // load them once per tab.
         if view == View::Indexes || no_idx {

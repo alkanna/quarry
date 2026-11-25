@@ -11,9 +11,9 @@ fn query_editor() -> Option<UiApp> {
     })?;
     let app = ui.h.state_mut();
     // Already in memory, so the editor never asks the worker, which has no server here.
-    app.sql_schema_asked.insert((3, "shop".into()));
-    let cur = app.cur;
-    if let Some(s) = app.tabs[cur].sql.as_mut() {
+    app.core.sql_schema_asked.insert((3, "shop".into()));
+    let cur = app.core.cur;
+    if let Some(s) = app.core.tabs[cur].sql.as_mut() {
         (s.query, s.caret) = (String::new(), 0);
     }
     ui.h.ctx.memory_mut(|m| m.request_focus(App::sql_editor_id(cur)));
@@ -55,7 +55,7 @@ fn a_space_after_where_opens_the_columns_and_esc_closes_them() {
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
     assert!(listed(&ui).is_empty(), "Esc left the list open: {:?}", listed(&ui));
-    assert!(ui.h.ctx.memory(|m| m.has_focus(App::sql_editor_id(ui.app().cur))), "Esc on the list also left the editor");
+    assert!(ui.h.ctx.memory(|m| m.has_focus(App::sql_editor_id(ui.app().core.cur))), "Esc on the list also left the editor");
     // The next trigger opens it again.
     ui.type_text("status = 'paid' AND ");
     assert!(listed(&ui).iter().any(|s| s == "status"), "no columns after AND: {:?}", listed(&ui));

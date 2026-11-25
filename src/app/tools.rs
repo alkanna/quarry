@@ -23,7 +23,7 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        let Some(t) = &mut self.tool else { return };
+        let Some(t) = &mut self.core.tool else { return };
         let mut close = false;
         let running = t.done.is_none();
         let r = banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
@@ -73,20 +73,20 @@ impl App {
             });
         });
         if close || (!running && r.should_close()) {
-            self.tool = None;
+            self.core.tool = None;
         }
     }
 
     pub(super) fn install_tools(&mut self) {
-        if !self.tools_installing {
-            self.tools_installing = true;
-            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
+        if !self.core.tools_installing {
+            self.core.tools_installing = true;
+            self.core.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
         }
     }
 
     /// The Install button, or a spinner while the download runs.
     pub(super) fn install_tools_button(&mut self, ui: &mut egui::Ui) {
-        if self.tools_installing {
+        if self.core.tools_installing {
             ui.horizontal(|ui| {
                 spin(ui);
                 ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED()));
@@ -97,13 +97,13 @@ impl App {
     }
 
     pub(super) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
-        let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
+        let (name, setting) = if restore { ("mongorestore", &self.core.prefs.mongorestore) } else { ("mongodump", &self.core.prefs.mongodump) };
         let Some(exe) = find_exe(name, setting) else {
             return self.warn_settings(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });
-        self.worker.tool(exe, args, rx);
+        self.core.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });
+        self.core.worker.tool(exe, args, rx);
     }
 }
 
@@ -118,7 +118,7 @@ impl App {
         let ui = &mut b.content_ui;
         let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
         let tool = if f.restore { "mongorestore" } else { "mongodump" };
-        let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
+        let exe = find_exe(tool, if f.restore { &self.core.prefs.mongorestore } else { &self.core.prefs.mongodump });
         ui.label(RichText::new(match &exe {
             Some(p) => format!("Runs {} with this connection's address.", p.display()),
             None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),

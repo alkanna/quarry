@@ -43,7 +43,7 @@ impl App {
     /// A connection the script may name: shared, and scripts not Never there.
     fn agent_shell_conn(&self, r: &ConnRef) -> Result<u64, Refusal> {
         let id = self.agent_conn(r).map_err(|e| ("not_shared", e))?;
-        if self.agents.cfg.conn(id).is_some_and(|p| p.mode(OpClass::RunScripts) == Mode::Never) {
+        if self.core.agents.cfg.conn(id).is_some_and(|p| p.mode(OpClass::RunScripts) == Mode::Never) {
             let name = self.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
             return Err(("refused", format!("Run scripts is set to Never for agents on {name}.")));
         }
@@ -54,7 +54,7 @@ impl App {
     fn agent_shell_shared(&self, id: u64, db: &str, schema: &str) -> Result<(), Refusal> {
         let name = self.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
         let pg = self.is_pg(id);
-        let raw = self.agents.cfg.conn(id).map(|p| p.scope.mode).unwrap_or_default();
+        let raw = self.core.agents.cfg.conn(id).map(|p| p.scope.mode).unwrap_or_default();
         // Two-part patterns mean the database the connection opens, which only its session tells.
         if pg && raw != crate::agents::config::ScopeMode::All && !self.conn(id).is_some_and(|c| c.sql.is_some()) {
             return Err(("not_open", format!("Open {name} in Quarry first, so Quarry can check which of its databases are shared.")));
@@ -91,8 +91,8 @@ impl App {
         let at = match tab {
             None => None,
             Some(uid) => {
-                let Some(i) = self.tabs.iter().position(|t| t.uid == uid) else { return Err(("gone", format!("Tab {uid} is closed. Leave out `tab` to open a new one."))) };
-                let t = &self.tabs[i];
+                let Some(i) = self.core.tabs.iter().position(|t| t.uid == uid) else { return Err(("gone", format!("Tab {uid} is closed. Leave out `tab` to open a new one."))) };
+                let t = &self.core.tabs[i];
                 match &t.shell.agent_code {
                     None => return Err(("refused", format!("Tab {uid} was not opened by open_shell, so Quarry leaves it alone. Leave out `tab` to open a new one."))),
                     Some(code) if *code != t.shell.code => return Err(("refused", format!("The user changed the script in tab {uid}, so Quarry leaves it alone. Leave out `tab` to open a new one."))),
@@ -126,24 +126,24 @@ impl App {
             attached.push(Attached { conn: aid, db: a.db.clone(), name, allow_writes: false, schema, tables: Vec::new() });
         }
         // A tab switch closes open cell and field editors, and under a dialog could let a confirm run the wrong script.
-        let shown = !typing && self.modal.is_none() && self.json_edit.is_none() && self.sql_cell.is_none() && self.inline.is_none() && self.new_field.is_none();
+        let shown = !typing && self.modal.is_none() && self.core.json_edit.is_none() && self.core.sql_cell.is_none() && self.core.inline.is_none() && self.core.new_field.is_none();
         let i = match at {
             Some(i) => i,
             None if shown => {
                 self.open_tab(sel, Open::NewTab);
-                self.cur
+                self.core.cur
             }
             None => {
-                self.tabs.push(Tab::new(sel).for_engine(engine));
-                self.tabs.len() - 1
+                self.core.tabs.push(Tab::new(sel).for_engine(engine));
+                self.core.tabs.len() - 1
             }
         };
-        if shown && i != self.cur {
+        if shown && i != self.core.cur {
             self.set_cur(i);
         }
         let names: Vec<String> = attached.iter().map(|a| a.name.clone()).collect();
         let loads: Vec<(u64, String)> = attached.iter().map(|a| (a.conn, a.db.clone())).collect();
-        let t = &mut self.tabs[i];
+        let t = &mut self.core.tabs[i];
         t.view = View::Shell;
         t.selected = None;
         t.shell.code.clone_from(&script);
@@ -184,11 +184,11 @@ mod tests {
 
     /// prod (MongoDB, open) and pg (PostgreSQL, closed) shared with agents, hidden (MySQL) not.
     fn setup(app: &mut App) {
-        app.agents.cfg.enabled = true;
+        app.core.agents.cfg.enabled = true;
         for (id, name, engine, status, shared) in [(21, "prod", db::sql::Engine::default(), Status::Ready, true), (22, "pg", db::sql::Engine::Postgres, Status::Idle, true), (23, "hidden", db::sql::Engine::MySql, Status::Ready, false)] {
-            app.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine, ..Default::default() }, status));
+            app.core.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine, ..Default::default() }, status));
             if shared {
-                app.agents.cfg.conns.insert(id, ConnPolicy { access: Access::Read, scripts: Mode::Ask, ..Default::default() });
+                app.core.agents.cfg.conns.insert(id, ConnPolicy { access: Access::Read, scripts: Mode::Ask, ..Default::default() });
             }
         }
     }
@@ -209,7 +209,7 @@ mod tests {
         // Sitting on a Shell tab is no reason to open the next one behind it.
         let second = call(app, &ctx, json!({ "connection": "prod", "database": "shop", "script": SCRIPT })).unwrap();
         assert_eq!(second["shown"], true);
-        let first = app.tabs.iter().position(|t| t.uid == uid).unwrap();
+        let first = app.core.tabs.iter().position(|t| t.uid == uid).unwrap();
         app.set_cur(first);
         let t = app.t().unwrap();
         assert!(t.view == View::Shell);
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!((a[0].conn, a[0].schema.as_str(), a[1].schema.as_str()), (22, crate::app::shell_attach::PG_SCHEMA, ""));
         assert!(a.iter().all(|a| !a.allow_writes), "only the user allows writes");
 
-        let tabs = app.tabs.len();
+        let tabs = app.core.tabs.len();
         let refuse = |app: &mut App, args: Value| call(app, &ctx, args).unwrap_err();
         let e = refuse(app, json!({ "connection": "prod", "database": "shop", "script": SCRIPT, "attach": [{ "connection": "hidden", "database": "x" }] }));
         assert_eq!(e.code, "not_shared");
@@ -227,10 +227,10 @@ mod tests {
         let e = refuse(app, json!({ "connection": "prod", "database": "shop", "schema": "public", "script": SCRIPT }));
         assert_eq!(e.code, "bad_args");
         assert_eq!(refuse(app, json!({ "connection": "pg", "database": "sales", "script": SCRIPT })).code, "not_open");
-        app.agents.cfg.conns.get_mut(&21).unwrap().scope = crate::agents::config::Scope { mode: crate::agents::config::ScopeMode::Only, globs: vec!["shop".into(), "app".into()] };
+        app.core.agents.cfg.conns.get_mut(&21).unwrap().scope = crate::agents::config::Scope { mode: crate::agents::config::ScopeMode::Only, globs: vec!["shop".into(), "app".into()] };
         assert!(refuse(app, json!({ "connection": "prod", "database": "payroll", "script": SCRIPT })).message.contains("payroll is not shared"));
-        app.agents.cfg.conns.get_mut(&21).unwrap().scope = Default::default();
-        assert_eq!(app.tabs.len(), tabs, "a refusal opens nothing");
+        app.core.agents.cfg.conns.get_mut(&21).unwrap().scope = Default::default();
+        assert_eq!(app.core.tabs.len(), tabs, "a refusal opens nothing");
 
         // Writes the user allowed for the script they read do not carry over to the agent's next one.
         app.tm().unwrap().shell.attached[1].allow_writes = true;
@@ -244,19 +244,19 @@ mod tests {
         app.tm().unwrap().shell.code.push_str("\n// mine");
         let e = refuse(app, json!({ "connection": "prod", "database": "shop", "script": SCRIPT, "tab": uid }));
         assert!(e.message.contains("The user changed"), "{}", e.message);
-        let mine = app.tabs.iter().find(|t| t.shell.agent_code.is_none()).map(|t| t.uid);
+        let mine = app.core.tabs.iter().find(|t| t.shell.agent_code.is_none()).map(|t| t.uid);
         if let Some(mine) = mine {
             assert!(refuse(app, json!({ "connection": "prod", "database": "shop", "script": SCRIPT, "tab": mine })).message.contains("not opened by open_shell"));
         }
 
         // A dialog open: the tab opens behind it and the current tab stays.
         app.modal = Some(Modal::Attach(Box::default()));
-        let cur = app.cur;
+        let cur = app.core.cur;
         let v = call(app, &ctx, json!({ "connection": "prod", "database": "shop", "script": SCRIPT })).unwrap();
-        assert_eq!((v["shown"].as_bool(), app.cur), (Some(false), cur));
-        assert_eq!(app.tabs.last().unwrap().uid, v["tab"].as_u64().unwrap());
+        assert_eq!((v["shown"].as_bool(), app.core.cur), (Some(false), cur));
+        assert_eq!(app.core.tabs.last().unwrap().uid, v["tab"].as_u64().unwrap());
         // The Run confirm runs the code as it is when confirmed, so no edit lands under a dialog.
         assert_eq!(refuse(app, json!({ "connection": "prod", "database": "shop", "script": SCRIPT, "tab": v["tab"] })).code, "busy");
-        assert_eq!(app.agents.activity.len(), 11);
+        assert_eq!(app.core.agents.activity.len(), 11);
     }
 }

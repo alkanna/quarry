@@ -112,23 +112,23 @@ impl App {
         if self.panel_dirty() {
             return self.warn("Apply or cancel the value in the side panel first.");
         }
-        self.new_field = None;
+        self.core.new_field = None;
         let kind = db::type_name_kind(&v);
         if let ("binary", Bson::Binary(bin)) = (kind, &v) {
             let enc = db::default_encoding(&bin.bytes);
-            self.inline = None;
+            self.core.inline = None;
             let text = db::encode_bytes(bin, enc).unwrap_or_default();
-            self.json_edit = Some(JsonEdit { enc, subtype: bin.subtype, ..JsonEdit::new(d.clone(), path, text, kind) });
+            self.core.json_edit = Some(JsonEdit { enc, subtype: bin.subtype, ..JsonEdit::new(d.clone(), path, text, kind) });
             return;
         }
         let container = matches!(v, Bson::Document(_) | Bson::Array(_));
         let text = if container { db::to_edit_value(&v) } else { db::inline_text(&v) };
         // With the panel open, a double-click loads the new field into it, so the panel follows the selection.
         if container || value_edit::is_long(&text) || self.value_in_panel() {
-            self.inline = None;
-            self.json_edit = Some(JsonEdit::new(d.clone(), path, text, kind));
+            self.core.inline = None;
+            self.core.json_edit = Some(JsonEdit::new(d.clone(), path, text, kind));
         } else {
-            self.inline = Some(Inline { text, kind, path, focus: true, pick: None, local: false });
+            self.core.inline = Some(Inline { text, kind, path, focus: true, pick: None, local: false });
         }
     }
 
@@ -154,7 +154,7 @@ impl App {
         let selected = self.t().and_then(|t| t.selected);
         let passive = row.is_some() && row != selected;
         // Edit state is keyed by field path only, so other open documents must not see it.
-        let parked = passive.then(|| (self.inline.take(), self.new_field.take()));
+        let parked = passive.then(|| (self.core.inline.take(), self.core.new_field.take()));
         // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
         // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
         let doc_id = d.get("_id").map(db::compact);
@@ -188,7 +188,7 @@ impl App {
                 }
                 if danger(ui, "Delete").clicked() {
                     // `d` carries unsaved edits; the delete only matches the document as stored.
-                    let stored = stored_version(&self.drafts, &self.draft_key(d), d);
+                    let stored = stored_version(&self.core.drafts, &self.draft_key(d), d);
                     self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }
@@ -208,7 +208,7 @@ impl App {
         });
         ui.separator();
         let key = self.draft_key(d);
-        self.changed = match self.drafts.get(&key) {
+        self.core.changed = match self.core.drafts.get(&key) {
             Some(dr) if !from_agg => {
                 let changes = db::diff(&dr.original, &dr.current);
                 // Same visible span as the header row, so Save stays on screen.
@@ -221,7 +221,7 @@ impl App {
             _ => HashSet::new(),
         };
         let mut path = Vec::new();
-        self.fold_busy = false;
+        self.core.fold_busy = false;
         // Runs every frame, so capped like doc_paths: deeper keys just truncate.
         fn longest(d: &Document, depth: usize) -> usize {
             d.iter().map(|(k, v)| k.chars().count().max(match v {
@@ -231,7 +231,7 @@ impl App {
                 _ => 0,
             })).max().unwrap_or(0)
         }
-        self.char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(MONO_PX), 'x'));
+        self.core.char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(MONO_PX), 'x'));
         // Cached per document and field count, so open documents are not walked every frame.
         let cache = id.with(("key-chars", d.len()));
         let chars = ui.data(|m| m.get_temp::<usize>(cache)).unwrap_or_else(|| {
@@ -239,36 +239,36 @@ impl App {
             ui.data_mut(|m| m.insert_temp(cache, n));
             n
         });
-        self.key_w = (chars as f32 * self.char_w + 24.0).clamp(96.0, 320.0);
+        self.core.key_w = (chars as f32 * self.core.char_w + 24.0).clamp(96.0, 320.0);
         self.tree_x = ui.max_rect().x_range().expand(8.0);
         // Tree rows keep egui's compact 18 px; the global BUTTON_H would show a quarter fewer fields.
         let interact_h = std::mem::replace(&mut ui.spacing_mut().interact_size.y, 18.0);
-        self.fold_seen = None;
+        self.core.fold_seen = None;
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, id, &mut path, !from_agg, &mut acts);
             path.pop();
         }
-        if ui.data(|m| m.get_temp::<Option<bool>>(fold_key)) != Some(self.fold_seen) {
-            ui.data_mut(|m| m.insert_temp(fold_key, self.fold_seen));
+        if ui.data(|m| m.get_temp::<Option<bool>>(fold_key)) != Some(self.core.fold_seen) {
+            ui.data_mut(|m| m.insert_temp(fold_key, self.core.fold_seen));
             ui.ctx().request_repaint();
         }
         ui.spacing_mut().interact_size.y = interact_h;
         // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
-        if !self.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
+        if !self.core.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
             self.fold = None;
         }
         // Picked after this frame's headers ran, so applied after the clear above to reach the next frame.
         if let Some(TreeAct::Fold(p, open)) = acts.iter().find(|a| matches!(a, TreeAct::Fold(..))) {
             self.fold = Some((id, p.clone(), *open));
         }
-        if self.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
+        if self.core.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
             self.new_field_row(ui, &mut acts);
         }
-        self.changed.clear();
+        self.core.changed.clear();
         if let Some((inline, new_field)) = parked {
-            self.inline = inline;
-            self.new_field = new_field;
+            self.core.inline = inline;
+            self.core.new_field = new_field;
         }
         if let (true, Some((agg, i)), false) = (passive, row, acts.is_empty()) {
             self.select(agg, i, false);
@@ -282,7 +282,7 @@ impl App {
         let covered = self.window_open();
         let mut save = false;
         let mut discard = false;
-        let mut confirm = self.prefs.confirm_save;
+        let mut confirm = self.core.prefs.confirm_save;
         egui::Frame::new().fill(tint(WARNING(), 22)).stroke(Stroke::new(1.0, WARNING().gamma_multiply(0.5))).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(semibold(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING())));
@@ -292,19 +292,19 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     save = primary(ui, "Save", PRIMARY()).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || (!covered && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S)));
                     discard = ui.button("Discard").clicked();
-                    if !self.prefs.always_writable {
+                    if !self.core.prefs.always_writable {
                         ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(TXT_SMALL));
                     }
                 });
             });
         });
         ui.add_space(4.0);
-        if confirm != self.prefs.confirm_save {
-            self.prefs.confirm_save = confirm;
+        if confirm != self.core.prefs.confirm_save {
+            self.core.prefs.confirm_save = confirm;
             self.save_prefs();
         }
         if discard {
-            self.drafts.remove(key);
+            self.core.drafts.remove(key);
             self.ok("Edits discarded");
         } else if save {
             self.save_draft(key);
@@ -318,18 +318,18 @@ impl App {
                 TreeAct::Fold(..) => {}
                 TreeAct::Start(p, v) => self.start_inline(d, p, v),
                 TreeAct::Expand => {
-                    if let Some(i) = self.inline.take() {
+                    if let Some(i) = self.core.inline.take() {
                         // Text typed inline counts as an edit the side panel must keep.
                         let dirty = db::get_path(d, &i.path.join(".")).is_none_or(|v| db::inline_text(v) != i.text);
-                        self.json_edit = Some(JsonEdit { dirty, ..JsonEdit::new(d.clone(), i.path, i.text, i.kind) });
+                        self.core.json_edit = Some(JsonEdit { dirty, ..JsonEdit::new(d.clone(), i.path, i.text, i.kind) });
                     }
                 }
                 TreeAct::Cancel => {
-                    self.inline = None;
-                    self.new_field = None;
+                    self.core.inline = None;
+                    self.core.new_field = None;
                 }
                 TreeAct::Commit => {
-                    if let Some(i) = &self.inline {
+                    if let Some(i) = &self.core.inline {
                         let new = db::make_value(i.kind, &i.text).and_then(|v| db::edit_path(d, &i.path, Some(v)));
                         self.stage(d, new);
                     }
@@ -344,15 +344,15 @@ impl App {
                 }
                 TreeAct::AddField(parent) => {
                     if self.sel_writable() {
-                        self.inline = None;
-                        self.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string", err: None });
+                        self.core.inline = None;
+                        self.core.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string", err: None });
                     } else {
                         let d = d.clone();
                         self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::AddField(parent)]));
                     }
                 }
                 TreeAct::CommitNew => {
-                    if let Some(n) = &mut self.new_field {
+                    if let Some(n) = &mut self.core.new_field {
                         let is_array = !n.parent.is_empty() && matches!(db::get_path(d, &n.parent.join(".")), Some(Bson::Array(_)));
                         let name = n.name.trim().to_string();
                         if name.is_empty() && !is_array {
@@ -371,8 +371,8 @@ impl App {
                 }
                 TreeAct::EditDoc => {
                     if self.sel_writable() {
-                        self.inline = None;
-                        self.json_edit = Some(JsonEdit::new(d.clone(), Vec::new(), db::to_edit_json(d), "object"));
+                        self.core.inline = None;
+                        self.core.json_edit = Some(JsonEdit::new(d.clone(), Vec::new(), db::to_edit_json(d), "object"));
                     } else {
                         let d = d.clone();
                         self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::EditDoc]));
@@ -390,7 +390,7 @@ impl App {
                     let key = self.col_key(false);
                     let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
                     self.apply_col_acts(&key, &fields, vec![ColAct::Show(path.clone()), ColAct::Pin(path)]);
-                    self.prefs.table = true;
+                    self.core.prefs.table = true;
                 }
                 TreeAct::Highlight(path) => {
                     let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
@@ -418,14 +418,14 @@ impl App {
                             let t = self.t().unwrap();
                             let (conn, co) = (t.sel.conn, filtered.then(|| t.query.collation.clone()).flatten());
                             self.ok(format!("Counting the values of {path}…"));
-                            self.worker.group_count(conn, target, path, p, co);
+                            self.core.worker.group_count(conn, target, path, p, co);
                         }
                     }
                 }
                 TreeAct::Distinct(path) => match self.target() {
                     Some(target) => {
                         let scope = self.t().unwrap().query.scope();
-                        self.worker.distinct_count(target, path, scope);
+                        self.core.worker.distinct_count(target, path, scope);
                     }
                     None => self.warn_offline(),
                 },
@@ -440,14 +440,14 @@ impl App {
                 TreeAct::GoRef(path, v) => {
                     let Some(s) = self.t().map(|t| t.sel.clone()) else { continue };
                     let path = db::strip_indices(&path);
-                    let rel = self.prefs.relations.get(&format!("{}/{}", s.conn, s.db)).and_then(|l| l.iter().find(|r| r.coll == s.coll && r.path == path)).cloned();
+                    let rel = self.core.prefs.relations.get(&format!("{}/{}", s.conn, s.db)).and_then(|l| l.iter().find(|r| r.coll == s.coll && r.path == path)).cloned();
                     match (rel, self.conn(s.conn).and_then(|c| c.client.clone())) {
                         (_, None) => self.warn_offline(),
                         (Some(r), _) => self.go_ref(s.conn, s.db, r.target, v),
                         (None, Some(client)) => {
                             let colls = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == s.db)).and_then(|d| d.1.clone()).unwrap_or_default();
                             self.ok("Looking for the collection that holds this id…");
-                            self.worker.find_ref(s.conn, Target { client, db: s.db, coll: s.coll, timeout: self.timeout() }, colls, path, v);
+                            self.core.worker.find_ref(s.conn, Target { client, db: s.db, coll: s.coll, timeout: self.timeout() }, colls, path, v);
                         }
                     }
                 }
@@ -474,7 +474,7 @@ impl App {
     }
 
     pub(super) fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
-        let Some(n) = &mut self.new_field else { return };
+        let Some(n) = &mut self.core.new_field else { return };
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             let bad = n.err.is_some();
@@ -520,7 +520,7 @@ impl App {
     }
 
     pub(super) fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
-        let editing_here = self.inline.as_ref().is_some_and(|i| i.path == *path);
+        let editing_here = self.core.inline.as_ref().is_some_and(|i| i.path == *path);
         match v {
             Bson::Document(_) | Bson::Array(_) if !editing_here => {
                 let items: Vec<(String, &Bson)> = match v {
@@ -529,11 +529,11 @@ impl App {
                     _ => unreachable!(),
                 };
                 let band = ui.painter().add(egui::Shape::Noop);
-                let key_px = key.chars().count() as f32 * self.char_w;
+                let key_px = key.chars().count() as f32 * self.core.char_w;
                 let mut job = LayoutJob::default();
                 job.append(key, 0.0, mono(BRIGHT()));
-                job.append(&leaf_text(v), (self.key_w - key_px).max(12.0), mono(FAINT()));
-                let adding_here = self.new_field.as_ref().is_some_and(|n| n.parent == *path);
+                job.append(&leaf_text(v), (self.core.key_w - key_px).max(12.0), mono(FAINT()));
+                let adding_here = self.core.new_field.as_ref().is_some_and(|n| n.parent == *path);
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
                     .id_salt(id.with(&*path))
@@ -549,7 +549,7 @@ impl App {
                             self.new_field_row(ui, acts);
                         }
                     });
-                if highlighted(&self.prefs, &self.col_key(false), path) {
+                if highlighted(&self.core.prefs, &self.col_key(false), path) {
                     ui.painter().rect_filled(r.header_response.rect.expand(2.0), R_SM, HIGHLIGHT());
                 }
                 if self.index_mark(path).is_some() {
@@ -561,11 +561,11 @@ impl App {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
                 }
                 if forced.is_some_and(|o| r.openness != if o { 1.0 } else { 0.0 }) {
-                    self.fold_busy = true;
+                    self.core.fold_busy = true;
                 }
-                self.fold_seen = Some(self.fold_seen.unwrap_or(false) || r.openness < 1.0);
+                self.core.fold_seen = Some(self.core.fold_seen.unwrap_or(false) || r.openness < 1.0);
                 let p = path.clone();
-                let hl = highlighted(&self.prefs, &self.col_key(false), &p);
+                let hl = highlighted(&self.core.prefs, &self.col_key(false), &p);
                 let in_coll = self.in_coll();
                 r.header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
                     menu_look(ui);
@@ -574,14 +574,14 @@ impl App {
                 });
             }
             leaf => {
-                let hl = highlighted(&self.prefs, &self.col_key(false), path);
-                let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
+                let hl = highlighted(&self.core.prefs, &self.col_key(false), path);
+                let edited = !self.core.changed.is_empty() && self.core.changed.contains(&path.join("."));
                 let band = ui.painter().add(egui::Shape::Noop);
                 let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(R_SM).show(ui, |ui| ui.horizontal(|ui| {
                     // Same offsets as a collapsing header so keys and values line up across both.
                     let x0 = ui.cursor().left();
                     ui.add_space(ui.spacing().indent);
-                    let key_w = self.key_w;
+                    let key_w = self.core.key_w;
                     let ix = self.index_mark(path);
                     let key_r = ui.scope(|ui| {
                         ui.set_max_width(key_w - 8.0 - if ix.is_some() { BOLT_ROOM } else { 0.0 });
@@ -594,7 +594,7 @@ impl App {
                     }
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
-                        let inl = self.inline.as_mut().unwrap();
+                        let inl = self.core.inline.as_mut().unwrap();
                         inline_editor(ui, inl, acts);
                     } else {
                         // A one-line label never shows more than this; laying out a megabyte string on

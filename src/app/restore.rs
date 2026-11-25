@@ -6,37 +6,37 @@ pub(crate) use quarry_core::state::restore::*;
 
 impl App {
     pub(super) fn apply_restore(&mut self, id: u64) {
-        let Some(i) = self.restores.iter().position(|(r, _)| *r == id) else { return };
-        match self.restores.remove(i).1 {
+        let Some(i) = self.core.restores.iter().position(|(r, _)| *r == id) else { return };
+        match self.core.restores.remove(i).1 {
             Restore::Group { g, at } => {
                 let (name, alive) = (g.name.clone(), self.conn_ids());
-                self.groups.restore(g, at, &alive);
+                self.core.groups.restore(g, at, &alive);
                 self.save_groups();
                 self.ok(format!("Group {name} is back."));
             }
             Restore::Placed { moved, created, tile, prev, at } => {
                 let alive = self.conn_ids();
-                self.groups.undo_drop(&moved, created, &alive);
+                self.core.groups.undo_drop(&moved, created, &alive);
                 // The tile goes back after the tile it followed, or to its old index when that one has closed since.
-                if self.rail_order.contains(&tile) {
-                    self.rail_order.retain(|c| *c != tile);
+                if self.core.rail_order.contains(&tile) {
+                    self.core.rail_order.retain(|c| *c != tile);
                     let i = match prev {
                         None => 0,
-                        Some(p) => self.rail_order.iter().position(|c| *c == p).map_or(at.min(self.rail_order.len()), |i| i + 1),
+                        Some(p) => self.core.rail_order.iter().position(|c| *c == p).map_or(at.min(self.core.rail_order.len()), |i| i + 1),
                     };
-                    self.rail_order.insert(i, tile);
+                    self.core.rail_order.insert(i, tile);
                 }
                 self.save_groups();
                 self.ok("Grouping undone.");
             }
             Restore::Saved { scripts, folders, written } => {
                 let n = scripts.len();
-                self.library.restore(folders, scripts);
+                self.core.library.restore(folders, scripts);
                 self.save_library();
                 // A script moved into a linked folder left a file there. It goes too, unless it was changed since, which
                 // would make the undo throw away the person's edits.
                 if let Some((link, rel, bytes)) = written
-                    && let Some(path) = self.library.link_join(link, &rel)
+                    && let Some(path) = self.core.library.link_join(link, &rel)
                 {
                     if std::fs::read(&path).is_ok_and(|now| now == bytes) {
                         if let Err(e) = std::fs::remove_file(&path) {
@@ -52,15 +52,15 @@ impl App {
                 self.ok(if n == 1 { "Script restored.".to_string() } else { format!("{n} scripts restored.") });
             }
             Restore::TabText { uid, text } => {
-                let Some(t) = self.tabs.iter_mut().find(|t| t.uid == uid) else { return self.warn("That tab was closed.") };
+                let Some(t) = self.core.tabs.iter_mut().find(|t| t.uid == uid) else { return self.warn("That tab was closed.") };
                 super::library::linked::set_bound_text(t, &text, None);
                 self.ok("Your edits are back.");
             }
             Restore::Script(old) => {
                 let name = old.name.clone();
-                match self.library.scripts.iter_mut().find(|s| s.id == old.id) {
+                match self.core.library.scripts.iter_mut().find(|s| s.id == old.id) {
                     Some(s) => *s = old,
-                    None => self.library.restore(Vec::new(), vec![old]),
+                    None => self.core.library.restore(Vec::new(), vec![old]),
                 }
                 self.save_library();
                 self.ok(format!("\"{name}\" is back as it was."));
@@ -78,8 +78,8 @@ impl App {
                 match write_atomic(dir, file, &bytes) {
                     Ok(()) => {
                         // The folder it came from shows the file again at the next scan.
-                        let links: Vec<u64> = self.library.links.iter().filter(|l| path.starts_with(&l.path)).map(|l| l.id).collect();
-                        self.lib_ui.rescan.extend(links);
+                        let links: Vec<u64> = self.core.library.links.iter().filter(|l| path.starts_with(&l.path)).map(|l| l.id).collect();
+                        self.core.lib_ui.rescan.extend(links);
                         self.ok(format!("{file} restored."));
                     }
                     Err(e) => self.err(format!("Could not restore {}: {e}", path.display())),
@@ -118,23 +118,23 @@ mod tests {
     fn undoing_a_deleted_group_puts_it_and_its_members_back() {
         let mut h = app();
         let a = h.state_mut();
-        a.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        let (first, second) = (a.groups.new_group("Prod"), a.groups.new_group("Dev"));
+        a.core.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        let (first, second) = (a.core.groups.new_group("Prod"), a.core.groups.new_group("Dev"));
         let all = a.conn_ids();
-        a.groups.place(1, Place::Into(first, None), &all);
-        a.groups.place(2, Place::Into(first, None), &all);
-        a.groups.place(3, Place::Into(second, None), &all);
+        a.core.groups.place(1, Place::Into(first, None), &all);
+        a.core.groups.place(2, Place::Into(first, None), &all);
+        a.core.groups.place(3, Place::Into(second, None), &all);
         // What deleting the first group does: it goes, and its members are loose again.
-        let gone = a.groups.groups.remove(0);
-        a.groups.loose = vec![1, 2];
+        let gone = a.core.groups.groups.remove(0);
+        a.core.groups.loose = vec![1, 2];
         a.toast_restore("Group Prod deleted.".into(), Restore::Group { g: gone, at: 0 });
-        let id = a.restores[0].0;
+        let id = a.core.restores[0].0;
         a.apply_restore(id);
-        assert_eq!(a.groups.groups.iter().map(|g| (g.name.as_str(), g.members.clone())).collect::<Vec<_>>(), [("Prod", vec![1, 2]), ("Dev", vec![3])]);
-        assert!(a.groups.loose.is_empty() && a.restores.is_empty());
+        assert_eq!(a.core.groups.groups.iter().map(|g| (g.name.as_str(), g.members.clone())).collect::<Vec<_>>(), [("Prod", vec![1, 2]), ("Dev", vec![3])]);
+        assert!(a.core.groups.loose.is_empty() && a.core.restores.is_empty());
         // A second press on the same toast finds nothing and changes nothing.
         a.apply_restore(id);
-        assert_eq!(a.groups.groups.len(), 2);
+        assert_eq!(a.core.groups.groups.len(), 2);
     }
 
     fn temp(tag: &str) -> PathBuf {
@@ -145,7 +145,7 @@ mod tests {
     }
 
     fn undo_last(a: &mut App) {
-        let id = a.restores.last().map(|r| r.0).expect("an Undo");
+        let id = a.core.restores.last().map(|r| r.0).expect("an Undo");
         a.apply_restore(id);
     }
 
@@ -153,41 +153,41 @@ mod tests {
     fn a_group_put_back_past_the_end_goes_last() {
         let mut h = app();
         let a = h.state_mut();
-        a.conns.extend([1, 2].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        a.groups.new_group("Dev");
+        a.core.conns.extend([1, 2].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        a.core.groups.new_group("Dev");
         let g = Group { id: 9, name: "Prod".into(), members: vec![1, 7], ..Default::default() };
         a.toast_restore("Deleted.".into(), Restore::Group { g, at: 99 });
         undo_last(a);
         // 7 is no saved connection any more, so only 1 comes back.
-        assert_eq!(a.groups.groups.iter().map(|g| (g.name.as_str(), g.members.clone())).collect::<Vec<_>>(), [("Dev", vec![]), ("Prod", vec![1])]);
+        assert_eq!(a.core.groups.groups.iter().map(|g| (g.name.as_str(), g.members.clone())).collect::<Vec<_>>(), [("Dev", vec![]), ("Prod", vec![1])]);
     }
 
     #[test]
     fn undoing_a_rail_drop_skips_a_removed_connection_and_keeps_later_group_edits() {
         let mut h = app();
         let a = h.state_mut();
-        a.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        a.rail_order = vec![1, 2, 3];
+        a.core.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        a.core.rail_order = vec![1, 2, 3];
         let all = a.conn_ids();
         // A drop of 2 onto 1 made a group of them.
-        let moved = vec![(2, None, a.groups.spot(2, &all).1), (1, None, a.groups.spot(1, &all).1)];
-        let g = a.groups.new_group("New group");
-        a.groups.place(1, Place::Into(g, None), &all);
-        a.groups.place(2, Place::Into(g, None), &all);
+        let moved = vec![(2, None, a.core.groups.spot(2, &all).1), (1, None, a.core.groups.spot(1, &all).1)];
+        let g = a.core.groups.new_group("New group");
+        a.core.groups.place(1, Place::Into(g, None), &all);
+        a.core.groups.place(2, Place::Into(g, None), &all);
         a.toast_restore("Grouped.".into(), Restore::Placed { moved, created: Some(g), tile: 2, prev: Some(1), at: 1 });
         // Since then: the group was renamed, 3 joined it, and 2 was removed from the app.
-        a.groups.group_mut(g).unwrap().name = "Prod".into();
-        a.groups.place(3, Place::Into(g, None), &all);
+        a.core.groups.group_mut(g).unwrap().name = "Prod".into();
+        a.core.groups.place(3, Place::Into(g, None), &all);
         // Removing a connection prunes it from the groups, as Danger::RemoveConnection does.
-        a.conns.retain(|c| c.meta.id != 2);
-        a.rail_order.retain(|c| *c != 2);
+        a.core.conns.retain(|c| c.meta.id != 2);
+        a.core.rail_order.retain(|c| *c != 2);
         let alive = a.conn_ids();
-        a.groups.prune(&alive);
+        a.core.groups.prune(&alive);
         undo_last(a);
         let alive = a.conn_ids();
-        assert_eq!(a.groups.group(g).map(|x| (x.name.as_str(), x.members.clone())), Some(("Prod", vec![3])));
-        assert_eq!(a.groups.loose_order(&alive), [1]);
-        assert!(!a.rail_order.contains(&2) && a.groups.groups.iter().all(|x| !x.members.contains(&2)));
+        assert_eq!(a.core.groups.group(g).map(|x| (x.name.as_str(), x.members.clone())), Some(("Prod", vec![3])));
+        assert_eq!(a.core.groups.loose_order(&alive), [1]);
+        assert!(!a.core.rail_order.contains(&2) && a.core.groups.groups.iter().all(|x| !x.members.contains(&2)));
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         let s = Script { id: 4, name: "R".into(), kind: "sql".into(), body: "select 1".into(), ..Default::default() };
         a.toast_restore("Moved.".into(), Restore::Saved { scripts: vec![s], folders: vec![], written: Some((7, "R.sql".into(), b"select 1".to_vec())) });
         undo_last(a);
-        assert!(a.library.scripts.iter().any(|s| s.id == 4));
+        assert!(a.core.library.scripts.iter().any(|s| s.id == 4));
         assert!(d.join("R.sql").exists(), "a file under a link that is gone must be left alone");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -211,7 +211,7 @@ mod tests {
         let d = temp("stuck");
         let f = d.join("R.sql");
         std::fs::write(&f, "select 1").unwrap();
-        a.library.links.push(crate::library::Link { id: 7, path: d.clone(), ..Default::default() });
+        a.core.library.links.push(crate::library::Link { id: 7, path: d.clone(), ..Default::default() });
         // A read-only file cannot be removed on Windows, and a read-only folder keeps its files on unix.
         let lock = |on: bool| {
             #[cfg(unix)]
@@ -230,7 +230,7 @@ mod tests {
         undo_last(a);
         let still = f.exists();
         lock(false);
-        assert!(a.library.scripts.iter().any(|s| s.id == 4));
+        assert!(a.core.library.scripts.iter().any(|s| s.id == 4));
         // Running as an admin removes it anyway; otherwise the person is told the file stayed.
         if still {
             assert!(a.last_problem().contains("could not be removed"), "{}", a.last_problem());
@@ -261,12 +261,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("quarry-restore-{}", std::process::id()));
         let path = dir.join("q.sql");
         a.toast_restore("Deleted.".into(), Restore::File { path: path.clone(), bytes: b"select 1".to_vec() });
-        let id = a.restores[0].0;
+        let id = a.core.restores[0].0;
         a.apply_restore(id);
         assert_eq!(std::fs::read(&path).unwrap(), b"select 1");
         std::fs::write(&path, "mine").unwrap();
         a.toast_restore("Deleted.".into(), Restore::File { path: path.clone(), bytes: b"select 2".to_vec() });
-        let id = a.restores[0].0;
+        let id = a.core.restores[0].0;
         a.apply_restore(id);
         assert_eq!(std::fs::read(&path).unwrap(), b"mine");
         std::fs::remove_dir_all(&dir).unwrap();

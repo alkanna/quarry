@@ -160,9 +160,9 @@ impl App {
     /// The grid that has the keys, as `keys` gives them: the Documents or Aggregate grid of `selected`, or the Query view's.
     fn vim_grid(&self, ctx: &egui::Context) -> Option<View> {
         let t = self.t()?;
-        let lib = self.lib_ui.panel.focus && !self.prefs.sidebar_hidden && self.prefs.side_mode() == SideMode::Library;
+        let lib = self.core.lib_ui.panel.focus && !self.core.prefs.sidebar_hidden && self.core.prefs.side_mode() == SideMode::Library;
         let panel = t.sql.as_ref().is_some_and(|s| s.bar.panel.open && s.bar.panel.sel.is_some());
-        if ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || self.sql_cell.is_some() || self.inline.is_some() || lib || panel {
+        if ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || self.core.sql_cell.is_some() || self.core.inline.is_some() || lib || panel {
             return None;
         }
         match (t.view, &t.sql) {
@@ -186,7 +186,7 @@ impl App {
 
     /// Selects row `i` of that grid as Up and Down do.
     fn vim_select(&mut self, view: View, i: usize) {
-        self.scroll_sel = true;
+        self.core.scroll_sel = true;
         self.vnav.scroll = true;
         if view == View::Sql {
             if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
@@ -208,7 +208,7 @@ impl App {
     /// Reads this pass's Vim keys before anything draws, so no widget acts on them too.
     pub(super) fn vim_begin(&mut self, ctx: &egui::Context) {
         self.vnav.injected.clear();
-        if !self.prefs.vim || self.window_open() {
+        if !self.core.prefs.vim || self.window_open() {
             self.vnav.pending.clear();
             self.vnav.alt_text = false;
             return;
@@ -247,7 +247,7 @@ impl App {
             return self.vim_pane(ctx, p);
         }
         // A text field, a cell editor that reads the keys itself, or an open date picker keeps every key.
-        if ctx.text_edit_focused() || self.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) || self.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
+        if ctx.text_edit_focused() || self.core.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) || self.core.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
             self.vnav.pending.clear();
             return;
         }
@@ -303,7 +303,7 @@ impl App {
     /// What a Vim key asked of the Query grid's cell under the cursor, or of its record's line, as its cell menu does.
     /// `names` are the columns the cursor walks. Copying the row is done here, since the menu has no such action.
     pub(super) fn vim_cell_act(&mut self, ctx: &egui::Context, sel: Option<usize>, at: usize, names: &[String], rows: Rows) -> Option<(usize, String, CellAct)> {
-        let i = sel.filter(|_| self.prefs.vim)?;
+        let i = sel.filter(|_| self.core.prefs.vim)?;
         let a = self.vnav.act.filter(|a| !matches!(a, Act::Fold(_)))?;
         self.vnav.act = None;
         let c = names.get(at.min(names.len().saturating_sub(1)))?.clone();
@@ -356,14 +356,14 @@ impl App {
     }
 
     fn vim_tab(&mut self, n: Option<usize>, next: bool) {
-        let len = self.tabs.len();
+        let len = self.core.tabs.len();
         if len == 0 {
             return;
         }
         let to = match n {
             Some(n) => n.clamp(1, len) - 1,
-            None if next => (self.cur + 1) % len,
-            None => (self.cur + len - 1) % len,
+            None if next => (self.core.cur + 1) % len,
+            None => (self.core.cur + len - 1) % len,
         };
         self.go_tab(to);
     }
@@ -448,12 +448,12 @@ impl App {
         match p {
             Pane::Left => {
                 surrender();
-                if self.prefs.sidebar_hidden {
-                    self.prefs.sidebar_hidden = false;
+                if self.core.prefs.sidebar_hidden {
+                    self.core.prefs.sidebar_hidden = false;
                     self.save_prefs();
                 }
-                if self.prefs.side_mode() == SideMode::Library {
-                    self.lib_ui.focus_tree = true;
+                if self.core.prefs.side_mode() == SideMode::Library {
+                    self.core.lib_ui.focus_tree = true;
                 } else {
                     ctx.data_mut(|d| {
                         d.insert_temp(side_id(), true);
@@ -462,7 +462,7 @@ impl App {
                 }
             }
             Pane::Up => {
-                self.lib_ui.panel.focus = false;
+                self.core.lib_ui.panel.focus = false;
                 if self.t().is_some_and(|t| t.view == View::Documents) {
                     self.focus_query(ctx);
                 } else if let Some(id) = crate::ui::vim::page_editor(ctx) {
@@ -471,11 +471,11 @@ impl App {
             }
             Pane::Down | Pane::Right => {
                 // Closing an open cell editor here would drop what was typed, so Enter or Esc closes it first.
-                if self.sql_cell.is_some() || self.inline.is_some() {
+                if self.core.sql_cell.is_some() || self.core.inline.is_some() {
                     return;
                 }
                 surrender();
-                self.lib_ui.panel.focus = false;
+                self.core.lib_ui.panel.focus = false;
                 if let Some(v) = self.vim_grid(ctx) {
                     let (sel, len) = self.vim_rows(v);
                     if sel.is_none() && len > 0 {

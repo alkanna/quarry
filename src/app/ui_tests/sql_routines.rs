@@ -63,7 +63,7 @@ fn the_window_shows_the_definition_and_close_ends_it() {
     }
     assert!(!ui.disabled("Edit"), "a routine of a user database cannot be edited");
     ui.click("Close");
-    assert!(!ui.app().routines.window_open(), "Close left the window open");
+    assert!(!ui.app().core.routines.window_open(), "Close left the window open");
 }
 
 #[test]
@@ -88,12 +88,12 @@ fn an_edit_previews_what_it_sends_and_refuses_what_cannot_save() {
     assert!(ui.disabled("Save routine"));
 
     replace(&mut ui, "Routine definition", "CREATE FUNCTION add_tax(amount DECIMAL(10,2), rate DECIMAL(4,2)) RETURNS decimal(10,2) DETERMINISTIC RETURN amount * rate");
-    ui.h.state_mut().status.clear();
+    ui.h.state_mut().core.status.clear();
     ui.click("Save routine");
     assert!(ui.said("Offline demo"), "Save did not reach the demo's stop: {}", ui.app().last_problem());
     ui.click("Revert");
     ui.show("Edit");
-    assert!(ui.app().routines.window_open());
+    assert!(ui.app().core.routines.window_open());
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn dropping_needs_the_exact_name_typed() {
     assert!(ui.disabled("Drop"), "the name is case sensitive");
     replace(&mut ui, "Confirmation", "add_tax");
     assert!(!ui.disabled("Drop"), "Drop stays off with the exact name typed");
-    ui.h.state_mut().status.clear();
+    ui.h.state_mut().core.status.clear();
     ui.click("Drop");
     assert!(ui.said("Offline demo"), "Drop did not reach the demo's stop: {}", ui.app().last_problem());
 }
@@ -140,12 +140,12 @@ fn the_row_menu_opens_the_drop_pane_of_that_routine() {
 #[test]
 fn run_fills_a_call_into_a_new_query_tab() {
     let Some(mut ui) = demo_ui(|a| mysql_open(a, "run")) else { return };
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.show("Argument before_day");
     replace(&mut ui, "Argument before_day", "2024-01-01");
     ui.click_last("Run");
-    assert!(!ui.app().routines.window_open(), "the window stayed open after Run");
-    assert_eq!(ui.app().tabs.len(), before + 1, "Run did not open a Query tab");
+    assert!(!ui.app().core.routines.window_open(), "the window stayed open after Run");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "Run did not open a Query tab");
     let q = ui.query_text();
     assert!(q.contains("CALL") && q.contains("archive_orders") && q.contains("2024-01-01"), "the call is not in the new tab: {q}");
 }
@@ -163,11 +163,11 @@ fn back_leaves_the_run_pane_for_the_definition() {
 fn a_locked_postgresql_connection_runs_a_read_only_function_and_asks_for_a_procedure() {
     let Some(mut ui) = demo_ui(|a| pg_open(a, "")) else { return };
     ui.lock();
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.click("Run\u{2026}");
     ui.click_last("Run");
     assert!(!matches!(ui.app().modal, Some(Modal::Unlock(..))), "an IMMUTABLE function asked to unlock");
-    assert_eq!(ui.app().tabs.len(), before + 1, "the function did not run in a new Query tab");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "the function did not run in a new Query tab");
     assert!(ui.query_text().starts_with("SELECT * FROM"), "{}", ui.query_text());
 
     let Some(mut ui) = demo_ui(|a| pg_open(a, "run")) else { return };

@@ -15,8 +15,8 @@ fn open(ui: &mut UiApp, update: bool, filter: &str, count: u64, engine: &str) {
 /// `col` is the column the dialog was opened on from its menu.
 fn open_on(ui: &mut UiApp, update: bool, filter: &str, count: u64, engine: &str, col: Option<&str>) {
     let app = ui.h.state_mut();
-    let sel = app.tabs[0].sel.clone();
-    let s = app.tabs[0].sql.as_ref().expect("the orders tab");
+    let sel = app.core.tabs[0].sel.clone();
+    let s = app.core.tabs[0].sql.as_ref().expect("the orders tab");
     let prep = BulkPrep { count, cols: s.cols.to_vec(), pk: s.pk.clone(), engine: engine.into() };
     app.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns: "shop".into(), filter: filter.into(), capped: false, req: 7, prep: None, pairs: col.map(|c| vec![Pair { col: c.into(), ..Default::default() }]).unwrap_or_default(), typed: String::new() })));
     app.on_bulk_prep(7, Ok(prep));
@@ -122,15 +122,15 @@ fn cancel_closes_the_dialog_without_acting() {
 #[test]
 fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     let Some(mut ui) = demo() else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.status = "idle".into();
     ui.h.state_mut().open_bulk(false);
     assert!(!matches!(ui.app().modal, Some(Modal::SqlBulk(_))), "the offline demo has no server to count on");
-    assert!(ui.app().status.contains("Offline demo"), "nothing says why nothing opened: {}", ui.app().status);
+    assert!(ui.app().core.status.contains("Offline demo"), "nothing says why nothing opened: {}", ui.app().core.status);
     ui.lock();
     ui.h.state_mut().open_bulk(true);
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(..))), "a locked connection did not ask to unlock");
     let Some(mut ui) = demo() else { return };
-    ui.h.state_mut().tabs[0].sql.as_mut().expect("the orders tab").matched = Some(148);
+    ui.h.state_mut().core.tabs[0].sql.as_mut().expect("the orders tab").matched = Some(148);
     ui.h.state_mut().open_bulk(false);
     assert!(ui.app().modal.is_none(), "grouped rows opened the dialog");
     assert!(ui.app().last_problem().contains("Grouped rows are summaries"), "no notice says why: {}", ui.app().last_problem());

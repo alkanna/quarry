@@ -11,23 +11,23 @@ pub(crate) type Modal = quarry_core::state::Modal<Retry>;
 
 impl App {
     pub(super) fn ok(&mut self, s: impl Into<String>) {
-        self.status = s.into();
+        self.core.status = s.into();
     }
 
     pub(super) fn conn(&self, id: u64) -> Option<&Conn> {
-        self.conns.iter().find(|c| c.meta.id == id)
+        self.core.conns.iter().find(|c| c.meta.id == id)
     }
 
     pub(super) fn t(&self) -> Option<&Tab> {
-        self.tabs.get(self.cur)
+        self.core.tabs.get(self.core.cur)
     }
 
     pub(super) fn tm(&mut self) -> Option<&mut Tab> {
-        self.tabs.get_mut(self.cur)
+        self.core.tabs.get_mut(self.core.cur)
     }
 
     pub(super) fn sel_is_view(&self) -> bool {
-        self.t().is_some_and(|t| self.views.has(t.sel.conn, &t.sel.nskey(), &t.sel.coll))
+        self.t().is_some_and(|t| self.core.views.has(t.sel.conn, &t.sel.nskey(), &t.sel.coll))
     }
 
     pub(super) fn sel_writable(&self) -> bool {
@@ -38,7 +38,7 @@ impl App {
     }
 
     pub(super) fn timeout(&self) -> Duration {
-        Duration::from_millis(self.prefs.timeout_ms)
+        Duration::from_millis(self.core.prefs.timeout_ms)
     }
 
     pub(super) fn target_for(&self, s: &Sel) -> Option<Target> {
@@ -81,7 +81,7 @@ impl App {
 
     pub(super) fn connect(&mut self, id: u64) {
         // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
-        if self.ephemeral {
+        if self.core.ephemeral {
             return self.ok("Offline demo: no database is connected.");
         }
         let uri = match stored_uri(id) {
@@ -95,16 +95,16 @@ impl App {
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
         let tools = self.cloud_tools();
         self.stop_conn_work(id);
-        self.req += 1;
-        let attempt = self.req;
-        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
+        self.core.req += 1;
+        let attempt = self.core.req;
+        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
         c.attempt = attempt;
         c.client = None;
         c.sql = None;
         c.tunnel = None;
         // A new session may see other indexes and statistics, so its plans start fresh.
-        self.explain_prev.forget(id);
+        self.core.explain_prev.forget(id);
         // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
         c.writable = false;
         // Asked again once connected, so a changed or failed server never shows the old one.
@@ -117,9 +117,9 @@ impl App {
             net.key_passphrase = secret(id, "pg-key-passphrase");
         }
         if c.meta.engine.is_sql() {
-            self.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
+            self.core.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
         } else {
-            self.worker.connect(id, attempt, uri, self.timeout(), net);
+            self.core.worker.connect(id, attempt, uri, self.timeout(), net);
         }
     }
 
@@ -127,13 +127,13 @@ impl App {
     /// Work a restart would lose. Settings does not count, since Restart sits in it; every other dialog may hold typed input.
     pub(super) fn busy_work(&self) -> bool {
         self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Settings))
-            || !self.drafts.is_empty()
-            || !self.saving.is_empty()
-            || self.json_edit.is_some()
-            || self.insert.is_some()
-            || self.inline.is_some()
-            || self.new_field.is_some()
-            || self.tool.as_ref().is_some_and(|t| t.done.is_none())
-            || self.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
+            || !self.core.drafts.is_empty()
+            || !self.core.saving.is_empty()
+            || self.core.json_edit.is_some()
+            || self.core.insert.is_some()
+            || self.core.inline.is_some()
+            || self.core.new_field.is_some()
+            || self.core.tool.as_ref().is_some_and(|t| t.done.is_none())
+            || self.core.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
     }
 }

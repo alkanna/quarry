@@ -227,14 +227,14 @@ fn default_n(sql: bool, setting: usize) -> usize {
 
 impl App {
     pub(super) fn default_cols(&self) -> usize {
-        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.prefs.default_cols)
+        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.core.prefs.default_cols)
     }
 
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
         let fields = if agg { t.agg_source().1.to_vec() } else { t.fields.clone() };
-        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&key).cloned().unwrap_or_default();
         let n = self.default_cols();
         let shown = visible_cols(Some(&prefs), &fields, n);
         let mut acts = Vec::new();
@@ -245,7 +245,7 @@ impl App {
                 popover_head(ui, "Columns", &format!("{} of {total}", shown.len()), "Drag to reorder. Pinned columns stay first.");
                 // One field filters the lists and adds a path the lists do not offer. Its suggestions are
                 // nested paths seen in the loaded documents.
-                let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
+                let paths: &[String] = if agg { &fields } else { &self.core.tabs[self.core.cur].paths };
                 let suggest = |b: &str, _: bool| {
                     let typed = b.trim().to_lowercase();
                     let items: Vec<Sug> = paths
@@ -261,17 +261,17 @@ impl App {
                 let (mut enter, mut picked_path) = (false, false);
                 well_field(ui, id, FieldIcon::Search, None, |ui| {
                     let w = ui.available_width();
-                    let (out, picked, m) = ac_input(ui, id, &mut self.col_filter, &mut self.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
+                    let (out, picked, m) = ac_input(ui, id, &mut self.core.col_filter, &mut self.core.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
                     moved = m;
                     picked_path = picked;
                     enter = picked || (out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
                 });
                 // Drawn in the menu, not as a popup: a click on another layer would close the menu.
-                if ac_list(ui, id, &mut self.col_filter, &mut self.ac, moved, Some(ui.available_width() - 2.0)) {
+                if ac_list(ui, id, &mut self.core.col_filter, &mut self.core.ac, moved, Some(ui.available_width() - 2.0)) {
                     (enter, picked_path) = (true, true);
                 }
                 ui.add_space(12.0);
-                let typed = self.col_filter.trim().to_string();
+                let typed = self.core.col_filter.trim().to_string();
                 let needle = typed.to_lowercase();
                 let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
                 let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
@@ -376,7 +376,7 @@ impl App {
         });
         if let Some(c) = add {
             acts.push(ColAct::Show(c));
-            self.col_filter.clear();
+            self.core.col_filter.clear();
         }
         if !acts.is_empty() {
             self.apply_col_acts(&key, &fields, acts);
@@ -385,7 +385,7 @@ impl App {
 
     pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
         let n = self.default_cols();
-        let p = self.prefs.cols.entry(key.to_string()).or_default();
+        let p = self.core.prefs.cols.entry(key.to_string()).or_default();
         col_acts_on(p, n, fields, acts);
         self.save_prefs();
     }
@@ -394,10 +394,10 @@ impl App {
     /// while it is drawn (see `results`) and that work looks rows up in the tab.
     pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) -> SqlAfter {
         let key = self.col_key(agg);
-        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
-        let summarize = !self.prefs.object_preview;
+        let summarize = !self.core.prefs.object_preview;
         // Measuring lays out every loaded cell of the column, so it is done once per result set instead of
         // on every frame. The generation says which answer the rows came from; where they live and how
         // many say which window of it is on screen.
@@ -408,14 +408,14 @@ impl App {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
                     let k = (answer, docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
-                    if let Some(w) = self.width_cache.get(&k) {
+                    if let Some(w) = self.core.width_cache.get(&k) {
                         return *w;
                     }
                     let w = optimal_width(ui, docs, c, prefs.label(c), summarize, OPTIMAL_MAX_W);
-                    if self.width_cache.len() > 512 {
-                        self.width_cache.clear();
+                    if self.core.width_cache.len() > 512 {
+                        self.core.width_cache.clear();
                     }
-                    self.width_cache.insert(k, w);
+                    self.core.width_cache.insert(k, w);
                     w
                 })
             })
@@ -443,7 +443,7 @@ impl App {
         let mut save_widths = false;
         let mut fit = None;
         let mut head_acts: Vec<(String, HeadAct)> = Vec::new();
-        let mut scope_query = self.col_scope_query;
+        let mut scope_query = self.core.col_scope_query;
         let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
         // Single-field sort shown in the header and set from the column popover.
         let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
@@ -495,7 +495,7 @@ impl App {
         // Tab shows the selected row as a record under it; Esc or Tab again hides it.
         let record = sql && self.t().is_some_and(|t| t.record);
         // The Vim cursor's column, scrolled into view after a Vim key moved it. With the record open it walks the record.
-        let vim = self.prefs.vim && !cols.is_empty();
+        let vim = self.core.prefs.vim && !cols.is_empty();
         let vk = self.t().map_or(0, |t| t.vcol).min(cols.len().saturating_sub(1));
         let vscroll = vim && !record && std::mem::take(&mut self.vnav.scroll);
         if !record {
@@ -634,7 +634,7 @@ impl App {
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.scroll_sel) {
+                    if active && std::mem::take(&mut self.core.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     // After the row's own scroll, so the cell's wins sideways.
@@ -648,7 +648,7 @@ impl App {
                         paint_row(ui, rr, active, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                         let p = ui.painter();
                         let off = num_w - NUM_W;
-                        if self.prefs.open_inline && !sql {
+                        if self.core.prefs.open_inline && !sql {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
@@ -678,7 +678,7 @@ impl App {
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
                             // With the record open, the row's editor is drawn in the record.
-                            if sql_rows && !(record && active) && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
+                            if sql_rows && !(record && active) && self.core.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -812,7 +812,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline && !sql {
+                    if (active || expanded.contains(&(agg, i))) && self.core.prefs.open_inline && !sql {
                         ui.add_space(4.0);
                         // Spans every column like the rows above it, not just the visible part.
                         let w = row_w.max(320.0);
@@ -839,7 +839,7 @@ impl App {
             t.vcol = c;
         }
         // What a Vim key asked of the cell under the cursor, or of the record's line, as a click on it would do.
-        if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.prefs.vim)
+        if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.core.prefs.vim)
             && let Some(a) = self.vnav.act.filter(|a| !matches!(a, super::vim_nav::Act::Fold(_)))
         {
             self.vnav.act = None;
@@ -877,17 +877,17 @@ impl App {
             self.sql_view_value(&c, &v);
         }
         if let Some((c, w)) = resized {
-            self.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
+            self.core.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
         }
         if let Some(c) = fit {
             // Back to the measured width, like the original's "optimal" column width.
-            self.prefs.cols.entry(key.clone()).or_default().widths.remove(&c);
+            self.core.prefs.cols.entry(key.clone()).or_default().widths.remove(&c);
             save_widths = true;
         }
         if save_widths {
             self.save_prefs();
         }
-        self.col_scope_query = scope_query;
+        self.core.col_scope_query = scope_query;
         for (c, a) in head_acts {
             self.head_act(ui, agg, docs, fields, &c, a);
         }
@@ -943,7 +943,7 @@ impl App {
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.scroll_sel) {
+                    if active && std::mem::take(&mut self.core.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     paint_row(ui, rect, active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);
@@ -959,7 +959,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.core.prefs.open_inline {
                         ui.add_space(4.0);
                         card(ui, |ui| {
                             ui.set_width(view_w - 48.0);

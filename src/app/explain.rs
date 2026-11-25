@@ -78,12 +78,12 @@ impl App {
             _ => return,
         };
         match (what, self.target()) {
-            _ if self.demo => self.ok("Offline demo: nothing to explain."),
+            _ if self.core.demo => self.ok("Offline demo: nothing to explain."),
             (Err(e), _) => self.err(e),
             (Ok(w), Some(target)) => {
-                self.req += 1;
-                self.explain_req = self.req;
-                self.worker.explain(self.req, target, w, self.page_size());
+                self.core.req += 1;
+                self.core.explain_req = self.core.req;
+                self.core.worker.explain(self.core.req, target, w, self.page_size());
             }
             _ => self.warn_offline(),
         }

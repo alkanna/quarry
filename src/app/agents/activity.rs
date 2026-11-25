@@ -62,7 +62,7 @@ fn outcome_badge(ui: &mut egui::Ui, text: &str, fg: Color32) {
 impl App {
     /// Opens the audit log's folder in the file manager.
     pub(super) fn agents_reveal(&mut self) {
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
         let dir = crate::agents::link::agents_dir();
@@ -74,17 +74,17 @@ impl App {
 
     /// The status bar pill: who is connected and how many calls they made, with the count waiting for you.
     pub(in crate::app) fn agents_pill(&mut self, ui: &mut egui::Ui) {
-        let waiting = self.agents.asks.len();
-        if self.agents.sessions.is_empty() && waiting == 0 {
+        let waiting = self.core.agents.asks.len();
+        if self.core.agents.sessions.is_empty() && waiting == 0 {
             return;
         }
-        let client = match self.agents.sessions.as_slice() {
+        let client = match self.core.agents.sessions.as_slice() {
             [] => "An agent".to_string(),
             [s] if !s.client.is_empty() => s.client.clone(),
             [_] => "An agent".to_string(),
             s => format!("{} agents", s.len()),
         };
-        let calls: u32 = self.agents.sessions.iter().map(|s| s.calls).sum();
+        let calls: u32 = self.core.agents.sessions.iter().map(|s| s.calls).sum();
         let calls_txt = plural(calls as u64, "call");
         let name = ui.painter().layout_job(egui::text::LayoutJob::single_section(client.clone(), ui_fmt(TXT_CAPTION, PRIMARY(), W_MEDIUM, 0.0)));
         let count = ui.painter().layout_job(egui::text::LayoutJob::single_section(calls_txt.clone(), ui_fmt(TXT_CAPTION, MUTED(), 400.0, 0.0)));
@@ -123,20 +123,20 @@ impl App {
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Agent activity");
         if r.clicked() {
             // The waiting call is already in front in its dialog; the list shows what else is waiting.
-            self.agents.filter = if waiting > 0 { Filter::Waiting } else { Filter::All };
-            self.agents.activity_open = true;
+            self.core.agents.filter = if waiting > 0 { Filter::Waiting } else { Filter::All };
+            self.core.agents.activity_open = true;
         }
     }
 
     pub(in crate::app) fn agents_activity_window(&mut self, ctx: &egui::Context) {
-        if !self.agents.activity_open {
+        if !self.core.agents.activity_open {
             return;
         }
         let mut keep = true;
         let (mut clear, mut undo, mut reveal) = (false, None, false);
         let width = fit_width(ctx, 800.0) - 40.0;
-        let names: HashMap<u64, String> = self.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
-        let connected = match self.agents.sessions.as_slice() {
+        let names: HashMap<u64, String> = self.core.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
+        let connected = match self.core.agents.sessions.as_slice() {
             [] => None,
             [s] => Some(format!("{} connected", if s.client.is_empty() { "An agent" } else { &s.client })),
             s => Some(format!("{} agents connected", s.len())),
@@ -157,9 +157,9 @@ impl App {
             let outer = ui;
             let ui = &mut b.content_ui;
             ui.horizontal(|ui| {
-                segmented(ui, &mut self.agents.filter, &FILTERS);
+                segmented(ui, &mut self.core.agents.filter, &FILTERS);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    clear = ui.add_enabled(!self.agents.activity.is_empty(), egui::Button::new("Clear")).on_hover_text("Empties this list. The audit log keeps every call.").clicked();
+                    clear = ui.add_enabled(!self.core.agents.activity.is_empty(), egui::Button::new("Clear")).on_hover_text("Empties this list. The audit log keeps every call.").clicked();
                 });
             });
             ui.add_space(6.0);
@@ -174,16 +174,16 @@ impl App {
                         caption(ui, "RESULT");
                     });
                 });
-                let rows: Vec<&Activity> = self.agents.activity.iter().rev().filter(|a| shows(a, self.agents.filter)).collect();
+                let rows: Vec<&Activity> = self.core.agents.activity.iter().rev().filter(|a| shows(a, self.core.agents.filter)).collect();
                 egui::ScrollArea::vertical().id_salt("agents-activity").max_height(300.0).min_scrolled_height(120.0).auto_shrink([false, true]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     if rows.is_empty() {
                         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 14)).show(ui, |ui| {
-                            ui.label(RichText::new(if self.agents.activity.is_empty() { "No agent calls yet." } else { "No calls match this filter." }).size(TXT_SMALL).color(MUTED()));
+                            ui.label(RichText::new(if self.core.agents.activity.is_empty() { "No agent calls yet." } else { "No calls match this filter." }).size(TXT_SMALL).color(MUTED()));
                         });
                     }
                     for a in rows {
-                        let on = self.agents.picked == Some(a.id);
+                        let on = self.core.agents.picked == Some(a.id);
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, ROW_H + 6.0), Sense::click());
                         let state = state_of(&resp);
                         let fill = if on { tint(PRIMARY(), 46) } else { hover_fill(state) };
@@ -210,12 +210,12 @@ impl App {
                         child.add(egui::Label::new(RichText::new(detail).size(TXT_SMALL).color(TEXT())).truncate());
                         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Row, true, on, format!("{} {} at {}", a.tool, a.ns, a.time)));
                         if resp.clicked() {
-                            self.agents.picked = if on { None } else { Some(a.id) };
+                            self.core.agents.picked = if on { None } else { Some(a.id) };
                         }
                     }
                 });
             });
-            let picked = self.agents.picked.and_then(|id| self.agents.activity.iter().find(|a| a.id == id));
+            let picked = self.core.agents.picked.and_then(|id| self.core.agents.activity.iter().find(|a| a.id == id));
             if let Some(a) = picked {
                 ui.add_space(8.0);
                 let half = (width - 12.0) / 2.0;
@@ -255,8 +255,8 @@ impl App {
             });
         });
         if clear {
-            self.agents.activity.retain(|a| a.outcome == Outcome::Waiting || a.outcome == Outcome::Running);
-            self.agents.picked = None;
+            self.core.agents.activity.retain(|a| a.outcome == Outcome::Waiting || a.outcome == Outcome::Running);
+            self.core.agents.picked = None;
         }
         if let Some(id) = undo {
             self.agent_undo(id);
@@ -265,7 +265,7 @@ impl App {
             self.agents_reveal();
         }
         if !keep || r.should_close() {
-            self.agents.activity_open = false;
+            self.core.agents.activity_open = false;
         }
     }
 }

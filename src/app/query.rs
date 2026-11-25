@@ -103,7 +103,7 @@ fn one_line(s: &str) -> String {
 impl App {
     /// In the offline demo with QUARRY_TEST_SQL=library, holds the library menu open for the picture.
     pub(super) fn demo_open_library(&self, ctx: &egui::Context, button: &egui::Response) {
-        if self.demo && std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
+        if self.core.demo && std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
             egui::Popup::open_id(ctx, egui::Popup::default_response_id(button));
         }
     }

@@ -127,7 +127,7 @@ impl App {
 
     /// The session of `conn` for a read the demo never sends, or None while not connected.
     pub(in crate::app) fn live_sql(&self, conn: u64) -> Option<db::sql::Db> {
-        if self.demo {
+        if self.core.demo {
             return None;
         }
         self.conn(conn)?.sql.clone()
@@ -136,23 +136,23 @@ impl App {
     /// Asks for the schemas of an opened PostgreSQL database. The tables of the picked one follow when they arrive.
     pub(in crate::app) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
         let Some(sql) = self.live_sql(conn) else { return };
-        self.sql_asked.insert((conn, db.to_string()));
-        self.worker.sql_schemas(conn, sql, db.to_string());
+        self.core.sql_asked.insert((conn, db.to_string()));
+        self.core.worker.sql_schemas(conn, sql, db.to_string());
     }
 
     /// Loads the tables of one schema unless they are held or on their way.
     pub(in crate::app) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
         // Without a session nothing is sent and nothing is marked asked, so the load happens once it exists.
         let Some(sql) = self.live_sql(conn) else { return };
-        if schema.is_empty() || !self.pg_tables_asked.insert(conn, db, schema) {
+        if schema.is_empty() || !self.core.pg_tables_asked.insert(conn, db, schema) {
             return;
         }
-        self.worker.sql_tables(conn, sql.at(db), schema.to_string());
+        self.core.worker.sql_tables(conn, sql.at(db), schema.to_string());
     }
 
     /// The switcher's pick: the sidebar lists that schema from now on, and its tables load if they are not held.
     pub(in crate::app) fn pg_set_schema(&mut self, conn: u64, db: &str, schema: String) {
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
             c.pg.entry(db.to_string()).or_default().picked = schema.clone();
         }
         self.pg_load_tables(conn, db, &schema);
@@ -162,8 +162,8 @@ impl App {
     /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
     /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.
     pub(in crate::app) fn pg_refresh(&mut self, conn: u64, db: &str) {
-        let held = self.pg_tables_asked.held(conn, db);
-        self.pg_tables_asked.forget(conn, Some(db), None);
+        let held = self.core.pg_tables_asked.held(conn, db);
+        self.core.pg_tables_asked.forget(conn, Some(db), None);
         for s in &held {
             self.sql_refresh_schema(conn, db, s);
         }
@@ -180,22 +180,22 @@ impl App {
         let list = match res {
             Ok(l) => l,
             Err(e) => {
-                self.side_err.insert((conn, database.clone()), e.clone());
+                self.core.side_err.insert((conn, database.clone()), e.clone());
                 return self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), ..Default::default() }), format!("List schemas · {database}"));
             }
         };
-        self.side_err.remove(&(conn, database.clone()));
+        self.core.side_err.remove(&(conn, database.clone()));
         let user: Vec<String> = list.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
         let listed = |name: &String| list.iter().any(|s| &s.name == name);
         let keep = self.conn(conn).and_then(|c| c.pg.get(&database)).map(|p| p.picked.clone()).filter(|p| listed(p));
         // A tab restored from the last session names its schema before any pick exists; the tree follows it.
         let of_tab = self.t().filter(|t| t.sel.conn == conn && t.sel.db == database).map(|t| t.sel.schema.clone()).filter(|s| !s.is_empty() && listed(s));
         let picked = keep.or(of_tab).unwrap_or_else(|| default_schema(&user).to_string());
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
             c.set_schemas(&database, list, picked.clone());
         }
         // Query tabs opened or switched to this database before its schemas were known take the schema now.
-        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn) {
+        for t in self.core.tabs.iter_mut().filter(|t| t.sel.conn == conn) {
             if t.sel.db == database && t.sel.schema.is_empty() && t.sel.coll.is_empty() && t.sql.is_some() {
                 t.sel.schema = picked.clone();
             }
@@ -210,16 +210,16 @@ impl App {
     pub(in crate::app) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
         match res {
             Ok((names, views)) => {
-                self.side_err.remove(&(conn, ns_key(&database, &schema)));
-                self.views.set(conn, &ns_key(&database, &schema), views);
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                self.core.side_err.remove(&(conn, ns_key(&database, &schema)));
+                self.core.views.set(conn, &ns_key(&database, &schema), views);
+                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.tables.entry(database).or_default().insert(schema, names);
                 }
             }
             Err(e) => {
                 // A schema that failed to list may be asked again by picking it once more.
-                self.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
-                self.side_err.insert((conn, ns_key(&database, &schema)), e.clone());
+                self.core.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
+                self.core.side_err.insert((conn, ns_key(&database, &schema)), e.clone());
                 self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), schema: schema.clone(), ..Default::default() }), format!("List tables · {database}.{schema}"))
             }
         }

@@ -47,14 +47,14 @@ fn the_tls_tab_takes_a_client_certificate_and_test_signs_in_with_it() {
     // require: the test server's certificate does not name the host, see live_client_certificate_sign_in.
     (f.addr.ssl_mode, f.addr.ssl_cert, f.addr.ssl_key) = (db::sql::SslMode::Required, p("client.crt"), p("client-enc.key"));
     ui.click("Test");
-    ui.wait("the Test answer", |a| a.conn_test.is_some());
-    match &ui.app().conn_test {
+    ui.wait("the Test answer", |a| a.core.conn_test.is_some());
+    match &ui.app().core.conn_test {
         Some((_, Ok(m))) => assert!(m.contains("with client certificate") && m.contains("CN=quarry_cert"), "{m}"),
         other => panic!("Test with the client certificate failed: {:?}", other.as_ref().map(|t| &t.1)),
     }
     // Without the passphrase the form says what is missing in words, not the driver's text.
     form_mut(ui.h.state_mut()).pg_key_pass.clear();
     ui.click("Test");
-    ui.wait("the Test answer", |a| a.conn_test.is_some());
+    ui.wait("the Test answer", |a| a.core.conn_test.is_some());
     ui.show("The client key needs its passphrase. The key file is encrypted. Type its passphrase on the connection's TLS tab.");
 }

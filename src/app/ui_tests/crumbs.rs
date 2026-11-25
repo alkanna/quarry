@@ -12,10 +12,10 @@ fn the_second_line_puts_the_connection_before_the_database() {
 fn the_same_table_on_two_connections_reads_differently() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.conns.push(Conn::new(ConnMeta { id: 9, name: "Billing".into(), engine: db::sql::Engine::MySql, tag: "Production".into(), ..Default::default() }, Status::Ready));
-    a.tabs.push(Tab::new(Sel { conn: 9, db: "shop".into(), coll: "orders".into(), ..Default::default() }));
-    let line = |a: &App, i: usize| super::super::crumbs::tab_second_line(a.conn(a.tabs[i].sel.conn).map_or("", |c| c.meta.name.as_str()), a.tabs[i].sel.scope_label());
-    let (first, last) = (a.tabs.iter().position(|t| t.sel.coll == "orders" && t.sel.conn == 1).unwrap(), a.tabs.len() - 1);
+    a.core.conns.push(Conn::new(ConnMeta { id: 9, name: "Billing".into(), engine: db::sql::Engine::MySql, tag: "Production".into(), ..Default::default() }, Status::Ready));
+    a.core.tabs.push(Tab::new(Sel { conn: 9, db: "shop".into(), coll: "orders".into(), ..Default::default() }));
+    let line = |a: &App, i: usize| super::super::crumbs::tab_second_line(a.conn(a.core.tabs[i].sel.conn).map_or("", |c| c.meta.name.as_str()), a.core.tabs[i].sel.scope_label());
+    let (first, last) = (a.core.tabs.iter().position(|t| t.sel.coll == "orders" && t.sel.conn == 1).unwrap(), a.core.tabs.len() - 1);
     assert_ne!(line(a, first), line(a, last));
     assert!(line(a, last).starts_with("Billing"));
     ui.settle();
@@ -26,23 +26,23 @@ fn the_same_table_on_two_connections_reads_differently() {
 #[test]
 fn picking_a_database_in_the_crumb_reveals_it_in_the_explorer() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    assert!(!ui.app().open_dbs.contains(&(1, "analytics".to_string())));
+    assert!(!ui.app().core.open_dbs.contains(&(1, "analytics".to_string())));
     ui.click("Database crumb");
     ui.click("Database analytics");
     ui.settle();
-    assert!(ui.app().open_dbs.contains(&(1, "analytics".to_string())), "the explorer did not expand the picked database");
-    assert_eq!(ui.app().prefs.recent_dbs(1).first().map(String::as_str), Some("analytics"));
+    assert!(ui.app().core.open_dbs.contains(&(1, "analytics".to_string())), "the explorer did not expand the picked database");
+    assert_eq!(ui.app().core.prefs.recent_dbs(1).first().map(String::as_str), Some("analytics"));
 }
 
 #[test]
 fn picking_a_database_in_a_query_tab_changes_its_database() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.conns.push(Conn { dbs: vec![("shop".into(), Some(vec!["orders".into()])), ("billing".into(), Some(Vec::new()))], ..Conn::new(ConnMeta { id: 9, name: "Shop SQL".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
+    a.core.conns.push(Conn { dbs: vec![("shop".into(), Some(vec!["orders".into()])), ("billing".into(), Some(Vec::new()))], ..Conn::new(ConnMeta { id: 9, name: "Shop SQL".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
     let mut t = Tab::new(Sel { conn: 9, db: "shop".into(), ..Default::default() });
     t.view = View::Sql;
-    a.tabs.push(t);
-    let last = a.tabs.len() - 1;
+    a.core.tabs.push(t);
+    let last = a.core.tabs.len() - 1;
     a.set_cur(last);
     ui.settle();
     ui.click("Database crumb");
@@ -72,13 +72,13 @@ fn the_title_bar_has_no_settings_button() {
 fn picking_a_schema_in_a_postgres_query_tab_moves_its_runs_there() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.conns.push(Conn { dbs: vec![("analytics".into(), Some(vec!["public".into(), "reporting".into()]))], ..Conn::new(ConnMeta { id: 9, name: "Analytics".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) });
+    a.core.conns.push(Conn { dbs: vec![("analytics".into(), Some(vec!["public".into(), "reporting".into()]))], ..Conn::new(ConnMeta { id: 9, name: "Analytics".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) });
     let mut t = Tab::new(Sel { conn: 9, db: "analytics".into(), schema: "public".into(), ..Default::default() }).for_engine(db::sql::Engine::Postgres);
     t.view = View::Sql;
     // A schema a library script set, which the pick must replace.
     t.sql.as_mut().unwrap().run_schema = "staging".into();
-    a.tabs.push(t);
-    let last = a.tabs.len() - 1;
+    a.core.tabs.push(t);
+    let last = a.core.tabs.len() - 1;
     a.set_cur(last);
     ui.settle();
     ui.click("Schema crumb");
@@ -107,13 +107,13 @@ fn a_tables_query_view_runs_in_the_database_picked_in_the_crumb() {
 fn a_schema_picked_in_a_query_tab_running_in_another_database_applies_there() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.conns.push(Conn { dbs: vec![("analytics".into(), Some(vec!["public".into()])), ("billing".into(), Some(vec!["public".into(), "ledger".into()]))], ..Conn::new(ConnMeta { id: 9, name: "Analytics".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) });
+    a.core.conns.push(Conn { dbs: vec![("analytics".into(), Some(vec!["public".into()])), ("billing".into(), Some(vec!["public".into(), "ledger".into()]))], ..Conn::new(ConnMeta { id: 9, name: "Analytics".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) });
     let mut t = Tab::new(Sel { conn: 9, db: "analytics".into(), schema: "public".into(), ..Default::default() }).for_engine(db::sql::Engine::Postgres);
     t.view = View::Sql;
     // A library script left the tab running in another database.
     t.sql.as_mut().unwrap().run_db = "billing".into();
-    a.tabs.push(t);
-    let last = a.tabs.len() - 1;
+    a.core.tabs.push(t);
+    let last = a.core.tabs.len() - 1;
     a.set_cur(last);
     ui.settle();
     ui.click("Schema crumb");

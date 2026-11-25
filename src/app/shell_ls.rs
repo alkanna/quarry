@@ -299,15 +299,15 @@ impl App {
     /// Fields of the collections loaded in tabs of the current tab's database, the current tab's
     /// first so its fields win for its collection.
     pub(super) fn db_fields(&self) -> Vec<(String, Arc<Fields>)> {
-        let cur = &self.tabs[self.cur];
+        let cur = &self.core.tabs[self.core.cur];
         self.fields_of(cur.sel.conn, &cur.sel.db)
     }
 
     /// The same for any connection and database, so an attached one is typed from tabs that show it.
     pub(super) fn fields_of(&self, conn: u64, db: &str) -> Vec<(String, Arc<Fields>)> {
-        let cur = &self.tabs[self.cur];
+        let cur = &self.core.tabs[self.core.cur];
         let mut out: Vec<(String, Arc<Fields>)> = Vec::new();
-        for t in std::iter::once(cur).chain(&self.tabs) {
+        for t in std::iter::once(cur).chain(&self.core.tabs) {
             if t.sel.conn == conn && t.sel.db == db && !t.field_info.is_empty() && !out.iter().any(|o| o.0 == t.sel.coll) {
                 out.push((t.sel.coll.clone(), t.field_info.clone()));
             }
@@ -317,7 +317,7 @@ impl App {
 
     /// The key of the current tab's database in the column cache.
     fn sql_key(&self) -> (u64, String) {
-        let t = &self.tabs[self.cur];
+        let t = &self.core.tabs[self.core.cur];
         (t.sel.conn, ns_key(&t.sel.db, &self.sel_schema(&t.sel)))
     }
 
@@ -325,12 +325,12 @@ impl App {
     /// refreshes one already held, as a run does so that a table added since shows up.
     pub(super) fn sql_columns_ask(&mut self, again: bool) {
         let key = self.sql_key();
-        if self.demo || (self.sql_schema_asked.contains(&key) && !again) {
+        if self.core.demo || (self.core.sql_schema_asked.contains(&key) && !again) {
             return;
         }
-        let Some((db, space)) = self.sql_target(&self.tabs[self.cur].sel) else { return };
-        self.sql_schema_asked.insert(key.clone());
-        self.worker.sql_schema(key.0, db, space);
+        let Some((db, space)) = self.sql_target(&self.core.tabs[self.core.cur].sel) else { return };
+        self.core.sql_schema_asked.insert(key.clone());
+        self.core.worker.sql_schema(key.0, db, space);
     }
 
     /// Sends a request about character `at` of the current script, starting the server first if
@@ -340,19 +340,19 @@ impl App {
             if self.js.fails >= MAX_FAILS {
                 return None;
             }
-            let runtime = find_bun(&self.prefs.shell_runtime)?;
-            self.js.tx = Some(self.worker.js_ls(runtime, config_dir().join("shell"), self.prefs.shell_packages.clone()));
+            let runtime = find_bun(&self.core.prefs.shell_runtime)?;
+            self.js.tx = Some(self.core.worker.js_ls(runtime, config_dir().join("shell"), self.core.prefs.shell_packages.clone()));
             self.js.globals = None;
         }
-        let names: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
-        let sql = self.tabs[self.cur].sql.is_some();
+        let names: Vec<String> = self.core.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
+        let sql = self.core.tabs[self.core.cur].sql.is_some();
         let attached = self.attached_infos();
         let key = globals_key(colls, &names, &attached) ^ sql as u64;
         // Rebuilt when an attachment was added, removed or retyped by a new schema or field list.
         let att_same = attached.len() == self.js.typed_att.len() && attached.iter().zip(&self.js.typed_att).all(|(a, b)| a.typed.same(b));
         // SQL tabs are typed from the autocomplete schema, which is replaced on every reload, so
         // pointer equality means unchanged.
-        let sql_cols = sql.then(|| self.sql_schema.get(&self.sql_key()).cloned()).flatten();
+        let sql_cols = sql.then(|| self.core.sql_schema.get(&self.sql_key()).cloned()).flatten();
         let (known, same) = if sql {
             let same = match (&sql_cols, &self.js.typed_sql) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -382,11 +382,11 @@ impl App {
         (self.js.globals, self.js.typed, self.js.typed_sql) = (Some(key), known, sql_cols);
         self.js.typed_att = attached.into_iter().map(|a| a.typed).collect();
         // Placeholders swapped for text of their length, so {{day:date}} is no syntax error and positions still match.
-        let code = crate::library::snippet::mask(&self.tabs[self.cur].shell.code, crate::library::snippet::Lang::Shell);
+        let code = crate::library::snippet::mask(&self.core.tabs[self.core.cur].shell.code, crate::library::snippet::Lang::Shell);
         let (line, col) = db::lsp_pos(&code, at);
-        self.req += 1;
-        self.js.tx.as_ref()?.send(db::JsLsReq { req: self.req, ask, code, line, col, globals }).ok()?;
-        Some(self.req)
+        self.core.req += 1;
+        self.js.tx.as_ref()?.send(db::JsLsReq { req: self.core.req, ask, code, line, col, globals }).ok()?;
+        Some(self.core.req)
     }
 
     /// The server stopped. Idle stops are normal; failures count toward turning it off.
@@ -429,7 +429,7 @@ impl App {
             self.js_ask(f.id, caret, colls);
         }
         self.js_resolve(f.id, colls);
-        let completion = self.ac.shown(f.id);
+        let completion = self.core.ac.shown(f.id);
         let sig_doc = self.js.sig.as_ref().is_some_and(|s| s.doc.is_some());
         self.js_hover(ctx, f.hover, completion || sig_doc, colls);
         let top = ctx.content_rect().top() + 4.0;
@@ -476,9 +476,9 @@ impl App {
     fn js_ask(&mut self, id: egui::Id, caret: usize, colls: &[String]) {
         self.js.complete = None;
         self.js.resolve = None;
-        let before: String = self.tabs[self.cur].shell.code.chars().take(caret).collect();
+        let before: String = self.core.tabs[self.core.cur].shell.code.chars().take(caret).collect();
         // SQL templates complete from the schema, not from the TypeScript server.
-        if self.tabs[self.cur].sql.is_some() && sql_at(&before, before.len()).is_some() {
+        if self.core.tabs[self.core.cur].sql.is_some() && sql_at(&before, before.len()).is_some() {
             self.js.sig = None;
             return;
         }
@@ -496,7 +496,7 @@ impl App {
         if !ask {
             return;
         }
-        let tab = self.cur;
+        let tab = self.core.cur;
         if let Some(req) = self.js_send(db::JsAsk::Complete, caret, colls) {
             self.js.complete = Some(Pending { req, id, tab, caret, token });
         }
@@ -504,10 +504,10 @@ impl App {
 
     /// Asks for the docs of the selected suggestion when the list came from the server.
     fn js_resolve(&mut self, id: egui::Id, colls: &[String]) {
-        if self.ac.id != Some(id.value()) || self.ac.doc.as_ref().is_some_and(|d| d.0 == self.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.ac.sel) {
+        if self.core.ac.id != Some(id.value()) || self.core.ac.doc.as_ref().is_some_and(|d| d.0 == self.core.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.core.ac.sel) {
             return;
         }
-        let (sel, caret) = (self.ac.sel, self.ac.cursor);
+        let (sel, caret) = (self.core.ac.sel, self.core.ac.cursor);
         let Some(raw) = self.js.raw.get(sel).cloned() else { return };
         self.js.resolve = self.js_send(db::JsAsk::Resolve(raw), caret, colls).map(|r| (r, sel));
     }
@@ -550,7 +550,7 @@ impl App {
             None => false,
         };
         if !alive {
-            let span = at.and_then(|(i, pos)| word_span(&self.tabs[self.cur].shell.code, i).map(|span| (span, pos)));
+            let span = at.and_then(|(i, pos)| word_span(&self.core.tabs[self.core.cur].shell.code, i).map(|span| (span, pos)));
             self.js.hover = span.map(|(span, pos)| Hover { span, since: Instant::now(), pos, asked: false, req: None, doc: None, left: None, open: false, rect: None });
         }
         let Some(h) = &self.js.hover else { return };
@@ -574,15 +574,15 @@ impl App {
             db::JsOut::Items(items) => {
                 let Some(p) = self.js.complete.filter(|p| p.req == req) else { return };
                 self.js.complete = None;
-                if p.tab == self.cur && ctx.memory(|m| m.has_focus(p.id)) {
+                if p.tab == self.core.cur && ctx.memory(|m| m.has_focus(p.id)) {
                     self.js_list(p, items);
                 }
             }
             db::JsOut::Doc(doc) => {
                 if let Some((_, sel)) = self.js.resolve.filter(|r| r.0 == req) {
                     self.js.resolve = None;
-                    if let Some(d) = doc.filter(|_| self.ac.sel == sel) {
-                        self.ac.doc = Some((sel, d));
+                    if let Some(d) = doc.filter(|_| self.core.ac.sel == sel) {
+                        self.core.ac.doc = Some((sel, d));
                     }
                 } else if let Some(s) = self.js.sig.as_mut().filter(|s| s.req == Some(req)) {
                     s.doc = doc;
@@ -595,7 +595,7 @@ impl App {
 
     /// Turns server items into the suggestion list, replacing the built-in one when there are any.
     fn js_list(&mut self, p: Pending, items: Vec<db::JsItem>) {
-        let code = &self.tabs[self.cur].shell.code;
+        let code = &self.core.tabs[self.core.cur].shell.code;
         let typed: String = code.chars().take(p.caret).skip(p.caret - p.token).collect();
         let callable = ["bind", "apply"].iter().all(|n| items.iter().any(|i| i.label == *n));
         let word_start = p.caret - p.token;
@@ -624,7 +624,7 @@ impl App {
         let (items, raw): (Vec<Sug>, Vec<_>) = list.into_iter().map(|(s, i)| (s, i.raw)).unzip();
         self.js.raw = raw;
         self.js.resolve = None;
-        self.ac = Ac { id: Some(p.id.value()), token: p.token, items, cursor: p.caret, ..Default::default() };
+        self.core.ac = Ac { id: Some(p.id.value()), token: p.token, items, cursor: p.caret, ..Default::default() };
     }
 }
 

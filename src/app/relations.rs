@@ -14,8 +14,8 @@ impl App {
         ui.add(egui::Label::new(RichText::new("Each relation's preview field is shown next to its ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(TXT_SMALL).color(MUTED())).wrap());
         ui.add_space(10.0);
         let key = format!("{conn}/{db}");
-        let before = self.prefs.relations.get(&key).cloned().unwrap_or_default();
-        let list = self.prefs.relations.entry(key.clone()).or_default();
+        let before = self.core.prefs.relations.get(&key).cloned().unwrap_or_default();
+        let list = self.core.prefs.relations.entry(key.clone()).or_default();
         if list.is_empty() {
             ui.label(RichText::new("None yet.").color(FAINT()));
         }
@@ -66,7 +66,7 @@ impl App {
         let mut note: Option<db::Res<String>> = None;
         let mut changed = false;
         ui.horizontal(|ui| {
-            let list = self.prefs.relations.entry(key.clone()).or_default();
+            let list = self.core.prefs.relations.entry(key.clone()).or_default();
             if ui.add_enabled(!list.is_empty(), egui::Button::new("Export…")).clicked() && let Some(path) = rfd::FileDialog::new().set_file_name(format!("{db}-data-relations.json")).save_file() {
                 match std::fs::write(&path, relations_export(db, list)) {
                     Ok(()) => note = Some(Ok(format!("Exported {} data relations", list.len()))),
@@ -89,12 +89,12 @@ impl App {
                     Err(e) => note = Some(Err(format!("Failed to import relations: {e}"))),
                 }
             }
-            let n = self.prefs.relations.get(&key).map_or(0, Vec::len);
+            let n = self.core.prefs.relations.get(&key).map_or(0, Vec::len);
             ui.add_enabled_ui(n > 0, |ui| {
                 ui.menu_button(RichText::new("Remove all…").color(ALERT()), |ui| {
                     menu_look(ui);
                     if danger(ui, format!("Remove all {n} relations of {db}")).clicked() {
-                        self.prefs.relations.remove(&key);
+                        self.core.prefs.relations.remove(&key);
                         changed = true;
                         ui.close();
                     }
@@ -119,7 +119,7 @@ impl App {
         let ui = outer;
         if dialog_done(ui) {
             *keep = false;
-            let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.req).collect();
+            let reqs: Vec<u64> = self.core.tabs.iter().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.req).collect();
             for r in reqs {
                 if let Some(t) = self.tab_by_req(r) {
                     t.related.clear();
@@ -153,13 +153,13 @@ impl App {
     /// Asks for the preview of every referenced id on the page, like the original's
     /// relatedDocuments (renderer line 107207).
     pub(super) fn load_related(&mut self, req: u64) {
-        let Some(t) = self.tabs.iter().find(|t| t.req == req) else { return };
+        let Some(t) = self.core.tabs.iter().find(|t| t.req == req) else { return };
         let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
-        let rels = self.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
+        let rels = self.core.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
         for r in rels {
             let ids = db::values_at(t.docs.iter().map(db::Row::raw), &r.path);
             if !ids.is_empty() {
-                self.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
+                self.core.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
             }
         }
     }
@@ -175,10 +175,10 @@ impl App {
     }
 
     pub(super) fn analyze_relations(&mut self, conn: u64, client: Client, db: String, coll: String) {
-        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.views.has(conn, &db, c)).collect();
+        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.core.views.has(conn, &db, c)).collect();
         let colls = if coll.is_empty() { all.clone() } else { vec![coll.clone()] };
         self.ok(format!("Analyzing data relations of {}…", if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") }));
-        self.worker.analyze_relations(conn, Target { client, db, coll, timeout: self.timeout() }, colls, all);
+        self.core.worker.analyze_relations(conn, Target { client, db, coll, timeout: self.timeout() }, colls, all);
     }
 }
 

@@ -54,7 +54,7 @@ impl UiApp {
 
     /// Waits until the linked-file reads and writes on the worker are back.
     fn wait_files(&mut self) {
-        self.wait("the linked-file jobs", |a| a.lib_ui.jobs.is_empty());
+        self.wait("the linked-file jobs", |a| a.core.lib_ui.jobs.is_empty());
         self.settle();
     }
 
@@ -66,11 +66,11 @@ impl UiApp {
         let row = self.h.get_all_by_label(label).min_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).expect("a row");
         row.click();
         self.settle();
-        self.wait("the row to be selected", |a| a.lib_ui.panel.focus);
+        self.wait("the row to be selected", |a| a.core.lib_ui.panel.focus);
     }
 
     fn show_library(&mut self) {
-        if self.app().prefs.side_mode() != SideMode::Library || self.app().prefs.sidebar_hidden {
+        if self.app().core.prefs.side_mode() != SideMode::Library || self.app().core.prefs.sidebar_hidden {
             self.click("Scripts");
         }
     }
@@ -102,7 +102,7 @@ fn mysql_a_query_saved_in_a_new_folder_reopens_from_the_library_and_runs() {
     ui.settle();
     ui.show("Group Journey");
     ui.drag("test", "Group Journey", 0.5, 1);
-    assert_eq!(ui.app().groups.group_of(CONN).map(|g| g.name.as_str()), Some("Journey"), "the drag did not put the connection in the group");
+    assert_eq!(ui.app().core.groups.group_of(CONN).map(|g| g.name.as_str()), Some("Journey"), "the drag did not put the connection in the group");
 
     // A Query tab with a SELECT, saved with Cmd+S into a new folder of the library.
     ui.h.state_mut().sql_new_query(CONN, "quarry_test".into());
@@ -118,7 +118,7 @@ fn mysql_a_query_saved_in_a_new_folder_reopens_from_the_library_and_runs() {
     ui.fill("New folder name", "Journeys");
     ui.click_last("Save");
     ui.wait("the dialog to close", |a| a.modal.is_none());
-    let lib = &ui.app().library;
+    let lib = &ui.app().core.library;
     let folder = lib.folders.iter().find(|f| f.name == "Journeys").map(|f| f.id).expect("the new folder");
     let s = lib.scripts.iter().find(|s| s.name == "Names").cloned().expect("the saved script");
     assert_eq!((s.folder, s.kind.as_str(), s.conn, s.db.as_str()), (Some(folder), "sql", CONN, "quarry_test"));
@@ -148,8 +148,8 @@ fn mysql_a_linked_file_is_edited_saved_and_reloaded_after_a_change_on_disk() {
     ui.fill("Folder path", &dir.0.to_string_lossy());
     ui.show("1 script in 1 folder");
     ui.click("Link folder");
-    let link = ui.app().library.links.first().map(|l| l.id).expect("a link");
-    assert_eq!(ui.app().library.links[0].conns, [CONN]);
+    let link = ui.app().core.library.links.first().map(|l| l.id).expect("a link");
+    assert_eq!(ui.app().core.library.links[0].conns, [CONN]);
 
     // Opened from the tree with Return.
     ui.show_library();
@@ -194,8 +194,8 @@ fn mysql_a_write_run_from_the_library_on_a_locked_connection_changes_nothing() {
     let mut ui = ui_app(MY).unwrap();
     assert!(!ui.app().conn(CONN).unwrap().writable, "the connection starts read-only");
     let a = ui.h.state_mut();
-    let id = a.library.next_id();
-    a.library.scripts.push(Script { id, name: "Raise qty".into(), kind: "sql".into(), body: format!("UPDATE quarry_test.{table} SET qty = 99 WHERE id = 1"), conn: CONN, db: "quarry_test".into(), ..Default::default() });
+    let id = a.core.library.next_id();
+    a.core.library.scripts.push(Script { id, name: "Raise qty".into(), kind: "sql".into(), body: format!("UPDATE quarry_test.{table} SET qty = 99 WHERE id = 1"), conn: CONN, db: "quarry_test".into(), ..Default::default() });
     ui.show_library();
     ui.library_row("Raise qty");
     ui.key(egui::Modifiers::COMMAND, egui::Key::Enter);
@@ -231,8 +231,8 @@ fn postgres_a_library_script_with_a_schema_runs_in_that_schema() {
     fx.sql(&format!("INSERT INTO public.{table} VALUES ('in public')"));
     let mut ui = ui_app(PG).unwrap();
     let a = ui.h.state_mut();
-    let id = a.library.next_id();
-    a.library.scripts.push(Script { id, name: "Where am I".into(), kind: "sql".into(), body: format!("SELECT v FROM {table}"), conn: CONN, db: "quarry_test".into(), schema: schema.clone(), ..Default::default() });
+    let id = a.core.library.next_id();
+    a.core.library.scripts.push(Script { id, name: "Where am I".into(), kind: "sql".into(), body: format!("SELECT v FROM {table}"), conn: CONN, db: "quarry_test".into(), schema: schema.clone(), ..Default::default() });
     a.open_script(&ScriptRef::Saved(id), How::Run);
     ui.wait("the script's tab", |a| a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.r == ScriptRef::Saved(id)));
     ui.wait_run();
@@ -264,8 +264,8 @@ fn mongo_a_filter_with_a_date_shortcut_is_saved_to_a_linked_file_and_reopens() {
     let dir = Dir::new("mongo");
     let mut ui = ui_app(MONGO).unwrap();
     let a = ui.h.state_mut();
-    let link = a.library.next_id();
-    a.library.links.push(Link { id: link, path: dir.0.clone(), name: "filters".into(), on: "conns".into(), conns: vec![CONN], exts: vec!["json".into()], follow: true, ..Default::default() });
+    let link = a.core.library.next_id();
+    a.core.library.links.push(Link { id: link, path: dir.0.clone(), name: "filters".into(), on: "conns".into(), conns: vec![CONN], exts: vec!["json".into()], follow: true, ..Default::default() });
     a.rescan_link(link);
 
     // The collection, filtered with #today.

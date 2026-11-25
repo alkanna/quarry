@@ -151,7 +151,7 @@ fn the_save_to_library_dialog_fits_and_saves() {
         },
         "Save",
         "Save",
-        |a| a.modal.is_none() && !a.library.scripts.is_empty(),
+        |a| a.modal.is_none() && !a.core.library.scripts.is_empty(),
         "Save to library",
     );
 }

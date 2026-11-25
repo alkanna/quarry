@@ -170,7 +170,7 @@ impl App {
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
         self.sync_stages();
-        let auto = self.prefs.auto_preview;
+        let auto = self.core.prefs.auto_preview;
         let mut auto_now = auto;
         let t = self.tm().unwrap();
         let builder = !t.agg_text_mode;
@@ -317,7 +317,7 @@ impl App {
             }
         });
         if auto_now != auto {
-            self.prefs.auto_preview = auto_now;
+            self.core.prefs.auto_preview = auto_now;
             self.save_prefs();
             if auto_now {
                 self.stages_changed(0, false);
@@ -377,7 +377,7 @@ impl App {
     /// Stages from `from` on need a new preview (a second later while typing), and the pipeline
     /// text follows the stages.
     pub(super) fn stages_changed(&mut self, from: usize, typing: bool) {
-        let auto = self.prefs.auto_preview;
+        let auto = self.core.prefs.auto_preview;
         let t = self.tm().unwrap();
         let at = std::time::Instant::now() + std::time::Duration::from_millis(if typing { 1000 } else { 0 });
         for s in t.stages.iter_mut().skip(from) {
@@ -435,17 +435,17 @@ impl App {
     /// Runs the next stage preview that is due, one at a time and in order, like the original's
     /// getResultsForStages (renderer line 112079), so a pipeline never floods the server.
     pub(super) fn pump_previews(&mut self, ctx: &egui::Context) {
-        if self.demo {
+        if self.core.demo {
             return;
         }
         let Some(target) = self.target() else { return };
         let now = std::time::Instant::now();
-        let t = &mut self.tabs[self.cur];
+        let t = &mut self.core.tabs[self.core.cur];
         if t.agg_input.req == 0 && t.agg_input.due.is_some_and(|d| d <= now) {
             t.agg_input.due = None;
-            self.req += 1;
-            t.agg_input.req = self.req;
-            self.worker.stage_preview(self.req, target.clone(), Vec::new(), t.agg_input.limit);
+            self.core.req += 1;
+            t.agg_input.req = self.core.req;
+            self.core.worker.stage_preview(self.core.req, target.clone(), Vec::new(), t.agg_input.limit);
         }
         if t.stages.iter().any(|s| s.req != 0) {
             return;
@@ -465,9 +465,9 @@ impl App {
                 (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some("This stage writes, so it only runs with the whole pipeline (Run).".into()), None, Vec::new());
             }
             Ok(p) => {
-                self.req += 1;
-                t.stages[k].req = self.req;
-                self.worker.stage_preview(self.req, target, p, t.stages[k].limit);
+                self.core.req += 1;
+                t.stages[k].req = self.core.req;
+                self.core.worker.stage_preview(self.core.req, target, p, t.stages[k].limit);
             }
         }
     }

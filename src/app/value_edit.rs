@@ -108,17 +108,17 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
 impl App {
     /// The large editor shows in the docked panel rather than a dialog. A whole document always gets the dialog.
     pub(super) fn value_in_panel(&self) -> bool {
-        self.prefs.value_panel && (self.json_edit.as_ref().is_some_and(|je| !je.path.is_empty()) || self.sql_cell.as_ref().is_some_and(|e| e.big))
+        self.core.prefs.value_panel && (self.core.json_edit.as_ref().is_some_and(|je| !je.path.is_empty()) || self.core.sql_cell.as_ref().is_some_and(|e| e.big))
     }
 
     /// The large editor shows as a dialog, which takes the keys from the page.
     pub(super) fn value_dialog_open(&self) -> bool {
-        (self.json_edit.is_some() || self.sql_cell.as_ref().is_some_and(|e| e.big)) && !self.value_in_panel()
+        (self.core.json_edit.is_some() || self.core.sql_cell.as_ref().is_some_and(|e| e.big)) && !self.value_in_panel()
     }
 
     /// The side panel holds text not applied yet, which opening another value would throw away.
     pub(super) fn panel_dirty(&self) -> bool {
-        self.value_in_panel() && (self.json_edit.as_ref().is_some_and(|j| j.dirty) || self.sql_cell.as_ref().is_some_and(|e| e.big && e.dirty))
+        self.value_in_panel() && (self.core.json_edit.as_ref().is_some_and(|j| j.dirty) || self.core.sql_cell.as_ref().is_some_and(|e| e.big && e.dirty))
     }
 
     /// The large editor as a dialog, from `modals`.
@@ -131,7 +131,7 @@ impl App {
         let screen = ctx.content_rect();
         let max_h = screen.height() * 0.62;
         let width = (screen.width() * 0.72).clamp(480.0, 1200.0);
-        if let Some(mut je) = self.json_edit.take() {
+        if let Some(mut je) = self.core.json_edit.take() {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
                 ui.set_width(width);
@@ -139,14 +139,14 @@ impl App {
             });
             self.json_edit_act(je, close(&r, act));
         }
-        if let Some(mut e) = self.sql_cell.take_if(|e| e.big) {
+        if let Some(mut e) = self.core.sql_cell.take_if(|e| e.big) {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "sqlcell"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.sql_cell_body(ui, &mut e, None, max_h);
             });
             sql_cell_act(&mut e, close(&r, act));
-            self.sql_cell = Some(e);
+            self.core.sql_cell = Some(e);
         }
     }
 
@@ -158,13 +158,13 @@ impl App {
         egui::Panel::right("value-panel").default_size(380.0).size_range(280.0..=900.0).resizable(true).frame(egui::Frame::new().fill(PANEL()).inner_margin(12)).show(ui, |ui| {
             let max_h = (ui.available_height() - 120.0).max(80.0);
             let rows = (max_h / ui.text_style_height(&egui::TextStyle::Monospace)) as usize;
-            if let Some(mut je) = self.json_edit.take() {
+            if let Some(mut je) = self.core.json_edit.take() {
                 let act = self.json_edit_body(ui, &mut je, Some(rows), max_h);
                 self.json_edit_act(je, act);
-            } else if let Some(mut e) = self.sql_cell.take() {
+            } else if let Some(mut e) = self.core.sql_cell.take() {
                 let act = self.sql_cell_body(ui, &mut e, Some(rows), max_h);
                 sql_cell_act(&mut e, act);
-                self.sql_cell = Some(e);
+                self.core.sql_cell = Some(e);
             }
         });
     }
@@ -211,7 +211,7 @@ impl App {
 
     fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
         let new = match act {
-            ValueAct::None => return self.json_edit = Some(je),
+            ValueAct::None => return self.core.json_edit = Some(je),
             ValueAct::Close => return,
             ValueAct::Null => db::edit_path(&je.base, &je.path, Some(Bson::Null)),
             ValueAct::Apply if je.path.is_empty() => db::parse_doc(&je.text).and_then(|mut new| {
@@ -240,7 +240,7 @@ impl App {
             }
             Err(e) => {
                 self.err(e);
-                self.json_edit = Some(je);
+                self.core.json_edit = Some(je);
             }
         }
     }

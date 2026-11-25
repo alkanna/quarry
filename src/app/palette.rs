@@ -155,7 +155,7 @@ impl App {
                 (db.clone(), c.meta.name.clone(), Glyph::Db, meta, None)
             }
             Jump::Coll(s) => {
-                let view = self.views.has(s.conn, &s.nskey(), &s.coll);
+                let view = self.core.views.has(s.conn, &s.nskey(), &s.coll);
                 let glyph = if view { Glyph::View } else if sql { Glyph::Table } else { Glyph::Coll };
                 let place = if s.schema.is_empty() { s.db.clone() } else { format!("{} \u{203a} {}", s.db, s.schema) };
                 (s.coll.clone(), format!("{} \u{203a} {}{}", c.meta.name, place, if view { " \u{b7} view" } else { "" }), glyph, String::new(), None)
@@ -176,7 +176,7 @@ impl App {
         let mut add = |group: &str, row: Row| out.push((group.to_string(), row));
         if let Some(t) = self.t() {
             let sql = self.conn(t.sel.conn).is_some_and(|c| c.meta.engine.is_sql());
-            let g = format!("This tab \u{b7} {}", self.tab_name(self.cur));
+            let g = format!("This tab \u{b7} {}", self.tab_name(self.core.cur));
             add(&g, Row::cmd("Reload tab", Glyph::Reload, keys(false, false, "R"), Cmd::Reload));
             add(&g, Row::cmd("Explain", Glyph::Prompt, keys(false, false, "E"), Cmd::Explain));
             if !t.sel.coll.is_empty() {
@@ -191,10 +191,10 @@ impl App {
             }
             add(&g, Row::cmd("Close tab", Glyph::Tab, keys(false, false, "W"), Cmd::CloseTab));
         }
-        if let Some(c) = self.active.and_then(|id| self.conn(id)) {
+        if let Some(c) = self.core.active.and_then(|id| self.conn(id)) {
             let (_, product) = engine_mark(c.meta.engine, &c.server.product);
             let g = format!("{} \u{b7} {product}", c.meta.name);
-            let lockable = c.status == Status::Ready && !self.prefs.always_writable;
+            let lockable = c.status == Status::Ready && !self.core.prefs.always_writable;
             if c.status == Status::Ready {
                 add(&g, Row::cmd("Refresh connection", Glyph::Reload, keys(true, false, "R"), Cmd::Connect));
                 if lockable && c.writable {
@@ -222,19 +222,19 @@ impl App {
         add(g, Row::cmd("Link a folder\u{2026}", Glyph::Prompt, "", Cmd::LinkFolder));
         let g = "Connection groups";
         add(g, Row::cmd("New group", Glyph::Prompt, "", Cmd::NewGroup));
-        for gr in &self.groups.groups {
+        for gr in &self.core.groups.groups {
             add(g, Row::cmd(&format!("Edit group {}\u{2026}", gr.name), Glyph::Prompt, "", Cmd::EditGroup(gr.id)));
         }
         let g = "Quarry";
         add(g, Row::cmd("New connection\u{2026}", Glyph::Prompt, keys(false, false, "N"), Cmd::NewConn));
-        if !self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql()) {
+        if !self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql()) {
             add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
         }
-        if !self.closed.is_empty() {
+        if !self.core.closed.is_empty() {
             add(g, Row::cmd("Reopen closed tab", Glyph::Tab, keys(true, false, "T"), Cmd::Reopen));
         }
-        if !self.undo.is_empty() {
-            add(g, Row { meta: format!("{} in 24 h", self.undo.len()), ..Row::cmd("Recent changes", Glyph::Prompt, "", Cmd::Undo) });
+        if !self.core.undo.is_empty() {
+            add(g, Row { meta: format!("{} in 24 h", self.core.undo.len()), ..Row::cmd("Recent changes", Glyph::Prompt, "", Cmd::Undo) });
         }
         add(g, Row::cmd("Query log", Glyph::Prompt, keys(false, false, "L"), Cmd::Log));
         add(g, Row::cmd("Settings", Glyph::Prompt, keys(false, false, ","), Cmd::Settings));
@@ -262,23 +262,23 @@ impl App {
             return out;
         }
         if tok.is_empty() {
-            let order = std::iter::once(self.cur).chain((0..self.tabs.len()).filter(|&i| i != self.cur));
-            for i in order.filter(|&i| i < self.tabs.len()).take(6) {
-                let sel = self.tabs[i].sel.clone();
+            let order = std::iter::once(self.core.cur).chain((0..self.core.tabs.len()).filter(|&i| i != self.core.cur));
+            for i in order.filter(|&i| i < self.core.tabs.len()).take(6) {
+                let sel = self.core.tabs[i].sel.clone();
                 if !sel.coll.is_empty()
                     && let Some(r) = self.jump_row(Jump::Coll(sel))
                 {
                     push(&mut out, "Open tabs", r);
                 }
             }
-            for c in &self.conns {
+            for c in &self.core.conns {
                 if let Some(r) = self.jump_row(Jump::Conn(c.meta.id)) {
                     push(&mut out, "Connections", r);
                 }
             }
             return out;
         }
-        let mut rows = jumps(&self.conns, self.active, q).into_iter().filter_map(|j| self.jump_row(j.2));
+        let mut rows = jumps(&self.core.conns, self.core.active, q).into_iter().filter_map(|j| self.jump_row(j.2));
         if let Some(top) = rows.next() {
             push(&mut out, "Top hit", top);
         }
@@ -295,9 +295,9 @@ impl App {
         }
         // Library scripts and linked files whose name matches, after the places: Return opens one, Cmd+Enter runs it.
         let mut scripts: Vec<(u32, Row)> = Vec::new();
-        for s in &self.library.scripts {
+        for s in &self.core.library.scripts {
             if let Some(score) = name_score(tok, &s.name) {
-                let folder = crate::library::ops::folder_path(&self.library, s.folder);
+                let folder = crate::library::ops::folder_path(&self.core.library, s.folder);
                 let conn = self.conn(s.conn).map_or("removed connection", |c| c.meta.name.as_str());
                 let sub = if folder.is_empty() { conn.to_string() } else { format!("{conn} \u{203a} {folder}") };
                 let (act, tag) = match self.script_snippet(s).map(|p| p.vars.len()) {
@@ -308,8 +308,8 @@ impl App {
                 scripts.push((score, Row { sub, meta: s.kind.clone(), tag, ..Row { act, ..Row::cmd(&s.name, Glyph::Prompt, "", Cmd::Shortcuts) } }));
             }
         }
-        for l in &self.library.links {
-            let Some(scan) = self.lib_ui.scans.get(&l.id) else { continue };
+        for l in &self.core.library.links {
+            let Some(scan) = self.core.lib_ui.scans.get(&l.id) else { continue };
             let lname = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
             for e in &scan.entries {
                 // Borrowed: most files do not match, and only a match needs its name kept.
@@ -336,12 +336,12 @@ impl App {
     }
 
     pub(super) fn run_cmd(&mut self, c: Cmd) {
-        let active = self.active;
+        let active = self.core.active;
         match c {
-            Cmd::Reload if !self.tabs.is_empty() => self.reload(),
+            Cmd::Reload if !self.core.tabs.is_empty() => self.reload(),
             Cmd::Explain if self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some()) => self.sql_run(false, true),
             Cmd::Explain => self.explain(),
-            Cmd::CloseTab => self.ask_close_tab(self.cur),
+            Cmd::CloseTab => self.ask_close_tab(self.core.cur),
             Cmd::View(v) => self.set_view(v),
             Cmd::NewQuery => {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
@@ -352,14 +352,14 @@ impl App {
                     }
                 }
             }
-            Cmd::Connect if !self.demo => {
+            Cmd::Connect if !self.core.demo => {
                 if let Some(id) = active {
                     self.connect(id);
                 }
             }
             Cmd::AllowWrites => self.modal = active.map(|id| Modal::Unlock(id, None)),
             Cmd::LockWrites => {
-                if let Some(c) = self.conns.iter_mut().find(|c| Some(c.meta.id) == active) {
+                if let Some(c) = self.core.conns.iter_mut().find(|c| Some(c.meta.id) == active) {
                     c.writable = false;
                     self.ok("Writes locked");
                 }
@@ -388,7 +388,7 @@ impl App {
             Cmd::CloudSql => self.open_cloud_browser(false),
             Cmd::Settings => self.modal = Some(Modal::Settings),
             Cmd::CheckUpdates => self.check_now(),
-            Cmd::Log => self.log.open = !self.log.open,
+            Cmd::Log => self.core.log.open = !self.core.log.open,
             Cmd::Reopen => self.reopen_tab(),
             Cmd::Undo => self.modal = Some(Modal::Undo),
             Cmd::Shortcuts => self.shortcuts_modal(),
@@ -396,7 +396,7 @@ impl App {
             Cmd::LinkFolder => self.open_link_dialog(None),
             Cmd::ShowLibrary => self.focus_library(),
             Cmd::NewGroup => {
-                let id = self.groups.new_group("New group");
+                let id = self.core.groups.new_group("New group");
                 self.save_groups();
                 self.edit_group(id);
             }
@@ -487,7 +487,7 @@ impl App {
             match a {
                 Act::Jump(j) => {
                     // A collection already open is switched to, as a browser offers its open tab.
-                    let open = matches!(&j, Jump::Coll(s) if self.tabs.iter().any(|t| t.sel == *s));
+                    let open = matches!(&j, Jump::Coll(s) if self.core.tabs.iter().any(|t| t.sel == *s));
                     self.jump(j, if new && !open { Open::NewTab } else { Open::Here })
                 }
                 Act::Cmd(c) => self.run_cmd(c),
@@ -510,7 +510,7 @@ impl App {
     /// the query to the Cmd+K palette through `search`.
     pub(super) fn tab_list(&self, ui: &mut egui::Ui, pick: &mut Option<usize>, close: &mut Option<usize>, search: &mut Option<String>) {
         let id = egui::Id::unique("tab-filter");
-        let n = self.tabs.len();
+        let n = self.core.tabs.len();
         sticky_menu(ui, format!("{n} tabs"), |ui| {
             ui.set_width(TAB_LIST_W);
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -537,7 +537,7 @@ impl App {
             let names: Vec<String> = (0..n).map(|i| self.tab_name(i)).collect();
             // Grouped by connection id, so same-named connections stay apart.
             let mut groups: Vec<(u64, Vec<usize>)> = Vec::new();
-            for (i, t) in self.tabs.iter().enumerate() {
+            for (i, t) in self.core.tabs.iter().enumerate() {
                 if !tok.is_empty() {
                     let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
                     let hay = format!("{} {} {} {conn}", names[i], t.sel.db, t.sel.schema).to_lowercase();
@@ -558,7 +558,7 @@ impl App {
             }
             p.hline(head.x_range().expand(margin.left as f32), head.bottom() - 0.5, Stroke::new(1.0, RAISED_LINE()));
             let opened = sel.is_none();
-            let mut sel = sel.unwrap_or_else(|| flat.iter().position(|&i| i == self.cur).unwrap_or(0));
+            let mut sel = sel.unwrap_or_else(|| flat.iter().position(|&i| i == self.core.cur).unwrap_or(0));
             if down {
                 sel += 1;
             }
@@ -582,7 +582,7 @@ impl App {
                     self.tab_group_head(ui, *conn, idx.len());
                     let mut prev_db = None;
                     for &i in idx {
-                        let db = self.tabs[i].sel.scope_label();
+                        let db = self.core.tabs[i].sel.scope_label();
                         let show_db = prev_db != Some(db);
                         prev_db = Some(db);
                         let (r, x) = self.tab_list_row(ui, i, &names[i], k == sel, show_db, &tok);
@@ -649,7 +649,7 @@ impl App {
         if !ui.is_rect_visible(rect) {
             return (r, false);
         }
-        let cur = i == self.cur;
+        let cur = i == self.core.cur;
         // contains_pointer, since the cross on top of the row takes the hover itself.
         let over = r.contains_pointer();
         // As in the palette: SEL marks the row Enter acts on, MENU_HOVER only the pointer.
@@ -669,7 +669,7 @@ impl App {
             right -= CLOSE_W + 8.0;
         } else {
             // Cmd+1 to 8 jump to those tabs and Cmd+9 to the last one, as in browsers.
-            let key = if i + 1 == self.tabs.len() { Some(9) } else if i < 8 { Some(i + 1) } else { None };
+            let key = if i + 1 == self.core.tabs.len() { Some(9) } else if i < 8 { Some(i + 1) } else { None };
             if let Some(k) = key {
                 right = kbd(ui.painter(), right, cy, &keys(false, false, &k.to_string())) - 8.0;
             }
@@ -684,7 +684,7 @@ impl App {
         let w = g.size().x;
         p.galley(egui::pos2(nx, cy - g.size().y / 2.0 + optical_dy(&g)), g, color);
         if show_db {
-            let db = truncated(p, self.tabs[i].sel.scope_label(), FontId::monospace(TXT_CAPTION), FAINT(), right - nx - w - 8.0);
+            let db = truncated(p, self.core.tabs[i].sel.scope_label(), FontId::monospace(TXT_CAPTION), FAINT(), right - nx - w - 8.0);
             p.galley(egui::pos2(nx + w + 8.0, cy - db.size().y / 2.0), db, FAINT());
         }
         (r.on_hover_cursor(egui::CursorIcon::PointingHand), x_clicked)

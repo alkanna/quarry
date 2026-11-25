@@ -233,7 +233,7 @@ impl App {
     /// Everything a write needs, or None with the reason shown. The one gate for SQL writes.
     fn writable_sql(&mut self) -> Option<(u64, db::sql::Db, Sel, Arc<Vec<Col>>, Vec<String>)> {
         let (sel, cols, pk) = self.sql_ctx()?;
-        if self.demo {
+        if self.core.demo {
             self.ok("Offline demo: no database is connected.");
             return None;
         }
@@ -269,14 +269,14 @@ impl App {
         let text = edit_text(&v, kind);
         // With the panel open, a double-click loads the new cell into it, so the panel follows the selection.
         let big = value_edit::is_long(&text) || self.value_in_panel();
-        self.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big, ..Default::default() });
+        self.core.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big, ..Default::default() });
     }
 
     /// Draws the editor over a cell and records Enter, Esc and a click elsewhere. Under it goes the helper the column
     /// type wants: the calendar for dates, a list for ENUM, SET and foreign key columns, a switch for booleans, and
     /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
-        let Some(mut e) = self.sql_cell.take() else { return };
+        let Some(mut e) = self.core.sql_cell.take() else { return };
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
         let d = self.sql_dialect();
@@ -288,7 +288,7 @@ impl App {
         ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if bad { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
         // The large editor has the text, so the cell only keeps its outline.
         if e.big {
-            self.sql_cell = Some(e);
+            self.core.sql_cell = Some(e);
             return;
         }
         let ctx = ui.ctx().clone();
@@ -300,7 +300,7 @@ impl App {
         let nullable = col.nullable || col.auto_increment;
         if check::is_bool(d, &col) {
             sql_bool_cell(ui, &mut e, &col, rect, below, click_out);
-            self.sql_cell = Some(e);
+            self.core.sql_cell = Some(e);
             return;
         }
         let date = matches!(col.kind, Kind::Date | Kind::DateTime);
@@ -438,7 +438,7 @@ impl App {
         }
         e.pop = pop.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
         e.grabs_keys = e.pick.is_some() || list_n > 0;
-        self.sql_cell = Some(e);
+        self.core.sql_cell = Some(e);
     }
 
     /// The clock in the zone `col` is read in, as milliseconds of that wall clock. None for a TIMESTAMP column under
@@ -467,11 +467,11 @@ impl App {
         let t = e.text.trim();
         let q = if t.eq_ignore_ascii_case("null") { "" } else { t };
         // One lookup at a time; the answer for older text asks again with the newest.
-        if !look.busy && look.asked.as_deref() != Some(q) && !self.demo && let Some((db, space)) = self.t().map(|t| t.sel.clone()).and_then(|s| self.sql_target(&s)) {
-            self.req += 1;
-            (look.req, look.busy, look.asked) = (self.req, true, Some(q.to_string()));
+        if !look.busy && look.asked.as_deref() != Some(q) && !self.core.demo && let Some((db, space)) = self.t().map(|t| t.sel.clone()).and_then(|s| self.sql_target(&s)) {
+            self.core.req += 1;
+            (look.req, look.busy, look.asked) = (self.core.req, true, Some(q.to_string()));
             let schema = if fk.ref_db.is_empty() { space } else { fk.ref_db.clone() };
-            self.worker.sql_key_search(self.req, db, schema, fk.ref_table.clone(), key.clone(), q.to_string(), look.table.clone());
+            self.core.worker.sql_key_search(self.core.req, db, schema, fk.ref_table.clone(), key.clone(), q.to_string(), look.table.clone());
         }
         let title = format!("{} references {} ({key})", col.src, fk.ref_table);
         let saves = look.rows.get(e.hl.unwrap_or(0)).map(|r| format!(" Picking one saves {}.", r.0)).unwrap_or_default();
@@ -486,7 +486,7 @@ impl App {
     }
 
     pub(in crate::app) fn sql_keys_done(&mut self, req: u64, res: db::Res<(db::sql::KeyTable, Vec<(String, String)>)>) {
-        let Some(k) = self.sql_cell.as_mut().and_then(|e| e.keys.as_mut()).filter(|k| k.req == req) else { return };
+        let Some(k) = self.core.sql_cell.as_mut().and_then(|e| e.keys.as_mut()).filter(|k| k.req == req) else { return };
         k.busy = false;
         // A lookup the server refuses leaves the list empty; the key can still be typed and saved.
         match res {
@@ -498,9 +498,9 @@ impl App {
 
     /// After the table is drawn: stage the edit, or keep the editor open with its error.
     pub(in crate::app) fn sql_cell_finish(&mut self) {
-        let Some(mut e) = self.sql_cell.take() else { return };
+        let Some(mut e) = self.core.sql_cell.take() else { return };
         match e.done {
-            None => self.sql_cell = Some(e),
+            None => self.core.sql_cell = Some(e),
             Some(false) => {}
             Some(true) => {
                 let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
@@ -510,7 +510,7 @@ impl App {
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
-                        self.sql_cell = Some(e);
+                        self.core.sql_cell = Some(e);
                     }
                 }
             }
@@ -534,10 +534,10 @@ impl App {
     fn sql_stage(&mut self, d: &Document, new: Document) {
         let key = self.draft_key(d);
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        let n = stage_draft(&mut self.drafts, &key, &sel, d, new);
+        let n = stage_draft(&mut self.core.drafts, &key, &sel, d, new);
         if n == 0 {
             self.ok("No changes left on this row");
-        } else if self.prefs.auto_save && self.sel_writable() {
+        } else if self.core.prefs.auto_save && self.sel_writable() {
             self.write_sql_drafts(vec![key]);
         } else {
             self.ok(format!("{n} cell{} staged. Save writes them, Discard drops them.", if n == 1 { "" } else { "s" }));
@@ -546,7 +546,7 @@ impl App {
 
     /// The columns of row `i` that have unsaved edits, for tinting.
     pub(in crate::app) fn sql_staged_cols(&self, rows: Rows, i: usize) -> Vec<String> {
-        let Some(dr) = self.drafts.get(&self.draft_key_of_row(rows, i)) else { return Vec::new() };
+        let Some(dr) = self.core.drafts.get(&self.draft_key_of_row(rows, i)) else { return Vec::new() };
         db::diff(&dr.original, &dr.current).into_iter().map(|c| c.0).filter(|p| p != "_id").collect()
     }
 
@@ -557,19 +557,19 @@ impl App {
 
     /// One transaction for the given drafts. A failure keeps every one of them staged.
     pub(in crate::app) fn write_sql_drafts(&mut self, keys: Vec<String>) {
-        let drafts: Vec<(String, Draft)> = keys.into_iter().filter_map(|k| self.drafts.remove(&k).map(|d| (k, d))).collect();
+        let drafts: Vec<(String, Draft)> = keys.into_iter().filter_map(|k| self.core.drafts.remove(&k).map(|d| (k, d))).collect();
         let Some(first) = drafts.first().map(|d| Sel { conn: d.1.conn, db: d.1.db.clone(), schema: d.1.schema.clone(), coll: d.1.coll.clone() }) else { return };
         let put_back = |a: &mut App, drafts: Vec<(String, Draft)>, why: &str| {
-            a.drafts.extend(drafts);
+            a.core.drafts.extend(drafts);
             a.err(why.to_string());
         };
         let Some((db, space)) = self.sql_target(&first) else { return put_back(self, drafts, "Not connected.") };
         let read_only = !self.conn_writable(first.conn);
-        let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
+        let Some((cols, pk)) = self.core.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
         // A row without its key could address any row, so it is never sent; its edits stay staged.
         let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| has_key(&d.current));
         let skipped = keyless.len();
-        self.drafts.extend(keyless);
+        self.core.drafts.extend(keyless);
         if skipped > 0 {
             self.err(format!("{skipped} row{} without a key value {} not saved.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
         }
@@ -585,8 +585,8 @@ impl App {
             })
             .collect();
         let tags: Vec<String> = drafts.iter().map(|d| d.0.clone()).collect();
-        self.saving.extend(drafts);
-        self.worker.sql_save(tags, first.conn, db, space, first.coll, cols, pk, edits, read_only);
+        self.core.saving.extend(drafts);
+        self.core.worker.sql_save(tags, first.conn, db, space, first.coll, cols, pk, edits, read_only);
     }
 
     /// Cmd+S, the bar's Save: asks for write access first, then confirms like Mongo's Save all when the setting says so.
@@ -594,7 +594,7 @@ impl App {
         if !self.sel_writable() {
             return self.ask_unlock_then(move |a| a.sql_save_all(keys));
         }
-        if self.prefs.confirm_save && !self.prefs.always_writable {
+        if self.core.prefs.confirm_save && !self.core.prefs.always_writable {
             self.modal = Some(Modal::SaveAll(keys));
         } else {
             self.write_sql_drafts(keys);
@@ -620,7 +620,7 @@ impl App {
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         let (mut cells, mut summary) = (0, String::new());
         for k in &keys {
-            let Some(dr) = self.drafts.get(k) else { continue };
+            let Some(dr) = self.core.drafts.get(k) else { continue };
             let ch: Vec<_> = db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").collect();
             cells += ch.len();
             if summary.is_empty() {
@@ -651,12 +651,12 @@ impl App {
             });
         });
         // Any window over the page owns Cmd+S, as do the value and cell editors.
-        let free = !self.window_open() && self.json_edit.is_none() && self.sql_cell.is_none();
+        let free = !self.window_open() && self.core.json_edit.is_none() && self.core.sql_cell.is_none();
         save |= free && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S));
         if show {
             let mut body = Vec::new();
             for k in &keys {
-                let Some(dr) = self.drafts.get(k) else { continue };
+                let Some(dr) = self.core.drafts.get(k) else { continue };
                 let edit = RowEdit {
                     pk: dr.current.get_document("_id").cloned().unwrap_or_default(),
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
@@ -668,7 +668,7 @@ impl App {
         }
         if discard {
             for k in &keys {
-                self.drafts.remove(k);
+                self.core.drafts.remove(k);
             }
             self.ok("Discarded the staged edits");
         }
@@ -826,7 +826,7 @@ impl App {
     fn sql_insert_rows(&mut self, rows: Vec<NewRow>) {
         let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
         let read_only = !self.conn_writable(conn);
-        self.worker.sql_insert(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
+        self.core.worker.sql_insert(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     /// Rows are the loaded documents of the checked or clicked rows, each with its key in `_id`.
@@ -932,13 +932,13 @@ impl App {
         let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
         for r in &rows {
             let key = self.draft_key(r);
-            self.drafts.remove(&key);
+            self.core.drafts.remove(&key);
         }
         if let Some(t) = self.tm() {
             t.selected = None;
         }
         let read_only = !self.conn_writable(conn);
-        self.worker.sql_delete_rows(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
+        self.core.worker.sql_delete_rows(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     pub(in crate::app) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {
@@ -1016,10 +1016,10 @@ impl App {
                             let key = self.draft_key(r);
                             let sel = sel.clone();
                             // Staged on top of any earlier edit of the same row, which keeps its original.
-                            let cur = self.drafts.get(&key).map(|x| x.current.clone()).unwrap_or_else(|| r.clone());
+                            let cur = self.core.drafts.get(&key).map(|x| x.current.clone()).unwrap_or_else(|| r.clone());
                             let mut new = cur.clone();
                             new.insert(col.name.clone(), v.clone());
-                            stage_draft(&mut self.drafts, &key, &sel, &cur, new);
+                            stage_draft(&mut self.core.drafts, &key, &sel, &cur, new);
                         }
                         self.ok(format!("Staged {n} edit{}. Save writes them.", if n == 1 { "" } else { "s" }));
                         *keep = false;
@@ -1036,7 +1036,7 @@ impl App {
     /// The visible columns in the order shown, for the copy formats.
     pub(in crate::app) fn copy_cols(&self, rows: &[Document]) -> Vec<CopyCol> {
         let Some(t) = self.t() else { return Vec::new() };
-        let prefs = self.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
         table::visible_cols(Some(&prefs), &t.fields, self.default_cols())
             .into_iter()
             .map(|name| {
@@ -1129,7 +1129,7 @@ impl App {
 
     /// The offline demo of `QUARRY_TEST_SQL=edit`: two cells of row 3 staged.
     pub(in crate::app) fn sql_demo_stage(&mut self) {
-        let Some(t) = self.tabs.get_mut(0) else { return };
+        let Some(t) = self.core.tabs.get_mut(0) else { return };
         let Some(orig) = t.docs.get(2).map(db::Row::owned) else { return };
         let mut old = orig.clone();
         old.insert("status", "pending");
@@ -1139,7 +1139,7 @@ impl App {
         }
         let sel = t.sel.clone();
         let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
-        stage_draft(&mut self.drafts, &key, &sel, &old, orig);
+        stage_draft(&mut self.core.drafts, &key, &sel, &old, orig);
     }
 }
 

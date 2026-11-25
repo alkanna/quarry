@@ -511,19 +511,19 @@ fn has_menu(_node: &Node) -> bool {
 impl App {
     /// The body of the sidebar in Library mode.
     pub(in crate::app) fn library_panel(&mut self, ui: &mut egui::Ui) {
-        let mut st = std::mem::take(&mut self.lib_ui.panel);
+        let mut st = std::mem::take(&mut self.core.lib_ui.panel);
         let mut acts = Vec::new();
         self.library_body(ui, &mut st, &mut acts);
         for a in acts {
             self.apply_lib_act(ui.ctx(), &mut st, a);
         }
-        self.lib_ui.panel = st;
+        self.core.lib_ui.panel = st;
     }
 
     fn library_body(&mut self, ui: &mut egui::Ui, st: &mut PanelUi, acts: &mut Vec<Act>) {
         let ctx = ui.ctx().clone();
         let active = self.lib_conn();
-        let all = self.prefs.lib_scope_all || active.is_none();
+        let all = self.core.prefs.lib_scope_all || active.is_none();
         let active_name = active.and_then(|id| self.conn(id)).map(|c| c.meta.name.clone());
         let scope_conn = if all { None } else { active };
 
@@ -540,7 +540,7 @@ impl App {
         // Header
         let new_parent = match &st.sel {
             Some(Node::Folder(id)) => Some(*id),
-            Some(Node::Script(id)) => self.library.scripts.iter().find(|s| s.id == *id).and_then(|s| tree::live_parent(&self.library, s.folder)),
+            Some(Node::Script(id)) => self.core.library.scripts.iter().find(|s| s.id == *id).and_then(|s| tree::live_parent(&self.core.library, s.folder)),
             _ => None,
         };
         self.side_switch(ui);
@@ -586,7 +586,7 @@ impl App {
         ui.add_space(10.0);
 
         let engine = scope_conn.and_then(|c| self.conn(c)).map(|c| c.meta.engine);
-        let rows = tree::flatten(&self.library, &self.lib_ui.scans, scope_conn, engine, &st.query, &st.open);
+        let rows = tree::flatten(&self.core.library, &self.core.lib_ui.scans, scope_conn, engine, &st.query, &st.open);
         // The folders still moving and how far open each is. A search shows its folders open at once.
         let searching = !st.query.trim().is_empty();
         let mut folds: HashMap<Node, f32> = HashMap::new();
@@ -605,7 +605,7 @@ impl App {
         let drawn_closing = (!closing.is_empty()).then(|| {
             let mut open = st.open.clone();
             open.extend(closing.iter().cloned());
-            let mut v = tree::flatten(&self.library, &self.lib_ui.scans, scope_conn, engine, &st.query, &open);
+            let mut v = tree::flatten(&self.core.library, &self.core.lib_ui.scans, scope_conn, engine, &st.query, &open);
             for r in &mut v {
                 r.open &= st.open.contains(&r.node);
             }
@@ -629,7 +629,7 @@ impl App {
             st.sel = None;
         }
         // Cmd+Shift+L: the tree takes the keys, on its first row when none is selected.
-        if std::mem::take(&mut self.lib_ui.focus_tree) {
+        if std::mem::take(&mut self.core.lib_ui.focus_tree) {
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
@@ -650,19 +650,19 @@ impl App {
         // Tree, splitter and preview share what is left of the panel's height.
         let avail = ui.available_height();
         let show_preview = st.sel.as_ref().is_some_and(|n| n.script_ref().is_some()) && avail > PREVIEW_MIN + TREE_MIN + 12.0;
-        let want = if self.prefs.lib_preview_h > 0.0 { self.prefs.lib_preview_h } else { PREVIEW_DEFAULT };
+        let want = if self.core.prefs.lib_preview_h > 0.0 { self.core.prefs.lib_preview_h } else { PREVIEW_DEFAULT };
         let preview_h = want.clamp(PREVIEW_MIN, (avail - TREE_MIN - 6.0).max(PREVIEW_MIN));
         let tree_h = if show_preview { avail - preview_h - 6.0 } else { avail };
 
         // The demo drag moves out of `st` for the frame, so the rows can read it while `st` is borrowed for state.
         let demo_drag = st.demo_drag.clone();
         let cx = RowCx {
-            lib: &self.library,
-            conns: &self.conns,
-            scans: &self.lib_ui.scans,
-            changed: &self.lib_ui.changed,
+            lib: &self.core.library,
+            conns: &self.core.conns,
+            scans: &self.core.lib_ui.scans,
+            changed: &self.core.lib_ui.changed,
             active,
-            groups: &self.groups,
+            groups: &self.core.groups,
             query: st.query.trim().to_string(),
             // Esc drops the payload; drag_cancelled keeps the marks off until the button comes up.
             drag: egui::DragAndDrop::payload::<DragItem>(&ctx).filter(|_| !drag_cancelled(&ctx)).and_then(|d| item_node(&d)),
@@ -723,12 +723,12 @@ impl App {
             let r = ui.interact(zone, egui::Id::unique("library-root-drop"), Sense::hover());
             if let (Some(p), Some(item)) = (r.dnd_hover_payload::<DragItem>(), cx.drag.as_ref()) {
                 let _ = p;
-                if root_plan(&self.library, item).is_ok() {
+                if root_plan(&self.core.library, item).is_ok() {
                     paint_spot(ui.painter(), zone.with_max_y(zone.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, zone.left() + 8.0, INDENT);
                 }
             }
             if let (Some(_), Some(item)) = (r.dnd_release_payload::<DragItem>(), cx.drag.clone()) {
-                acts.push(match root_plan(&self.library, &item) {
+                acts.push(match root_plan(&self.core.library, &item) {
                     Ok(Plan::Saved(a)) => Act::Move(item, a),
                     Ok(plan) => Act::Drop(item, plan),
                     Err(e) => Act::Refuse(e),
@@ -737,15 +737,15 @@ impl App {
         }
 
         if show_preview {
-            let mut pref = if self.prefs.lib_preview_h > 0.0 { avail - preview_h } else { 0.0 };
+            let mut pref = if self.core.prefs.lib_preview_h > 0.0 { avail - preview_h } else { 0.0 };
             let r = splitter(ui);
             if resize_editor(&r, &mut pref, out.inner_rect.height(), TREE_MIN, avail - PREVIEW_MIN - 6.0) {
-                self.prefs.lib_preview_h = if pref > 0.0 { avail - pref } else { 0.0 };
+                self.core.prefs.lib_preview_h = if pref > 0.0 { avail - pref } else { 0.0 };
                 self.save_prefs();
             }
             // A drag in progress moves the card at once; the preference is saved when it ends.
             if r.dragged() && pref > 0.0 {
-                self.prefs.lib_preview_h = avail - pref;
+                self.core.prefs.lib_preview_h = avail - pref;
             }
             if let Some(sel) = st.sel.clone() {
                 self.library_preview(ui, &sel, st, all, acts);
@@ -754,7 +754,7 @@ impl App {
     }
 
     fn library_empty(&mut self, ui: &mut egui::Ui, active: Option<u64>, name: Option<&str>, all: bool, acts: &mut Vec<Act>) {
-        let others = self.library.scripts.iter().filter(|s| active.is_some_and(|a| a != s.conn)).count();
+        let others = self.core.library.scripts.iter().filter(|s| active.is_some_and(|a| a != s.conn)).count();
         let title = match (name, all) {
             (Some(n), false) => format!("No saved scripts on {n}"),
             _ => "No saved scripts".to_string(),
@@ -797,7 +797,7 @@ impl App {
         let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
         let at = st.sel.as_ref().and_then(|n| rows.iter().position(|r| r.node == *n));
         let kind = |n: &Node| match n {
-            Node::Script(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.kind.clone()).unwrap_or_default(),
+            Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.kind.clone()).unwrap_or_default(),
             Node::File { link, rel } => self.file_kind(*link, rel),
             _ => String::new(),
         };
@@ -858,19 +858,19 @@ impl App {
         // What the card shows: a script's name, where it lives and when it was edited, its kind and the start of its text.
         let (name, sub, kind, text) = match node.script_ref() {
             Some(ScriptRef::Saved(id)) => {
-                let Some(s) = self.library.scripts.iter().find(|s| s.id == id).cloned() else { return };
+                let Some(s) = self.core.library.scripts.iter().find(|s| s.id == id).cloned() else { return };
                 let place = {
-                    let p = ops::folder_path(&self.library, s.folder);
+                    let p = ops::folder_path(&self.core.library, s.folder);
                     let p = if p.is_empty() { "Library".to_string() } else { p };
-                    if all { format!("{} · {p}", self.conns.iter().find(|c| c.meta.id == s.conn).map_or("removed connection", |c| c.meta.name.as_str())) } else { p }
+                    if all { format!("{} · {p}", self.core.conns.iter().find(|c| c.meta.id == s.conn).map_or("removed connection", |c| c.meta.name.as_str())) } else { p }
                 };
                 let when = edited(s.updated);
                 (s.name.clone(), if when.is_empty() { place } else { format!("{place}  ·  {when}") }, s.kind.clone(), s.body.chars().take(1500).collect::<String>())
             }
             // A linked file shows what its scan kept of it, so the card never reads the disk while it is drawn.
             Some(ScriptRef::File { link, rel }) => {
-                let Some(e) = self.lib_ui.scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)) else { return };
-                let l = self.library.links.iter().find(|l| l.id == link);
+                let Some(e) = self.core.lib_ui.scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)) else { return };
+                let l = self.core.library.links.iter().find(|l| l.id == link);
                 let folder = l.map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
                 let place = match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
                     Some(p) => format!("{folder} / {}", p.display()),
@@ -949,9 +949,9 @@ impl App {
             }
             Act::Rename(n) => {
                 let name = match &n {
-                    Node::Folder(id) => self.library.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()),
-                    Node::Script(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()),
-                    Node::Link(id) => self.library.links.iter().find(|l| l.id == *id).map(|l| if l.name.is_empty() { l.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { l.name.clone() }),
+                    Node::Folder(id) => self.core.library.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()),
+                    Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()),
+                    Node::Link(id) => self.core.library.links.iter().find(|l| l.id == *id).map(|l| if l.name.is_empty() { l.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { l.name.clone() }),
                     Node::Dir { rel, .. } => rel.file_name().map(|n| n.to_string_lossy().into_owned()),
                     Node::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()),
                 };
@@ -963,7 +963,7 @@ impl App {
             Act::Commit(n, text) => match &n {
                 Node::Link(id) => {
                     let name = text.trim().to_string();
-                    if !name.is_empty() && let Some(l) = self.library.links.iter_mut().find(|l| l.id == *id) {
+                    if !name.is_empty() && let Some(l) = self.core.library.links.iter_mut().find(|l| l.id == *id) {
                         l.name = name;
                         self.save_library();
                     }
@@ -979,18 +979,18 @@ impl App {
                     }
                 }
                 _ => {
-                    if ops::rename(&mut self.library, &n, &text) {
+                    if ops::rename(&mut self.core.library, &n, &text) {
                         self.save_library();
                     }
                 }
             },
             Act::Duplicate(id) => {
-                if let Some(new) = ops::duplicate(&mut self.library, id, crate::library::now_secs()) {
+                if let Some(new) = ops::duplicate(&mut self.core.library, id, crate::library::now_secs()) {
                     self.save_library();
                     st.sel = Some(Node::Script(new));
                 }
             }
-            Act::Move(n, at) => match ops::move_to(&mut self.library, &n, at.clone()) {
+            Act::Move(n, at) => match ops::move_to(&mut self.core.library, &n, at.clone()) {
                 Ok(()) => {
                     if let DropAt::Into(f) = at {
                         st.open.insert(Node::Folder(f));
@@ -1000,18 +1000,18 @@ impl App {
                 Err(e) => self.warn(e),
             },
             Act::MoveToNew(n) => {
-                let id = ops::new_folder(&mut self.library, None, "");
-                if ops::move_to(&mut self.library, &n, DropAt::Into(id)).is_ok() {
+                let id = ops::new_folder(&mut self.core.library, None, "");
+                if ops::move_to(&mut self.core.library, &n, DropAt::Into(id)).is_ok() {
                     st.open.insert(Node::Folder(id));
                     st.query.clear();
                     st.sel = Some(Node::Folder(id));
-                    let name = self.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
+                    let name = self.core.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
                     st.rename = Some((Node::Folder(id), name, true));
                 }
                 self.save_library();
             }
             Act::Copy(id) => {
-                if let Some(s) = self.library.scripts.iter().find(|s| s.id == id) {
+                if let Some(s) = self.core.library.scripts.iter().find(|s| s.id == id) {
                     ctx.copy_text(s.body.clone());
                     self.ok("Script text copied.");
                 }
@@ -1023,11 +1023,11 @@ impl App {
             }
             Act::Delete(n) => {
                 let label = match &n {
-                    Node::Script(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| format!("\"{}\"", s.name)),
-                    Node::Folder(id) => self.library.folders.iter().find(|f| f.id == *id).map(|f| format!("folder \"{}\"", f.name)),
+                    Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| format!("\"{}\"", s.name)),
+                    Node::Folder(id) => self.core.library.folders.iter().find(|f| f.id == *id).map(|f| format!("folder \"{}\"", f.name)),
                     _ => None,
                 };
-                if let Some((folders, scripts)) = ops::delete(&mut self.library, &n) {
+                if let Some((folders, scripts)) = ops::delete(&mut self.core.library, &n) {
                     self.forget_scripts(&scripts.iter().map(|s| s.id).collect::<Vec<_>>());
                     self.save_library();
                     let msg = match (&n, scripts.len()) {
@@ -1042,13 +1042,13 @@ impl App {
                 }
             }
             Act::NewFolder(parent) => {
-                let id = ops::new_folder(&mut self.library, parent, "");
+                let id = ops::new_folder(&mut self.core.library, parent, "");
                 if let Some(p) = parent {
                     st.open.insert(Node::Folder(p));
                 }
                 st.query.clear();
                 self.save_library();
-                let name = self.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
+                let name = self.core.library.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default();
                 st.sel = Some(Node::Folder(id));
                 st.rename = Some((Node::Folder(id), name, true));
             }
@@ -1059,7 +1059,7 @@ impl App {
                 }
             }
             Act::Scope(all) => {
-                self.prefs.lib_scope_all = all;
+                self.core.prefs.lib_scope_all = all;
                 self.save_prefs();
             }
             Act::Link => self.open_link_dialog(None),
@@ -1097,7 +1097,7 @@ impl App {
                 ctx.copy_text(path.to_string_lossy().into_owned());
                 self.ok("Path copied.");
             }
-            Act::CopyFileText(link, rel) => match self.library.link_join(link, &rel).map(|p| super::linked::read_script(&p)) {
+            Act::CopyFileText(link, rel) => match self.core.library.link_join(link, &rel).map(|p| super::linked::read_script(&p)) {
                 Some(Ok(l)) => {
                     ctx.copy_text(l.text);
                     self.ok("Script text copied.");
@@ -1160,12 +1160,12 @@ impl App {
     fn demo_library_panel(&mut self, state: &str) {
         use crate::library::{Folder, Script};
         if self.conn(3).is_none() {
-            self.conns.push(Conn { masked_uri: "mysql://app:****@shop.internal:3306".into(), ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
+            self.core.conns.push(Conn { masked_uri: "mysql://app:****@shop.internal:3306".into(), ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
         }
-        self.active = Some(3);
-        self.prefs.set_side_mode(SideMode::Library);
-        self.prefs.sidebar_hidden = false;
-        self.prefs.lib_scope_all = state == "all";
+        self.core.active = Some(3);
+        self.core.prefs.set_side_mode(SideMode::Library);
+        self.core.prefs.sidebar_hidden = false;
+        self.core.prefs.lib_scope_all = state == "all";
         let now = crate::library::now_secs();
         let folder = |id, name: &str, parent| Folder { id, name: name.into(), parent };
         let script = |id, name: &str, kind: &str, conn, folder, db: &str, coll: &str, body: &str, age: u64| Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), folder, updated: now - age, ..Default::default() };
@@ -1189,8 +1189,8 @@ impl App {
             lib.scripts = vec![script(20, "Paid orders", "filter", 1, None, "shop", "orders", "{ status: 'paid' }", 86400), script(21, "Revenue by status", "pipeline", 1, None, "shop", "orders", "[]", 86400), script(22, "Backfill totals", "shell", 1, None, "", "", "console.log(1)", 86400)];
             lib.folders.clear();
         }
-        self.library = lib;
-        let st = &mut self.lib_ui.panel;
+        self.core.library = lib;
+        let st = &mut self.core.lib_ui.panel;
         st.open = [1, 2].map(Node::Folder).into_iter().collect();
         match state {
             "search" => st.query = "orders".into(),

@@ -12,18 +12,18 @@ fn release() -> Available {
 
 fn ready(a: &mut App) {
     a.load_demo();
-    a.upd = Upd::Ready(release());
+    a.core.upd = Upd::Ready(release());
 }
 
 fn ready_with_work(a: &mut App) {
     ready(a);
-    a.tabs[0].compare.running = true;
+    a.core.tabs[0].compare.running = true;
 }
 
 fn settings_ready(a: &mut App) {
     ready(a);
     a.modal = Some(Modal::Settings);
-    a.settings_cat = settings::SettingsCat::Updates;
+    a.core.settings_cat = settings::SettingsCat::Updates;
 }
 
 fn two_releases(a: &mut App) {

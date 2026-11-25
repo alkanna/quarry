@@ -36,9 +36,9 @@ fn the_column_menu_sorts_the_page_and_unsort_restores_the_servers_order() {
 #[test]
 fn a_selected_row_follows_its_row_through_a_sort() {
     let Some(mut ui) = query_demo() else { return };
-    let cur = ui.app().cur;
+    let cur = ui.app().core.cur;
     // Ada, the first row, goes to the end of an ascending sort on orders.
-    if let Some(s) = ui.h.state_mut().tabs[cur].sql.as_mut() {
+    if let Some(s) = ui.h.state_mut().core.tabs[cur].sql.as_mut() {
         s.qsel = Some(0);
         s.qchecked.insert(0);
     }

@@ -125,9 +125,9 @@ pub(super) fn ui_app(var: &str) -> Option<UiApp> {
     let mut ui = harness();
     let app = ui.h.state_mut();
     let engine = db::sql::Engine::from_uri(&uri).unwrap_or_default();
-    app.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: CONN, name: "test".into(), engine, ..Default::default() }, Status::Idle) });
-    app.active = Some(CONN);
-    app.rail_order.push(CONN);
+    app.core.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: CONN, name: "test".into(), engine, ..Default::default() }, Status::Idle) });
+    app.core.active = Some(CONN);
+    app.core.rail_order.push(CONN);
     ui.connect(CONN, &uri);
     ui.assert_ready(CONN);
     Some(ui)
@@ -142,9 +142,9 @@ pub(super) fn demo_ui(load: fn(&mut App)) -> Option<UiApp> {
     }
     let mut ui = harness();
     let app = ui.h.state_mut();
-    app.demo = true;
+    app.core.demo = true;
     load(app);
-    for c in &mut app.conns {
+    for c in &mut app.core.conns {
         c.writable = true;
     }
     ui.h.run_steps(5);
@@ -212,7 +212,7 @@ impl UiApp {
     /// ACCESS EXCLUSIVE under a 3 s lock timeout, so a loaded machine could make the test fail on the lock and not on what it checks.
     /// It is checked again after a few frames, since a read the first answer asked for may only start then.
     pub fn quiet(&mut self) {
-        let idle = |a: &App| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql::structure::Load::Loading)));
+        let idle = |a: &App| a.core.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql::structure::Load::Loading)));
         self.wait("the open tabs to have no read in flight", idle);
         self.settle();
         self.wait("the open tabs to have no read in flight", idle);
@@ -297,7 +297,7 @@ impl UiApp {
     /// Opens `table` from the sidebar: expands the database, picks the schema on PostgreSQL, clicks the table, and waits for its rows.
     pub fn open_table(&mut self, db: &str, schema: &str, table: &str) {
         let pg = self.app().conn(CONN).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres);
-        if !self.app().open_dbs.contains(&(CONN, db.to_string())) {
+        if !self.app().core.open_dbs.contains(&(CONN, db.to_string())) {
             self.click(db);
         }
         if pg {
@@ -321,7 +321,7 @@ impl UiApp {
 
     /// Turns every connection read-only again, without the badge and its dialog.
     pub fn lock(&mut self) {
-        for c in &mut self.h.state_mut().conns {
+        for c in &mut self.h.state_mut().core.conns {
             c.writable = false;
         }
     }
@@ -338,7 +338,7 @@ impl UiApp {
 
     /// Whether the app said `part`: in the status line, where the offline demo's notes go, or in a toast.
     pub fn said(&self, part: &str) -> bool {
-        self.app().status.contains(part) || self.app().last_problem().contains(part)
+        self.app().core.status.contains(part) || self.app().last_problem().contains(part)
     }
 
     /// The text of the current tab's SQL query.
@@ -374,7 +374,7 @@ impl UiApp {
     /// Double-clicks a cell and waits for its editor, which replaces the cell and is focused with its text selected.
     pub fn open_cell(&mut self, col: &str, row: usize) {
         self.double_click_cell(col, row);
-        self.wait("the cell editor", |a| a.sql_cell.is_some());
+        self.wait("the cell editor", |a| a.core.sql_cell.is_some());
     }
 
     /// A mouse drag as a person makes it: press on `from`, move to `to` in steps so egui passes its 6 px drag threshold on the
@@ -449,7 +449,7 @@ impl UiApp {
         self.open_cell(col, row);
         self.type_text(text);
         self.h.key_press(egui::Key::Enter);
-        self.wait("the edit to be staged", |a| a.sql_cell.is_none());
+        self.wait("the edit to be staged", |a| a.core.sql_cell.is_none());
     }
 
     /// Clicks the last widget with this accessible name: a dialog is drawn after the page, so its button comes
@@ -472,6 +472,6 @@ impl UiApp {
     /// Clicks Save in the staged bar and waits until nothing is staged or in flight.
     pub fn save(&mut self) {
         self.click("Save");
-        self.wait("the save to finish", |a| a.saving.is_empty() && a.drafts.is_empty());
+        self.wait("the save to finish", |a| a.core.saving.is_empty() && a.core.drafts.is_empty());
     }
 }

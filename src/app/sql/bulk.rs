@@ -66,9 +66,9 @@ impl App {
             return;
         }
         let Some((db, ns)) = self.sql_target(&sel) else { return self.warn_offline() };
-        self.req += 1;
-        let req = self.req;
-        self.worker.sql_bulk_prep(req, db, ns.clone(), sel.coll.clone(), ran.filter.clone());
+        self.core.req += 1;
+        let req = self.core.req;
+        self.core.worker.sql_bulk_prep(req, db, ns.clone(), sel.coll.clone(), ran.filter.clone());
         let capped = ran.limit.is_some() || ran.skip > 0;
         self.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns, filter: ran.filter, capped, req, prep: None, pairs: col.map(|col| vec![Pair { col, ..Default::default() }]).unwrap_or_default(), typed: String::new() })));
     }
@@ -236,6 +236,6 @@ impl App {
             return;
         }
         let Some((db, _)) = self.sql_target(&f.sel) else { return self.warn_offline() };
-        self.worker.sql_bulk(conn, db, f.ns.clone(), f.sel.coll.clone(), plan, !self.conn_writable(conn));
+        self.core.worker.sql_bulk(conn, db, f.ns.clone(), f.sel.coll.clone(), plan, !self.conn_writable(conn));
     }
 }

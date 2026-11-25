@@ -102,7 +102,7 @@ impl App {
             });
             // Remembered for every tab; the others reload when shown, see the top of `documents`.
             if size != self.page_size() {
-                self.prefs.page_size = size;
+                self.core.prefs.page_size = size;
                 self.save_prefs();
                 out.go = Some(0);
             }

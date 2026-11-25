@@ -7,7 +7,7 @@ impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
         self.value_dialog(ctx);
         let into = self.t().map(|t| format!("into {}", t.sel.ns())).unwrap_or_default();
-        if let Some(text) = &mut self.insert {
+        if let Some(text) = &mut self.core.insert {
             let mut close = false;
             let mut submit = false;
             let r = banded(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
@@ -33,13 +33,13 @@ impl App {
                 match db::parse_doc(text) {
                     Ok(d) => {
                         if let Some((conn, target)) = self.writable_target() {
-                            self.worker.insert(conn, target, d, self.insert.take());
+                            self.core.worker.insert(conn, target, d, self.core.insert.take());
                         }
                     }
                     Err(e) => self.err(e),
                 }
             } else if close || r.should_close() {
-                self.insert = None;
+                self.core.insert = None;
             }
         }
 
@@ -47,7 +47,7 @@ impl App {
             self.modal = Some(self.late_modals.remove(0));
         }
         // Settings looks for gcloud each time it opens, so it forgets the answer once closed.
-        if self.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
+        if self.core.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
             self.gcloud_forget();
         }
         if matches!(self.modal, Some(Modal::Palette { .. })) {
@@ -83,7 +83,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Allow writes", ALERT()).clicked() {
-                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *id) {
+                            if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == *id) {
                                 c.writable = true;
                             }
                             self.ok(format!("Writes allowed on {name} for this session"));
@@ -181,7 +181,7 @@ impl App {
                                 let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
                                 let (c, d, k) = (*conn, db.clone(), coll.clone());
                                 self.remove_tabs(|t| t.sel.conn == c && t.sel.db == d && t.sel.coll == k);
-                                self.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
+                                self.core.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
                             }
                             keep = false;
                         }
@@ -200,8 +200,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Import", PRIMARY()).clicked() {
-                            if let Some((conn, target)) = self.writable_target() && let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
-                                self.worker.import(conn, target, docs, None);
+                            if let Some((conn, target)) = self.writable_target() && let Some(Ok(docs)) = self.core.tabs[self.core.cur].import.parsed.clone() {
+                                self.core.worker.import(conn, target, docs, None);
                                 self.ok("Importing…");
                             }
                             keep = false;
@@ -257,10 +257,10 @@ impl App {
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run it").clicked() {
                             if let Some((_, target)) = self.writable_target() {
-                                self.req += 1;
-                                let req = self.req;
+                                self.core.req += 1;
+                                let req = self.core.req;
                                 self.tm().unwrap().agg_req = req;
-                                self.worker.aggregate(req, target, p.clone());
+                                self.core.worker.aggregate(req, target, p.clone());
                             }
                             keep = false;
                         }
@@ -349,8 +349,8 @@ impl App {
             super::sql::pg_roles::forget_pg_secrets(ctx, &m);
         } else if matches!(m, Modal::Conn(_)) {
             // A Test still running when the form closes must not show in the next form.
-            self.conn_test = None;
-            self.test_info = None;
+            self.core.conn_test = None;
+            self.core.test_info = None;
         }
     }
 
@@ -379,8 +379,8 @@ impl App {
                 self.on_tab(&at.clone(), |a| {
                     if let Some((conn, target)) = a.writable_target() {
                         match docs.as_slice() {
-                            [d] => a.worker.delete(conn, target, d.clone(), true),
-                            _ => a.worker.delete_docs(conn, target, docs.clone()),
+                            [d] => a.core.worker.delete(conn, target, d.clone(), true),
+                            _ => a.core.worker.delete_docs(conn, target, docs.clone()),
                         }
                         // The reload drops deleted rows from the checks; others stay checked.
                         if let Some(t) = a.tm() {
@@ -435,7 +435,7 @@ impl App {
                 };
                 match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
                     (Ok(cmd), Some(client)) => {
-                        self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
+                        self.core.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
                         *keep = false;
                     }
                     (Err(e), _) => self.err(e),
@@ -461,7 +461,7 @@ impl App {
         let cname = self.conn_name(*conn);
         dialog_head(ui, &Head::new(format!("Duplicate {coll}")).sub(format!("in {db} on {cname}")).glyph(glyphs::copy));
         let to = name.trim().to_string();
-        let taken = self.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| *n == to));
+        let taken = self.core.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| *n == to));
         dialog_body(ui, |ui| {
             stacked_field(ui, "New collection", "Copies every document, index and setting (validator, collation).", |ui| ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY)));
             if taken {
@@ -473,8 +473,8 @@ impl App {
                 match self.conn(*conn).and_then(|c| c.client.clone()) {
                     Some(client) => {
                         // The sidebar shows it with a spinner until the copy ends.
-                        self.copying.insert((*conn, db.clone(), to.clone()));
-                        self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.clone());
+                        self.core.copying.insert((*conn, db.clone(), to.clone()));
+                        self.core.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.clone());
                     }
                     None => self.warn_offline(),
                 }
@@ -488,7 +488,7 @@ impl App {
 
     fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &[String], keep: &mut bool) {
         let sql = self.t().is_some_and(|t| t.sql.is_some());
-        let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
+        let n: usize = keys.iter().filter_map(|k| self.core.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
         ui.set_width(480.0);
         let (title, note) = if sql {
             (format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }), "They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.")
@@ -560,8 +560,8 @@ impl App {
                 t.view = View::Aggregate;
                 t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
                 // Next to the current tab, like the original's nextToActive.
-                let at = (self.cur + 1).min(self.tabs.len());
-                self.tabs.insert(at, t);
+                let at = (self.core.cur + 1).min(self.core.tabs.len());
+                self.core.tabs.insert(at, t);
                 self.set_cur(at);
                 self.reset_doc_state();
                 self.run_pipeline(pipeline.to_vec());
@@ -676,7 +676,7 @@ impl App {
                 *keep = false;
             }
             if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(t)) = (&stages, self.target()) {
-                self.worker.update_preview(t, scope.clone(), st.clone());
+                self.core.worker.update_preview(t, scope.clone(), st.clone());
             }
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -689,14 +689,14 @@ impl App {
         dialog_head(ui, &Head::new("Recent changes").sub(format!("The last {} actions from the past 24 hours", db::UNDO_MAX)).glyph(glyphs::undo));
         let mut pick = None;
         dialog_pane(ui, |ui| {
-            if self.undo.is_empty() {
+            if self.core.undo.is_empty() {
                 ui.label(RichText::new("Nothing to undo.").color(MUTED()));
                 return;
             }
             table_card(ui, |ui| {
                 let w = ui.available_width();
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                    for (i, a) in self.undo.iter().enumerate() {
+                    for (i, a) in self.core.undo.iter().enumerate() {
                         if i > 0 {
                             table_sep(ui);
                         }

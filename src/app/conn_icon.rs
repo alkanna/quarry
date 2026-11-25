@@ -230,7 +230,7 @@ impl App {
         };
         let on = png.is_some();
         // The demo keeps its icon in memory only, since its ids may be real connections' ids.
-        if !self.ephemeral {
+        if !self.core.ephemeral {
             let res = match &png {
                 Some(png) => write_atomic(&icons_dir(), &format!("{id}.png"), png),
                 None => std::fs::remove_file(path(id)).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
@@ -240,7 +240,7 @@ impl App {
             }
         }
         ctx.data_mut(|d| d.insert_temp(cache_id(id), tex));
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == id) {
             c.meta.icon = on;
         }
         self.save_conns();

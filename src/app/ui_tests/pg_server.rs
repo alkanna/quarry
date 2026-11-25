@@ -39,7 +39,7 @@ fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &st
     loop {
         if asked.elapsed() > Duration::from_millis(500) {
             asked = std::time::Instant::now();
-            if let Some(s) = ui.h.state_mut().pg_server.as_mut() {
+            if let Some(s) = ui.h.state_mut().core.pg_server.as_mut() {
                 s.refresh_now();
             }
         }
@@ -50,14 +50,14 @@ fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &st
         if let Ok(r) = rx.try_recv() {
             panic!("the sleeping session ended before it was listed: {r:?}");
         }
-        assert!(t.elapsed() < LIMIT * 2, "timed out waiting for the sleeping session to be listed; window: {}; last error: {}", ui.app().pg_server.as_ref().map_or("closed".into(), |s| s.activity_state()), ui.app().last_problem());
+        assert!(t.elapsed() < LIMIT * 2, "timed out waiting for the sleeping session to be listed; window: {}; last error: {}", ui.app().core.pg_server.as_ref().map_or("closed".into(), |s| s.activity_state()), ui.app().last_problem());
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 /// The pid of the session whose query carries `tag`, once the window lists it as running.
 fn listed(a: &App, tag: &str) -> Option<u64> {
-    a.pg_server.as_ref()?.listed(tag)
+    a.core.pg_server.as_ref()?.listed(tag)
 }
 
 /// One frame at egui time `at`. Set by hand because a kittest step lasts 250 ms of egui time, too coarse for a double click.
@@ -91,18 +91,18 @@ fn a_double_click_on_terminate_arms_it_and_does_not_send() {
         // The red confirm takes the place of Terminate, so the second click of a double click lands on it 150 ms later.
         let t = ui.h.ctx.input(|i| i.time) + 1.0;
         click_at(&mut ui, "Terminate", t);
-        assert!(ui.app().pg_server.as_ref().is_some_and(|s| s.armed()), "the first click arms");
+        assert!(ui.app().core.pg_server.as_ref().is_some_and(|s| s.armed()), "the first click arms");
         frame_at(&mut ui, t + 0.05);
         ui.show(&format!("End session {pid}?"));
         click_at(&mut ui, "Terminate", t + 0.15);
         frame_at(&mut ui, t + 0.2);
-        assert!(ui.app().sql_kills.is_empty() && ui.app().pg_server.as_ref().is_some_and(|s| s.armed()), "a double click does not send");
+        assert!(ui.app().core.sql_kills.is_empty() && ui.app().core.pg_server.as_ref().is_some_and(|s| s.armed()), "a double click does not send");
         std::thread::sleep(Duration::from_millis(300));
         assert!(rx.try_recv().is_err(), "the session still runs");
         // A deliberate second click after the guard sends it.
         click_at(&mut ui, "Terminate", t + 0.75);
         ui.h.input_mut().time = None;
-        assert!(!ui.app().sql_kills.is_empty(), "the click after the guard sends");
+        assert!(!ui.app().core.sql_kills.is_empty(), "the click after the guard sends");
         let started = std::time::Instant::now();
         let out = loop {
             ui.h.step();

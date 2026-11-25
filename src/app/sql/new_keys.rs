@@ -270,9 +270,9 @@ impl App {
             }
             (k.asked, k.parent, k.err) = (want.clone(), None, None);
             if let Some(sql) = self.pg_session(env.conn) {
-                self.req += 1;
-                k.req = self.req;
-                self.worker.sql_structure(self.req, sql.at(env.database), want.0, want.1);
+                self.core.req += 1;
+                k.req = self.core.req;
+                self.core.worker.sql_structure(self.core.req, sql.at(env.database), want.0, want.1);
             }
         }
     }

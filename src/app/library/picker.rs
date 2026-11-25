@@ -114,7 +114,7 @@ impl App {
     /// The scripts the current tab's view lists, grouped for the picker. While no picker is open only the count is worked
     /// out, since the views ask for this every frame and the lists cost an allocation per script.
     pub(in crate::app) fn pick_data(&self, ctx: &egui::Context, kind: PickKind) -> PickData {
-        let lib = &self.library;
+        let lib = &self.core.library;
         let (conn, db, schema, coll) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.schema.clone(), t.sel.coll.clone())).unwrap_or_default();
         // A SQL filter belongs to one table, which on PostgreSQL its schema names too.
         let fits = |s: &crate::library::Script| s.kind == kind.kind() && s.conn == conn && (matches!(kind, PickKind::Sql | PickKind::Shell) || (s.db == db && s.coll == coll && (kind != PickKind::Where || s.schema == schema)));
@@ -126,7 +126,7 @@ impl App {
             lib.links
                 .iter()
                 .filter(|l| engine.is_some_and(|e| crate::library::format::fits(l, kind.kind(), conn, e)))
-                .filter_map(|l| self.lib_ui.scans.get(&l.id).map(|s| (l.id, s)))
+                .filter_map(|l| self.core.lib_ui.scans.get(&l.id).map(|s| (l.id, s)))
                 .flat_map(|(id, s)| s.entries.iter().map(move |e| (id, e)))
                 .filter(|(_, e)| e.kind == kind.kind() && (matches!(kind, PickKind::Sql | PickKind::Shell) || ((e.target.coll.is_empty() || e.target.coll == coll) && (e.target.db.is_empty() || e.target.db == db))))
         };
@@ -134,7 +134,7 @@ impl App {
         let bound = self.t().and_then(|t| t.script.as_ref().filter(|b| b.view == t.view).map(|b| (b.r.clone(), super::linked::bound_text(t).is_some_and(|x| x != b.base))));
         let bound = bound.map(|(r, edited)| (self.chip_text(&r), edited));
         if !picker_open(ctx) {
-            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), linked: Vec::new(), sidebar: panel::READY, open: self.lib_ui.open_picker, bound };
+            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), linked: Vec::new(), sidebar: panel::READY, open: self.core.lib_ui.open_picker, bound };
         }
         let mut rows = Vec::new();
         let mut index = std::collections::HashMap::new();
@@ -194,18 +194,18 @@ impl App {
                 folders.push(PickFolder { id, depth, name, count, own: own.remove(&id).unwrap_or_default() });
             }
         }
-        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.lib_ui.open_picker, bound }
+        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.core.lib_ui.open_picker, bound }
     }
 
     /// The chip of a bound tab: "monthly-revenue.sql  ·  shop-queries / reports", the script and where it is kept.
     pub(in crate::app) fn chip_text(&self, r: &ScriptRef) -> String {
         let place = match r {
             ScriptRef::Saved(id) => {
-                let folder = self.library.scripts.iter().find(|s| s.id == *id).map(|s| crate::library::ops::folder_path(&self.library, s.folder)).unwrap_or_default();
+                let folder = self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| crate::library::ops::folder_path(&self.core.library, s.folder)).unwrap_or_default();
                 if folder.is_empty() { "Library".to_string() } else { folder }
             }
             ScriptRef::File { link, rel } => {
-                let l = self.library.links.iter().find(|l| l.id == *link).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
+                let l = self.core.library.links.iter().find(|l| l.id == *link).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
                 match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
                     Some(p) => format!("{l} / {}", p.display()),
                     None => l,
@@ -218,7 +218,7 @@ impl App {
     /// Does what the picker asked for.
     pub(in crate::app) fn pick_acts(&mut self, acts: Vec<PickAct>) {
         // The view drew its picker this frame, so a Cmd+O for it has been seen.
-        self.lib_ui.open_picker = false;
+        self.core.lib_ui.open_picker = false;
         for a in acts {
             match a {
                 PickAct::Open(r, how) => self.open_script(&r, how),
@@ -231,9 +231,9 @@ impl App {
                 }
                 PickAct::Unbind => self.unbind_script(),
                 PickAct::Sidebar => {
-                    if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Library {
-                        self.prefs.set_side_mode(SideMode::Library);
-                        self.prefs.sidebar_hidden = false;
+                    if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Library {
+                        self.core.prefs.set_side_mode(SideMode::Library);
+                        self.core.prefs.sidebar_hidden = false;
                         self.save_prefs();
                     }
                 }
@@ -243,7 +243,7 @@ impl App {
 
     /// In the offline demo with QUARRY_TEST_LIBRARY=`which`, holds the picker open for the picture.
     pub(in crate::app) fn demo_open_picker(&self, ctx: &egui::Context, button: &egui::Response, which: &str) {
-        if self.demo && std::env::var("QUARRY_TEST_LIBRARY").as_deref() == Ok(which) {
+        if self.core.demo && std::env::var("QUARRY_TEST_LIBRARY").as_deref() == Ok(which) {
             egui::Popup::open_id(ctx, egui::Popup::default_response_id(button));
         }
     }
@@ -511,8 +511,8 @@ impl App {
         }
         // The SQL states show the MySQL demo's Query tab; the others stay on the Mongo demo.
         if matches!(state, "save" | "picker") {
-            (self.conns, self.tabs) = (Vec::new(), Vec::new());
-            self.open_dbs.clear();
+            (self.core.conns, self.core.tabs) = (Vec::new(), Vec::new());
+            self.core.open_dbs.clear();
             self.load_sql_demo();
             self.sql_query_demo();
         }
@@ -532,7 +532,7 @@ impl App {
     /// Three folders and a dozen scripts on the two demo connections, with some of them opened recently.
     pub(in crate::app) fn demo_scripts(&mut self) {
         use crate::library::{Folder, Library, Script};
-        let lib = &mut self.library;
+        let lib = &mut self.core.library;
         let folder = |lib: &mut Library, name: &str, parent: Option<u64>| {
             let id = lib.next_id();
             lib.folders.push(Folder { id, name: name.into(), parent });
@@ -557,6 +557,6 @@ impl App {
         let backfill = add(lib, "shell", 1, "Backfill note field", "// Fill the empty notes\nasync function run() {\n  return await orders.find({ note: null }, { limit: 20 });\n}", Some(maint));
         add(lib, "shell", 3, "Count orders by status", "async function run() {\n  return await sql`SELECT status, COUNT(*) AS n FROM orders GROUP BY status`;\n}", None);
         lib.recent = [late, tier, orphans, paid, grouped, backfill].map(ScriptRef::Saved).to_vec();
-        self.lib_ui.last_folder = Some(reports);
+        self.core.lib_ui.last_folder = Some(reports);
     }
 }

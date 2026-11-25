@@ -16,7 +16,7 @@ fn view_form(ui: &UiApp) -> &ViewForm {
 
 /// An edit of `name` the way `sql_edit_view` opens it, waiting for its definition.
 fn open_edit(app: &mut App, database: &str, schema: &str, name: &str) {
-    let conn = app.active.expect("a connection");
+    let conn = app.core.active.expect("a connection");
     app.modal = Some(Modal::SqlView(Box::new(ViewForm { conn, database: database.into(), schema: schema.into(), name: name.into(), body: String::new(), edit: true, loading: true, error: None, def: ViewDef::default(), algorithm: "UNDEFINED".into(), security: "DEFINER".into(), check: "NONE".into(), keep_definer: true, focused: false, busy: false, ask_drop: false })));
 }
 
@@ -61,8 +61,8 @@ fn query_with(script: &str, at: usize) -> Option<UiApp> {
         a.sql_query_demo();
     })?;
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    if let Some(s) = app.tabs[cur].sql.as_mut() {
+    let cur = app.core.cur;
+    if let Some(s) = app.core.tabs[cur].sql.as_mut() {
         s.query = script.into();
         s.caret = at;
     }
@@ -125,7 +125,7 @@ fn an_edit_waits_for_the_definition_and_then_keeps_what_the_server_holds() {
     assert!(ui.disabled("Save view"), "Save view was armed before the definition arrived");
     let def = ViewDef { schema: "shop".into(), name: "order_totals".into(), body: "SELECT order_id, SUM(total) AS total FROM order_items GROUP BY order_id".into(), algorithm: "MERGE".into(), security: "INVOKER".into(), definer: Some(("app".into(), "%".into())), check: String::new(), ..Default::default() };
     let app = ui.h.state_mut();
-    let conn = app.active.expect("a connection");
+    let conn = app.core.active.expect("a connection");
     app.sql_view_def_done(conn, String::new(), "shop".into(), "order_totals".into(), Ok(def));
     ui.settle();
     ui.show("Save view");
@@ -142,7 +142,7 @@ fn a_definition_that_cannot_be_read_says_why_and_saves_nothing() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     open_edit(ui.h.state_mut(), "", "shop", "order_totals");
     let app = ui.h.state_mut();
-    let conn = app.active.expect("a connection");
+    let conn = app.core.active.expect("a connection");
     app.sql_view_def_done(conn, String::new(), "shop".into(), "order_totals".into(), Err("The view is gone".into()));
     ui.settle();
     assert!(ui.shows("The view is gone"), "the reason is not shown");
@@ -156,7 +156,7 @@ fn a_materialized_postgres_view_is_shown_and_cannot_be_saved() {
     open_edit(ui.h.state_mut(), "analytics", "public", "mv_cohorts");
     let def = ViewDef { schema: "public".into(), name: "mv_cohorts".into(), body: "SELECT 1".into(), materialized: true, ..Default::default() };
     let app = ui.h.state_mut();
-    let conn = app.active.expect("a connection");
+    let conn = app.core.active.expect("a connection");
     app.sql_view_def_done(conn, "analytics".into(), "public".into(), "mv_cohorts".into(), Ok(def));
     ui.settle();
     assert!(ui.shows("PostgreSQL has no CREATE OR REPLACE for a materialized view"), "the dialog does not explain why it cannot edit");

@@ -83,7 +83,7 @@ impl App {
             return t.sel.coll.clone();
         }
         let base = match t.script.as_ref().map(|b| &b.r) {
-            Some(crate::library::ScriptRef::Saved(id)) => self.library.scripts.iter().find(|s| s.id == *id && s.kind == "sql").map(|s| s.coll.clone()),
+            Some(crate::library::ScriptRef::Saved(id)) => self.core.library.scripts.iter().find(|s| s.id == *id && s.kind == "sql").map(|s| s.coll.clone()),
             _ => None,
         };
         let stmt = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| s.cur_set()).map(|x| x.stmt.as_str()).unwrap_or_default();
@@ -432,7 +432,7 @@ impl App {
     /// so the next Copy as SQL INSERT writes to it.
     fn keep_base_table(&mut self, src: Src, table: &str) {
         let Some(Some(crate::library::ScriptRef::Saved(id))) = self.t().filter(|_| src == Src::Query).map(|t| t.script.as_ref().map(|b| b.r.clone())) else { return };
-        if let Some(s) = self.library.scripts.iter_mut().find(|s| s.id == id && s.kind == "sql" && s.coll != table) {
+        if let Some(s) = self.core.library.scripts.iter_mut().find(|s| s.id == id && s.kind == "sql" && s.coll != table) {
             s.coll = table.to_string();
             self.save_library();
         }
@@ -448,18 +448,18 @@ impl App {
 
     /// Streams a Query result's statement to `sink` in a worker task, tracked in the status bar.
     fn start_stream(&mut self, a: &AllRows, plan: Plan, sink: Sink, copy: bool) {
-        if self.export_job.is_some() {
+        if self.core.export_job.is_some() {
             return self.warn("An export is already running.");
         }
-        self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(a.db.clone()), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
-        self.worker.sql_export(job.req, a.db.clone(), a.schema.clone(), a.stmt.clone(), plan, sink, job.count.clone(), job.id.clone(), job.cancel.clone());
-        self.export_job = Some(job);
+        self.core.req += 1;
+        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(a.db.clone()), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        self.core.worker.sql_export(job.req, a.db.clone(), a.schema.clone(), a.stmt.clone(), plan, sink, job.count.clone(), job.id.clone(), job.cancel.clone());
+        self.core.export_job = Some(job);
     }
 
     /// Writes every Shell row to `path` on a blocking thread, tracked in the status bar like a stream.
     fn start_shell_export(&mut self, f: &ExportForm, table: String, path: PathBuf) {
-        if self.export_job.is_some() {
+        if self.core.export_job.is_some() {
             return self.warn("An export is already running.");
         }
         let out = match f.fmt {
@@ -474,22 +474,22 @@ impl App {
         let Some(t) = self.t() else { return };
         // A copy of the bytes, freed when the export ends, so the result stays on screen meanwhile.
         let rows: Vec<mongodb::bson::RawDocumentBuf> = t.shell.docs.iter().map(|r| r.raw().to_owned()).collect();
-        self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: None, copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        self.core.req += 1;
+        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: None, copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
         let (req, count, cancel) = (job.req, job.count.clone(), job.cancel.clone());
-        self.worker.blocking(move || Msg::SqlExport { req, res: db::export_rows(&rows, &out, &path, &count, &cancel) });
-        self.export_job = Some(job);
+        self.core.worker.blocking(move || Msg::SqlExport { req, res: db::export_rows(&rows, &out, &path, &count, &cancel) });
+        self.core.export_job = Some(job);
     }
 
     /// Runs the editor's statements in a worker task and streams their results to files.
     fn start_script(&mut self, sc: &Script, stmts: Vec<String>, ap: db::sql::export::AllPlan, path: PathBuf) {
-        if self.export_job.is_some() {
+        if self.core.export_job.is_some() {
             return self.warn("An export is already running.");
         }
-        self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sc.db.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
-        self.worker.sql_export_all(job.req, sc.db.clone(), sc.schema.clone(), stmts, ap, path, job.count.clone(), job.step.clone(), job.id.clone(), job.cancel.clone());
-        self.export_job = Some(job);
+        self.core.req += 1;
+        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sc.db.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
+        self.core.worker.sql_export_all(job.req, sc.db.clone(), sc.schema.clone(), stmts, ap, path, job.count.clone(), job.step.clone(), job.id.clone(), job.cancel.clone());
+        self.core.export_job = Some(job);
     }
 
     /// Copy as for every page of the selected Query result: the text is built in a worker task.
@@ -510,10 +510,10 @@ impl App {
 
     /// The finished stream: a file is reported, clipboard text is copied.
     pub(super) fn export_done(&mut self, ctx: &egui::Context, req: u64, res: db::Res<Done>) {
-        if self.export_job.as_ref().is_none_or(|j| j.req != req) {
+        if self.core.export_job.as_ref().is_none_or(|j| j.req != req) {
             return;
         }
-        self.export_job = None;
+        self.core.export_job = None;
         match res {
             Ok(Done { rows, path: Some(p), files, .. }) if files > 1 => self.ok(format!("Exported {} rows to {files} files, from {}", human_rows(rows), p.display())),
             Ok(Done { rows, path: Some(p), .. }) => self.ok(format!("Exported {} rows to {}", human_rows(rows), p.display())),
@@ -529,14 +529,14 @@ impl App {
 
     /// The status bar's readout of a running stream, with Cancel. True while one runs.
     pub(super) fn export_progress(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(j) = &self.export_job else { return false };
+        let Some(j) = &self.core.export_job else { return false };
         let (n, copy) = (j.count.load(Ordering::Relaxed), j.copy);
         spin(ui);
         let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
-        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() && let Some(j) = &self.export_job {
+        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() && let Some(j) = &self.core.export_job {
             match &j.db {
-                Some(db) => self.worker.sql_kill(db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone()),
+                Some(db) => self.core.worker.sql_kill(db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone()),
                 None => j.cancel.store(true, Ordering::Relaxed),
             }
         }

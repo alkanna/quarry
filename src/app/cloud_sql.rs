@@ -356,39 +356,39 @@ impl App {
     /// Where the proxy and gcloud are: Settings first, else where the browser found them, else the worker looks.
     pub(super) fn cloud_tools(&self) -> crate::cloudsql::Tools {
         let set = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(PathBuf::from);
-        let found = self.cloud.start.as_ref();
-        crate::cloudsql::Tools { proxy: set(&self.prefs.cloud_sql_proxy).or_else(|| found.and_then(|s| s.proxy.clone())), gcloud: set(&self.prefs.gcloud).or_else(|| found.and_then(|s| s.gcloud.clone())) }
+        let found = self.core.cloud.start.as_ref();
+        crate::cloudsql::Tools { proxy: set(&self.core.prefs.cloud_sql_proxy).or_else(|| found.and_then(|s| s.proxy.clone())), gcloud: set(&self.core.prefs.gcloud).or_else(|| found.and_then(|s| s.gcloud.clone())) }
     }
 
     /// Opens the browser. `change` is for a connection form that is open: Use then fills it.
     pub(super) fn open_cloud_browser(&mut self, change: bool) {
         self.cloud_load(false);
-        self.cloud_browser = Some(CloudBrowser { change, ..Default::default() });
+        self.core.cloud_browser = Some(CloudBrowser { change, ..Default::default() });
     }
 
     /// Asks gcloud again, or for the first time. The demo and tests fill the cache themselves and never run gcloud.
     pub(super) fn cloud_load(&mut self, force: bool) {
-        if self.demo || (self.cloud.req != 0 && !force) {
+        if self.core.demo || (self.core.cloud.req != 0 && !force) {
             return;
         }
-        self.req += 1;
-        let req = self.req;
-        self.cloud.reload(req);
-        let (g, p) = (self.prefs.gcloud.clone(), self.prefs.cloud_sql_proxy.clone());
-        self.worker.blocking(move || Msg::CloudSql { req, found: Found::Start(crate::cloudsql::start(&g, &p)) });
+        self.core.req += 1;
+        let req = self.core.req;
+        self.core.cloud.reload(req);
+        let (g, p) = (self.core.prefs.gcloud.clone(), self.core.prefs.cloud_sql_proxy.clone());
+        self.core.worker.blocking(move || Msg::CloudSql { req, found: Found::Start(crate::cloudsql::start(&g, &p)) });
     }
 
     /// Where gcloud is found, for Settings: asked once each time Settings opens, off the UI thread. The demo shows a
     /// fixed path and never looks.
     pub(super) fn gcloud_found_text(&mut self) -> String {
-        if self.demo {
+        if self.core.demo {
             return "Found automatically at ~/google-cloud-sdk/bin/gcloud. Set a path only to use another gcloud.".into();
         }
-        if !self.cloud.gcloud_asked {
-            self.cloud.gcloud_asked = true;
-            self.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Gcloud(crate::cloudsql::find_gcloud("")) });
+        if !self.core.cloud.gcloud_asked {
+            self.core.cloud.gcloud_asked = true;
+            self.core.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Gcloud(crate::cloudsql::find_gcloud("")) });
         }
-        match &self.cloud.gcloud_seen {
+        match &self.core.cloud.gcloud_seen {
             None => "Looking for gcloud\u{2026}".into(),
             Some(Some(p)) => format!("Found automatically at {}. Set a path only to use another gcloud.", p.display()),
             Some(None) => "gcloud was not found. Install the Google Cloud CLI or enter its path.".into(),
@@ -397,16 +397,16 @@ impl App {
 
     /// Settings closed: it looks again the next time it opens.
     pub(super) fn gcloud_forget(&mut self) {
-        (self.cloud.gcloud_asked, self.cloud.gcloud_seen) = (false, None);
+        (self.core.cloud.gcloud_asked, self.core.cloud.gcloud_seen) = (false, None);
     }
 
     /// Starts the next instance lists, up to `PARALLEL` at once.
     fn cloud_pump(&mut self) {
-        let req = self.cloud.req;
-        let Some(g) = self.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
-        while let Some(project) = self.cloud.next_project() {
+        let req = self.core.cloud.req;
+        let Some(g) = self.core.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
+        while let Some(project) = self.core.cloud.next_project() {
             let g = g.clone();
-            self.worker.blocking(move || {
+            self.core.worker.blocking(move || {
                 let res = crate::cloudsql::instances(&g, &project);
                 Msg::CloudSql { req, found: Found::Instances { project, res } }
             });
@@ -417,21 +417,21 @@ impl App {
         match found {
             Found::Gcloud(p) => {
                 // An answer for a Settings that has closed since is dropped, so the next opening looks again.
-                if self.cloud.gcloud_asked {
-                    self.cloud.gcloud_seen = Some(p);
+                if self.core.cloud.gcloud_asked {
+                    self.core.cloud.gcloud_seen = Some(p);
                 }
             }
             // Counted whatever load it was for, since it ran until now.
             Found::Instances { project, res } => {
-                self.cloud.listed(req, project, res);
+                self.core.cloud.listed(req, project, res);
                 self.cloud_pump();
             }
             Found::Proxy(res) => {
-                self.cloud.busy = None;
+                self.core.cloud.busy = None;
                 match res {
                     Ok(p) => {
                         self.ok(format!("Cloud SQL proxy ready at {}", p.display()));
-                        if let Some(s) = &mut self.cloud.start {
+                        if let Some(s) = &mut self.core.cloud.start {
                             s.proxy = Some(p);
                         }
                     }
@@ -439,14 +439,14 @@ impl App {
                 }
             }
             // An answer to a load that Refresh has replaced.
-            _ if req != self.cloud.req => {}
+            _ if req != self.core.cloud.req => {}
             Found::Start(s) => {
                 // A project already answered (a test feeds them first) is not asked again.
                 if let Ok(ps) = &s.projects {
-                    self.cloud.queue = ps.iter().filter(|p| !self.cloud.instances.contains_key(&p.id)).map(|p| p.id.clone()).collect();
+                    self.core.cloud.queue = ps.iter().filter(|p| !self.core.cloud.instances.contains_key(&p.id)).map(|p| p.id.clone()).collect();
                 }
-                self.cloud.start = Some(s);
-                self.cloud.prev = None;
+                self.core.cloud.start = Some(s);
+                self.core.cloud.prev = None;
                 self.cloud_pump();
             }
         }
@@ -454,28 +454,28 @@ impl App {
 
     /// Downloads the pinned proxy, or installs it with gcloud.
     pub(super) fn cloud_get_proxy(&mut self, install: bool) {
-        if self.demo {
+        if self.core.demo {
             return self.warn("Offline demo: nothing is downloaded.");
         }
-        if self.cloud.busy.is_some() {
+        if self.core.cloud.busy.is_some() {
             return;
         }
         if install {
-            let Some(g) = self.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
-            self.cloud.busy = Some("Installing cloud-sql-proxy with gcloud…");
-            self.worker.blocking(move || Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::install_and_find(&g)) });
+            let Some(g) = self.core.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
+            self.core.cloud.busy = Some("Installing cloud-sql-proxy with gcloud…");
+            self.core.worker.blocking(move || Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::install_and_find(&g)) });
         } else {
-            self.cloud.busy = Some("Downloading and checking cloud-sql-proxy…");
-            self.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::download_proxy(&tools_dir())) });
+            self.core.cloud.busy = Some("Downloading and checking cloud-sql-proxy…");
+            self.core.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::download_proxy(&tools_dir())) });
         }
     }
 
     /// Fills the form the browser was opened for, or a new one.
     fn cloud_use(&mut self, inst: &Instance, change: bool) {
-        let account = self.cloud.account().map(str::to_string);
+        let account = self.core.cloud.account().map(str::to_string);
         if !(change && matches!(self.modal, Some(Modal::Conn(_)))) {
-            self.conn_test = None;
-            self.test_info = None;
+            self.core.conn_test = None;
+            self.core.test_info = None;
             self.modal = Some(Modal::Conn(Box::default()));
         }
         if let Some(Modal::Conn(f)) = self.modal.as_mut() {
@@ -497,7 +497,7 @@ impl App {
     /// whether gcloud can install it, so it is started if it never ran.
     pub(super) fn proxy_missing_card(&mut self, ui: &mut egui::Ui, again: &str) -> Option<CardAct> {
         self.cloud_load(false);
-        state_card(ui, Card::NoProxy, None, self.cloud.components(), self.cloud.busy, again)
+        state_card(ui, Card::NoProxy, None, self.core.cloud.components(), self.core.cloud.busy, again)
     }
 
     /// The card of a connection that went through Cloud SQL and could not open, in place of the generic one.
@@ -511,7 +511,7 @@ impl App {
         let signed_out = raw.to_lowercase().contains("gcloud auth login");
         let no_adc = raw.contains(crate::cloudsql::ADC_MISSING);
         if missing || signed_out || no_adc {
-            let account = self.cloud.account().map(str::to_string);
+            let account = self.core.cloud.account().map(str::to_string);
             act = centered(ui, |ui| match (missing, no_adc) {
                 (true, _) => self.proxy_missing_card(ui, "Retry"),
                 (_, true) => state_card(ui, Card::NoAdc, account.as_deref(), false, None, "Retry"),
@@ -570,14 +570,14 @@ impl App {
 
     /// The "Add from Cloud SQL" browser.
     pub(super) fn cloud_browser_window(&mut self, ctx: &egui::Context) {
-        let Some(mut b) = self.cloud_browser.take() else { return };
+        let Some(mut b) = self.core.cloud_browser.take() else { return };
         let mut close = false;
         let mut pick: Option<Instance> = None;
         let mut act = None;
         let r = banded(egui::Id::unique(("quarry-layer", "cloud-sql"))).show(ctx, |ui| {
             ui.set_width(BROWSER_W + 40.0);
             let sub = if b.change { "Instances your gcloud account can reach. Use puts one in the open form." } else { "Instances your gcloud account can reach. Use fills a new connection." };
-            let account = self.cloud.account();
+            let account = self.core.cloud.account();
             dialog_head_with(ui, &Head::new("Add from Cloud SQL").sub(sub).glyph(glyphs::server), |ui| {
                 // Stacked, so a long address does not run into the context line beside it
                 if let Some(a) = account {
@@ -610,20 +610,20 @@ impl App {
             });
             ui.add_space(12.0);
             // While a Refresh waits, the cards of the last answer stay: the panels are taller than a card, so swapping to them made the window jump.
-            let start = self.cloud.start.clone().or_else(|| self.cloud.prev.clone());
+            let start = self.core.cloud.start.clone().or_else(|| self.core.cloud.prev.clone());
             let signed_out = start.as_ref().is_some_and(|s| matches!(&s.projects, Err(e) if e.contains("gcloud auth login")));
             match &start {
                 Some(s) if s.gcloud.is_none() => act = act.or(state_card(ui, Card::NoGcloud, None, false, None, "Refresh")),
-                Some(_) if signed_out => act = act.or(state_card(ui, Card::SignedOut, self.cloud.account(), false, None, "Refresh")),
+                Some(_) if signed_out => act = act.or(state_card(ui, Card::SignedOut, self.core.cloud.account(), false, None, "Refresh")),
                 _ => {
                     if start.as_ref().is_some_and(|s| s.proxy.is_none()) {
-                        act = act.or(state_card(ui, Card::NoProxy, None, self.cloud.components(), self.cloud.busy, "Refresh"));
+                        act = act.or(state_card(ui, Card::NoProxy, None, self.core.cloud.components(), self.core.cloud.busy, "Refresh"));
                         ui.add_space(10.0);
                     }
-                    if self.cloud.adc() {
+                    if self.core.cloud.adc() {
                         b.adc_for = None;
                     } else if b.adc_for.is_some() {
-                        act = act.or(state_card(ui, Card::NoAdc, self.cloud.account(), false, None, "Refresh"));
+                        act = act.or(state_card(ui, Card::NoAdc, self.core.cloud.account(), false, None, "Refresh"));
                         ui.add_space(10.0);
                     }
                     ui.horizontal_top(|ui| {
@@ -637,7 +637,7 @@ impl App {
             }
             bd.end(outer);
             let ui = outer;
-            let shown = b.sel.as_ref().and_then(|n| self.cloud.instance(n));
+            let shown = b.sel.as_ref().and_then(|n| self.core.cloud.instance(n));
             let foot = match shown {
                 Some(i) => format!("Only PostgreSQL and MySQL instances are listed. Use saves {} {}.", i.connection_name, if i.iam { "with IAM sign-in on" } else { "with a database password" }),
                 None => "Only PostgreSQL and MySQL instances are listed.".to_string(),
@@ -650,22 +650,22 @@ impl App {
         self.cloud_card_act(act, |a| a.cloud_load(true));
         if let Some(i) = pick {
             // Without Application Default Credentials the proxy cannot sign in to IAM, so the browser asks for them first.
-            if !(i.iam && !self.cloud.adc()) {
+            if !(i.iam && !self.core.cloud.adc()) {
                 return self.cloud_use(&i, b.change);
             }
             (b.adc_for, b.sel) = (Some(i.connection_name.clone()), Some(i.connection_name));
         }
         if !(close || r.should_close()) {
-            self.cloud_browser = Some(b);
+            self.core.cloud_browser = Some(b);
         }
     }
 
     /// The project list on the left of the browser, with a count of each project's instances.
     fn cloud_projects(&mut self, ui: &mut egui::Ui, b: &mut CloudBrowser) {
-        let projects = self.cloud.start.as_ref().and_then(|s| s.projects.as_ref().ok()).cloned().unwrap_or_default();
+        let projects = self.core.cloud.start.as_ref().and_then(|s| s.projects.as_ref().ok()).cloned().unwrap_or_default();
         let stopped = b.stopped;
         let shown = |r: &Result<Vec<Instance>, String>| r.as_ref().map(|v| v.iter().filter(|i| stopped || running(i)).count()).unwrap_or(0);
-        let total: usize = self.cloud.instances.values().map(shown).sum();
+        let total: usize = self.core.cloud.instances.values().map(shown).sum();
         ui.allocate_ui_with_layout(egui::vec2(PROJECTS_W, PANELS_H), egui::Layout::top_down(egui::Align::Min), |ui| {
             egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
                 ui.set_width(PROJECTS_W - 10.0);
@@ -688,15 +688,15 @@ impl App {
                     }
                     // Projects with instances first; empty or refused ones fold away, their reason on hover, so an account
                     // that reaches many projects does not bury the few that matter.
-                    let has = |id: &str| matches!(self.cloud.instances.get(id), Some(r @ Ok(_)) if shown(r) > 0);
-                    let pending = projects.iter().filter(|p| !self.cloud.instances.contains_key(&p.id)).count();
-                    let others: Vec<_> = projects.iter().filter(|p| self.cloud.instances.contains_key(&p.id) && !has(&p.id)).collect();
+                    let has = |id: &str| matches!(self.core.cloud.instances.get(id), Some(r @ Ok(_)) if shown(r) > 0);
+                    let pending = projects.iter().filter(|p| !self.core.cloud.instances.contains_key(&p.id)).count();
+                    let others: Vec<_> = projects.iter().filter(|p| self.core.cloud.instances.contains_key(&p.id) && !has(&p.id)).collect();
                     let mut rows: Vec<_> = projects.iter().filter(|p| has(&p.id) || b.project.as_deref() == Some(&p.id)).collect();
                     if b.others {
                         rows.extend(others.iter().copied().filter(|p| b.project.as_deref() != Some(&p.id)));
                     }
                     for pr in rows {
-                        let res = self.cloud.instances.get(&pr.id);
+                        let res = self.core.cloud.instances.get(&pr.id);
                         let n = res.map(shown);
                         let faint = !has(&pr.id);
                         let right = match res {
@@ -748,10 +748,10 @@ impl App {
         let mut pick = None;
         let w = BROWSER_W - PROJECTS_W - PANEL_GAP;
         let q = b.search.trim().to_lowercase();
-        let start = self.cloud.start.as_ref();
+        let start = self.core.cloud.start.as_ref();
         let projects: Vec<String> = start.and_then(|s| s.projects.as_ref().ok()).map(|v| v.iter().map(|p| p.id.clone()).collect()).unwrap_or_default();
         let error = start.and_then(|s| s.projects.as_ref().err()).cloned();
-        let loading = start.is_none() || projects.iter().any(|p| !self.cloud.instances.contains_key(p));
+        let loading = start.is_none() || projects.iter().any(|p| !self.core.cloud.instances.contains_key(p));
         ui.allocate_ui_with_layout(egui::vec2(w, PANELS_H), egui::Layout::top_down(egui::Align::Min), |ui| {
             egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).show(ui, |ui| {
                 ui.set_width(w - 2.0);
@@ -768,7 +768,7 @@ impl App {
                     let mut any = false;
                     let only = b.project.clone();
                     for pr in projects.iter().filter(|p| only.as_ref().is_none_or(|x| x == *p)) {
-                        let Some(Ok(list)) = self.cloud.instances.get(pr) else { continue };
+                        let Some(Ok(list)) = self.core.cloud.instances.get(pr) else { continue };
                         let rows: Vec<&Instance> = list.iter().filter(|i| (b.stopped || running(i)) && (q.is_empty() || [&i.name, &i.region, pr, &i.version].iter().any(|s| s.to_lowercase().contains(&q)))).collect();
                         if rows.is_empty() {
                             continue;

@@ -27,8 +27,8 @@ fn sql_query(a: &mut App) {
 }
 
 fn add(a: &mut App, kind: &str, conn: u64, name: &str, body: &str, db: &str, coll: &str) -> u64 {
-    let id = a.library.next_id();
-    a.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), ..Default::default() });
+    let id = a.core.library.next_id();
+    a.core.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), ..Default::default() });
     id
 }
 
@@ -43,7 +43,7 @@ fn sql_of(a: &App) -> &SqlTab {
 
 /// A scan as the worker makes it: the files open in tabs are read in full when they changed.
 fn rescan(a: &mut App, link: u64, dir: &Path) {
-    let open: Vec<(PathBuf, disk::Meta)> = a.tabs.iter().filter_map(|t| t.script.as_ref()).filter_map(|b| match &b.r {
+    let open: Vec<(PathBuf, disk::Meta)> = a.core.tabs.iter().filter_map(|t| t.script.as_ref()).filter_map(|b| match &b.r {
         ScriptRef::File { rel, .. } => Some((rel.clone(), b.disk)),
         _ => None,
     }).collect();
@@ -58,53 +58,53 @@ fn a_restored_tab_on_a_linked_file_keeps_its_edits_when_the_file_is_read() {
     std::fs::write(dir.join("a.sql"), "select 1").unwrap();
     let mut h = harness();
     let a = h.state_mut();
-    a.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
-    a.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow: true, ..Default::default() });
+    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow: true, ..Default::default() });
     let mut t = Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
     t.view = View::Sql;
     t.sql.as_mut().unwrap().query = "select 1 -- mine".into();
     t.script = Some(a.rebind(&t, ScriptRef::File { link: 1, rel: "a.sql".into() }).expect("bound again"));
-    a.tabs.push(t);
-    a.cur = 0;
+    a.core.tabs.push(t);
+    a.core.cur = 0;
     rescan(a, 1, &dir);
-    let t = &a.tabs[0];
+    let t = &a.core.tabs[0];
     assert_eq!(t.sql.as_ref().unwrap().query, "select 1 -- mine", "the edits were replaced by the file");
     assert_eq!(t.script.as_ref().unwrap().conflict.as_deref(), Some("select 1"), "the difference shows as a conflict");
     // A restored tab that holds what the file holds is simply clean.
     let a = h.state_mut();
-    a.tabs[0].sql.as_mut().unwrap().query = "select 1".into();
-    let b = a.rebind(&a.tabs[0], ScriptRef::File { link: 1, rel: "a.sql".into() }).unwrap();
-    a.tabs[0].script = Some(b);
+    a.core.tabs[0].sql.as_mut().unwrap().query = "select 1".into();
+    let b = a.rebind(&a.core.tabs[0], ScriptRef::File { link: 1, rel: "a.sql".into() }).unwrap();
+    a.core.tabs[0].script = Some(b);
     rescan(a, 1, &dir);
-    assert!(a.tabs[0].script.as_ref().unwrap().conflict.is_none());
+    assert!(a.core.tabs[0].script.as_ref().unwrap().conflict.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn a_missing_script_or_an_unknown_kind_opens_nothing() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     open(&mut ui, 9_999, How::Here);
     assert!(ui.app().last_problem().contains("no longer in the library"), "{}", ui.app().last_problem());
     // A kind written by a newer build.
     let id = add(ui.h.state_mut(), "chart", 3, "Later", "x", "shop", "");
     open(&mut ui, id, How::Run);
-    assert_eq!(ui.app().tabs.len(), tabs);
+    assert_eq!(ui.app().core.tabs.len(), tabs);
     assert!(ui.app().last_problem().contains("does not know scripts of kind"), "{}", ui.app().last_problem());
 }
 
 #[test]
 fn a_reused_query_tab_runs_the_script_in_its_own_database() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     {
         let a = ui.h.state_mut();
-        let c = a.cur;
-        a.tabs[c].sql.as_mut().unwrap().run_db = "analytics".into();
+        let c = a.core.cur;
+        a.core.tabs[c].sql.as_mut().unwrap().run_db = "analytics".into();
     }
     let id = add(ui.h.state_mut(), "sql", 3, "Late", "SELECT 1", "shop", "");
     open(&mut ui, id, How::Here);
-    assert_eq!(ui.app().tabs.len(), tabs, "the empty tab is reused");
+    assert_eq!(ui.app().core.tabs.len(), tabs, "the empty tab is reused");
     let s = sql_of(ui.app());
     assert!(s.run_db.is_empty() || s.run_db == "shop", "the script runs in {:?}, not shop", s.run_db);
 }
@@ -116,29 +116,29 @@ fn cmd_s_writes_back_the_database_the_tab_runs_in() {
     open(&mut ui, id, How::Here);
     {
         let a = ui.h.state_mut();
-        let c = a.cur;
-        let s = a.tabs[c].sql.as_mut().unwrap();
+        let c = a.core.cur;
+        let s = a.core.tabs[c].sql.as_mut().unwrap();
         (s.query, s.run_db) = ("SELECT 2".into(), "analytics".into());
     }
     ui.key(CMD, egui::Key::S);
-    let s = ui.app().library.scripts.iter().find(|s| s.id == id).unwrap();
+    let s = ui.app().core.library.scripts.iter().find(|s| s.id == id).unwrap();
     assert_eq!((s.body.as_str(), s.db.as_str()), ("SELECT 2", "analytics"));
 }
 
 #[test]
 fn a_script_of_another_engine_is_refused_without_a_half_built_tab() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     let id = add(ui.h.state_mut(), "sql", 1, "Wrong engine", "SELECT 1", "", "");
     open(&mut ui, id, How::Here);
-    assert_eq!(ui.app().tabs.len(), tabs, "a SQL script opened a tab on a MongoDB connection");
+    assert_eq!(ui.app().core.tabs.len(), tabs, "a SQL script opened a tab on a MongoDB connection");
     assert!(ui.app().last_problem().contains("Not opened"), "{}", ui.app().last_problem());
 
     let Some(mut ui) = demo_ui(sql_query) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     let id = add(ui.h.state_mut(), "filter", 3, "Mongo filter", "{ a: 1 }", "shop", "orders");
     open(&mut ui, id, How::Here);
-    assert_eq!(ui.app().tabs.len(), tabs, "a filter opened a tab on a MySQL connection");
+    assert_eq!(ui.app().core.tabs.len(), tabs, "a filter opened a tab on a MySQL connection");
     assert!(ui.app().last_problem().contains("Not opened"), "{}", ui.app().last_problem());
 }
 
@@ -147,15 +147,15 @@ fn a_migrated_filter_with_no_collection_says_so_and_opens_nothing() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     {
         let a = ui.h.state_mut();
-        a.prefs.library.insert("1/shop".into(), vec![SavedQuery { name: "Loose".into(), filter: "{ a: 1 }".into(), ..Default::default() }]);
+        a.core.prefs.library.insert("1/shop".into(), vec![SavedQuery { name: "Loose".into(), filter: "{ a: 1 }".into(), ..Default::default() }]);
         a.migrate_library();
     }
-    let s = ui.app().library.scripts.iter().find(|s| s.name == "Loose").cloned().expect("migrated");
+    let s = ui.app().core.library.scripts.iter().find(|s| s.name == "Loose").cloned().expect("migrated");
     assert_eq!((s.kind.as_str(), s.db.as_str(), s.coll.as_str()), ("filter", "shop", ""));
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     let sel = ui.app().t().map(|t| t.sel.clone());
     open(&mut ui, s.id, How::Here);
-    assert_eq!(ui.app().tabs.len(), tabs);
+    assert_eq!(ui.app().core.tabs.len(), tabs);
     assert!(ui.app().t().map(|t| t.sel.clone()) == sel, "the current tab moved");
     assert!(ui.app().last_problem().contains("names no collection"), "{}", ui.app().last_problem());
 }
@@ -165,22 +165,22 @@ fn cmd_enter_in_the_editor_runs_the_query_after_a_click_in_the_library() {
     let Some(mut ui) = demo_ui(|a| {
         sql_query(a);
         a.demo_library("panel");
-        a.lib_ui.panel.sel = None;
+        a.core.lib_ui.panel.sel = None;
     }) else { return };
     {
         let a = ui.h.state_mut();
-        let c = a.cur;
-        a.tabs[c].sql.as_mut().unwrap().query = "SELECT 1".into();
+        let c = a.core.cur;
+        a.core.tabs[c].sql.as_mut().unwrap().query = "SELECT 1".into();
     }
     ui.click("Top customers");
-    assert!(ui.app().lib_ui.panel.focus);
+    assert!(ui.app().core.lib_ui.panel.focus);
     // The keyboard moves to the editor without a click, as Tab or a shortcut moves it.
-    let id = App::sql_editor_id(ui.app().cur);
+    let id = App::sql_editor_id(ui.app().core.cur);
     ui.h.ctx.memory_mut(|m| m.request_focus(id));
     ui.settle();
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.key(CMD, egui::Key::Enter);
-    assert_eq!(ui.app().tabs.len(), before, "the library script ran instead of the editor's query");
+    assert_eq!(ui.app().core.tabs.len(), before, "the library script ran instead of the editor's query");
     assert!(ui.said("Offline demo"), "the editor's query did not run: {}", ui.app().last_problem());
 }
 
@@ -189,22 +189,22 @@ fn return_alt_return_and_cmd_enter_act_on_the_selected_script() {
     let Some(mut ui) = demo_ui(|a| {
         sql_query(a);
         a.demo_library("panel");
-        a.lib_ui.panel.sel = None;
+        a.core.lib_ui.panel.sel = None;
     }) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     // A script opened in a tab gives the tab its name, so the rows are picked as a click on one would pick them.
     let pick = |ui: &mut UiApp, id: u64| {
-        let st = &mut ui.h.state_mut().lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.lib_ui.panel;
         (st.sel, st.focus) = (Some(crate::library::tree::Node::Script(id)), true);
         ui.settle();
     };
     pick(&mut ui, 11);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
-    assert_eq!(ui.app().tabs.len(), tabs, "Return opens in the empty tab");
+    assert_eq!(ui.app().core.tabs.len(), tabs, "Return opens in the empty tab");
     assert!(sql_of(ui.app()).query.starts_with("SELECT customer_id"));
     pick(&mut ui, 11);
     ui.key(egui::Modifiers::ALT, egui::Key::Enter);
-    assert_eq!(ui.app().tabs.len(), tabs + 1, "Alt+Return opens a new tab");
+    assert_eq!(ui.app().core.tabs.len(), tabs + 1, "Alt+Return opens a new tab");
     // Monthly revenue only reads, so Run all runs it at once.
     pick(&mut ui, 10);
     ui.key(CMD, egui::Key::Enter);
@@ -215,7 +215,7 @@ fn return_alt_return_and_cmd_enter_act_on_the_selected_script() {
 /// Steps frames until the linked-file reads and writes on the worker are back.
 fn io(h: &mut Harness<'static, App>) {
     let t = std::time::Instant::now();
-    while !h.state().lib_ui.jobs.is_empty() {
+    while !h.state().core.lib_ui.jobs.is_empty() {
         assert!(t.elapsed() < Duration::from_secs(20), "a linked-file job never came back");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
@@ -228,7 +228,7 @@ fn conn(id: u64, name: &str, engine: db::sql::Engine, status: Status) -> Conn {
 }
 
 fn writable(ui: &mut UiApp, id: u64, on: bool) {
-    if let Some(c) = ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == id) {
+    if let Some(c) = ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == id) {
         c.writable = on;
     }
 }
@@ -240,24 +240,24 @@ fn a_linked_file_runs_on_the_tab_or_active_connection_and_otherwise_asks() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
     use db::sql::Engine::{Mongo, MySql};
-    a.conns.extend([conn(1, "local", Mongo, Status::Ready), conn(2, "staging", MySql, Status::Ready), conn(3, "prod", MySql, Status::Ready)]);
-    a.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
-    a.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }));
-    a.cur = 0;
+    a.core.conns.extend([conn(1, "local", Mongo, Status::Ready), conn(2, "staging", MySql, Status::Ready), conn(3, "prod", MySql, Status::Ready)]);
+    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
+    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }));
+    a.core.cur = 0;
     let file = ScriptRef::File { link: 1, rel: "a.sql".into() };
     use crate::app::library::open::Target;
     // The tab is on MongoDB and nothing else is active: neither MySQL connection is picked for the person.
-    a.active = None;
+    a.core.active = None;
     assert_eq!(a.script_target(&file), Target::Ask(vec![2, 3]));
-    a.active = Some(2);
+    a.core.active = Some(2);
     assert_eq!(a.script_target(&file), Target::On(2));
-    a.tabs.push(Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(MySql));
-    a.cur = 1;
+    a.core.tabs.push(Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(MySql));
+    a.core.cur = 1;
     assert_eq!(a.script_target(&file), Target::On(3), "the current tab's connection comes before the active one");
     // Asked: the chooser lists both, nothing is opened until one is picked.
     let a = ui.h.state_mut();
-    (a.cur, a.active) = (0, None);
-    let tabs = a.tabs.len();
+    (a.core.cur, a.core.active) = (0, None);
+    let tabs = a.core.tabs.len();
     a.open_script(&file, How::Here);
     ui.h.run_steps(3);
     assert!(matches!(&ui.app().modal, Some(Modal::OpenOn(f)) if f.conns == [2, 3] && f.sel.is_none()));
@@ -265,7 +265,7 @@ fn a_linked_file_runs_on_the_tab_or_active_connection_and_otherwise_asks() {
     ui.click_last("Open");
     io(&mut ui.h);
     let a = ui.app();
-    assert_eq!(a.tabs.len(), tabs + 1);
+    assert_eq!(a.core.tabs.len(), tabs + 1);
     assert_eq!((a.t().unwrap().sel.conn, sql_of(a).query.as_str()), (2, "select 1"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -287,7 +287,7 @@ fn a_script_with_no_database_opens_in_the_connections_default_not_the_first_list
 fn a_removed_connections_scripts_never_pass_to_a_new_connection() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let a = ui.h.state_mut();
-    a.conns.push(conn(9, "old-prod", db::sql::Engine::MySql, Status::Idle));
+    a.core.conns.push(conn(9, "old-prod", db::sql::Engine::MySql, Status::Idle));
     let id = add(a, "sql", 9, "Old report", "SELECT 1", "", "");
     a.danger(Danger::RemoveConnection(9));
     assert!(a.conn(9).is_none());
@@ -306,7 +306,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     open(&mut ui, id, How::Run);
     // It runs, as a read-only run: the server refuses the write. Nothing is held back for a notice.
     assert!(ui.said("Offline demo"), "{}", ui.app().last_problem());
-    assert!(ui.app().lib_ui.writes.is_empty());
+    assert!(ui.app().core.lib_ui.writes.is_empty());
 
     // A pipeline with a write stage stops at the read-only gate.
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
@@ -314,7 +314,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     let id = add(ui.h.state_mut(), "pipeline", 1, "Copy out", "[{ $match: {} }, { $out: 'copy' }]", "shop", "orders");
     open(&mut ui, id, How::Run);
     assert!(ui.app().last_problem().contains("is read-only"), "{}", ui.app().last_problem());
-    assert!(!matches!(ui.app().modal, Some(Modal::AggWrite(_))) && ui.app().lib_ui.writes.is_empty());
+    assert!(!matches!(ui.app().modal, Some(Modal::AggWrite(_))) && ui.app().core.lib_ui.writes.is_empty());
 
     // A Shell script runs read-only, without the write confirmation.
     let id = add(ui.h.state_mut(), "shell", 1, "Clean", "async function run() {\n  return await orders.deleteMany({ a: 1 });\n}", "shop", "");
@@ -327,21 +327,21 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
 fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "SELECT 1;\nDELETE FROM carts WHERE id = 1", "shop", "");
-    ui.h.state_mut().status.clear();
+    ui.h.state_mut().core.status.clear();
     open(&mut ui, id, How::Run);
     assert!(sql_of(ui.app()).query.contains("DELETE FROM carts"));
     assert!(!ui.said("Offline demo"), "it ran: {}", ui.app().last_problem());
-    assert!(ui.app().lib_ui.writes.contains(&ui.app().t().unwrap().uid));
+    assert!(ui.app().core.lib_ui.writes.contains(&ui.app().t().unwrap().uid));
     ui.show("This script writes");
     ui.click_nth("Run all", 0);
     assert!(ui.said("Offline demo"), "Run all in the notice did not run it: {}", ui.app().last_problem());
-    assert!(ui.app().lib_ui.writes.is_empty());
+    assert!(ui.app().core.lib_ui.writes.is_empty());
 
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let id = add(ui.h.state_mut(), "pipeline", 1, "Copy out", "[{ $match: {} }, { $out: 'copy' }]", "shop", "orders");
     open(&mut ui, id, How::Run);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$out")));
-    assert!(ui.app().lib_ui.writes.contains(&ui.app().t().unwrap().uid));
+    assert!(ui.app().core.lib_ui.writes.contains(&ui.app().t().unwrap().uid));
     // Run all goes to the Aggregate gate, which needs the server the demo does not have.
     ui.click("Run all");
     assert!(ui.app().last_problem().contains("Not connected"), "{}", ui.app().last_problem());
@@ -358,7 +358,7 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
 fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let id = add(ui.h.state_mut(), "pipeline", 1, "Totals", "[{ $group: { _id: '$status', n: { $sum: 1 } } }]", "shop", "orders");
-    ui.h.state_mut().status.clear();
+    ui.h.state_mut().core.status.clear();
     open(&mut ui, id, How::Here);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$group")));
     assert!(!ui.said("nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
@@ -370,7 +370,7 @@ fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
 fn waiting(status: Status) -> (UiApp, u64) {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, status));
+    a.core.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, status));
     let id = add(a, "sql", 1, "Monthly revenue", "SELECT 1", "shop", "");
     a.open_script(&ScriptRef::Saved(id), How::Here);
     ui.h.run_steps(3);
@@ -378,7 +378,7 @@ fn waiting(status: Status) -> (UiApp, u64) {
 }
 
 fn set_status(ui: &mut UiApp, status: Status, attempt: u64) {
-    let c = ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == 1).unwrap();
+    let c = ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == 1).unwrap();
     (c.status, c.attempt) = (status, attempt);
     ui.h.run_steps(3);
 }
@@ -390,37 +390,37 @@ fn count_toasts(a: &App, part: &str) -> usize {
 #[test]
 fn a_script_waits_for_its_connection_and_says_so() {
     let (mut ui, _) = waiting(Status::Idle);
-    assert!(ui.app().lib_ui.pending.is_some() && ui.app().tabs.is_empty());
+    assert!(ui.app().core.lib_ui.pending.is_some() && ui.app().core.tabs.is_empty());
     assert!(ui.app().last_problem().contains("Opening Monthly revenue when shop-prod connects"), "{}", ui.app().last_problem());
     set_status(&mut ui, Status::Connecting, 1);
     set_status(&mut ui, Status::Ready, 1);
-    assert!(ui.app().lib_ui.pending.is_none());
+    assert!(ui.app().core.lib_ui.pending.is_none());
     assert_eq!(ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.as_str()), Some("SELECT 1"));
 }
 
 #[test]
 fn a_connection_that_never_starts_connecting_drops_the_wait() {
     let (mut ui, _) = waiting(Status::Idle);
-    assert!(ui.app().lib_ui.pending.is_some());
+    assert!(ui.app().core.lib_ui.pending.is_some());
     // Still idle after the time limit: the address could not be read, say, so no connect is coming.
-    if let Some(p) = ui.h.state_mut().lib_ui.pending.as_mut() {
+    if let Some(p) = ui.h.state_mut().core.lib_ui.pending.as_mut() {
         p.since = Some(-1000.0);
     }
     ui.h.run_steps(3);
-    assert!(ui.app().lib_ui.pending.is_none());
+    assert!(ui.app().core.lib_ui.pending.is_none());
     assert!(ui.app().last_problem().contains("did not connect"), "{}", ui.app().last_problem());
     // A later connect opens nothing.
     set_status(&mut ui, Status::Ready, 1);
-    assert!(ui.app().tabs.is_empty());
+    assert!(ui.app().core.tabs.is_empty());
 }
 
 #[test]
 fn a_connection_that_was_connecting_and_fails_says_so_at_once() {
     let (mut ui, _) = waiting(Status::Connecting);
-    assert!(ui.app().lib_ui.pending.is_some());
+    assert!(ui.app().core.lib_ui.pending.is_some());
     // The same attempt fails: it was under way when the script was asked for, so this failure is news.
     set_status(&mut ui, Status::Failed("refused".into()), 0);
-    assert!(ui.app().lib_ui.pending.is_none());
+    assert!(ui.app().core.lib_ui.pending.is_none());
     assert_eq!(count_toasts(ui.app(), "failed to connect"), 1, "{}", ui.app().last_problem());
 }
 
@@ -438,8 +438,8 @@ fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
     // the whole sidebar belongs to the rail's connection.
     {
         let a = ui.h.state_mut();
-        a.conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
-        a.active = Some(1);
+        a.core.conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
+        a.core.active = Some(1);
     }
     ui.settle();
     assert_eq!(ui.app().lib_conn(), Some(1));
@@ -450,11 +450,11 @@ fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
 fn a_migration_that_brings_nothing_still_writes_the_library_so_it_never_runs_again() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.prefs.library.insert("junk".into(), vec![SavedQuery { name: "x".into(), ..Default::default() }]);
-    assert_eq!(a.library.v, 0);
+    a.core.prefs.library.insert("junk".into(), vec![SavedQuery { name: "x".into(), ..Default::default() }]);
+    assert_eq!(a.core.library.v, 0);
     a.migrate_library();
-    assert!(a.library.scripts.is_empty());
-    assert_eq!(a.library.v, 1, "library.json was not written");
+    assert!(a.core.library.scripts.is_empty());
+    assert_eq!(a.core.library.v, 1, "library.json was not written");
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
         a.demo_library("panel");
     }) else { return };
     {
-        let st = &mut ui.h.state_mut().lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.lib_ui.panel;
         (st.sel, st.focus) = (Some(crate::library::tree::Node::Script(11)), true);
     }
     ui.settle();
@@ -472,19 +472,19 @@ fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
     ui.key(CMD, egui::Key::A);
     ui.type_text("Best customers");
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
-    assert!(ui.app().library.scripts.iter().any(|s| s.id == 11 && s.name == "Best customers"));
-    let before = ui.app().lib_ui.panel.sel.clone();
+    assert!(ui.app().core.library.scripts.iter().any(|s| s.id == 11 && s.name == "Best customers"));
+    let before = ui.app().core.lib_ui.panel.sel.clone();
     ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
-    assert_ne!(ui.app().lib_ui.panel.sel, before, "the arrows stopped walking the tree after the rename");
+    assert_ne!(ui.app().core.lib_ui.panel.sel, before, "the arrows stopped walking the tree after the rename");
     // Focus reaching a row from the keyboard selects it and hands the tree the keys.
     {
-        let st = &mut ui.h.state_mut().lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.lib_ui.panel;
         (st.sel, st.focus) = (None, false);
     }
     ui.settle();
     ui.h.get_by_label("Monthly revenue").focus();
     ui.settle();
-    let st = &ui.app().lib_ui.panel;
+    let st = &ui.app().core.lib_ui.panel;
     assert!(st.focus && st.sel == Some(crate::library::tree::Node::Script(10)), "{:?} {}", st.sel, st.focus);
 }
 
@@ -492,10 +492,10 @@ fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
 fn a_failed_connection_is_tried_again_and_warns_once_when_it_fails_again() {
     let (mut ui, _) = waiting(Status::Failed("refused".into()));
     // The old failure is not news: the script waits for the new attempt.
-    assert!(ui.app().lib_ui.pending.is_some(), "it gave up on the old failure: {}", ui.app().last_problem());
+    assert!(ui.app().core.lib_ui.pending.is_some(), "it gave up on the old failure: {}", ui.app().last_problem());
     set_status(&mut ui, Status::Connecting, 1);
     set_status(&mut ui, Status::Failed("refused".into()), 1);
-    assert!(ui.app().lib_ui.pending.is_none());
+    assert!(ui.app().core.lib_ui.pending.is_none());
     assert_eq!(count_toasts(ui.app(), "failed to connect"), 1, "{}", ui.app().last_problem());
 
     let (mut ui, _) = waiting(Status::Failed("refused".into()));
@@ -508,23 +508,23 @@ fn a_failed_connection_is_tried_again_and_warns_once_when_it_fails_again() {
 fn a_waiting_run_only_opens_when_another_tab_became_current() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, Status::Idle));
-    a.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(db::sql::Engine::MySql));
-    a.cur = 0;
+    a.core.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, Status::Idle));
+    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(db::sql::Engine::MySql));
+    a.core.cur = 0;
     let id = add(a, "sql", 1, "Monthly revenue", "SELECT 1", "shop", "");
     a.open_script(&ScriptRef::Saved(id), How::Run);
     ui.h.run_steps(2);
     // The person moved on to another tab while it connected.
     let a = ui.h.state_mut();
-    a.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "users".into() }).for_engine(db::sql::Engine::MySql));
-    a.cur = 1;
+    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "users".into() }).for_engine(db::sql::Engine::MySql));
+    a.core.cur = 1;
     set_status(&mut ui, Status::Ready, 1);
     assert_eq!(ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.as_str()), Some("SELECT 1"));
     assert!(!ui.app().last_problem().contains("Connect first"), "the Run went ahead: {}", ui.app().last_problem());
     // Cancel on the toast drops a wait.
     let (mut ui, _) = waiting(Status::Idle);
     ui.click("Cancel");
-    assert!(ui.app().lib_ui.pending.is_none());
+    assert!(ui.app().core.lib_ui.pending.is_none());
 }
 
 #[test]
@@ -533,15 +533,15 @@ fn the_conflict_banner_shows_on_a_query_tab_and_reload_can_be_undone() {
     std::fs::write(dir.join("a.sql"), "select 1").unwrap();
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.conns.push(conn(1, "shop", db::sql::Engine::MySql, Status::Ready));
-    a.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
-    a.lib_ui.frozen = true;
+    a.core.conns.push(conn(1, "shop", db::sql::Engine::MySql, Status::Ready));
+    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
+    a.core.lib_ui.frozen = true;
     let mut t = Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
     t.view = View::Sql;
     t.sql.as_mut().unwrap().query = "select 1 -- mine".into();
     t.script = Some(Bound { r: ScriptRef::File { link: 1, rel: "a.sql".into() }, view: View::Sql, base: "select 1".into(), disk: None, conflict: Some("select 2".into()) });
-    a.tabs.push(t);
-    a.cur = 0;
+    a.core.tabs.push(t);
+    a.core.cur = 0;
     std::fs::write(dir.join("a.sql"), "select 2").unwrap();
     ui.show("a.sql changed on disk");
     ui.click("Reload");
@@ -555,7 +555,7 @@ fn the_conflict_banner_shows_on_a_query_tab_and_reload_can_be_undone() {
 fn panel(a: &mut App) {
     sql_query(a);
     a.demo_library("panel");
-    a.lib_ui.panel.sel = None;
+    a.core.lib_ui.panel.sel = None;
 }
 
 #[test]
@@ -588,9 +588,9 @@ fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
 fn a_script_opens_on_another_connection_from_its_menu() {
     let Some(mut ui) = demo_ui(|a| {
         panel(a);
-        a.conns.push(Conn { writable: true, ..conn(4, "shop-staging", db::sql::Engine::MySql, Status::Ready) });
+        a.core.conns.push(Conn { writable: true, ..conn(4, "shop-staging", db::sql::Engine::MySql, Status::Ready) });
     }) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     ui.show("Top customers");
     let at = ui.h.get_by_label("Top customers").rect().center();
     ui.h.hover_at(at);
@@ -599,11 +599,11 @@ fn a_script_opens_on_another_connection_from_its_menu() {
     ui.click_contains("Open on");
     ui.click("shop-staging");
     let a = ui.app();
-    assert!(a.tabs.len() > tabs || a.t().is_some_and(|t| t.sel.conn == 4));
+    assert!(a.core.tabs.len() > tabs || a.t().is_some_and(|t| t.sel.conn == 4));
     assert_eq!(a.t().map(|t| t.sel.conn), Some(4));
     assert!(sql_of(a).query.starts_with("SELECT customer_id"));
     // The script keeps its own connection.
-    assert_eq!(a.library.scripts.iter().find(|s| s.id == 11).map(|s| s.conn), Some(3));
+    assert_eq!(a.core.library.scripts.iter().find(|s| s.id == 11).map(|s| s.conn), Some(3));
 }
 
 #[test]
@@ -611,10 +611,10 @@ fn opening_a_script_already_in_a_tab_switches_to_that_tab() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     let id = add(ui.h.state_mut(), "sql", 3, "Top customers", "SELECT 1", "shop", "");
     open(&mut ui, id, How::Here);
-    let (at, n) = (ui.app().cur, ui.app().tabs.len());
+    let (at, n) = (ui.app().core.cur, ui.app().core.tabs.len());
     ui.h.state_mut().set_cur(0);
     open(&mut ui, id, How::Here);
-    assert_eq!((ui.app().cur, ui.app().tabs.len()), (at, n), "a second copy of the script opened");
+    assert_eq!((ui.app().core.cur, ui.app().core.tabs.len()), (at, n), "a second copy of the script opened");
     open(&mut ui, id, How::NewTab);
-    assert_eq!(ui.app().tabs.len(), n + 1, "New tab did not open a second copy");
+    assert_eq!(ui.app().core.tabs.len(), n + 1, "New tab did not open a second copy");
 }

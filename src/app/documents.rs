@@ -228,13 +228,13 @@ impl App {
             if !sql && matches!(view, View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
-                    if self.prefs.table {
+                    if self.core.prefs.table {
                         self.columns_menu(ui, true);
                     }
-                    let mut table = self.prefs.table;
+                    let mut table = self.core.prefs.table;
                     segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
-                    if table != self.prefs.table {
-                        self.prefs.table = table;
+                    if table != self.core.prefs.table {
+                        self.core.prefs.table = table;
                         self.save_prefs();
                     }
                 });
@@ -276,13 +276,13 @@ impl App {
         let mut code_lang = None;
         let mut demo_pick = None;
         let key = self.col_key(false);
-        let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
+        let hist = self.core.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Query);
         let (mut qacts, mut pick_acts) = (Vec::new(), Vec::new());
-        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
+        let (t, ac) = (&mut self.core.tabs[self.core.cur], &mut self.core.ac);
         // Not asked yet (it is, right after this frame) or asked and not back.
-        let (asked, waiting, notes) = (&self.values_asked, &self.values_pending, &self.values_note);
+        let (asked, waiting, notes) = (&self.core.values_asked, &self.core.values_pending, &self.core.values_note);
         let lookup = |p: &str| {
             let k = (key.clone(), p.to_string());
             if !asked.contains(&(k.0.clone(), k.1.clone(), None)) || waiting.contains(&k) {
@@ -422,18 +422,18 @@ impl App {
         let now = std::time::Instant::now();
         if let Some(prefix) = typed.edit {
             let due = now + std::time::Duration::from_millis(400);
-            self.values_typed = typed.field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key.clone(), f, p));
+            self.core.values_typed = typed.field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key.clone(), f, p));
         }
-        if let Some((_, k, f, p)) = self.values_typed.take_if(|(due, ..)| *due <= now) {
+        if let Some((_, k, f, p)) = self.core.values_typed.take_if(|(due, ..)| *due <= now) {
             sent |= self.want_values(k, f, Some(p));
-        } else if let Some((due, ..)) = &self.values_typed {
+        } else if let Some((due, ..)) = &self.core.values_typed {
             ui.ctx().request_repaint_after(*due - now);
         }
         if sent {
             ui.ctx().request_repaint();
         }
         for a in qacts {
-            let t = &mut self.tabs[self.cur];
+            let t = &mut self.core.tabs[self.core.cur];
             match a {
                 QAct::Filter(v) => t.filter_txt = v,
                 QAct::Sort(v) => t.sort_txt = v,
@@ -468,7 +468,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Open query in Shell").clicked() {
-                    let t = &app.tabs[app.cur];
+                    let t = &app.core.tabs[app.core.cur];
                     // A pasted shell command carries its own options.
                     match super::run::find_query(t) {
                         Ok(q) => app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt, &cursor_chain(&q))),
@@ -508,24 +508,24 @@ impl App {
             .on_hover_text("More actions");
             // The button shows only painted dots, so screen readers and the UI tests need a name.
             a11y(&more, egui::Role::Button, "Document actions");
-            if app.prefs.table {
+            if app.core.prefs.table {
                 app.columns_menu(ui, false);
             }
-            let mut table = app.prefs.table;
+            let mut table = app.core.prefs.table;
             segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
-            if table != app.prefs.table {
-                app.prefs.table = table;
+            if table != app.core.prefs.table {
+                app.core.prefs.table = table;
                 app.save_prefs();
             }
             if quiet(ui, "+ Insert").clicked() {
-                let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
+                let open = |a: &mut App| a.core.insert = Some("{\n  \n}".into());
                 if app.sel_writable() { open(app) } else { app.ask_unlock_then(open) }
             }
             let pending = app.tab_drafts();
             if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
                 if !app.sel_writable() {
                     app.ask_unlock();
-                } else if app.prefs.confirm_save && !app.prefs.always_writable {
+                } else if app.core.prefs.confirm_save && !app.core.prefs.always_writable {
                     app.modal = Some(Modal::SaveAll(pending));
                 } else {
                     for k in &pending {
@@ -547,7 +547,7 @@ impl App {
     /// Table or JSON list of the current results, with the open document shown under its row.
     pub(super) fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
-        let cur = self.cur;
+        let cur = self.core.cur;
         let size = self.page_size();
         let t = self.tm().unwrap();
         // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
@@ -584,7 +584,7 @@ impl App {
         let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
         let mut after = None;
         let loading = t.loading;
-        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
+        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.core.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
         let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some() || super::run::query_dirty(t));
         if let (true, true, Some((id, ..))) = (docs.is_empty(), conn_failed, &closed) {
@@ -600,7 +600,7 @@ impl App {
                 }
                 ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED()));
                 if primary(ui, "Connect", PRIMARY()).clicked() {
-                    self.active = Some(id);
+                    self.core.active = Some(id);
                     self.connect(id);
                 }
             });
@@ -616,14 +616,14 @@ impl App {
                 if stale {
                     ui.multiply_opacity(0.45);
                 }
-                if self.prefs.table || sql {
+                if self.core.prefs.table || sql {
                     after = Some(self.doc_table(ui, agg, docs, &fields, base));
                 } else {
                     self.doc_list(ui, agg, docs);
                 }
             });
         }
-        if let Some(t) = self.tabs.get_mut(cur) {
+        if let Some(t) = self.core.tabs.get_mut(cur) {
             match (agg, t.agg_store(view)) {
                 (false, _) => t.docs = raw,
                 (true, Some(Store::Docs(v))) => *v = all,
@@ -633,7 +633,7 @@ impl App {
         }
         // Only now does the tab hold its page again, and SQL cell work finds its rows there. A link followed while
         // drawing may have moved to another tab, whose rows these indexes are not.
-        if let Some(a) = after.filter(|_| self.cur == cur) {
+        if let Some(a) = after.filter(|_| self.core.cur == cur) {
             self.sql_after(ui.ctx(), a);
         }
     }
@@ -643,7 +643,7 @@ impl App {
         let m = ui.input(|i| i.modifiers);
         if (!agg || self.t().is_some_and(|t| t.view == View::Shell)) && (m.command || m.shift) {
             self.toggle_check(i, m.shift);
-        } else if self.prefs.open_inline {
+        } else if self.core.prefs.open_inline {
             // Rows open and close on their own; the last one opened takes edits and keys.
             let t = self.tm().unwrap();
             let key = (agg, i);
@@ -711,7 +711,7 @@ impl App {
     pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: Rows) {
         let n = self.checks().len();
         // Hidden under dialogs, which would otherwise sit behind it.
-        let hidden = self.modal.is_some() || self.insert.is_some();
+        let hidden = self.modal.is_some() || self.core.insert.is_some();
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let grouped = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         // Query and Shell results are read only: no edit or delete actions.
@@ -768,9 +768,9 @@ impl App {
                 }).collect();
                 // One copy opens the insert editor to tweak it first; many are written straight away.
                 if let [c] = copies.as_slice() {
-                    self.insert = Some(db::to_edit_json(c));
+                    self.core.insert = Some(db::to_edit_json(c));
                 } else if let Some((conn, target)) = self.writable_target() {
-                    self.worker.import(conn, target, copies, None);
+                    self.core.worker.import(conn, target, copies, None);
                 }
             }
             DocsAct::Export => self.open_export(docs, false),
@@ -817,7 +817,7 @@ impl App {
         if let Some(path) = file {
             self.ok(format!("Exporting to {}…", path.display()));
             let q = self.t().unwrap().query.clone();
-            self.worker.export(target, q, path);
+            self.core.worker.export(target, q, path);
         }
     }
 }

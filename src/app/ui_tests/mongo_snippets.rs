@@ -13,13 +13,13 @@ const FILTER: &str = "{ status: {{status:paid|shipped=paid}}, total: { $gte: {{m
 fn with_scripts(a: &mut App) {
     a.load_demo();
     for (name, kind, body, coll) in [("Paid since", "shell", SHELL, ""), ("Gift wrap", "shell", WRITE, ""), ("Big orders", "filter", FILTER, "orders")] {
-        let id = a.library.next_id();
-        a.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() });
+        let id = a.core.library.next_id();
+        a.core.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() });
     }
 }
 
 fn id_of(a: &App, name: &str) -> u64 {
-    a.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
+    a.core.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
 }
 
 fn form(a: &mut App) -> &mut crate::app::library::snippet_form::SnippetForm {

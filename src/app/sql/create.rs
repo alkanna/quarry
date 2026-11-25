@@ -52,7 +52,7 @@ impl App {
     /// Asks the server for what the dialogs list. The offline demo has no server, so its dialogs are filled directly.
     pub(in crate::app) fn ask_meta(&mut self, conn: u64, schema: &str) {
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_create_meta(conn, sql, schema.to_string());
+            self.core.worker.sql_create_meta(conn, sql, schema.to_string());
         }
     }
 
@@ -85,7 +85,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.sql_drop_ask(conn, schema, table, kind));
         }
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_drop_info(conn, sql, schema.clone(), table.clone());
+            self.core.worker.sql_drop_info(conn, sql, schema.clone(), table.clone());
         }
         self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database: String::new(), schema, table, kind, typed: String::new(), opt: false, info: None })));
     }
@@ -139,7 +139,7 @@ impl App {
             Ok(s) => self.ok(s),
             Err(e) => return self.err(e),
         }
-        if let (Some(dbs), Some(c)) = (dbs, self.conns.iter_mut().find(|c| c.meta.id == conn)) {
+        if let (Some(dbs), Some(c)) = (dbs, self.core.conns.iter_mut().find(|c| c.meta.id == conn)) {
             let old = std::mem::take(&mut c.dbs);
             c.dbs = dbs.into_iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == d).and_then(|o| o.1.clone()))).collect();
             // A database just created is known to be empty, so it shows 0 instead of a spinner.
@@ -150,9 +150,9 @@ impl App {
         let gone = |t: &Tab| t.sel.conn == conn && t.sel.db == schema && (table.is_empty() || t.sel.coll == table);
         match what {
             Ddl::CreatedDb => {
-                self.sql_asked.insert((conn, schema.clone()));
-                self.open_dbs.insert((conn, schema.clone()));
-                self.reveal = Some((conn, schema, None));
+                self.core.sql_asked.insert((conn, schema.clone()));
+                self.core.open_dbs.insert((conn, schema.clone()));
+                self.core.reveal = Some((conn, schema, None));
             }
             Ddl::CreatedTable => {
                 self.side_act(conn, SideAct::Refresh(schema.clone()));
@@ -164,8 +164,8 @@ impl App {
             Ddl::DroppedDb => {
                 self.purge_undo(conn, "", &schema, "");
                 self.remove_tabs(gone);
-                self.open_dbs.remove(&(conn, schema.clone()));
-                self.sql_asked.remove(&(conn, schema.clone()));
+                self.core.open_dbs.remove(&(conn, schema.clone()));
+                self.core.sql_asked.remove(&(conn, schema.clone()));
                 self.forget_schema(conn, &schema);
             }
             Ddl::DroppedTable => {
@@ -175,7 +175,7 @@ impl App {
             }
             Ddl::CreatedSchema | Ddl::DroppedSchema => {}
             Ddl::Emptied => {
-                let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| gone(&self.tabs[i])).collect();
+                let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| gone(&self.core.tabs[i])).collect();
                 for i in open {
                     self.reload_of(i);
                 }
@@ -186,7 +186,7 @@ impl App {
 
     /// Runs a confirmed drop. Tabs close and the sidebar updates when the server says it worked.
     pub(in crate::app) fn sql_drop_run(&mut self, conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         let Some(c) = self.conn(conn) else { return };
@@ -197,7 +197,7 @@ impl App {
         if c.meta.engine == db::sql::Engine::Postgres {
             return self.pg_drop_run(conn, sql, database, schema, table, kind, opt);
         }
-        self.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
+        self.core.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
     }
 
     pub(in crate::app) fn sql_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewDb, keep: &mut bool) {
@@ -285,7 +285,7 @@ impl App {
     fn sql_create_db_run(&mut self, f: &NewDb) {
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let Some(meta) = f.meta.clone() else { return };
-        self.worker.sql_create_db(f.conn, sql, f.name.clone(), f.charset.clone(), f.collation.clone(), meta, !self.conn_writable(f.conn));
+        self.core.worker.sql_create_db(f.conn, sql, f.name.clone(), f.charset.clone(), f.collation.clone(), meta, !self.conn_writable(f.conn));
     }
 
     pub(in crate::app) fn sql_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewTable, keep: &mut bool) {
@@ -422,7 +422,7 @@ impl App {
     fn sql_create_table_run(&mut self, f: &NewTable) {
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let Some(meta) = f.meta.clone() else { return };
-        self.worker.sql_create_table(f.conn, sql, f.spec(), meta, !self.conn_writable(f.conn));
+        self.core.worker.sql_create_table(f.conn, sql, f.spec(), meta, !self.conn_writable(f.conn));
     }
 
     /// The editable column list: name with a key toggle, type with its length, Null, and an Extra menu.
@@ -616,7 +616,7 @@ impl App {
             return;
         }
         // The designs show the actions enabled, which they are on an unlocked connection.
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3) {
+        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3) {
             c.writable = true;
         }
         let cs = |n: &str, d: &str, c: &str| create::Charset { name: n.into(), desc: d.into(), default_collation: c.into() };

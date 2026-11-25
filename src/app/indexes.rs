@@ -111,7 +111,7 @@ impl App {
     fn index_suggestions(&mut self, ui: &mut egui::Ui) {
         let t = self.t().unwrap();
         let key = t.sel.key();
-        let Some(i) = self.idx_info.as_ref().filter(|(k, _)| *k == key).map(|(_, i)| i) else { return };
+        let Some(i) = self.core.idx_info.as_ref().filter(|(k, _)| *k == key).map(|(_, i)| i) else { return };
         if let Some(e) = &i.stats_err {
             ui.add_space(6.0);
             ui.label(RichText::new(stats_note(e)).color(MUTED())).on_hover_text(e);
@@ -145,7 +145,7 @@ impl App {
             self.open_create_index(Some(k));
         }
         if profiling && let Some((conn, target)) = self.writable_target() {
-            self.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
+            self.core.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
         }
     }
 
@@ -159,7 +159,7 @@ impl App {
         if self.t().is_none() {
             return false;
         }
-        let mut ac = std::mem::take(&mut self.ac);
+        let mut ac = std::mem::take(&mut self.core.ac);
         let t = self.t().unwrap();
         let coll = t.sel.coll.clone();
         dialog_head(ui, &Head::new(format!("New index on {coll}")).glyph(glyphs::list));
@@ -171,7 +171,7 @@ impl App {
         ac_field(ui, id, &mut f.keys, &mut ac, &|b, _| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
             egui::TextEdit::singleline(text).id(id).font(egui::TextStyle::Monospace).hint_text("{ email: 1, createdAt: -1 }").desired_width(440.0).show(ui)
         });
-        self.ac = ac;
+        self.core.ac = ac;
         ui.label(RichText::new("1 ascending, -1 descending, or \"text\", \"2dsphere\", \"hashed\".").size(TXT_SMALL).color(MUTED()));
         ui.add_space(6.0);
         egui::Grid::new("index-options").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
@@ -233,7 +233,7 @@ impl App {
         });
         if let (true, Ok(s)) = (create, spec) && let Some((conn, target)) = self.writable_target() {
             let done = format!("Created index {}", s.get_str("name").unwrap_or_default());
-            self.worker.db_change(conn, target.client, target.db, command(s), done);
+            self.core.worker.db_change(conn, target.client, target.db, command(s), done);
             keep = false;
         }
         keep
@@ -261,7 +261,7 @@ impl App {
             IdxAct::Hide(hidden) => {
                 if let Some((conn, target)) = self.writable_target() {
                     let done = format!("{} index {name}", if hidden { "Hid" } else { "Unhid" });
-                    self.worker.db_change(conn, target.client, target.db, doc! { "collMod": target.coll, "index": { "name": name, "hidden": hidden } }, done);
+                    self.core.worker.db_change(conn, target.client, target.db, doc! { "collMod": target.coll, "index": { "name": name, "hidden": hidden } }, done);
                 }
             }
             IdxAct::Drop => {
@@ -279,8 +279,8 @@ impl App {
     /// their index by name, since a create or drop moves the others up or down.
     pub(super) fn refresh_idx_rows(&mut self, key: &str) {
         let now = mongodb::bson::DateTime::now().timestamp_millis();
-        let info = self.idx_info.as_ref().filter(|(k, _)| k == key).map(|(_, i)| i);
-        for t in self.tabs.iter_mut().filter(|t| t.sel.key() == key) {
+        let info = self.core.idx_info.as_ref().filter(|(k, _)| k == key).map(|(_, i)| i);
+        for t in self.core.tabs.iter_mut().filter(|t| t.sel.key() == key) {
             let rows = index_rows(&t.indexes, info, now);
             if t.view == View::Indexes {
                 let name = |i: usize| t.idx_rows.get(i).and_then(|r| r.get_str("name").ok());
@@ -297,19 +297,19 @@ impl App {
     }
 
     pub(super) fn load_indexes(&mut self) {
-        self.load_indexes_of(self.cur);
+        self.load_indexes_of(self.core.cur);
     }
 
     pub(super) fn load_indexes_of(&mut self, i: usize) {
-        if let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
-            self.req += 1;
-            let req = self.req;
-            self.tabs[i].idx_req = req;
+        if let Some(target) = self.core.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
+            self.core.req += 1;
+            let req = self.core.req;
+            self.core.tabs[i].idx_req = req;
             // Only the Indexes view shows usage, and it costs a profiler query.
-            if self.tabs[i].view == View::Indexes {
-                self.worker.index_info(target.clone());
+            if self.core.tabs[i].view == View::Indexes {
+                self.core.worker.index_info(target.clone());
             }
-            self.worker.indexes(req, target);
+            self.core.worker.indexes(req, target);
         }
     }
 }

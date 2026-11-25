@@ -95,12 +95,12 @@ pub(super) fn ops_of(d: &Document) -> Vec<Document> {
 
 impl App {
     pub(super) fn server_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.server.take() else { return };
+        let Some(mut s) = self.core.server.take() else { return };
         let conn = s.conn;
         let client = self.conn(conn).and_then(|c| c.client.clone());
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        if let (Some(client), false) = (&client, self.demo) {
+        if let (Some(client), false) = (&client, self.core.demo) {
             self.server_poll(ctx, &mut s, client);
         }
         let mut open = true;
@@ -149,10 +149,10 @@ impl App {
             self.modal = Some(Modal::Unlock(conn, None));
         }
         if let (Some(op), Some(client)) = (kill, client) {
-            self.worker.command(client, "admin".into(), doc! { "killOp": 1, "op": op }, &format!("server:{}:kill", s.id));
+            self.core.worker.command(client, "admin".into(), doc! { "killOp": 1, "op": op }, &format!("server:{}:kill", s.id));
         }
         if open && !(r.should_close() && self.modal.is_none()) {
-            self.server = Some(s);
+            self.core.server = Some(s);
         }
     }
 
@@ -172,7 +172,7 @@ impl App {
         let (id, mut sent) = (s.id, 0);
         let mut ask = |cmd: Document, what: &str| {
             sent += 1;
-            self.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
+            self.core.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
         };
         if s.ops_tab {
             if s.auto_ops || s.ops.is_none() || s.refresh {
@@ -276,7 +276,7 @@ impl App {
             match r {
                 Ok(_) => {
                     self.ok("Asked the server to kill the operation");
-                    if let Some(s) = self.server.as_mut().filter(|s| Some(s.id) == id) {
+                    if let Some(s) = self.core.server.as_mut().filter(|s| Some(s.id) == id) {
                         s.refresh = true;
                         s.next = None;
                     }
@@ -286,7 +286,7 @@ impl App {
             }
             return;
         }
-        let Some(s) = self.server.as_mut().filter(|s| Some(s.id) == id) else { return };
+        let Some(s) = self.core.server.as_mut().filter(|s| Some(s.id) == id) else { return };
         s.waiting = s.waiting.saturating_sub(1);
         match what {
             "status" => {

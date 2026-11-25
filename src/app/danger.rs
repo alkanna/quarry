@@ -17,7 +17,7 @@ impl App {
         }
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
-            if !self.ephemeral {
+            if !self.core.ephemeral {
                 let _ = store_uri(id, "");
                 // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
                 for what in SECRETS {
@@ -25,21 +25,21 @@ impl App {
                 }
                 let _ = std::fs::remove_file(super::conn_icon::path(id));
             }
-            self.conns.retain(|c| c.meta.id != id);
-            self.explain_prev.forget(id);
+            self.core.conns.retain(|c| c.meta.id != id);
+            self.core.explain_prev.forget(id);
             self.remove_tabs(|t| t.sel.conn == id);
-            if self.active == Some(id) {
-                self.active = self.conns.first().map(|c| c.meta.id);
+            if self.core.active == Some(id) {
+                self.core.active = self.core.conns.first().map(|c| c.meta.id);
             }
             self.save_conns();
             // A removed connection must not linger in a group, where the panel and the rail would count it.
             let alive = self.conn_ids();
-            if self.groups.prune(&alive) {
+            if self.core.groups.prune(&alive) {
                 self.save_groups();
             }
             // Its agent access goes with it. Settings that failed their signature are left for the user to review,
             // since saving here would sign them.
-            if self.agents.cfg.conns.remove(&id).is_some() && self.agents.distrust.is_none() {
+            if self.core.agents.cfg.conns.remove(&id).is_some() && self.core.agents.distrust.is_none() {
                 self.save_agents();
             }
             return self.ok("Connection removed");
@@ -52,7 +52,7 @@ impl App {
         }
         if let Danger::UndoAlter(at) = action {
             // Found by time, since the list may have moved while the dialog was open.
-            return match self.undo.iter().position(|a| a.at == at) {
+            return match self.core.undo.iter().position(|a| a.at == at) {
                 Some(i) => self.apply_undo_as(i, true),
                 None => self.warn("That change is no longer in Recent changes."),
             };
@@ -77,27 +77,27 @@ impl App {
             match action {
                 Danger::DropDatabase { db, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db);
-                    self.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
-                    if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                    self.core.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
+                    if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
                     }
                 }
                 Danger::DropCollAt { db, coll, .. } => {
                     self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
-                    self.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
+                    self.core.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
                 }
-                Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
+                Danger::DropUser { db, user, .. } => self.core.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
                 Danger::Sync { .. } => {
                     let timeout = self.timeout();
                     self.drop_agg_row();
-                    let c = &mut self.tabs[self.cur].compare;
+                    let c = &mut self.core.tabs[self.core.cur].compare;
                     let r = c.result.take();
                     c.set_result(None);
                     let Some(r) = r else { return };
                     let insert = if c.insert { r.only_src } else { Vec::new() };
                     let replace = if c.replace { r.changed } else { Vec::new() };
                     let delete = if c.delete { r.only_dst.iter().filter_map(|d| d.get("_id").cloned()).collect() } else { Vec::new() };
-                    self.worker.sync(Target { client, db: c.db.clone(), coll: c.coll.clone(), timeout }, insert, replace, delete);
+                    self.core.worker.sync(Target { client, db: c.db.clone(), coll: c.coll.clone(), timeout }, insert, replace, delete);
                     self.ok("Syncing… Run Compare again afterwards to check.");
                 }
                 Danger::Restore { args, .. } => self.start_tool(true, "Restore".into(), args),
@@ -107,15 +107,15 @@ impl App {
         }
         let Some((conn, target)) = self.writable_target() else { return };
         match action {
-            Danger::DeleteMatching(s) => self.worker.delete_many(target, s),
-            Danger::DropIndex(name) => self.worker.drop_index(target, name),
-            Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
-            Danger::RenameMany { scope, from, to } => self.worker.rename_many(target, scope, from, to),
-            Danger::UpdateMany { scope, stages } => self.worker.update_many(target, scope, stages),
+            Danger::DeleteMatching(s) => self.core.worker.delete_many(target, s),
+            Danger::DropIndex(name) => self.core.worker.drop_index(target, name),
+            Danger::Validator(cmd) => self.core.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
+            Danger::RenameMany { scope, from, to } => self.core.worker.rename_many(target, scope, from, to),
+            Danger::UpdateMany { scope, stages } => self.core.worker.update_many(target, scope, stages),
             Danger::Upsert { key } => {
                 let conn = self.t().unwrap().sel.conn;
-                if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
-                    self.worker.import(conn, target, docs, Some(key));
+                if let Some(Ok(docs)) = self.core.tabs[self.core.cur].import.parsed.clone() {
+                    self.core.worker.import(conn, target, docs, Some(key));
                 }
             }
             Danger::At(..) | Danger::DropCollection | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),

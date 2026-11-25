@@ -20,21 +20,21 @@ fn assert_clamped(ui: &UiApp, mode: &str, when: &str) {
 
 /// Library scripts, a folder group and long names, so every mode has rows to lay out.
 fn crowded(a: &mut App) {
-    a.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
     a.demo_library("panel");
-    a.prefs.lib_scope_all = true;
+    a.core.prefs.lib_scope_all = true;
     for (id, name) in [(5, "a-connection-with-a-very-long-name-indeed"), (6, "beta"), (7, "gamma")] {
-        a.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+        a.core.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
     }
-    let gid = a.groups.new_group("A folder with a long name that cannot fit");
+    let gid = a.core.groups.new_group("A folder with a long name that cannot fit");
     let all = a.conn_ids();
-    a.groups.place(6, Place::Into(gid, None), &all);
-    a.groups.place(7, Place::Into(gid, None), &all);
+    a.core.groups.place(6, Place::Into(gid, None), &all);
+    a.core.groups.place(7, Place::Into(gid, None), &all);
 }
 
 fn drag_below_minimum(mode: SideMode, name: &str) {
     let Some(mut ui) = demo_ui(crowded) else { return };
-    ui.h.state_mut().prefs.set_side_mode(mode);
+    ui.h.state_mut().core.prefs.set_side_mode(mode);
     ui.h.run_steps(4);
     let (side, _) = edges(&ui);
     let from = egui::pos2(side.right() - 1.0, side.center().y);

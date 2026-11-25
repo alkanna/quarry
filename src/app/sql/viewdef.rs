@@ -48,13 +48,13 @@ impl App {
         }
         let (database, schema) = self.form_ns(conn, db);
         let Some(sql) = self.sql_db_for(conn, None) else { return };
-        self.worker.sql_view_def(conn, if database.is_empty() { sql } else { sql.at(&database) }, schema.clone(), name.clone());
+        self.core.worker.sql_view_def(conn, if database.is_empty() { sql } else { sql.at(&database) }, schema.clone(), name.clone());
         self.modal = Some(Modal::SqlView(Box::new(ViewForm::new(conn, database, schema, name, String::new(), true))));
     }
 
     /// Content tab: a new view from the SELECT of the grid's last page, not from what the bar says now.
     fn save_content_as_view(&mut self, i: usize) {
-        let Some(t) = self.tabs.get(i) else { return };
+        let Some(t) = self.core.tabs.get(i) else { return };
         let Some(s) = t.sql.as_ref() else { return };
         let (conn, db, coll) = (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone());
         let body = s.ran.select_sql(self.dialect_of(conn), t.sel.space(), &coll, &[], None);
@@ -84,8 +84,8 @@ impl App {
 
     /// Opens the dialog a Content tab's Save as view button asked for. Called once a frame, since the button is drawn where the app is borrowed.
     pub(in crate::app) fn view_requests(&mut self) {
-        let Some(i) = self.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.save_view)) else { return };
-        if let Some(s) = self.tabs[i].sql.as_mut() {
+        let Some(i) = self.core.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.save_view)) else { return };
+        if let Some(s) = self.core.tabs[i].sql.as_mut() {
             s.save_view = false;
         }
         self.save_content_as_view(i);
@@ -144,7 +144,7 @@ impl App {
                 self.open_collection(sel, Open::Here);
             }
             ViewDone::Replaced | ViewDone::Restored => {
-                let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| hit(&self.tabs[i])).collect();
+                let open: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| hit(&self.core.tabs[i])).collect();
                 for i in open {
                     self.reload_of(i);
                 }
@@ -174,7 +174,7 @@ impl App {
         let pg = self.is_pg(f.conn);
         let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let sql = if pg { sql.at(&f.database) } else { sql };
-        self.worker.sql_save_view(f.conn, sql, f.spec(pg, drop_first), !self.conn_writable(f.conn));
+        self.core.worker.sql_save_view(f.conn, sql, f.spec(pg, drop_first), !self.conn_writable(f.conn));
         (f.busy, f.error, f.ask_drop) = (true, None, false);
     }
 

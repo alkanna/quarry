@@ -7,6 +7,7 @@
 
 pub mod agents;
 pub mod cloudsql;
+pub mod core;
 pub mod db;
 pub mod library;
 pub mod paths;

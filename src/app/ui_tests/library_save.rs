@@ -19,8 +19,8 @@ fn sql_query_with_scripts(a: &mut App) {
 
 fn set_query(ui: &mut UiApp, text: &str) {
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].sql.as_mut().unwrap().query = text.into();
+    let c = a.core.cur;
+    a.core.tabs[c].sql.as_mut().unwrap().query = text.into();
 }
 
 fn dialog_name(ui: &UiApp) -> Option<String> {
@@ -36,12 +36,12 @@ fn cmd_s_opens_the_dialog_and_saves_the_script_bound_to_the_tab() {
     set_query(&mut ui, "SELECT 1");
     ui.key(CMD, egui::Key::S);
     // With no comment to take a name from, the tab's name is offered, focused and selected, so typing replaces it.
-    let tab = ui.app().tab_name(ui.app().cur);
+    let tab = ui.app().tab_name(ui.app().core.cur);
     assert_eq!(dialog_name(&ui), Some(tab));
     ui.type_text("Late");
     ui.click("Save");
     assert!(ui.app().modal.is_none());
-    let lib = &ui.app().library;
+    let lib = &ui.app().core.library;
     assert_eq!(lib.scripts.len(), 1);
     let s = &lib.scripts[0];
     assert_eq!((s.name.as_str(), s.kind.as_str(), s.body.as_str(), s.conn, s.db.as_str()), ("Late", "sql", "SELECT 1", 3, "shop"));
@@ -58,7 +58,7 @@ fn a_second_cmd_s_writes_back_without_a_dialog() {
     set_query(&mut ui, "SELECT 2");
     ui.key(CMD, egui::Key::S);
     assert!(ui.app().modal.is_none(), "the bound script is written without asking");
-    let lib = &ui.app().library;
+    let lib = &ui.app().core.library;
     assert_eq!((lib.scripts.len(), lib.scripts[0].body.as_str()), (1, "SELECT 2"));
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.base == "SELECT 2"));
 }
@@ -73,16 +73,16 @@ fn saving_under_a_taken_name_in_the_same_folder_replaces_it() {
     ui.h.state_mut().sql_new_query(3, "shop".into());
     set_query(&mut ui, "SELECT 9");
     ui.key(CMD, egui::Key::S);
-    let first = ui.app().library.scripts[0].name.clone();
+    let first = ui.app().core.library.scripts[0].name.clone();
     if let Some(Modal::SaveScript(f)) = &mut ui.h.state_mut().modal {
         f.name = first.clone();
     }
     // The button says what will happen, and the toast after it can take it back.
     ui.click("Replace");
-    let lib = &ui.app().library;
+    let lib = &ui.app().core.library;
     assert_eq!((lib.scripts.len(), lib.scripts[0].body.as_str()), (1, "SELECT 9"));
     ui.click_last("Undo");
-    assert_eq!(ui.app().library.scripts[0].body, "SELECT 1", "Undo did not put the replaced script back");
+    assert_eq!(ui.app().core.library.scripts[0].body, "SELECT 1", "Undo did not put the replaced script back");
 }
 
 #[test]
@@ -113,10 +113,10 @@ fn cmd_s_with_staged_grid_edits_saves_only_the_edits() {
         a.load_sql_demo();
         a.sql_demo_stage();
     }) else { return };
-    assert!(!ui.app().drafts.is_empty());
+    assert!(!ui.app().core.drafts.is_empty());
     ui.key(CMD, egui::Key::S);
     assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))), "the grid's Save took the key");
-    assert!(ui.app().library.scripts.is_empty());
+    assert!(ui.app().core.library.scripts.is_empty());
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn cmd_s_in_a_view_without_a_script_does_nothing() {
             t.view = View::Structure;
         }
     }) else { return };
-    assert!(ui.app().tab_text().is_none() && ui.app().drafts.is_empty());
+    assert!(ui.app().tab_text().is_none() && ui.app().core.drafts.is_empty());
     ui.key(CMD, egui::Key::S);
     assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))));
     assert!(!ui.app().last_problem().contains("no script to save"), "{}", ui.app().last_problem());
@@ -140,28 +140,28 @@ fn cmd_s_with_a_document_draft_saves_only_the_draft() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     {
         let a = ui.h.state_mut();
-        let t = &a.tabs[a.cur];
+        let t = &a.core.tabs[a.core.cur];
         let old = t.docs[2].owned();
         let mut new = old.clone();
         new.insert("status", "refunded");
         let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
         let sel = t.sel.clone();
-        crate::app::drafts::stage_draft(&mut a.drafts, &key, &sel, &old, new);
+        crate::app::drafts::stage_draft(&mut a.core.drafts, &key, &sel, &old, new);
     }
     ui.settle();
     ui.key(CMD, egui::Key::S);
     assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))), "the document's Save took the key");
-    assert!(ui.app().library.scripts.is_empty());
+    assert!(ui.app().core.library.scripts.is_empty());
 }
 
 #[test]
 fn a_recent_script_loads_its_text_into_the_empty_tab() {
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     ui.click("Library 5");
     ui.click("Script Late shipments");
     assert!(ui.query_text().starts_with("-- Paid orders that never shipped"));
-    assert_eq!(ui.app().tabs.len(), tabs, "an empty tab is reused, as a click on a table does");
+    assert_eq!(ui.app().core.tabs.len(), tabs, "an empty tab is reused, as a click on a table does");
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some());
 }
 
@@ -169,14 +169,14 @@ fn a_recent_script_loads_its_text_into_the_empty_tab() {
 fn a_script_opens_beside_a_tab_that_holds_text() {
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
     set_query(&mut ui, "SELECT 7");
-    let tabs = ui.app().tabs.len();
-    let id = ui.app().library.scripts.iter().find(|s| s.name == "Revenue by tier" && s.kind == "sql").map(|s| s.id).unwrap();
+    let tabs = ui.app().core.tabs.len();
+    let id = ui.app().core.library.scripts.iter().find(|s| s.name == "Revenue by tier" && s.kind == "sql").map(|s| s.id).unwrap();
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.settle();
-    assert_eq!(ui.app().tabs.len(), tabs + 1);
+    assert_eq!(ui.app().core.tabs.len(), tabs + 1);
     assert!(ui.query_text().starts_with("SELECT tier"));
     // The first tab kept what was typed there.
-    let first = ui.app().tabs.iter().filter_map(|t| t.sql.as_ref()).any(|s| s.query == "SELECT 7");
+    let first = ui.app().core.tabs.iter().filter_map(|t| t.sql.as_ref()).any(|s| s.query == "SELECT 7");
     assert!(first);
 }
 
@@ -185,15 +185,15 @@ fn saving_from_the_shell_makes_a_shell_script() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     {
         let a = ui.h.state_mut();
-        let c = a.cur;
-        a.tabs[c].view = View::Shell;
-        a.tabs[c].shell.code = "async function run() {\n  return await orders.count();\n}".into();
+        let c = a.core.cur;
+        a.core.tabs[c].view = View::Shell;
+        a.core.tabs[c].shell.code = "async function run() {\n  return await orders.count();\n}".into();
     }
     ui.settle();
     ui.key(CMD, egui::Key::S);
     assert!(matches!(ui.app().modal, Some(Modal::SaveScript(_))));
     ui.click("Save");
-    let s = &ui.app().library.scripts[0];
+    let s = &ui.app().core.library.scripts[0];
     assert_eq!((s.kind.as_str(), s.conn, s.db.as_str()), ("shell", 1, "shop"));
     assert!(s.body.contains("orders.count"));
 }
@@ -202,30 +202,30 @@ fn saving_from_the_shell_makes_a_shell_script() {
 fn a_shell_script_opens_in_a_tab_with_no_collection_named_for_the_database() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     ui.h.state_mut().demo_scripts();
-    let id = ui.app().library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 1).map(|s| s.id).unwrap();
-    let before = ui.app().tabs.len();
+    let id = ui.app().core.library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 1).map(|s| s.id).unwrap();
+    let before = ui.app().core.tabs.len();
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.settle();
     let a = ui.app();
-    assert_eq!(a.tabs.len(), before + 1);
+    assert_eq!(a.core.tabs.len(), before + 1);
     let t = a.t().unwrap();
     assert!(t.view == View::Shell && t.sel.coll.is_empty() && t.sel.db == "shop");
-    assert_eq!(a.tab_name(a.cur), "Backfill note field", "a bound tab is named for its script");
+    assert_eq!(a.tab_name(a.core.cur), "Backfill note field", "a bound tab is named for its script");
     assert!(t.shell.code.contains("Fill the empty notes"));
     // The tab binds again to its script after a restart, and an edited one stays edited.
     let bound = a.rebind(t, ScriptRef::Saved(id)).expect("bound again");
-    assert_eq!(bound.base, a.library.scripts.iter().find(|s| s.id == id).unwrap().body);
+    assert_eq!(bound.base, a.core.library.scripts.iter().find(|s| s.id == id).unwrap().body);
 }
 
 #[test]
 fn a_shell_script_of_a_sql_connection_shows_the_shell() {
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
-    let id = ui.app().library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 3).map(|s| s.id).unwrap();
+    let id = ui.app().core.library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 3).map(|s| s.id).unwrap();
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::NewTab);
     ui.settle();
     let a = ui.app();
     assert!(a.t().is_some_and(|t| t.view == View::Shell && t.shell.code.contains("COUNT(*)")));
-    assert_eq!(a.tab_name(a.cur), "Count orders by status", "a bound tab is named for its script");
+    assert_eq!(a.tab_name(a.core.cur), "Count orders by status", "a bound tab is named for its script");
     // The Shell is on screen, not the Query view that shares the tab.
     ui.h.get_by_label("Shell editor");
 }
@@ -234,7 +234,7 @@ fn a_shell_script_of_a_sql_connection_shows_the_shell() {
 fn a_filter_script_opens_its_collection_with_the_query_set() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     ui.h.state_mut().demo_scripts();
-    let id = ui.app().library.scripts.iter().find(|s| s.kind == "filter" && s.name == "Pending orders").map(|s| s.id).unwrap();
+    let id = ui.app().core.library.scripts.iter().find(|s| s.kind == "filter" && s.name == "Pending orders").map(|s| s.id).unwrap();
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::NewTab);
     ui.settle();
     let t = ui.app().t().unwrap();
@@ -246,15 +246,15 @@ fn a_filter_script_opens_its_collection_with_the_query_set() {
 fn the_old_saved_queries_move_into_the_library_once() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.prefs.library.insert("3/#sql".into(), vec![SavedQuery { name: "Old".into(), sql: Some("SELECT 1".into()), ..Default::default() }]);
-    a.prefs.library.insert("1/shop/orders".into(), vec![SavedQuery { name: "Paid".into(), filter: "{ status: 'paid' }".into(), ..Default::default() }]);
+    a.core.prefs.library.insert("3/#sql".into(), vec![SavedQuery { name: "Old".into(), sql: Some("SELECT 1".into()), ..Default::default() }]);
+    a.core.prefs.library.insert("1/shop/orders".into(), vec![SavedQuery { name: "Paid".into(), filter: "{ status: 'paid' }".into(), ..Default::default() }]);
     a.migrate_library();
     a.migrate_library();
-    let lib = &a.library;
+    let lib = &a.core.library;
     assert_eq!(lib.scripts.len(), 2);
     assert_eq!(lib.scripts.iter().map(|s| s.kind.as_str()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(), ["filter", "sql"]);
     // ui.json keeps its copy for an older build.
-    assert_eq!(a.prefs.library.len(), 2);
+    assert_eq!(a.core.prefs.library.len(), 2);
 }
 
 #[test]
@@ -263,14 +263,14 @@ fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_pick
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
     let lost = {
         let a = ui.h.state_mut();
-        let lost = a.library.next_id();
-        a.library.folders.push(Folder { id: lost, name: "Lost folder".into(), parent: Some(9_999) });
-        let id = a.library.next_id();
-        a.library.scripts.push(Script { id, name: "Lost script".into(), kind: "sql".into(), body: "SELECT 2;".into(), conn: 3, folder: Some(9_998), ..Default::default() });
+        let lost = a.core.library.next_id();
+        a.core.library.folders.push(Folder { id: lost, name: "Lost folder".into(), parent: Some(9_999) });
+        let id = a.core.library.next_id();
+        a.core.library.scripts.push(Script { id, name: "Lost script".into(), kind: "sql".into(), body: "SELECT 2;".into(), conn: 3, folder: Some(9_998), ..Default::default() });
         lost
     };
     // The panel puts both at the top level; the Save dialog's folder list and the picker must too.
-    let rows = crate::app::library::save_dialog::folder_rows(&ui.app().library);
+    let rows = crate::app::library::save_dialog::folder_rows(&ui.app().core.library);
     assert!(rows.contains(&(lost, 0)), "{rows:?}");
     ui.click("Library 6");
     ui.click("Script Lost script");
@@ -329,15 +329,15 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     ui.settle();
     ui.type_text("Paid over 50");
     ui.click("Save");
-    let s = ui.app().library.scripts.iter().find(|s| s.kind == "where").cloned().expect("a saved filter");
+    let s = ui.app().core.library.scripts.iter().find(|s| s.kind == "where").cloned().expect("a saved filter");
     assert_eq!((s.name.as_str(), s.body.as_str(), s.sort.as_str(), s.db.as_str(), s.coll.as_str()), ("Paid over 50", filter.as_str(), sort.as_str(), "shop", "orders"));
     let ctx = ui.h.ctx.clone();
     assert_eq!(ui.app().pick_data(&ctx, PickKind::Where).count, 1);
     // Another kind's picker does not list it, nor does a Mongo view.
     assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
     let a = ui.h.state_mut();
-    let c = a.cur;
-    (a.tabs[c].filter_txt, a.tabs[c].sort_txt) = (String::new(), String::new());
+    let c = a.core.cur;
+    (a.core.tabs[c].filter_txt, a.core.tabs[c].sort_txt) = (String::new(), String::new());
     a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
     ui.settle();
     let t = ui.app().t().unwrap();
@@ -350,8 +350,8 @@ fn saving_a_query_from_a_table_tab_turns_it_into_a_query_tab() {
     assert!(!ui.app().t().unwrap().sel.coll.is_empty(), "the demo opens on a table");
     {
         let a = ui.h.state_mut();
-        let c = a.cur;
-        a.tabs[c].view = View::Sql;
+        let c = a.core.cur;
+        a.core.tabs[c].view = View::Sql;
     }
     set_query(&mut ui, "SELECT 1");
     ui.key(CMD, egui::Key::S);
@@ -367,15 +367,15 @@ fn closing_a_tab_with_unsaved_script_changes_asks_first() {
     set_query(&mut ui, "SELECT 1");
     ui.key(CMD, egui::Key::S);
     ui.click("Save");
-    let n = ui.app().tabs.len();
+    let n = ui.app().core.tabs.len();
     set_query(&mut ui, "SELECT 2");
     ui.settle();
     ui.key(CMD, egui::Key::W);
     assert!(matches!(ui.app().modal, Some(Modal::CloseEdited(_))), "an edited script closed without asking");
     ui.click("Cancel");
-    assert_eq!(ui.app().tabs.len(), n);
+    assert_eq!(ui.app().core.tabs.len(), n);
     ui.key(CMD, egui::Key::W);
     ui.click("Save and close");
-    assert_eq!(ui.app().tabs.len(), n - 1);
-    assert_eq!(ui.app().library.scripts[0].body, "SELECT 2", "Save and close did not save");
+    assert_eq!(ui.app().core.tabs.len(), n - 1);
+    assert_eq!(ui.app().core.library.scripts[0].body, "SELECT 2", "Save and close did not save");
 }

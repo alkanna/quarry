@@ -4,20 +4,20 @@ use super::*;
 
 impl App {
     pub(super) fn push_undo(&mut self, a: UndoAction) {
-        self.undo.insert(0, a);
-        trim_undo(&mut self.undo, std::time::Instant::now());
+        self.core.undo.insert(0, a);
+        trim_undo(&mut self.core.undo, std::time::Instant::now());
     }
 
     /// Forgets the undo entries of what a drop just removed. A database or table made again under the name would otherwise get them.
     /// `database` is the PostgreSQL database (empty on MySQL, where `schema` is the database); `schema` and `table` narrow it, empty for the whole of it.
     pub(super) fn purge_undo(&mut self, conn: u64, database: &str, schema: &str, table: &str) {
-        self.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
+        self.core.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
     }
 
     /// The MongoDB side of `purge_undo`: undoing a delete after a drop would quietly make the collection again.
     /// An empty `coll` means the whole database.
     pub(super) fn purge_mongo_undo(&mut self, conn: u64, db: &str, coll: &str) {
-        self.undo.retain(|a| !mongo_undo_is_under(a, conn, db, coll));
+        self.core.undo.retain(|a| !mongo_undo_is_under(a, conn, db, coll));
     }
 
     pub(super) fn apply_undo(&mut self, i: usize) {
@@ -26,7 +26,7 @@ impl App {
 
     /// `confirmed` once a structure undo that loses data passed its typed confirmation.
     pub(super) fn apply_undo_as(&mut self, i: usize, confirmed: bool) {
-        let a = &self.undo[i];
+        let a = &self.core.undo[i];
         let Some(c) = self.conn(a.conn) else { return };
         let writable = c.writable;
         if !writable {
@@ -36,29 +36,29 @@ impl App {
         if !confirmed && self.alter_undo_gate(i) {
             return;
         }
-        let Some(c) = self.conn(self.undo[i].conn) else { return };
-        let a = &self.undo[i];
+        let Some(c) = self.conn(self.core.undo[i].conn) else { return };
+        let a = &self.core.undo[i];
         // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
         if let (Some(sql), UndoKind::Sql { database, .. }) = (c.sql.as_ref(), &a.kind) {
             // A PostgreSQL write ran in one database, and the undo runs on that one's pool.
             let sql = sql.at(database);
-            let a = self.undo.remove(i);
+            let a = self.core.undo.remove(i);
             let pk = match &a.kind {
                 UndoKind::Sql { undo, .. } => undo.pk_names(),
                 _ => Vec::new(),
             };
             // The worker hands the action back if the undo fails, so it is not lost.
-            self.worker.sql_undo(sql, a, pk, !writable);
+            self.core.worker.sql_undo(sql, a, pk, !writable);
             return;
         }
         let Some(client) = c.client.clone() else {
             self.warn("That connection is closed.");
             return;
         };
-        let a = self.undo.remove(i);
+        let a = self.core.undo.remove(i);
         let t = Target { client, db: a.db.clone(), coll: a.coll.clone(), timeout: self.timeout() };
         // The worker hands the action back if the undo fails, so it is not lost.
-        self.worker.undo_doc(t, a);
+        self.core.worker.undo_doc(t, a);
     }
 }
 

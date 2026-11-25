@@ -828,33 +828,33 @@ impl App {
     /// groups, saved tabs and history stay behind on purpose, and a new connection that took its id would adopt them and run
     /// its scripts on another server.
     pub(super) fn next_conn_id(&self) -> u64 {
-        let lib = &self.library;
+        let lib = &self.core.library;
         let held = lib.scripts.iter().map(|s| s.conn).chain(lib.links.iter().flat_map(|l| l.conns.iter().copied()));
-        let groups = self.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.groups.loose.iter().copied());
-        let prefs = self.prefs.open_tabs.iter().map(|t| t.conn).chain(self.prefs.open_conns.iter().copied()).chain(self.prefs.last_conn);
+        let groups = self.core.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.core.groups.loose.iter().copied());
+        let prefs = self.core.prefs.open_tabs.iter().map(|t| t.conn).chain(self.core.prefs.open_conns.iter().copied()).chain(self.core.prefs.last_conn);
         // Per-connection settings are keyed "{conn}/...".
-        let p = &self.prefs;
+        let p = &self.core.prefs;
         let keyed = p.history.keys().chain(p.shell_histories.keys()).chain(p.cols.keys()).chain(p.schema_maps.keys()).chain(p.relations.keys());
         let history = keyed.filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
         // An agent policy names its connection by id too, and a new connection must never inherit another's access.
-        let agents = self.agents.cfg.conns.keys().copied();
-        self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).chain(agents).max().unwrap_or(0) + 1
+        let agents = self.core.agents.cfg.conns.keys().copied();
+        self.core.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).chain(agents).max().unwrap_or(0) + 1
     }
 
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
-        if self.demo {
+        if self.core.demo {
             paste_seed(ui.ctx(), f);
         }
         let mut save = false;
         let mut test = false;
         let mut browse = false;
-        let default_s = self.prefs.timeout_ms / 1000;
+        let default_s = self.core.prefs.timeout_ms / 1000;
         // An edited Cloud SQL connection shows the gcloud account and the instance's state, which the browser's load reads.
         if f.cloud_on().is_some() {
             self.cloud_load(false);
         }
         // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
-        if let Some((req, info)) = self.test_info.take() {
+        if let Some((req, info)) = self.core.test_info.take() {
             f.take_test_info(req, info);
         }
         ui.set_width(fit_width(ui.ctx(), 800.0));
@@ -870,7 +870,7 @@ impl App {
         let mut b = body_begin(ui);
         let outer = ui;
         let ui = &mut b.content_ui;
-        let cloud = &self.cloud;
+        let cloud = &self.core.cloud;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(210.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -932,10 +932,10 @@ impl App {
             banner(ui, Notice::Info, "", "A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.", None);
         }
         // An answer for an older Test or another form is not this form's.
-        if self.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
-            self.conn_test = None;
+        if self.core.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
+            self.core.conn_test = None;
         }
-        match self.conn_test.as_ref().map(|(_, r)| r) {
+        match self.core.conn_test.as_ref().map(|(_, r)| r) {
             // Testing and a success show in the footer, beside the Test button.
             None | Some(Ok(_)) => {}
             Some(Err(e)) if e.contains(crate::cloudsql::PROXY_MISSING) => {}
@@ -946,7 +946,7 @@ impl App {
                 banner(ui, Notice::Danger, "Test failed.", &text, None);
             }
         }
-        if matches!(&self.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
+        if matches!(&self.core.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
             ui.add_space(6.0);
             match self.proxy_missing_card(ui, "Test") {
                 Some(super::cloud_sql::CardAct::Again) => test = true,
@@ -959,8 +959,8 @@ impl App {
         }
         b.end(outer);
         let ui = outer;
-        let testing = f.testing && self.conn_test.is_none();
-        let passed = match self.conn_test.as_ref().map(|(_, r)| r) {
+        let testing = f.testing && self.core.conn_test.is_none();
+        let passed = match self.core.conn_test.as_ref().map(|(_, r)| r) {
             Some(Ok(m)) => Some(m.clone()),
             _ => None,
         };
@@ -992,17 +992,17 @@ impl App {
         }
         if test {
             f.testing = true;
-            self.conn_test = None;
-            self.test_info = None;
-            self.req += 1;
-            f.test_req = self.req;
-            self.test_started = Some(std::time::Instant::now());
+            self.core.conn_test = None;
+            self.core.test_info = None;
+            self.core.req += 1;
+            f.test_req = self.core.req;
+            self.core.test_started = Some(std::time::Instant::now());
             let mut net = f.net();
             net.tools = self.cloud_tools();
             if f.engine.is_sql() {
-                self.worker.sql_test_with(f.test_req, f.sql_addr().to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
+                self.core.worker.sql_test_with(f.test_req, f.sql_addr().to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
             } else {
-                self.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
+                self.core.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
             }
         }
         if save {
@@ -1011,10 +1011,10 @@ impl App {
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
             let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.ephemeral { Ok(()) } else { store_uri(id, &uri) };
+            let saved = if self.core.ephemeral { Ok(()) } else { store_uri(id, &uri) };
             match saved {
                 Ok(()) => {
-                    let stored = if self.ephemeral {
+                    let stored = if self.core.ephemeral {
                         Vec::new()
                     } else {
                         vec![
@@ -1031,16 +1031,16 @@ impl App {
                         tag: clean_tag(&f.tag).into(),
                         // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
                         ssh: f.ssh_on.then(|| {
-                            let old = self.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
+                            let old = self.core.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
                             let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
                             crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
                         }),
                         proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
                         cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
                         advanced: f.advanced().unwrap_or_default(),
-                        icon: self.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
+                        icon: self.core.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
                     };
-                    match self.conns.iter_mut().find(|c| c.meta.id == id) {
+                    match self.core.conns.iter_mut().find(|c| c.meta.id == id) {
                         Some(c) => {
                             c.meta = meta;
                             c.masked_uri = db::mask_uri(&uri);
@@ -1048,13 +1048,13 @@ impl App {
                             c.dbs.clear();
                             c.server = Default::default();
                         }
-                        None => self.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(meta, Status::Idle) }),
+                        None => self.core.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(meta, Status::Idle) }),
                     }
-                    self.active = Some(id);
+                    self.core.active = Some(id);
                     self.save_conns();
                     if let (None, Some(g)) = (f.id, f.group) {
                         let all = self.conn_ids();
-                        if self.groups.place(id, Place::Into(g, None), &all) {
+                        if self.core.groups.place(id, Place::Into(g, None), &all) {
                             self.save_groups();
                         }
                     }

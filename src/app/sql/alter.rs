@@ -98,7 +98,7 @@ impl App {
     }
 
     pub(in crate::app) fn set_staged(&mut self, v: Vec<Change>) {
-        if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
+        if let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) {
             s.st.staged = v;
         }
     }
@@ -308,7 +308,7 @@ impl App {
 
     /// Asks for confirmation when the changes lose data or cannot be undone, then runs them.
     pub(in crate::app) fn request_alter_apply(&mut self) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
         if !self.sel_writable() {
@@ -373,19 +373,19 @@ impl App {
             }
             Err(why) => (None, format!("Changed the structure. It cannot be undone: {why}")),
         };
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
             s.st.applying = true;
         }
         match expect {
-            Some(expect) => self.worker.pg_alter(conn, db, schema, table, steps, expect, undo, !writable, done),
-            None => self.worker.sql_alter(conn, db, schema, table, sql, m, undo, !writable, done),
+            Some(expect) => self.core.worker.pg_alter(conn, db, schema, table, steps, expect, undo, !writable, done),
+            None => self.core.worker.sql_alter(conn, db, schema, table, sql, m, undo, !writable, done),
         }
     }
 
     /// Before a structure undo runs: one that drops a column or converts a type back loses what was written since,
     /// so it asks for the table name like a drop does. True when it asked, and the undo waits for the answer.
     pub(in crate::app) fn alter_undo_gate(&mut self, i: usize) -> bool {
-        let Some(a) = self.undo.get(i) else { return false };
+        let Some(a) = self.core.undo.get(i) else { return false };
         let UndoKind::Sql { undo: db::sql::write::SqlUndo::Alter(u), .. } = &a.kind else { return false };
         if u.loss.is_empty() {
             return false;
@@ -416,19 +416,19 @@ impl App {
         // A tab is the answer's table when its connection, its database and its namespace, resolved as a read of it resolves
         // them (a PostgreSQL tab may leave its schema to the sidebar's pick), are the ones the answer names. Another
         // database of the connection can hold a table of the same name.
-        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sql.is_some() && answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(d, ns)| (d.pg_database(), ns)), (conn, &database, &schema, &table))).collect();
+        let tabs: Vec<usize> = (0..self.core.tabs.len()).filter(|&i| self.core.tabs[i].sql.is_some() && answers_tab(&self.core.tabs[i].sel, self.sql_target(&self.core.tabs[i].sel).map(|(d, ns)| (d.pg_database(), ns)), (conn, &database, &schema, &table))).collect();
         let at = if database.is_empty() { (schema.clone(), String::new()) } else { (database.clone(), schema.clone()) };
         if tabs.is_empty() {
             // No tab resolves to the answer's table after a reconnect dropped the connection's pool, or when a PostgreSQL
             // tab's schema follows a sidebar pick that changed meanwhile. The tab that sent it still needs Apply back.
-            for t in self.tabs.iter_mut().filter(|t| may_answer_tab(&t.sel, (conn, &database, &schema, &table))) {
+            for t in self.core.tabs.iter_mut().filter(|t| may_answer_tab(&t.sel, (conn, &database, &schema, &table))) {
                 if let Some(s) = t.sql.as_mut() {
                     s.st.applying = false;
                 }
             }
         }
         for i in tabs {
-            if let Some(s) = self.tabs[i].sql.as_mut() {
+            if let Some(s) = self.core.tabs[i].sql.as_mut() {
                 s.st.applying = false;
                 if !alter {
                     let saving = s.st.trig_saving.take();
@@ -450,7 +450,7 @@ impl App {
             if reload {
                 // A structure read already on its way was made before this change, and its answer would put the old structure
                 // back with nothing left to ask for a new one.
-                self.tabs[i].idx_req = 0;
+                self.core.tabs[i].idx_req = 0;
                 self.reload_of(i);
             }
         }

@@ -36,13 +36,13 @@ fn check_tab_list(size: egui::Vec2) {
     let load = |a: &mut App| {
         a.load_demo();
         for _ in 0..20 {
-            a.tabs.push(Tab::new(a.tabs[0].sel.clone()));
+            a.core.tabs.push(Tab::new(a.core.tabs[0].sel.clone()));
         }
     };
     let Some(mut ui) = demo_ui(load) else { return };
     ui.h.set_size(size);
     ui.h.run_steps(4);
-    let n = ui.app().tabs.len();
+    let n = ui.app().core.tabs.len();
     ui.click(&format!("{n} tabs"));
     ui.h.run_steps(4);
     let row = ui.h.query_all_by(|n| n.role() == egui::Role::ListBoxOption).map(|n| n.rect()).next().expect("the tab list shows no tab");
@@ -70,7 +70,7 @@ fn the_columns_stepper_is_one_field_high_and_steps() {
     let load = |a: &mut App| {
         a.load_demo();
         a.modal = Some(Modal::Settings);
-        a.settings_cat = crate::app::settings::SettingsCat::Documents;
+        a.core.settings_cat = crate::app::settings::SettingsCat::Documents;
     };
     let Some(mut ui) = demo_ui(load) else { return };
     ui.show("Columns shown");
@@ -81,17 +81,17 @@ fn the_columns_stepper_is_one_field_high_and_steps() {
         assert!(well.contains_rect(r), "\"{b}\" at {r:?} is outside the stepper at {well:?}");
         assert!((r.center().y - well.center().y).abs() <= 0.5, "\"{b}\" is not centered in the stepper: {} against {}", r.center().y, well.center().y);
     }
-    let n = ui.app().prefs.default_cols;
+    let n = ui.app().core.prefs.default_cols;
     ui.click("Increase");
-    assert_eq!(ui.app().prefs.default_cols, n + 1);
+    assert_eq!(ui.app().core.prefs.default_cols, n + 1);
     ui.click("Decrease");
-    assert_eq!(ui.app().prefs.default_cols, n);
+    assert_eq!(ui.app().core.prefs.default_cols, n);
 }
 
 /// The identity card of the active connection ends above the tree filter, so its tag and host line are not drawn under it.
 fn check_identity_card(load: fn(&mut App)) {
     let Some(ui) = demo_ui(load) else { return };
-    let name = ui.app().active.and_then(|id| ui.app().conn(id)).map(|c| c.meta.name.clone()).expect("an active connection");
+    let name = ui.app().core.active.and_then(|id| ui.app().conn(id)).map(|c| c.meta.name.clone()).expect("an active connection");
     let card = ui.h.get_by_label(Box::leak(format!("Connection {name}").into_boxed_str())).rect();
     let filter = ui.h.query_all_by(|n| n.role() == egui::Role::TextInput).map(|n| n.rect()).filter(|r| r.x_range().intersects(card.x_range()) && r.top() > card.top()).min_by(|a, b| a.top().total_cmp(&b.top())).expect("the tree filter");
     assert!(filter.top() >= card.bottom(), "the tree filter at {filter:?} is laid over the identity card at {card:?}");

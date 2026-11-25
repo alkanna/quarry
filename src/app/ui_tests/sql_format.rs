@@ -16,7 +16,7 @@ fn format_keeps_a_dollar_quoted_body_and_undo_restores_the_text() {
         let (db, _) = fx.place();
         ui.h.state_mut().side_act(CONN, SideAct::NewQuery(db.to_string()));
         ui.wait("the Query tab", |a| a.t().is_some_and(|t| t.sql.is_some()));
-        ui.h.state_mut().tabs.iter_mut().filter_map(|t| t.sql.as_mut()).for_each(|s| s.query = SRC.into());
+        ui.h.state_mut().core.tabs.iter_mut().filter_map(|t| t.sql.as_mut()).for_each(|s| s.query = SRC.into());
         ui.settle();
         ui.click("Format");
         let new = ui.query_text();
@@ -24,7 +24,7 @@ fn format_keeps_a_dollar_quoted_body_and_undo_restores_the_text() {
         assert!(new.contains('\n') && new.contains(BODY), "{new}");
         assert!(new.contains("$1") && new.contains("->>") && !new.contains(": :"), "{new}");
         // The button took the focus off the editor, so it is given back before the key.
-        let id = App::sql_editor_id(ui.app().cur);
+        let id = App::sql_editor_id(ui.app().core.cur);
         ui.h.ctx.memory_mut(|m| m.request_focus(id));
         ui.settle();
         ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);

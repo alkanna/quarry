@@ -26,8 +26,8 @@ impl App {
 
     /// Keeps a loaded schema, with the row estimates the sidebar reads next to each table name.
     pub(in crate::app) fn put_sql_schema(&mut self, conn: u64, key: String, schema: Arc<db::sql::schema::Schema>) {
-        self.sql_rows.insert((conn, key.clone()), schema.tables.iter().filter_map(|t| Some((t.name.clone(), t.rows?))).collect());
-        self.sql_schema.insert((conn, key), schema);
+        self.core.sql_rows.insert((conn, key.clone()), schema.tables.iter().filter_map(|t| Some((t.name.clone(), t.rows?))).collect());
+        self.core.sql_schema.insert((conn, key), schema);
         self.lint_schema_changed(conn);
     }
 
@@ -44,14 +44,14 @@ impl App {
         }
         let key = ns_key(db, schema);
         let space = if schema.is_empty() { db.to_string() } else { schema.to_string() };
-        if wants.schema && self.sql_schema_asked.insert((conn, key.clone())) {
-            self.worker.sql_schema(conn, sql.at(db), space.clone());
+        if wants.schema && self.core.sql_schema_asked.insert((conn, key.clone())) {
+            self.core.worker.sql_schema(conn, sql.at(db), space.clone());
         }
         if let Some(Need { table, column, prefix }) = wants.values {
             // A column asks once per typed prefix, but only so many, so typing through a long list cannot grow the set forever.
-            let asked = self.sql_values_asked.entry((conn, key, table.clone(), column.clone())).or_default();
+            let asked = self.core.sql_values_asked.entry((conn, key, table.clone(), column.clone())).or_default();
             if (asked.len() < MAX_ASKED || asked.contains(&prefix)) && asked.insert(prefix.clone()) {
-                self.worker.sql_field_values(conn, sql.at(db), space, table, column, prefix);
+                self.core.worker.sql_field_values(conn, sql.at(db), space, table, column, prefix);
             }
         }
     }
@@ -63,23 +63,23 @@ impl App {
             return;
         }
         let key = ns_key(db, schema);
-        if self.sql_facts_asked.insert((conn, key, table.to_string(), column.clone())) {
+        if self.core.sql_facts_asked.insert((conn, key, table.to_string(), column.clone())) {
             let space = if schema.is_empty() { db.to_string() } else { schema.to_string() };
-            self.worker.sql_col_facts(conn, sql.at(db), space, table.to_string(), column, kind);
+            self.core.worker.sql_col_facts(conn, sql.at(db), space, table.to_string(), column, kind);
         }
     }
 
     /// Keeps a column's facts. A failed read keeps empty ones, so the cells stop waiting and nothing asks again.
     pub(in crate::app) fn sql_facts_done(&mut self, conn: u64, database: String, schema: String, table: String, column: String, res: db::Res<db::sql::facts::ColFacts>) {
         let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
-        self.sql_facts.entry((conn, key, table)).or_default().insert(column, res.unwrap_or_default());
+        self.core.sql_facts.entry((conn, key, table)).or_default().insert(column, res.unwrap_or_default());
     }
 
     /// Reads a schema's tables and columns for completion and shell types, once until a Refresh. `key` is the cache key
     /// (`ns_key`), `space` the schema name the server reads, and `sql` a session on the right database.
     pub(in crate::app) fn ask_sql_schema(&mut self, conn: u64, sql: db::sql::Db, key: String, space: String) {
-        if self.sql_schema_asked.insert((conn, key)) {
-            self.worker.sql_schema(conn, sql, space);
+        if self.core.sql_schema_asked.insert((conn, key)) {
+            self.core.worker.sql_schema(conn, sql, space);
         }
     }
 
@@ -88,30 +88,30 @@ impl App {
     /// schema, all of them under keys that start with its name.
     pub(in crate::app) fn forget_schema(&mut self, conn: u64, db: &str) {
         let mine = |k: &str| k == db || k.starts_with(&format!("{db}\u{1f}"));
-        self.sql_schema.retain(|k, _| !(k.0 == conn && mine(&k.1)));
-        self.sql_rows.retain(|k, _| !(k.0 == conn && mine(&k.1)));
-        self.sql_schema_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
-        self.sql_values.retain(|k, _| !(k.0 == conn && mine(&k.1)));
-        self.sql_values_asked.retain(|k, _| !(k.0 == conn && mine(&k.1)));
-        self.sql_facts.retain(|k, _| !(k.0 == conn && mine(&k.1)));
-        self.sql_facts_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_schema.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_rows.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_schema_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_values.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_values_asked.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_facts.retain(|k, _| !(k.0 == conn && mine(&k.1)));
+        self.core.sql_facts_asked.retain(|k| !(k.0 == conn && mine(&k.1)));
     }
 
     /// The sidebar's Refresh: the schema is read again and looked up values are forgotten.
     pub(in crate::app) fn sql_refresh_schema(&mut self, conn: u64, db: &str, schema: &str) {
         let key = ns_key(db, schema);
-        self.sql_values.remove(&(conn, key.clone()));
-        self.sql_values_asked.retain(|k, _| !(k.0 == conn && k.1 == key));
-        self.sql_facts.retain(|k, _| !(k.0 == conn && k.1 == key));
-        self.sql_facts_asked.retain(|k| !(k.0 == conn && k.1 == key));
-        if self.sql_schema_asked.contains(&(conn, key)) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_schema(conn, sql.at(db), if schema.is_empty() { db.to_string() } else { schema.to_string() });
+        self.core.sql_values.remove(&(conn, key.clone()));
+        self.core.sql_values_asked.retain(|k, _| !(k.0 == conn && k.1 == key));
+        self.core.sql_facts.retain(|k, _| !(k.0 == conn && k.1 == key));
+        self.core.sql_facts_asked.retain(|k| !(k.0 == conn && k.1 == key));
+        if self.core.sql_schema_asked.contains(&(conn, key)) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
+            self.core.worker.sql_schema(conn, sql.at(db), if schema.is_empty() { db.to_string() } else { schema.to_string() });
         }
     }
 
     pub(in crate::app) fn sql_values_done(&mut self, conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: db::Res<Option<Vec<(String, u64)>>>) {
         let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
-        let entry = self.sql_values.entry((conn, key)).or_default().entry(value_key(&table, &column));
+        let entry = self.core.sql_values.entry((conn, key)).or_default().entry(value_key(&table, &column));
         // An answer of any kind creates the entry, so a list waiting for it stops waiting.
         let info = entry.or_insert_with(|| FieldInfo { kind: "string", ..Default::default() });
         let Ok(Some(rows)) = res else { return };

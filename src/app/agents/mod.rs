@@ -23,25 +23,25 @@ impl App {
     /// Loads agents.json and starts the listener. The listener runs while Quarry does, so a bridge can tell
     /// "agents are off" from "Quarry is closed"; while off it answers nothing else.
     pub(super) fn agents_start(&mut self) {
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
         let dir = link::agents_dir();
         let key = store::key();
         let (cfg, trust) = store::load(&dir, key);
         if let Some(k) = key {
-            self.agents.exec.hash_key = exec::hash_key_from(k);
+            self.core.agents.exec.hash_key = exec::hash_key_from(k);
         }
-        self.agents.cfg = cfg;
-        self.agents.rev += 1;
-        self.agents.distrust = (trust != store::Trust::Signed).then_some(trust);
+        self.core.agents.cfg = cfg;
+        self.core.agents.rev += 1;
+        self.core.agents.distrust = (trust != store::Trust::Signed).then_some(trust);
         // On its own thread, which sends back the last calls of earlier sessions for the Activity window.
-        if self.agents.cfg.audit.on {
-            self.agents.exec.audit = Some(self.worker.agents_audit(dir.clone(), self.agents.cfg.audit.max_bytes, exec::ACTIVITY_MAX));
+        if self.core.agents.cfg.audit.on {
+            self.core.agents.exec.audit = Some(self.core.worker.agents_audit(dir.clone(), self.core.agents.cfg.audit.max_bytes, exec::ACTIVITY_MAX));
         }
-        let token = if self.agents.cfg.enabled { self.agents_token() } else { None };
-        self.agents.handle = Some(self.worker.agents_listen(dir, token));
-        self.agents.link = LinkState::Starting;
+        let token = if self.core.agents.cfg.enabled { self.agents_token() } else { None };
+        self.core.agents.handle = Some(self.core.worker.agents_listen(dir, token));
+        self.core.agents.link = LinkState::Starting;
     }
 
     fn agents_token(&mut self) -> Option<link::Token> {
@@ -55,24 +55,24 @@ impl App {
     }
 
     pub(super) fn set_agents_enabled(&mut self, on: bool) {
-        self.agents.cfg.enabled = on;
-        let token = if on && !self.ephemeral { self.agents_token() } else { None };
-        if let Some(h) = &self.agents.handle {
+        self.core.agents.cfg.enabled = on;
+        let token = if on && !self.core.ephemeral { self.agents_token() } else { None };
+        if let Some(h) = &self.core.agents.handle {
             h.set_token(token);
         }
         if !on {
-            self.agents.sessions.clear();
+            self.core.agents.sessions.clear();
         }
         self.save_agents();
     }
 
     pub(super) fn save_agents(&mut self) {
-        self.agents.rev += 1;
-        if self.ephemeral {
+        self.core.agents.rev += 1;
+        if self.core.ephemeral {
             return;
         }
-        match store::save(&link::agents_dir(), &self.agents.cfg, store::key()) {
-            Ok(()) => self.agents.distrust = None,
+        match store::save(&link::agents_dir(), &self.core.agents.cfg, store::key()) {
+            Ok(()) => self.core.agents.distrust = None,
             Err(e) => self.err(e),
         }
     }
@@ -80,9 +80,9 @@ impl App {
     /// Reverts the change call `id` made, from the Activity window. Like the user's own undo it is a write, so the
     /// connection must be unlocked; each document or row goes back only while it is as the agent left it.
     pub(super) fn agent_undo(&mut self, id: u64) {
-        let Some(conn) = self.agents.activity.iter().find(|a| a.id == id && a.undo.is_some()).and_then(|a| a.conn) else { return };
+        let Some(conn) = self.core.agents.activity.iter().find(|a| a.id == id && a.undo.is_some()).and_then(|a| a.conn) else { return };
         let Some(c) = self.conn(conn) else { return self.warn("That connection was removed from Quarry.") };
-        if !(c.writable || self.prefs.always_writable) {
+        if !(c.writable || self.core.prefs.always_writable) {
             return self.warn("Undo is a write. Unlock writes on that connection first.");
         }
         let target = match (c.sql.as_ref(), c.client.as_ref()) {
@@ -90,28 +90,28 @@ impl App {
             (None, Some(cl)) => db::AgentTarget::Mongo(cl.clone()),
             _ => return self.warn_offline(),
         };
-        let Some(u) = self.agents.undo.take(id) else { return };
+        let Some(u) = self.core.agents.undo.take(id) else { return };
         // A PostgreSQL write ran in one database, and its undo runs on that one's pool.
         let target = match (target, &u) {
             (db::AgentTarget::Sql(s), db::AgentUndo::Sql(db::UndoAction { kind: db::UndoKind::Sql { database, .. }, .. })) => db::AgentTarget::Sql(s.at(database)),
             (t, _) => t,
         };
-        if let Some(a) = self.agents.activity.iter_mut().find(|a| a.id == id) {
+        if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == id) {
             a.undo = None;
             a.summary = format!("{} · undoing", a.summary);
         }
-        self.worker.agent_undo(id, target, u);
+        self.core.worker.agent_undo(id, target, u);
     }
 
     /// Keeps what undoes call `id`. Older entries go once the total is over the cap; their calls say so.
     pub(super) fn agent_keep_undo(&mut self, id: u64, u: db::AgentUndo) {
         let bytes = u.bytes();
-        let gone = self.agents.undo.push(id, bytes, u, self.agents.cfg.limits.undo_total_bytes);
-        if let Some(a) = self.agents.activity.iter_mut().find(|a| a.id == id) {
+        let gone = self.core.agents.undo.push(id, bytes, u, self.core.agents.cfg.limits.undo_total_bytes);
+        if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == id) {
             a.undo = Some(id);
         }
         for g in gone {
-            if let Some(a) = self.agents.activity.iter_mut().find(|a| a.id == g) {
+            if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == g) {
                 a.undo = None;
                 a.summary = format!("{} · undo expired", a.summary);
             }
@@ -120,12 +120,12 @@ impl App {
 
     /// An Undo call finished. What it could not reach comes back so it can be tried again.
     pub(super) fn agent_undone(&mut self, id: u64, res: db::Res<String>, back: Option<db::AgentUndo>) {
-        let (conn, database, ns) = match self.agents.activity.iter().find(|a| a.id == id) {
+        let (conn, database, ns) = match self.core.agents.activity.iter().find(|a| a.id == id) {
             Some(a) => (a.conn, a.database.clone(), back.as_ref().map(|u| u.ns())),
             None => (None, String::new(), None),
         };
         let done = res.is_ok();
-        if let Some(a) = self.agents.activity.iter_mut().find(|a| a.id == id) {
+        if let Some(a) = self.core.agents.activity.iter_mut().find(|a| a.id == id) {
             let base = a.summary.trim_end_matches(" · undoing").to_string();
             a.summary = if done { format!("{base} · undone") } else { base };
         }
@@ -138,7 +138,7 @@ impl App {
         }
         if let Some(conn) = conn {
             let (db, coll) = ns.unwrap_or_else(|| {
-                let ns = self.agents.activity.iter().find(|a| a.id == id).map(|a| a.ns.clone()).unwrap_or_default();
+                let ns = self.core.agents.activity.iter().find(|a| a.id == id).map(|a| a.ns.clone()).unwrap_or_default();
                 let ns = ns.strip_prefix(&format!("{database}.")).filter(|_| !database.is_empty()).map(String::from).unwrap_or(ns);
                 let (d, c) = ns.split_once('.').unwrap_or((&ns, ""));
                 (d.to_string(), c.to_string())
@@ -151,7 +151,7 @@ impl App {
     /// every tab of the database.
     /// `database` narrows it to one PostgreSQL database; empty matches the schema in any.
     pub(super) fn mark_agent_changed(&mut self, conn: u64, database: &str, db: &str, coll: Option<&str>) {
-        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && (database.is_empty() || t.sel.db == database) && t.sel.space() == db && coll.is_none_or(|c| t.sel.coll == c)) {
+        for t in self.core.tabs.iter_mut().filter(|t| t.sel.conn == conn && (database.is_empty() || t.sel.db == database) && t.sel.space() == db && coll.is_none_or(|c| t.sel.coll == c)) {
             t.agent_changed = true;
         }
     }
@@ -177,10 +177,10 @@ impl App {
     /// The shared connections, without anything an agent could reach the server with: no address, user or secret.
     pub(super) fn agent_connections(&self) -> Value {
         let list: Vec<Value> = self
-            .conns
+            .core.conns
             .iter()
             .filter_map(|c| {
-                let p = self.agents.cfg.conn(c.meta.id)?;
+                let p = self.core.agents.cfg.conn(c.meta.id)?;
                 let (_, engine) = super::rail::engine_mark(c.meta.engine, &c.server.product);
                 Some(json!({
                     // A string: ids are 64-bit and JavaScript clients would round them.
@@ -198,15 +198,15 @@ impl App {
 
     /// QUARRY_TEST_SETTINGS=agents: agents on with two shared demo connections and one client, never touching disk.
     pub(super) fn agents_demo(&mut self) {
-        self.agents.cfg.enabled = true;
+        self.core.agents.cfg.enabled = true;
         for (i, access) in [Access::ReadWrite, Access::Read].into_iter().enumerate() {
-            if let Some(c) = self.conns.get(i) {
-                let p = crate::agents::config::ConnPolicy { access, ..self.agents.cfg.defaults.clone() };
-                self.agents.cfg.conns.insert(c.meta.id, p);
+            if let Some(c) = self.core.conns.get(i) {
+                let p = crate::agents::config::ConnPolicy { access, ..self.core.agents.cfg.defaults.clone() };
+                self.core.agents.cfg.conns.insert(c.meta.id, p);
             }
         }
-        self.agents.link = LinkState::Listening;
-        self.agents.sessions.push(AgentSession { id: 1, client: "claude-code".into(), calls: 14 });
+        self.core.agents.link = LinkState::Listening;
+        self.core.agents.sessions.push(AgentSession { id: 1, client: "claude-code".into(), calls: 14 });
     }
 }
 
@@ -220,12 +220,12 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
         let app = h.state_mut();
         for (id, name) in [(11, "shared"), (12, "hidden"), (13, "read")] {
-            app.conns.push(Conn { masked_uri: "mongodb://u:***@db.example.com".into(), ..Conn::new(ConnMeta { id, name: name.into(), tag: "Production".into(), ..Default::default() }, Status::Idle) });
+            app.core.conns.push(Conn { masked_uri: "mongodb://u:***@db.example.com".into(), ..Conn::new(ConnMeta { id, name: name.into(), tag: "Production".into(), ..Default::default() }, Status::Idle) });
         }
-        app.agents.cfg.enabled = true;
-        app.agents.cfg.conns.insert(11, ConnPolicy { access: Access::ReadWrite, ..Default::default() });
-        app.agents.cfg.conns.insert(12, ConnPolicy::default());
-        app.agents.cfg.conns.insert(13, ConnPolicy { access: Access::Read, ..Default::default() });
+        app.core.agents.cfg.enabled = true;
+        app.core.agents.cfg.conns.insert(11, ConnPolicy { access: Access::ReadWrite, ..Default::default() });
+        app.core.agents.cfg.conns.insert(12, ConnPolicy::default());
+        app.core.agents.cfg.conns.insert(13, ConnPolicy { access: Access::Read, ..Default::default() });
         let v = app.agent_connections();
         let list = v["connections"].as_array().unwrap();
         assert_eq!(list.iter().map(|c| c["name"].as_str().unwrap()).collect::<Vec<_>>(), ["shared", "read"]);

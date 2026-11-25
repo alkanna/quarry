@@ -8,21 +8,21 @@ type MemLines = (Vec<(&'static str, usize)>, String);
 impl App {
     /// Where the memory goes, by what holds it. Empty lines are left out.
     pub(super) fn mem_parts(&self) -> Vec<(&'static str, usize)> {
-        let sizes: Vec<usize> = self.tabs.iter().map(Tab::mem).collect();
-        let cur = sizes.get(self.cur).copied().unwrap_or(0);
+        let sizes: Vec<usize> = self.core.tabs.iter().map(Tab::mem).collect();
+        let cur = sizes.get(self.core.cur).copied().unwrap_or(0);
         let open: usize = sizes.iter().sum();
         let log: usize = db::log().iter().map(db::LogEntry::mem).sum();
-        let kept = self.tabs.iter().map(Tab::kept).reduce(|mut a, b| {
+        let kept = self.core.tabs.iter().map(Tab::kept).reduce(|mut a, b| {
             a.iter_mut().zip(b).for_each(|(x, y)| x.1 += y.1);
             a
         });
-        let closed = self.closed.iter().map(|t| t.mem() + t.kept().iter().map(|k| k.1).sum::<usize>()).sum();
+        let closed = self.core.closed.iter().map(|t| t.mem() + t.kept().iter().map(|k| k.1).sum::<usize>()).sum();
         // Sizing an entry encodes its documents, so each is measured once, the first time the tooltip asks, rather than
         // on every write while the readout is off. Entries gone from the list are forgotten.
-        let mut undo_sizes = self.undo_bytes.borrow_mut();
-        undo_sizes.retain(|at, _| self.undo.iter().any(|a| a.at == *at));
+        let mut undo_sizes = self.core.undo_bytes.borrow_mut();
+        undo_sizes.retain(|at, _| self.core.undo.iter().any(|a| a.at == *at));
         // Agent undo is a separate store that counts the encoded bytes of its decoded documents.
-        let undo = self.undo.iter().map(|a| *undo_sizes.entry(a.at).or_insert_with(|| a.held())).sum::<usize>() + self.agents.undo.total() as usize * db::DECODED;
+        let undo = self.core.undo.iter().map(|a| *undo_sizes.entry(a.at).or_insert_with(|| a.held())).sum::<usize>() + self.core.agents.undo.total() as usize * db::DECODED;
         let parts = [("Current tab", cur), ("Other open tabs", open - cur), ("Closed tabs kept to reopen", closed), ("Query log", log)];
         parts.into_iter().chain(kept.into_iter().flatten()).chain([("Undo history", undo)]).filter(|p| p.1 > 0).collect()
     }

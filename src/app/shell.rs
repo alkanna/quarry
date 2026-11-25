@@ -431,10 +431,10 @@ impl App {
     }
 
     pub(super) fn start_shell(&mut self) {
-        if self.demo {
+        if self.core.demo {
             return self.ok("Offline demo: the shell needs a real connection.");
         }
-        let Some(runtime) = find_bun(&self.prefs.shell_runtime) else {
+        let Some(runtime) = find_bun(&self.core.prefs.shell_runtime) else {
             return self.warn_settings("Bun is needed for the Shell. Install it from bun.sh, or set its path in Settings.");
         };
         let Some(t) = self.t() else { return };
@@ -446,7 +446,7 @@ impl App {
         };
         let collections: Vec<String> = self.tables_of(&sel);
         let schema = self.sel_schema(&sel);
-        let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
+        let packages: Vec<String> = self.core.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let read_only = !self.sel_writable();
         // A PostgreSQL attachment's tables are not saved with the tab, so a restored one lists them again. They arrive
         // while the script starts, and a table helper missing on this run is there on the next (table('name') always works).
@@ -457,7 +457,7 @@ impl App {
         let (mut mongo, mut sql_entries, mut sql) = match self.shell_attachments() {
             Ok(v) => v,
             Err(e) => {
-                self.tabs[self.cur].shell.error = Some(e);
+                self.core.tabs[self.core.cur].shell.error = Some(e);
                 return;
             }
         };
@@ -487,7 +487,7 @@ impl App {
         let mut input = serde_json::json!({ "mongo": mongo, "sql": sql_entries });
         input["code"] = filled.into();
         input["packages"] = packages.into();
-        input["timeoutMs"] = self.prefs.timeout_ms.into();
+        input["timeoutMs"] = self.core.prefs.timeout_ms.into();
         input["maxBytes"] = db::SHELL_MAX.into();
         input["main"] = name.into();
         let input = input.to_string();
@@ -496,7 +496,7 @@ impl App {
         const MAX_HISTORY_LENGTH: usize = 50;
         const MAX_HISTORY_SCRIPT: usize = 1000;
         if code.chars().count() <= MAX_HISTORY_SCRIPT {
-            let h = self.prefs.shell_histories.entry(format!("{}/{}", sel.conn, sel.db)).or_default();
+            let h = self.core.prefs.shell_histories.entry(format!("{}/{}", sel.conn, sel.db)).or_default();
             h.retain(|x| *x != code);
             h.insert(0, code);
             h.truncate(MAX_HISTORY_LENGTH);
@@ -506,7 +506,7 @@ impl App {
         if main_sql {
             self.sql_columns_ask(true);
         }
-        for a in self.tabs[self.cur].shell.attached.clone() {
+        for a in self.core.tabs[self.core.cur].shell.attached.clone() {
             if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
                 // A PostgreSQL schema is read on a session of its own database and cached under that database and schema.
                 let (key, space, db) = if db.dialect == db::sql::Dialect::Postgres {
@@ -515,16 +515,16 @@ impl App {
                 } else {
                     (a.db.clone(), a.db.clone(), db)
                 };
-                self.sql_schema_asked.insert((a.conn, key));
-                self.worker.sql_schema(a.conn, db, space);
+                self.core.sql_schema_asked.insert((a.conn, key));
+                self.core.worker.sql_schema(a.conn, db, space);
             }
         }
-        self.req += 1;
-        let req = self.req;
+        self.core.req += 1;
+        let req = self.core.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
         // The floating selection bar is not disabled with the result, so stale checks could still be exported.
-        self.tabs[self.cur].shell_checked.clear();
-        let sh = &mut self.tabs[self.cur].shell;
+        self.core.tabs[self.core.cur].shell_checked.clear();
+        let sh = &mut self.core.tabs[self.core.cur].shell;
         // Only the script and the last result are kept, so a field added to ShellTab later starts fresh.
         let old = std::mem::take(sh);
         *sh = ShellTab {
@@ -547,9 +547,9 @@ impl App {
             started: Some(std::time::Instant::now()),
             ..Default::default()
         };
-        let packages = self.prefs.shell_packages.clone();
-        self.tabs[self.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
-        self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
+        let packages = self.core.prefs.shell_packages.clone();
+        self.core.tabs[self.core.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
+        self.core.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
     }
 
     /// The Shell runs in its own process, so it reaches SSH-only servers through this app's
@@ -584,25 +584,25 @@ impl App {
         if sql {
             self.sql_columns_ask(false);
         }
-        let history = self.t().and_then(|t| self.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
-        let mut packages = self.prefs.shell_packages.clone();
+        let history = self.t().and_then(|t| self.core.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
+        let mut packages = self.core.prefs.shell_packages.clone();
         let mut pkg_names: Vec<String> = packages.iter().map(|p| package_ident(p)).collect();
         if packages.iter().any(|p| db::package_spec(p).0 == "lodash") {
             pkg_names.push("_".into());
         }
-        let mut new_pkg = std::mem::take(&mut self.new_pkg);
+        let mut new_pkg = std::mem::take(&mut self.core.new_pkg);
         let pick = self.pick_data(ui.ctx(), PickKind::Shell);
         let (mut pick_acts, mut demo_pick) = (Vec::new(), None);
         let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
-        let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone(), self.sel_schema(&self.tabs[self.cur].sel)));
-        let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, s, None));
+        let sql_cx = sql.then(|| (self.core.tabs[self.core.cur].sel.conn, self.core.tabs[self.core.cur].sel.db.clone(), self.sel_schema(&self.core.tabs[self.core.cur].sel)));
+        let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.core.conns, &self.core.sql_schema, &self.core.views, *c, d, s, None));
         let none = Fields::new();
-        let values = sql_cx.as_ref().and_then(|(c, d, s)| self.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
+        let values = sql_cx.as_ref().and_then(|(c, d, s)| self.core.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
         let strip = self.strip_of(Src::Shell);
         let (mut make_default, mut make_value) = (false, None);
-        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
+        let (t, ac) = (&mut self.core.tabs[self.core.cur], &mut self.core.ac);
         if t.shell.code.is_empty() {
             t.shell.code = default_script(&coll, sql);
         }
@@ -681,7 +681,7 @@ impl App {
         let esc = ui.input(|i| i.key_pressed(Key::Escape));
         // The editor keeps three lines, and the results below it the Console, the header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, ui.available_height() - SHELL_PANEL_H - 3.0 * ROW_H - TABLE_HEAD_H - 70.0);
-        let pref = self.prefs.shell_editor_h;
+        let pref = self.core.prefs.shell_editor_h;
         let custom = pref > 0.0;
         let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
@@ -786,7 +786,7 @@ impl App {
             });
         }));
         let bar = splitter(ui);
-        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut self.prefs.shell_editor_h, f.response.rect.height(), lo, hi));
+        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut self.core.prefs.shell_editor_h, f.response.rect.height(), lo, hi));
         ui.add_space(2.0);
         if let Some(e) = &t.shell.error {
             egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
@@ -911,7 +911,7 @@ impl App {
             self.warn(format!("The result is {} MB, too big to copy. Use Export to save it to a file.", n >> 20));
         }
         if export {
-            if self.tabs[self.cur].shell.docs.is_empty() {
+            if self.core.tabs[self.core.cur].shell.docs.is_empty() {
                 self.export_shell();
             } else {
                 let sel = self.checked_rows();
@@ -924,7 +924,7 @@ impl App {
         if has_table {
             // The result table is the same one documents use: open, colours, right-click menu.
             // Sized to its rows so the Console sits right under a short result, not at the bottom.
-            let rows = self.tabs[self.cur].shell.docs.len().min(PAGE_SIZE as usize) as f32;
+            let rows = self.core.tabs[self.core.cur].shell.docs.len().min(PAGE_SIZE as usize) as f32;
             let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
@@ -934,13 +934,13 @@ impl App {
         }
         let ui = outer;
         ui.add_space(8.0);
-        shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name, &kinds);
+        shell_panel(ui, &mut self.core.tabs[self.core.cur].shell, &conn_name, &kinds);
         if let Some(code) = use_example {
-            self.tabs[self.cur].shell.code = code;
+            self.core.tabs[self.core.cur].shell.code = code;
         }
-        self.new_pkg = new_pkg;
-        if packages != self.prefs.shell_packages {
-            self.prefs.shell_packages = packages;
+        self.core.new_pkg = new_pkg;
+        if packages != self.core.prefs.shell_packages {
+            self.core.prefs.shell_packages = packages;
             self.save_prefs();
             self.js_restart();
         }
@@ -954,10 +954,10 @@ impl App {
             self.js_editor(ui.ctx(), f, &colls);
         }
         if stop {
-            self.tabs[self.cur].shell.stop();
+            self.core.tabs[self.core.cur].shell.stop();
         }
         if let Some(i) = detach {
-            self.tabs[self.cur].shell.attached.remove(i);
+            self.core.tabs[self.core.cur].shell.attached.remove(i);
         }
         if open_attach {
             self.open_attach();
@@ -980,7 +980,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=shell: the SQL shell of the design, with a finished run and its Queries panel.
     pub(super) fn sql_shell_demo(&mut self) {
-        let t = &mut self.tabs[0];
+        let t = &mut self.core.tabs[0];
         t.view = View::Shell;
         t.selected = None;
         let ac_demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac");
@@ -1009,11 +1009,11 @@ impl App {
 
     /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
     pub(super) fn export_shell(&mut self) {
-        let t = &self.tabs[self.cur].shell;
+        let t = &self.core.tabs[self.core.cur].shell;
         let Some(v) = t.result() else { return };
         // Documents for CSV and TSV, decoded only for this save.
         let docs: Vec<Document> = t.docs.iter().map(db::Row::owned).collect();
-        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", self.tabs[self.cur].sel.coll)).add_filter("JSON", &["json"]);
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", self.core.tabs[self.core.cur].sel.coll)).add_filter("JSON", &["json"]);
         if !docs.is_empty() {
             dialog = dialog.add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]);
         }

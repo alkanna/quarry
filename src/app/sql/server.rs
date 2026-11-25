@@ -71,18 +71,18 @@ fn shown_vars<'a>(rows: &'a [Var], filter: &str) -> Vec<&'a Var> {
 
 impl App {
     pub(in crate::app) fn sql_server_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.sql_server.take() else { return };
+        let Some(mut s) = self.core.sql_server.take() else { return };
         let conn = s.conn;
         let db = self.conn(conn).and_then(|c| c.sql.clone());
         let (name, product) = self.conn(conn).map(|c| (c.meta.name.clone(), format!("{} {}", c.server.product, c.server.version))).unwrap_or_default();
-        if let (Some(db), false) = (&db, self.demo) {
+        if let (Some(db), false) = (&db, self.core.demo) {
             self.sql_server_poll(ctx, &mut s, db);
         }
         let mut open = true;
         let mut kill: Option<Confirm> = None;
-        let live = db.is_some() || self.demo;
+        let live = db.is_some() || self.core.demo;
         // A locked connection offers no Kill, and a confirmation armed before the lock is dropped.
-        s.writable = self.conn(conn).map_or(self.demo, |c| c.writable);
+        s.writable = self.conn(conn).map_or(self.core.demo, |c| c.writable);
         s.own = self.own_sessions(conn);
         if !s.writable {
             s.confirm = None;
@@ -131,12 +131,12 @@ impl App {
             self.modal = Some(Modal::Unlock(conn, None));
         }
         if let (Some(c), Some(db)) = (kill, db) {
-            self.req += 1;
-            self.sql_kills.insert(self.req);
-            self.worker.sql_server_kill(db, self.req, KillTarget::of(&c.p, &c.identity), c.whole, !s.writable);
+            self.core.req += 1;
+            self.core.sql_kills.insert(self.core.req);
+            self.core.worker.sql_server_kill(db, self.core.req, KillTarget::of(&c.p, &c.identity), c.whole, !s.writable);
         }
         if open && !(r.should_close() && self.modal.is_none()) {
-            self.sql_server = Some(s);
+            self.core.sql_server = Some(s);
         }
     }
 
@@ -156,9 +156,9 @@ impl App {
                 if s.procs_wait || !due {
                     return;
                 }
-                self.req += 1;
-                (s.procs_req, s.procs_wait, s.refresh) = (self.req, true, false);
-                self.worker.sql_server_processes(db.clone(), self.req);
+                self.core.req += 1;
+                (s.procs_req, s.procs_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.sql_server_processes(db.clone(), self.core.req);
             }
             SqlServerTab::Locks => {
                 if s.auto {
@@ -168,17 +168,17 @@ impl App {
                 if s.locks_wait || !due {
                     return;
                 }
-                self.req += 1;
-                (s.locks_req, s.locks_wait, s.refresh) = (self.req, true, false);
-                self.worker.sql_server_locks(db.clone(), self.req);
+                self.core.req += 1;
+                (s.locks_req, s.locks_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.sql_server_locks(db.clone(), self.core.req);
             }
             SqlServerTab::Overview | SqlServerTab::Status => {
                 let overview = s.tab == SqlServerTab::Overview;
                 // MariaDB opens every table to size it, so sizes are read once per window and on Refresh, never on a timer.
                 if overview && !s.sz_wait && (s.refresh || s.sizes_at.is_none()) {
-                    self.req += 1;
-                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.req, true, Some(now));
-                    self.worker.sql_server_sizes(db.clone(), self.req);
+                    self.core.req += 1;
+                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.core.req, true, Some(now));
+                    self.core.worker.sql_server_sizes(db.clone(), self.core.req);
                 }
                 let (auto, empty, wait) = if overview { (true, s.ov.is_none(), s.ov_wait) } else { (s.st_auto, s.st.is_none(), s.st_wait) };
                 if auto {
@@ -188,23 +188,23 @@ impl App {
                 if wait || !due {
                     return;
                 }
-                self.req += 1;
+                self.core.req += 1;
                 s.refresh = false;
                 if overview {
-                    (s.ov_req, s.ov_wait) = (self.req, true);
-                    self.worker.sql_server_overview(db.clone(), self.req);
+                    (s.ov_req, s.ov_wait) = (self.core.req, true);
+                    self.core.worker.sql_server_overview(db.clone(), self.core.req);
                 } else {
-                    (s.st_req, s.st_wait) = (self.req, true);
-                    self.worker.sql_server_status(db.clone(), self.req);
+                    (s.st_req, s.st_wait) = (self.core.req, true);
+                    self.core.worker.sql_server_status(db.clone(), self.core.req);
                 }
             }
             SqlServerTab::Variables => {
                 if s.vars_wait || !(s.refresh || s.vars.is_none()) {
                     return;
                 }
-                self.req += 1;
-                (s.vars_req, s.vars_wait, s.refresh) = (self.req, true, false);
-                self.worker.sql_server_variables(db.clone(), self.req, s.global);
+                self.core.req += 1;
+                (s.vars_req, s.vars_wait, s.refresh) = (self.core.req, true, false);
+                self.core.worker.sql_server_variables(db.clone(), self.core.req, s.global);
             }
         }
     }
@@ -219,7 +219,7 @@ impl App {
                 own.insert(id, what.to_string());
             }
         };
-        for t in &self.tabs {
+        for t in &self.core.tabs {
             if let Some(s) = t.sql.as_ref().filter(|s| s.run_req != 0 && t.sel.conn == conn) {
                 add(s.run.conn.load(Ordering::SeqCst), "Query tab");
             }
@@ -231,10 +231,10 @@ impl App {
                 }
             }
         }
-        if let Some(j) = self.export_job.as_ref().filter(|j| j.db.as_ref().is_some_and(|d| d.conn == conn)) {
+        if let Some(j) = self.core.export_job.as_ref().filter(|j| j.db.as_ref().is_some_and(|d| d.conn == conn)) {
             add(j.id.load(Ordering::SeqCst), "Export");
         }
-        if let Some(j) = self.sql_job.as_ref().filter(|j| j.conn == conn) {
+        if let Some(j) = self.core.sql_job.as_ref().filter(|j| j.conn == conn) {
             add(j.id.load(Ordering::SeqCst), if j.kind == sql::dump::JobKind::Import { "Import" } else { "Script file" });
         }
         own
@@ -242,8 +242,8 @@ impl App {
 
     pub(in crate::app) fn sql_server_done(&mut self, req: u64, ans: Answer) {
         // A Kill answer is told even when the window is gone, so a failure is never silent.
-        if let Some(told) = kill_toast(&mut self.sql_kills, req, &ans) {
-            if let (Ok(_), Some(s)) = (&told, self.sql_server.as_mut()) {
+        if let Some(told) = kill_toast(&mut self.core.sql_kills, req, &ans) {
+            if let (Ok(_), Some(s)) = (&told, self.core.sql_server.as_mut()) {
                 s.refresh = true;
                 s.next = None;
             }
@@ -253,7 +253,7 @@ impl App {
             }
             return;
         }
-        let Some(s) = self.sql_server.as_mut() else { return };
+        let Some(s) = self.core.sql_server.as_mut() else { return };
         match ans {
             Answer::Procs(r) if req == s.procs_req => {
                 s.procs_wait = false;

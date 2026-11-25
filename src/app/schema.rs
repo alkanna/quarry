@@ -6,12 +6,12 @@ impl App {
     pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
         let mut analyze = false;
         let mut acts: Vec<(String, u8)> = Vec::new();
-        let key = self.tabs[self.cur].coll_key();
-        let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
-        let sel = &self.tabs[self.cur].sel;
+        let key = self.core.tabs[self.core.cur].coll_key();
+        let maps = self.core.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
+        let sel = &self.core.tabs[self.core.cur].sel;
         // Views refuse a $natural sort, so they only offer the first documents.
-        let view = self.views.has(sel.conn, &sel.db, &sel.coll);
-        let t = &mut self.tabs[self.cur];
+        let view = self.core.views.has(sel.conn, &sel.db, &sel.coll);
+        let t = &mut self.core.tabs[self.core.cur];
         if view {
             t.schema.last = false;
         }
@@ -80,7 +80,7 @@ impl App {
         if t.schema.err.is_some() {
             self.failed_panel(ui, View::Schema);
         }
-        let t = &mut self.tabs[self.cur];
+        let t = &mut self.core.tabs[self.core.cur];
         if t.schema.err.is_some() {
         } else if let Some(ms) = t.schema.ms {
             ui.horizontal(|ui| {
@@ -190,14 +190,14 @@ impl App {
             });
         });
         if generate {
-            let s = &mut self.tabs[self.cur].schema;
+            let s = &mut self.core.tabs[self.core.cur].schema;
             s.vtext = db::to_edit_json(&db::schema_from_stats(&s.stats, s.docs));
         }
         if reload {
-            self.tabs[self.cur].schema.vloaded = false;
+            self.core.tabs[self.core.cur].schema.vloaded = false;
         }
         if apply {
-            let t = &self.tabs[self.cur];
+            let t = &self.core.tabs[self.core.cur];
             match db::parse_doc(&t.schema.vtext) {
                 Ok(v) => {
                     let level = ["off", "moderate", "strict"][t.schema.vlevel as usize];
@@ -207,15 +207,15 @@ impl App {
                 Err(e) => self.err(e),
             }
         }
-        if !self.tabs[self.cur].schema.vloaded && let Some(target) = self.target() {
-            self.req += 1;
-            let (req, coll) = (self.req, target.coll.clone());
-            let s = &mut self.tabs[self.cur].schema;
+        if !self.core.tabs[self.core.cur].schema.vloaded && let Some(target) = self.target() {
+            self.core.req += 1;
+            let (req, coll) = (self.core.req, target.coll.clone());
+            let s = &mut self.core.tabs[self.core.cur].schema;
             (s.vloaded, s.vreq) = (true, req);
-            self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
+            self.core.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
         }
         if let Some(p) = toggle {
-            let closed = &mut self.tabs[self.cur].schema.closed;
+            let closed = &mut self.core.tabs[self.core.cur].schema.closed;
             if !closed.remove(&p) {
                 closed.insert(p);
             }
@@ -229,19 +229,19 @@ impl App {
                     self.ok("Column added; open Documents to see it");
                 }
                 3 => {
-                    let list = self.prefs.schema_maps.entry(key.clone()).or_default();
+                    let list = self.core.prefs.schema_maps.entry(key.clone()).or_default();
                     match list.iter().position(|p| *p == path) {
                         Some(i) => _ = list.remove(i),
                         None => list.push(path),
                     }
                     if list.is_empty() {
-                        self.prefs.schema_maps.remove(&key);
+                        self.core.prefs.schema_maps.remove(&key);
                     }
                     self.save_prefs();
                     analyze = true;
                 }
                 _ => {
-                    let t = &mut self.tabs[self.cur];
+                    let t = &mut self.core.tabs[self.core.cur];
                     t.filter_txt = db::shell_text(&Bson::Document(doc! { path: { "$exists": what == 1 } }));
                     t.view = View::Documents;
                     self.run_query();
@@ -250,17 +250,17 @@ impl App {
         }
         if analyze {
             // Read again: a toggle above changed the saved list after `maps` was taken.
-            let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
+            let maps = self.core.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
             if let Some(target) = self.target() {
-                self.req += 1;
-                let req = self.req;
-                let t = &mut self.tabs[self.cur];
+                self.core.req += 1;
+                let req = self.core.req;
+                let t = &mut self.core.tabs[self.core.cur];
                 t.schema.req = req;
                 t.schema.running = true;
                 t.schema.err = None;
-                self.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last, maps.clone());
-            } else if self.demo {
-                let t = &mut self.tabs[self.cur];
+                self.core.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last, maps.clone());
+            } else if self.core.demo {
+                let t = &mut self.core.tabs[self.core.cur];
                 t.schema.stats = db::analyze_schema(&t.decoded_docs(), &maps);
                 (t.schema.docs, t.schema.ms) = (t.docs.len(), Some(3));
             }

@@ -4,16 +4,16 @@ use super::*;
 
 fn three_stages(a: &mut App) {
     a.load_demo();
-    let t = &mut a.tabs[1];
+    let t = &mut a.core.tabs[1];
     t.view = View::Aggregate;
     t.stages = vec![Stage::new("$match", "{ a: 1 }", true), Stage::new("$group", "{ _id: '$a' }", true), Stage::new("$sort", "{ _id: 1 }", true)];
     t.agg_txt = text_from_stages(&t.stages);
     t.stages_src = t.agg_txt.clone();
-    a.cur = 1;
+    a.core.cur = 1;
 }
 
 fn ops(ui: &UiApp) -> Vec<String> {
-    ui.app().tabs[1].stages.iter().map(|s| s.op.clone()).collect()
+    ui.app().core.tabs[1].stages.iter().map(|s| s.op.clone()).collect()
 }
 
 /// A point on the header of stage `n` (from 1), left of its operator, which no widget of the card takes.
@@ -38,12 +38,12 @@ fn a_stage_moves_by_dragging_its_card_and_esc_cancels() {
     ui.press_and_move(from, to);
     ui.release(to);
     assert_eq!(ops(&ui), ["$group", "$sort", "$match"], "the stage did not land after the last one");
-    let t = &ui.app().tabs[1];
+    let t = &ui.app().core.tabs[1];
     assert!(t.agg_txt.find("$group").unwrap() < t.agg_txt.find("$match").unwrap(), "the pipeline text did not follow the stages");
     // A click in an editor still edits it rather than starting a drag.
     ui.mouse_hold("Stage 1 editor", 0);
     ui.type_text("x");
-    assert!(ui.app().tabs[1].stages[0].text.contains('x'), "a click in the editor did not focus it");
+    assert!(ui.app().core.tabs[1].stages[0].text.contains('x'), "a click in the editor did not focus it");
 }
 
 #[test]

@@ -16,7 +16,7 @@ fn panel() -> Option<UiApp> {
 }
 
 fn members(ui: &UiApp, g: u64) -> Vec<u64> {
-    ui.app().groups.group(g).map(|g| g.members.clone()).unwrap_or_default()
+    ui.app().core.groups.group(g).map(|g| g.members.clone()).unwrap_or_default()
 }
 
 /// Opens the menu of a row with a right click.
@@ -30,27 +30,27 @@ fn right_click(ui: &mut UiApp, label: &str) {
 #[test]
 fn manage_in_connect_opens_the_panel_and_the_switch_leads_back() {
     let Some(mut ui) = panel() else { return };
-    ui.h.state_mut().prefs.set_side_mode(SideMode::Explorer);
+    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Explorer);
     ui.settle();
     assert!(ui.h.query_by_label("Group Production").is_none());
     ui.click("Connect");
     ui.click("Manage…");
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Connections);
     ui.show("Group Production");
     // The switch at the top of the panel leads back to the other two.
     ui.click("Tables");
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Explorer);
 }
 
 #[test]
 fn the_tables_and_scripts_switch_sets_the_side_mode() {
     let Some(mut ui) = panel() else { return };
-    ui.h.state_mut().prefs.set_side_mode(SideMode::Explorer);
+    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Explorer);
     ui.settle();
     ui.click("Scripts");
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Library);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Library);
     ui.click("Tables");
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Explorer);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn a_new_group_is_named_in_a_field_after_the_groups() {
     ui.type_text("Analytics");
     ui.h.key_press(egui::Key::Enter);
     ui.settle();
-    let g = ui.app().groups.groups.last().cloned().expect("a group");
+    let g = ui.app().core.groups.groups.last().cloned().expect("a group");
     assert_eq!((g.name.as_str(), g.members.len()), ("Analytics", 0));
     // It takes the first color no group has, and an empty one says where connections go.
     assert_eq!(g.color, "green");
@@ -71,7 +71,7 @@ fn a_new_group_is_named_in_a_field_after_the_groups() {
     ui.type_text("Nope");
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
-    assert_eq!(ui.app().groups.groups.len(), 4);
+    assert_eq!(ui.app().core.groups.groups.len(), 4);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn a_swatch_in_the_group_menu_recolors_the_group() {
     let Some(mut ui) = panel() else { return };
     right_click(&mut ui, "Group Production");
     ui.click("blue");
-    assert_eq!(ui.app().groups.group(PROD).unwrap().color, "blue");
+    assert_eq!(ui.app().core.groups.group(PROD).unwrap().color, "blue");
 }
 
 #[test]
@@ -87,13 +87,13 @@ fn deleting_a_group_frees_its_members_and_undo_puts_it_back() {
     let Some(mut ui) = panel() else { return };
     right_click(&mut ui, "Group Staging");
     ui.click("Delete group");
-    assert!(ui.app().groups.group(STAGE).is_none());
-    assert!(ui.app().groups.loose_order(&ui.app().conn_ids()).contains(&14));
+    assert!(ui.app().core.groups.group(STAGE).is_none());
+    assert!(ui.app().core.groups.loose_order(&ui.app().conn_ids()).contains(&14));
     // The members are in the loose list now, under the caption.
     ui.show("reports");
     ui.click_last("Undo");
     assert_eq!(members(&ui, STAGE), [2, 14]);
-    assert_eq!(ui.app().groups.groups.iter().map(|g| g.id).collect::<Vec<_>>(), [PROD, STAGE, LOCAL]);
+    assert_eq!(ui.app().core.groups.groups.iter().map(|g| g.id).collect::<Vec<_>>(), [PROD, STAGE, LOCAL]);
 }
 
 #[test]
@@ -105,9 +105,9 @@ fn the_filter_opens_groups_with_a_match_and_leaves_the_folding_alone() {
     // Only the group holding the match is left, and the stored flag is not touched.
     assert!(ui.h.query_by_label("Group Staging").is_none() && ui.h.query_by_label("Group Production").is_none());
     ui.show("Group Local");
-    assert!(!ui.app().groups.group(LOCAL).unwrap().open);
+    assert!(!ui.app().core.groups.group(LOCAL).unwrap().open);
     ui.show("MATCHES");
-    ui.h.state_mut().conns_ui.filter.clear();
+    ui.h.state_mut().core.conns_ui.filter.clear();
     ui.settle();
     assert!(ui.h.query_by_label("scratch").is_none() && ui.h.query_by_label("MATCHES").is_none());
     ui.show("Group Staging");
@@ -124,11 +124,11 @@ fn a_connection_is_dragged_into_a_group_out_of_it_and_within_it() {
     assert_eq!(members(&ui, PROD), [12, 11, 13]);
     // Out: onto a loose row, before it.
     ui.drag("billing", "analytics", 0.1, 1);
-    assert!(ui.app().groups.group_of(13).is_none());
-    assert_eq!(ui.app().groups.loose_order(&ui.app().conn_ids()), [13, 16]);
+    assert!(ui.app().core.groups.group_of(13).is_none());
+    assert_eq!(ui.app().core.groups.loose_order(&ui.app().conn_ids()), [13, 16]);
     // A press that moves less than the drag threshold is a click on the row.
     ui.click("analytics");
-    assert_eq!(ui.app().active, Some(16));
+    assert_eq!(ui.app().core.active, Some(16));
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn a_drag_that_rests_on_a_folded_group_opens_it() {
     let Some(mut ui) = panel() else { return };
     ui.drag("sandbox", "Group Local", 0.5, 4);
     assert!(members(&ui, LOCAL).contains(&17));
-    assert!(ui.app().groups.group(LOCAL).unwrap().open);
+    assert!(ui.app().core.groups.group(LOCAL).unwrap().open);
 }
 
 #[test]
@@ -151,11 +151,11 @@ fn the_edit_dialog_renames_recolors_reorders_and_removes_members() {
     ui.click_last("Fold in the rail");
     ui.drag("Member billing", "Member prod-eu", 0.1, 1);
     ui.click("Save");
-    let g = ui.app().groups.group(PROD).unwrap().clone();
+    let g = ui.app().core.groups.group(PROD).unwrap().clone();
     assert_eq!(g.name, "Production EU");
     assert!(!g.fold_rail);
     assert_eq!(g.members, [13, 11]);
-    assert!(ui.app().groups.group_of(12).is_none(), "a removed member is in no group");
+    assert!(ui.app().core.groups.group_of(12).is_none(), "a removed member is in no group");
     assert!(ui.app().modal.is_none());
 }
 
@@ -183,9 +183,9 @@ fn delete_group_in_the_dialog_deletes_it_with_an_undo() {
     right_click(&mut ui, "Group Staging");
     ui.click("Edit group…");
     ui.click("Delete group");
-    assert!(ui.app().groups.group(STAGE).is_none() && ui.app().modal.is_none());
+    assert!(ui.app().core.groups.group(STAGE).is_none() && ui.app().modal.is_none());
     ui.click_last("Undo");
-    assert!(ui.app().groups.group(STAGE).is_some());
+    assert!(ui.app().core.groups.group(STAGE).is_some());
 }
 
 #[test]
@@ -213,19 +213,19 @@ fn the_picker_groups_its_list_folds_it_and_opens_the_panel() {
     }) else {
         return;
     };
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Explorer);
     ui.show("Fold Production");
     ui.show("prod-eu");
     // A caption folds its connections in the picker only.
     ui.click("Fold Production");
     assert!(ui.h.query_by_label("prod-eu").is_none());
-    assert!(ui.app().groups.group(PROD).unwrap().open);
+    assert!(ui.app().core.groups.group(PROD).unwrap().open);
     // The filter narrows the list and keeps the group of the match.
     ui.fill("Filter connections", "reports");
     ui.show("reports");
     assert!(ui.h.query_by_label("sandbox").is_none());
     ui.click("Manage…");
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Connections);
 }
 
 #[test]
@@ -233,9 +233,9 @@ fn esc_cancels_a_connection_drag_and_a_click_still_activates() {
     let Some(mut ui) = panel() else { return };
     ui.drag_esc("sandbox", "Group Staging", 0.5);
     assert_eq!(members(&ui, STAGE), [2, 14], "Esc did not cancel the drop");
-    assert!(ui.app().groups.group_of(17).is_none());
+    assert!(ui.app().core.groups.group_of(17).is_none());
     ui.click("sandbox");
-    assert_eq!(ui.app().active, Some(17));
+    assert_eq!(ui.app().core.active, Some(17));
 }
 
 #[test]
@@ -261,8 +261,8 @@ fn a_click_on_a_connection_shows_its_databases() {
     let Some(mut ui) = panel() else { return };
     ui.mouse_hold("analytics", 0);
     // Before, the panel stayed up and only the highlight moved.
-    assert_eq!(ui.app().active, Some(16));
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Explorer, "the click left the Connections panel up");
+    assert_eq!(ui.app().core.active, Some(16));
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Explorer, "the click left the Connections panel up");
 }
 
 #[test]
@@ -276,16 +276,16 @@ fn a_hovered_row_shows_its_menu_button_with_browse_databases() {
     let w = ui.h.get_by_label("Browse databases").rect().width();
     assert!(w < 320.0, "the row menu is {w} px wide");
     ui.click("Browse databases");
-    assert_eq!((ui.app().active, ui.app().prefs.side_mode()), (Some(12), SideMode::Explorer));
+    assert_eq!((ui.app().core.active, ui.app().core.prefs.side_mode()), (Some(12), SideMode::Explorer));
     // A group row has one too, with the group's menu.
-    ui.h.state_mut().prefs.set_side_mode(SideMode::Connections);
+    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Connections);
     ui.show("Group Staging");
     let at = ui.h.get_by_label("Group Staging").rect().center();
     ui.h.hover_at(at);
     ui.h.run_steps(2);
     ui.click("More for group Staging");
     ui.click("Delete group");
-    assert!(ui.app().groups.group(STAGE).is_none());
+    assert!(ui.app().core.groups.group(STAGE).is_none());
 }
 
 #[test]
@@ -299,9 +299,9 @@ fn the_arrow_keys_walk_the_rows_and_return_opens_a_connection() {
     assert!(focused(&ui, "Group Staging"));
     // Left folds the group, Right opens it again.
     ui.key(none, egui::Key::ArrowLeft);
-    assert!(!ui.app().groups.group(STAGE).unwrap().open);
+    assert!(!ui.app().core.groups.group(STAGE).unwrap().open);
     ui.key(none, egui::Key::ArrowRight);
-    assert!(ui.app().groups.group(STAGE).unwrap().open);
+    assert!(ui.app().core.groups.group(STAGE).unwrap().open);
     // Down walks into the members, Left from a member goes back up to its group.
     ui.key(none, egui::Key::ArrowDown);
     ui.key(none, egui::Key::ArrowDown);
@@ -311,7 +311,7 @@ fn the_arrow_keys_walk_the_rows_and_return_opens_a_connection() {
     ui.key(none, egui::Key::ArrowDown);
     ui.key(none, egui::Key::ArrowDown);
     ui.key(none, egui::Key::Enter);
-    assert_eq!((ui.app().active, ui.app().prefs.side_mode()), (Some(14), SideMode::Explorer));
+    assert_eq!((ui.app().core.active, ui.app().core.prefs.side_mode()), (Some(14), SideMode::Explorer));
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn leaving_a_name_field_keeps_what_was_typed() {
     ui.type_text("Ops");
     // A press elsewhere ends the field: before, only Enter made the group.
     ui.mouse_hold("Group Production", 0);
-    assert!(ui.app().groups.groups.iter().any(|g| g.name == "Ops"), "leaving the field threw the name away");
+    assert!(ui.app().core.groups.groups.iter().any(|g| g.name == "Ops"), "leaving the field threw the name away");
     // The same for a rename started with F2.
     ui.h.get_by_label("Group Local").focus();
     ui.settle();
@@ -331,7 +331,7 @@ fn leaving_a_name_field_keeps_what_was_typed() {
     ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     ui.type_text("Laptop");
     ui.mouse_hold("Group Production", 0);
-    assert_eq!(ui.app().groups.group(LOCAL).map(|g| g.name.as_str()), Some("Laptop"));
+    assert_eq!(ui.app().core.groups.group(LOCAL).map(|g| g.name.as_str()), Some("Laptop"));
 }
 
 #[test]
