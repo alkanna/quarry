@@ -28,6 +28,7 @@ pub mod roles;
 pub mod server;
 pub mod users;
 pub mod sql;
+pub mod structure;
 pub mod sql_server;
 pub mod shell;
 pub mod tools;
@@ -50,6 +51,8 @@ mod shell_tests;
 mod conn_tests;
 #[cfg(test)]
 mod prefs_tests;
+#[cfg(test)]
+mod sql_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -64,6 +67,8 @@ pub use update::{UpdBtn, UpdateA};
 pub use toasts::AppA;
 pub use prefs::{Pref, PrefVals, PrefsA};
 pub use library::LibA;
+pub use sql::SqlA;
+pub use structure::StructA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -79,6 +84,8 @@ pub enum Action {
     App(AppA),
     Prefs(PrefsA),
     Library(LibA),
+    Sql(SqlA),
+    Structure(StructA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -138,6 +145,12 @@ pub enum Dialog {
     ErrorDetails(Box<crate::state::errors::ErrEntry>),
     /// A text window, such as a linked file against the tab that edits it.
     Text { title: String, body: String, code: bool },
+    /// The Explain dialog of a SQL statement, which the app builds and holds with its first request.
+    SqlExplain(String),
+    /// Save all's confirmation of these staged drafts.
+    SaveAll(Vec<String>),
+    /// The insert form of a SQL table.
+    SqlRow(Box<crate::state::sql::edit::RowForm>),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -203,6 +216,8 @@ impl Core {
             Action::App(a) => self.app(a),
             Action::Prefs(a) => self.prefs_act(a),
             Action::Library(a) => self.library_act(a),
+            Action::Sql(a) => self.sql(a),
+            Action::Structure(a) => self.structure_act(a),
         }
     }
 
@@ -260,6 +275,9 @@ impl Core {
             Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) => true,
             Msg::LibScan { link, .. } => *link != 0,
             Msg::LibFile { .. } => true,
+            Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } => true,
+            Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => true,
+            Msg::SqlAltered { .. } => true,
             _ => false,
         }
     }
@@ -294,6 +312,15 @@ impl Core {
             Msg::UpdateInstalled(res) => self.on_update_installed(res),
             Msg::LibScan { link, scan } => self.apply_scan(link, scan),
             Msg::LibFile { job, out } => self.file_done(job, out),
+            Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
+            Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
+            Msg::SqlLint { req, lint } => self.sql_linted(req, lint),
+            Msg::SqlCols { req, cols, pk, estimated, matched } => self.sql_cols(req, cols, pk, estimated, matched),
+            Msg::SqlFilterCount { req, res } => self.sql_filter_counted(req, res),
+            Msg::SqlKeys { req, res } => self.sql_keys_done(req, res),
+            Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
+            Msg::SqlFacts { conn, database, schema, table, column, res } => self.sql_facts_done(conn, database, schema, table, column, res),
+            Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
             _ => {}
         }
     }

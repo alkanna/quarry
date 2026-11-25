@@ -40,4 +40,101 @@ impl Core {
             self.save_prefs();
         }
     }
+
+    /// Reads the open tab's page again, as the app's reload does for a SQL tab; the demo has no server to ask.
+    pub(super) fn sql_reload(&mut self) {
+        self.sql_reload_of(self.cur);
+    }
+
+    /// Reads tab `i`'s page again, as the app's reload_of does for a SQL tab.
+    pub(crate) fn sql_reload_of(&mut self, i: usize) {
+        if self.demo {
+            return;
+        }
+        if let Some(t) = self.tabs.get_mut(i) {
+            t.agent_changed = false;
+        }
+        self.reload_sql(i);
+    }
+
+    /// The bar's Run, Enter or the panel's Apply: the first page of what the bar reads now.
+    pub(super) fn sql_apply(&mut self) {
+        self.tabs[self.cur].page = 0;
+        self.sql_reload();
+    }
+
+    /// The results bar's pager.
+    pub(super) fn sql_page(&mut self, page: u64) {
+        self.tabs[self.cur].page = page;
+        self.sql_reload();
+    }
+
+    /// Ungroup: back to the table's rows, keeping a sort that names real columns.
+    pub(super) fn sql_ungroup(&mut self) {
+        crate::state::sql::bar::ungroup(&mut self.tabs[self.cur]);
+        self.sql_reload();
+    }
+
+    /// Double click on a grouped row: its rows replace the grouped result.
+    pub(super) fn sql_drill(&mut self, row: usize) {
+        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
+        crate::state::sql::bar::drill(&mut self.tabs[self.cur], row, dialect, bs);
+        self.sql_reload();
+    }
+
+    /// The Rules or SQL switch of the bar. Rules mode reads the WHERE text again into the tree first.
+    pub(super) fn sql_where_mode(&mut self, sql: bool) {
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
+        let t = &mut self.tabs[self.cur];
+        let Some(s) = t.sql.as_mut() else { return };
+        let b = &mut s.bar;
+        if sql == b.c.sql {
+            return;
+        }
+        b.c.sql = sql;
+        if sql {
+            b.panel.open = false;
+        } else {
+            let cols = if b.table_cols.is_empty() { s.cols.clone() } else { b.table_cols.clone() };
+            let pairs: Vec<_> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
+            // The tree is from before SQL mode, so it is read again now, before the next frame writes it out.
+            b.src.clear();
+            crate::state::sql::bar::read_tree(b, &t.filter_txt, &pairs, d, bs, true);
+        }
+    }
+
+    /// The columns of a page answer, given to the tab that asked.
+    pub fn sql_cols(&mut self, req: u64, cols: Vec<db::sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64>) {
+        if let Some(s) = self.tabs.iter_mut().find(|t| t.req == req).and_then(|t| t.sql.as_mut()) {
+            // The rules pick from table columns, which a grouped answer does not have.
+            let cols = std::sync::Arc::new(cols);
+            if matched.is_none() {
+                s.bar.table_cols = cols.clone();
+            }
+            (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
+        }
+    }
+
+    /// An answer for a filter panel's count, given to the tab that asked.
+    pub fn sql_filter_counted(&mut self, req: u64, res: crate::state::sql::filter_panel::Counted) {
+        for t in &mut self.tabs {
+            if let Some(s) = t.sql.as_mut()
+                && s.bar.panel.counted(req, &res)
+            {
+                return;
+            }
+        }
+    }
+
+    /// The rows a foreign key cell editor looked up, for the lookup still awaited.
+    pub fn sql_keys_done(&mut self, req: u64, res: db::Res<(db::sql::KeyTable, Vec<(String, String)>)>) {
+        let Some(k) = self.sql_cell.as_mut().and_then(|e| e.keys.as_mut()).filter(|k| k.req == req) else { return };
+        k.busy = false;
+        // A lookup the server refuses leaves the list empty; the key can still be typed and saved.
+        match res {
+            Ok((t, rows)) => (k.table, k.rows) = (Some(t), rows),
+            // Treated as a big table with no name column, so later lookups skip the catalog and only match exact keys.
+            Err(_) => (k.table, k.rows) = (Some(db::sql::KeyTable { label: None, big: true }), Vec::new()),
+        }
+    }
 }

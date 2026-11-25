@@ -14,3 +14,8 @@ pub struct Need {
     /// The text typed so far, when the list of frequent values did not hold it.
     pub prefix: Option<String>,
 }
+
+/// Key of a column's values in the `Fields` the app keeps.
+pub fn value_key(table: &str, column: &str) -> String {
+    format!("{table}.{column}")
+}

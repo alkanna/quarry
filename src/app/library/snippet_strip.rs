@@ -146,10 +146,8 @@ impl App {
         preview_ui(ui, out, 10, |t| crate::ui::editor::sql_job_in(t, TXT_SMALL, d));
     }
 
-    /// The text a Query run sends: `text` with the tab's values filled in, or why it can't be.
     pub(in crate::app) fn snippet_fill_run(&self, text: String) -> Result<String, String> {
-        let Some(t) = self.t() else { return Ok(text) };
-        fill_tab(t, &text, Src::Query, self.sql_dialect().into(), self.sql_bs_of(t.sel.conn))
+        self.core.snippet_fill_run(text)
     }
 
     /// Make it a value... on the selected literal of the Query or Shell editor, from its context menu.

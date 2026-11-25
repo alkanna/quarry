@@ -17,6 +17,8 @@ impl App {
     pub(super) fn run_fx(&mut self) {
         for fx in self.core.take_ui_fx() {
             match fx {
+                // The Explain dialog is built by the app with its first request.
+                UiFx::Open(Dialog::SqlExplain(text)) => self.sql_explain(text),
                 UiFx::Open(d) => {
                     self.modal = Some(match d {
                         Dialog::Unlock(conn) => Modal::Unlock(conn, None),
@@ -32,6 +34,9 @@ impl App {
                         Dialog::WhatsNew(w) => Modal::WhatsNew(w),
                         Dialog::ErrorDetails(e) => Modal::ErrorDetails(e),
                         Dialog::Text { title, body, code } => Modal::Text { title, body, code },
+                        Dialog::SqlExplain(_) => unreachable!("handled above"),
+                        Dialog::SaveAll(keys) => Modal::SaveAll(keys),
+                        Dialog::SqlRow(f) => Modal::SqlRow(f),
                     })
                 }
                 UiFx::Connected { conn, sql: false } => {

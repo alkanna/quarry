@@ -2,6 +2,7 @@
 
 use crate::app::results_bar::BarInfo;
 use crate::app::*;
+use quarry_core::action::{Action, SqlA};
 
 impl App {
     pub(in crate::app) fn reload_sql(&mut self, i: usize) {
@@ -32,9 +33,8 @@ impl App {
 
     /// Double click on a grouped row: its rows replace the grouped result.
     pub(in crate::app) fn sql_drill(&mut self, row: usize) {
-        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
-        crate::app::sql::bar::drill(self.tm().unwrap(), row, dialect, bs);
-        self.reload();
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::Drill { tab, row }));
     }
 
     /// Asks for the filter panel's counts while it is open on a live connection: the whole WHERE once it has rested,
@@ -88,17 +88,6 @@ impl App {
         }
     }
 
-    /// An answer for a filter panel's count, given to the tab that asked.
-    pub(in crate::app) fn sql_filter_counted(&mut self, req: u64, res: crate::app::sql::filter_panel::Counted) {
-        for t in &mut self.core.tabs {
-            if let Some(s) = t.sql.as_mut()
-                && s.bar.panel.counted(req, &res)
-            {
-                return;
-            }
-        }
-    }
-
     /// Content: the query line, the results line and the table.
     pub(in crate::app) fn sql_content(&mut self, ui: &mut egui::Ui) {
         // Loaded with another page size, set from another tab: its page numbers no longer line up.
@@ -117,7 +106,7 @@ impl App {
         let covered = self.window_open();
         let table = self.core.tabs[self.core.cur].sel.coll.clone();
         let facts = self.core.sql_facts.get(&(conn, ns_key(&db, &schema), table.clone()));
-        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts };
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts, acts: Vec::new() };
         let t = &mut self.core.tabs[self.core.cur];
         let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.core.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
@@ -131,7 +120,11 @@ impl App {
             }
         }
         let pick_acts = std::mem::take(&mut side.pick_acts);
-        if side.help {
+        let (acts, tab, help) = (std::mem::take(&mut side.acts), t.uid, side.help);
+        for a in acts {
+            self.exec(Action::Sql(a));
+        }
+        if help {
             self.modal = Some(Modal::Text { title: "Query help".into(), body: crate::db::sql::rules::filter_help(dialect), code: false });
         }
         self.sql_serve(conn, &db, &schema, wants);
@@ -147,8 +140,7 @@ impl App {
             self.save_script_as();
         }
         if run {
-            self.tm().unwrap().page = 0;
-            self.reload();
+            self.exec(Action::Sql(SqlA::Apply { tab }));
         }
         self.agent_notice(ui);
         ui.add_space(10.0);
@@ -167,11 +159,9 @@ impl App {
         };
         let out = self.results_bar(ui, &info, |app, ui| app.sql_row_tools(ui));
         if out.ungroup {
-            crate::app::sql::bar::ungroup(self.tm().unwrap());
-            self.reload();
-        } else if let Some(p) = out.go {
-            self.tm().unwrap().page = p;
-            self.reload();
+            self.exec(Action::Sql(SqlA::Ungroup { tab }));
+        } else if let Some(page) = out.go {
+            self.exec(Action::Sql(SqlA::Page { tab, page }));
         }
         ui.add_space(4.0);
         self.sql_results(ui);

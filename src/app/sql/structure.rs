@@ -3,6 +3,7 @@
 //! indexes are edited here through staged changes (`sql_alter.rs`); the other three views stay read-only.
 
 use crate::app::*;
+use quarry_core::action::{Action, StructA};
 use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
@@ -45,18 +46,8 @@ pub(in crate::app) enum Act {
 }
 
 impl App {
-    /// Asks for the current tab's structure. The answer is matched back by `idx_req`.
     fn request_structure(&mut self) {
-        let i = self.core.cur;
-        let Some((db, space)) = self.core.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
-        self.core.req += 1;
-        let req = self.core.req;
-        let t = &mut self.core.tabs[i];
-        t.idx_req = req;
-        if let Some(s) = t.sql.as_mut() {
-            s.st.load = Load::Loading;
-        }
-        self.core.worker.sql_structure(req, db, space, t.sel.coll.clone());
+        self.core.request_structure()
     }
 
     /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
@@ -119,6 +110,10 @@ impl App {
     }
 
     fn act(&mut self, ctx: &egui::Context, a: Act) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        // Columns are named in actions, by their place in the structure the grid drew.
+        let cols: Vec<String> = self.structure().map(|s| s.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
+        let name = |cols: &[String], i: usize| cols.get(i).cloned();
         match a {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
@@ -126,12 +121,7 @@ impl App {
                 // A link: without a per-tab Back, the table it was followed from stays in its tab.
                 self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::Link);
             }
-            Act::Refresh => {
-                if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
-                    s.st.load = Load::Idle;
-                }
-                self.request_structure();
-            }
+            Act::Refresh => self.exec(Action::Structure(StructA::Refresh { tab })),
             Act::Maintain(what) => self.sql_maintain(what),
             Act::Truncate => {
                 let sel = self.core.tabs[self.core.cur].sel.clone();
@@ -140,8 +130,16 @@ impl App {
             Act::NewColumn => self.open_col_form(None),
             Act::EditColumn(i) => self.open_col_form(Some(i)),
             Act::DuplicateColumn(i) => self.duplicate_column(i),
-            Act::DropColumn(i) => self.stage_drop_column(i),
-            Act::MoveColumnTo(i, to) => self.stage_move_column_to(i, to),
+            Act::DropColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::DropColumn { tab, col }));
+                }
+            }
+            Act::MoveColumnTo(i, to) => {
+                if let (Some(col), Some(to)) = (name(&cols, i), name(&cols, to)) {
+                    self.exec(Action::Structure(StructA::MoveColumn { tab, col, to }));
+                }
+            }
             Act::NewRelation => self.open_fk_form(None),
             Act::EditRelation(i) => self.open_fk_form(Some(i)),
             Act::DropRelation(i) => self.stage_drop_fk(i),
@@ -149,14 +147,18 @@ impl App {
             Act::DropTrigger(n) => self.trig_ask_drop(n),
             Act::NewIndex => self.open_idx_form(None),
             Act::EditIndex(i) => self.open_idx_form(Some(i)),
-            Act::DropIndex(i) => self.stage_drop_index(i),
+            Act::DropIndex(i) => {
+                if let Some(index) = self.structure().and_then(|s| s.indexes.get(i)).map(|x| x.name.clone()) {
+                    self.exec(Action::Structure(StructA::DropIndex { tab, index }));
+                }
+            }
             Act::NewCheck => self.open_check_form(None),
             Act::EditCheck(i) => self.open_check_form(Some(i)),
             Act::DropCheck(i) => self.stage_drop_check(i),
             Act::EditTable => self.open_table_opts(),
-            Act::Unstage(i) => self.unstage(i),
-            Act::Discard => self.discard_staged(),
-            Act::Apply => self.request_alter_apply(),
+            Act::Unstage(at) => self.exec(Action::Structure(StructA::Unstage { tab, at })),
+            Act::Discard => self.exec(Action::Structure(StructA::Discard { tab })),
+            Act::Apply => self.exec(Action::Structure(StructA::Apply { tab })),
         }
     }
 

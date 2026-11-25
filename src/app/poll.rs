@@ -12,16 +12,6 @@ impl App {
             }
             match m {
                 Msg::Agent(ev) => self.on_agent(ctx, ev),
-                Msg::SqlCols { req, cols, pk, estimated, matched } => {
-                    if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
-                        // The rules pick from table columns, which a grouped answer does not have.
-                        let cols = Arc::new(cols);
-                        if matched.is_none() {
-                            s.bar.table_cols = cols.clone();
-                        }
-                        (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
-                    }
-                }
                 Msg::SqlOrphans { req, res, sample } => {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
                         f.orphans_done(req, res, sample);
@@ -49,13 +39,9 @@ impl App {
                         s.st.finish(res);
                     }
                 }
-                Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
-                Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlExplained { req, sets } => self.sql_explained(req, sets),
                 Msg::SqlExplainEvidence { req, ev } => self.sql_explain_evidence(req, ev),
                 Msg::SqlExplainHypo { req, res } => self.sql_explain_hypo(req, res),
-                Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
-                Msg::SqlLint { req, lint } => self.sql_linted(req, lint),
                 Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
@@ -82,6 +68,9 @@ impl App {
                 Msg::SqlServer { .. } | Msg::PgServer { .. } => {}
                 Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => {}
                 Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) | Msg::LibFile { .. } => {}
+                Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } => {}
+                Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => {}
+                Msg::SqlAltered { .. } => {}
                 Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
@@ -89,10 +78,6 @@ impl App {
                 }
                 Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
-                Msg::SqlKeys { req, res } => self.sql_keys_done(req, res),
-                Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
-                Msg::SqlFacts { conn, database, schema, table, column, res } => self.sql_facts_done(conn, database, schema, table, column, res),
-                Msg::SqlFilterCount { req, res } => self.sql_filter_counted(req, res),
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
                 Msg::Command { tag, res } => self.on_command(tag, res),
                 Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),

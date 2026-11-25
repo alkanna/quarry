@@ -47,10 +47,7 @@ pub(crate) struct Scope<'a> {
     pub(crate) schemas: Vec<String>,
 }
 
-/// Key of a column's values in the `Fields` the app keeps.
-pub(crate) fn value_key(table: &str, column: &str) -> String {
-    format!("{table}.{column}")
-}
+pub(crate) use quarry_core::state::sql_complete::value_key;
 
 /// The suggestions for a place in a statement, with the heading and footer the popup shows and the
 /// lookup that would make them better.

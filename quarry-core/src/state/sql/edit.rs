@@ -83,3 +83,24 @@ pub struct RowForm {
     pub fields: Vec<RowField>,
     pub err: Option<String>,
 }
+
+use crate::db::sql::value::{self, Kind};
+
+pub fn is_numeric(k: Kind) -> bool {
+    matches!(k, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal)
+}
+
+/// Text for the editor of a `kind` column: what the cell shows, as typed back it parses to the same value.
+pub fn edit_text(b: &Bson, kind: Kind) -> String {
+    match b {
+        Bson::Null => "NULL".into(),
+        Bson::String(s) if value::text_like(kind) && value::null_like(s) => format!("'{s}'"),
+        Bson::String(s) if kind == Kind::Json && s.trim() == "null" => "'null'".into(),
+        Bson::String(s) => s.clone(),
+        Bson::Int32(n) => n.to_string(),
+        Bson::Int64(n) => n.to_string(),
+        Bson::Double(f) => f.to_string(),
+        Bson::Binary(x) => format!("0x{}", x.bytes.iter().map(|b| format!("{b:02X}")).collect::<String>()),
+        other => db::short(other),
+    }
+}

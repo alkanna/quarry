@@ -342,6 +342,8 @@ fn all_actions() -> Vec<Action> {
         LibA::FileToQuarry { link: 1, rel: rel(), at: DropAt::Into(3) },
     ];
     all.extend(l.into_iter().map(Action::Library));
+    all.extend(super::sql_tests::sql_actions().into_iter().map(Action::Sql));
+    all.extend(super::sql_tests::struct_actions().into_iter().map(Action::Structure));
     all
 }
 
@@ -398,6 +400,8 @@ fn variant(a: &Action) -> String {
         Action::Library(l) => match l {
             LibA::CancelPending | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } => {}
         },
+        Action::Sql(a) => super::sql_tests::sql_variant(a),
+        Action::Structure(a) => super::sql_tests::struct_variant(a),
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }
