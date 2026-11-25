@@ -7,8 +7,6 @@ use quarry_core::core::notify::{fix_label, raised};
 use std::time::Instant;
 pub(crate) use quarry_core::state::errors::*;
 
-/// Undo entries kept for toasts that may still be up; older ones drop off.
-const RESTORES_MAX: usize = 10;
 const OK_S: u64 = 8;
 const WARN_S: u64 = 6;
 const TOAST_W: f32 = 380.0;
@@ -227,21 +225,12 @@ impl App {
     /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
     /// read-only connection: a group, saved scripts or a file.
     pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
-        self.toast_restore_edit(s, r, None);
+        self.core.toast_restore(s, r)
     }
 
     /// `toast_restore` with a Rename beside Undo that opens the Edit group dialog on `group`.
     pub(super) fn toast_restore_edit(&mut self, s: String, r: Restore, group: Option<u64>) {
-        self.core.err_seq += 1;
-        let id = self.core.err_seq;
-        self.core.restores.push((id, r));
-        if self.core.restores.len() > RESTORES_MAX {
-            self.core.restores.remove(0);
-        }
-        let mut acts = vec![("Undo".to_string(), Act::Restore(id))];
-        acts.extend(group.map(|g| ("Rename".to_string(), Act::EditGroup(g))));
-        self.core.toasts.retain(|t| t.tone != Tone::Ok);
-        self.core.toasts.push(Toast { id, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+        self.core.toast_restore_edit(s, r, group)
     }
 
     /// Runs a toast, panel or card button. `tab` is the tab whose panel it was on.

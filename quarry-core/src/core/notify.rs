@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 /// Errors kept for the status bar list; older ones drop off.
 pub const ERRORS_MAX: usize = 200;
 
+/// Undo entries kept for toasts that may still be up; older ones drop off.
+pub const RESTORES_MAX: usize = 10;
+
 pub fn fix_label(f: Fix, timeout_ms: u64) -> String {
     match f {
         Fix::Retry => "Retry".into(),
@@ -285,5 +288,25 @@ impl Core {
         self.toasts.retain(|t| t.tone != Tone::Ok);
         self.err_seq += 1;
         self.toasts.push(Toast { id: self.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+    }
+
+    /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
+    /// read-only connection: a group, saved scripts or a file.
+    pub fn toast_restore(&mut self, s: String, r: crate::state::restore::Restore) {
+        self.toast_restore_edit(s, r, None);
+    }
+
+    /// `toast_restore` with a Rename beside Undo that opens the Edit group dialog on `group`.
+    pub fn toast_restore_edit(&mut self, s: String, r: crate::state::restore::Restore, group: Option<u64>) {
+        self.err_seq += 1;
+        let id = self.err_seq;
+        self.restores.push((id, r));
+        if self.restores.len() > RESTORES_MAX {
+            self.restores.remove(0);
+        }
+        let mut acts = vec![("Undo".to_string(), Act::Restore(id))];
+        acts.extend(group.map(|g| ("Rename".to_string(), Act::EditGroup(g))));
+        self.toasts.retain(|t| t.tone != Tone::Ok);
+        self.toasts.push(Toast { id, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
     }
 }
