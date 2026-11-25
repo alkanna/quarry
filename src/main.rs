@@ -11,7 +11,7 @@ mod ui;
 mod win_frame;
 
 // The core crate's modules keep their crate::db, crate::agents, ... paths here.
-use quarry_core::{agents, cloudsql, db, library, paths, ssh, sysmem, update, vault};
+use quarry_core::{agents, cloudsql, db, library, ssh, sysmem, update, vault};
 
 /// QUARRY_NO_FOCUS runs benchmark and screenshot windows in the background: never the active app,
 /// so they cannot take focus from whatever the user is doing.

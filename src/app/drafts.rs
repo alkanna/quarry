@@ -123,12 +123,6 @@ pub(super) fn drafts_of(drafts: &HashMap<String, Draft>, sel: &Sel) -> Vec<Strin
     drafts.iter().filter(|(_, d)| d.is_in(sel)).map(|(k, _)| k.clone()).collect()
 }
 
-impl Draft {
-    pub(super) fn is_in(&self, sel: &Sel) -> bool {
-        self.conn == sel.conn && self.db == sel.db && self.schema == sel.schema && self.coll == sel.coll
-    }
-}
-
 /// The document as stored on the server: deletes must match that, not its unsaved edits.
 pub(super) fn stored_version(drafts: &HashMap<String, Draft>, key: &str, d: &Document) -> Document {
     drafts.get(key).map(|dr| dr.original.clone()).unwrap_or_else(|| d.clone())

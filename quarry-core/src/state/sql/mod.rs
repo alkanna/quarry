@@ -1,0 +1,30 @@
+//! State of the sql views and windows.
+
+pub mod alter;
+pub mod bar;
+pub mod bulk;
+pub mod checks;
+pub mod create;
+pub mod create_pg;
+pub mod dump;
+pub mod edit;
+pub mod explain;
+pub mod explain_compare;
+pub mod explain_flame;
+pub mod explain_hypo;
+pub mod explain_tree;
+pub mod filter_panel;
+pub mod import;
+pub mod new_keys;
+pub mod pg_roles;
+pub mod pg_server;
+pub mod query;
+pub mod rel;
+pub mod routines;
+pub mod server;
+pub mod structure;
+pub mod table_opts;
+pub mod tableops;
+pub mod trig;
+pub mod users;
+pub mod viewdef;

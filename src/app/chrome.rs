@@ -250,7 +250,7 @@ impl App {
         match self.tm().and_then(|t| t.sql.as_mut()) {
             Some(s) if !s.bar.c.sql => {
                 let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-                s.bar.open_filters(ctx, &cols, d);
+                sql::filter_panel::open_filters(&mut s.bar, ctx, &cols, d);
             }
             Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
             None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),

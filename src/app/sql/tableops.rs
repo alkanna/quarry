@@ -7,48 +7,9 @@ use crate::app::sql::ns::sel_of;
 use crate::app::*;
 use db::sql::create::DropInfo;
 use db::sql::pg::tableops as pgops;
-use db::sql::tableops as myops;
+pub(crate) use quarry_core::state::sql::tableops::*;
 
 const NOTE_WRITE: &str = "Read-only: unlock writes to change tables";
-
-/// Rename a table, view or (PostgreSQL) schema. `database` is the PostgreSQL database and empty on MySQL, where `schema` is the database.
-pub(in crate::app) struct RenameForm {
-    conn: u64,
-    database: String,
-    schema: String,
-    /// Table, View or Schema.
-    kind: DropKind,
-    from: String,
-    to: String,
-    focused: bool,
-    /// The statement shown, kept while the new name stays as it is.
-    preview: Option<(String, Result<String, String>)>,
-}
-
-pub(in crate::app) struct DupForm {
-    conn: u64,
-    database: String,
-    schema: String,
-    from: String,
-    to: String,
-    data: bool,
-    focused: bool,
-    /// The statements shown, kept while the new name and the choice of rows stay as they are.
-    preview: Option<((String, bool), Result<String, String>)>,
-}
-
-/// Empty a PostgreSQL table, with the two options TRUNCATE has.
-pub(in crate::app) struct TruncForm {
-    conn: u64,
-    database: String,
-    schema: String,
-    table: String,
-    typed: String,
-    restart: bool,
-    cascade: bool,
-    /// None while the counts load.
-    info: Option<Result<DropInfo, String>>,
-}
 
 /// The first line of the empty confirmation, with the rows only where they are known: an estimate of 0 is not known, because the
 /// server's statistics lag behind a table that filled since.
@@ -59,33 +20,6 @@ fn trunc_lead(table: &str, conn: &str, info: &DropInfo) -> String {
         _ => String::new(),
     };
     format!("This deletes every row of {table}{rows} on {conn}. The table and its structure stay. It cannot be undone.")
-}
-
-impl RenameForm {
-    /// The statement for the current name, built again only when the name changes.
-    fn preview(&mut self, pg: bool, d: db::sql::Dialect) -> Result<String, String> {
-        let (key, built) = self.preview.take().filter(|p| p.0 == self.to).unwrap_or_else(|| {
-            let built = match (pg, self.kind) {
-                (true, DropKind::Schema) => pgops::rename_schema_sql(&self.from, &self.to),
-                (true, k) => pgops::rename_sql(if k == DropKind::View { "VIEW" } else { "TABLE" }, &self.schema, &self.from, &self.to),
-                (false, _) => myops::rename_table_sql(d, &self.schema, &self.from, &self.to, false),
-            };
-            (self.to.clone(), built.map(|sql| format!("{sql};")))
-        });
-        self.preview.insert((key, built)).1.clone()
-    }
-}
-
-impl DupForm {
-    /// Both statements for the current name and choice, built again only when one of them changes.
-    fn preview(&mut self, pg: bool, d: db::sql::Dialect) -> Result<String, String> {
-        let key = (self.to.clone(), self.data);
-        let (key, built) = self.preview.take().filter(|p| p.0 == key).unwrap_or_else(|| {
-            let built = if pg { pgops::duplicate_preview(&self.schema, &self.from, &self.to, self.data) } else { myops::duplicate_preview(d, &self.schema, &self.from, &self.to, self.data, false) };
-            (key, built.map(|v| v.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")))
-        });
-        self.preview.insert((key, built)).1.clone()
-    }
 }
 
 impl App {

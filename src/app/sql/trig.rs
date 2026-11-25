@@ -6,29 +6,9 @@ use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
 use db::sql::ddl::{self, TrigDef, TrigJob};
 use db::sql::structure::{Structure, Trigger};
+pub(crate) use quarry_core::state::sql::trig::*;
 
 const LINE_H: f32 = 20.0;
-
-/// What the editor shows for a draft, kept while the draft, the live trigger, the session mode and the columns stay as they are.
-pub(in crate::app) struct TrigMemo {
-    key: String,
-    def: TrigDef,
-    live: Option<Trigger>,
-    n_trigs: usize,
-    mode: ddl::Mode,
-    cols: Vec<String>,
-    dirty: bool,
-    /// None while the draft is the live trigger.
-    steps: Option<Result<Vec<String>, String>>,
-    script: String,
-    pg_warnings: Vec<String>,
-}
-
-impl TrigMemo {
-    fn holds(&self, key: &str, live: Option<&Trigger>, n_trigs: usize, mode: ddl::Mode, cols: &[&str], def: &TrigDef) -> bool {
-        self.key == key && self.live.as_ref() == live && self.n_trigs == n_trigs && self.mode == mode && self.cols.iter().map(String::as_str).eq(cols.iter().copied()) && self.def == *def
-    }
-}
 
 /// The key of the draft of a trigger that does not exist yet.
 pub(in crate::app) const NEW: &str = "";

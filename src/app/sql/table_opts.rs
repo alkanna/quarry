@@ -4,43 +4,9 @@
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::sql::create::pick;
 use crate::app::*;
-use db::sql::create::Meta;
 use db::sql::ddl::{self, Change, TableOpt};
 use db::sql::Dialect;
-
-/// The Edit table options dialog.
-pub(in crate::app) struct TableForm {
-    pub(in crate::app) conn: u64,
-    /// The database, which the lists of engines and collations are read for.
-    pub(in crate::app) schema: String,
-    pg: bool,
-    /// What the structure read.
-    was: (String, String, String, Option<u64>),
-    comment: String,
-    engine: String,
-    collation: String,
-    auto: String,
-    /// The staged changes that are not table options, which these go after.
-    rest: Vec<Change>,
-    /// Whether table options were already staged when the dialog opened, so clearing the fields back can still be staged.
-    had_staged: bool,
-    pub(in crate::app) meta: Option<Meta>,
-    pub(in crate::app) load_err: Option<String>,
-    view: Option<TableView>,
-}
-
-/// The plan of the options as they stand, kept until a field changes.
-struct TableView {
-    key: [String; 4],
-    /// The form did not parse, which is a mistake to point at and not a form left alone.
-    invalid: bool,
-    /// Nothing differs from the server any more, but options were staged before: staging then takes them back.
-    removes: bool,
-    /// Only the table options of the form. They replace the staged ones, so opening the dialog twice never stacks two.
-    new: Vec<Change>,
-    text: Result<String, String>,
-    warnings: Vec<String>,
-}
+pub(crate) use quarry_core::state::sql::table_opts::*;
 
 impl App {
     pub(in crate::app) fn open_table_opts(&mut self) {

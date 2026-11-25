@@ -4,144 +4,17 @@
 
 use crate::app::*;
 use super::filter_cells::{col_pick, combo_w, mono_edit, pill_combo, rule_editor, type_name, Hints};
-use super::filter_panel::Panel;
 use crate::db::sql::{
     filter::{self, Match},
     rules::{self, Grain, Op, Rule},
     schema::SchemaCol,
     value::Kind,
-    Col, Dialect, PageQuery,
-};
+    Col, Dialect, };
 use crate::ui::sql_complete::{open_list, sql_ac_field, Scope, Wants};
-
-/// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
-#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub(in crate::app) struct Clauses {
-    /// SQL mode of the bar instead of Rules mode.
-    pub(in crate::app) sql: bool,
-    pub(in crate::app) select: String,
-    pub(in crate::app) group: String,
-    pub(in crate::app) having: String,
-    pub(in crate::app) limit: String,
-    pub(in crate::app) offset: String,
-    pub(in crate::app) hint: String,
-    pub(in crate::app) distinct: bool,
-    /// The filter tree as the panel last wrote it, kept only in the saved tabs: groups, order and off rows that the
-    /// WHERE text alone loses. Empty at runtime, where the tree lives in `Bar`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(in crate::app) tree: String,
-}
-
-/// One aggregate of the GROUP BY editor: function index into `FUNCS`, column ("" is `*`) and alias.
-#[derive(Clone, Default)]
-struct Agg {
-    func: usize,
-    col: String,
-    alias: String,
-}
+pub(crate) use quarry_core::state::sql::bar::*;
+use super::filter_panel::PanelFold;
 
 const FUNCS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
-
-/// The state of the GROUP BY editor. It is what the last Apply wrote, so reopening shows it again;
-/// text edited by hand in SQL mode is not read back (ponytail: parse it if someone asks).
-#[derive(Default)]
-struct GroupDlg {
-    keys: Vec<(String, Option<Grain>)>,
-    aggs: Vec<Agg>,
-    having: Option<Rule>,
-    /// Whether the server reads backslash escapes, for the HAVING preview.
-    bs: bool,
-}
-
-/// Runtime state of the bar. Only `c` is saved.
-#[derive(Default)]
-pub(in crate::app) struct Bar {
-    pub(in crate::app) c: Clauses,
-    /// The filter as the panel edits it. The WHERE text stays the source of truth: the tree writes it on every edit and
-    /// is read again from any text that came from elsewhere.
-    pub(in crate::app) tree: filter::Tree,
-    /// A restored tab's saved tree, used once the columns are known and only while it still writes the WHERE text.
-    pub(in crate::app) pending: String,
-    /// The tree as the open tabs save it.
-    pub(in crate::app) tree_json: String,
-    pub(in crate::app) panel: Panel,
-    /// Set by the panel's Save as filter; `sql_content` opens the Save dialog.
-    pub(in crate::app) save_filter: bool,
-    /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
-    pub(in crate::app) want_facts: Option<(String, Kind)>,
-    /// The WHERE text the tree was last written as; a different `filter_txt` came from elsewhere.
-    src: String,
-    /// The tree was read again, so the text is written back once, in the tree's spelling.
-    rewrite: bool,
-    fold_open: bool,
-    gdlg: GroupDlg,
-    /// The table's own columns, kept when a grouped answer replaces the result columns.
-    pub(in crate::app) table_cols: Arc<Vec<Col>>,
-    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
-    pub(in crate::app) ac: Ac,
-    pub(in crate::app) wants: Wants,
-    /// Set by the Explain button; `sql_content` runs the same entry point as Cmd+E.
-    pub(in crate::app) explain: bool,
-    /// Initial open states; only the offline demo sets them.
-    pub(in crate::app) preset: Preset,
-    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
-    adding: Option<Add>,
-    /// Whether the bar holds another query than the page's, worked out once a frame by `bar` so the results need not
-    /// build the query again.
-    pub(in crate::app) dirty: bool,
-    /// A WHERE text as it ran and as the rules respelled it.
-    respelled: Option<(String, String)>,
-    /// What `bar` derives from the columns, kept while they and the primary key stay the same.
-    memo: Option<ColsMemo>,
-    /// Whether the WHERE text read as a tree, for the text, the column pairs and the mode it was read with.
-    parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
-    /// The folded statement line as a job, for the statement text and the fold state it was built from.
-    fold: Option<(String, bool, LayoutJob)>,
-}
-
-impl Bar {
-    /// Cmd+F in Rules mode: the filter panel, with a new row when it has none.
-    pub(in crate::app) fn open_filters(&mut self, ctx: &egui::Context, cols: &[Col], d: Dialect) {
-        if self.tree.root.kids.is_empty() {
-            super::filter_panel::add(&mut self.tree, &mut self.panel, 0, false, cols, d);
-        }
-        let at = self.panel.sel;
-        self.panel.show(ctx, at);
-    }
-
-    /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
-    /// the text as it ran, so only this comparison reads the other spelling.
-    pub(in crate::app) fn ran_as_shown<'a>(&self, ran: &'a PageQuery) -> std::borrow::Cow<'a, PageQuery> {
-        match &self.respelled {
-            Some((from, to)) if ran.filter == *from => std::borrow::Cow::Owned(PageQuery { filter: to.clone(), ..ran.clone() }),
-            _ => std::borrow::Cow::Borrowed(ran),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Add {
-    Order,
-    Columns,
-    Group,
-}
-
-struct ColsMemo {
-    cols: Arc<Vec<Col>>,
-    pk: Vec<String>,
-    fallback: Arc<Vec<SchemaCol>>,
-    pairs: Arc<Vec<(String, Kind)>>,
-}
-
-/// What the bar shows open from the first frame: the suggestion list, the ORDER BY popover and the
-/// text typed into its first column picker.
-#[derive(Default)]
-pub(in crate::app) struct Preset {
-    pub(in crate::app) ac: bool,
-    pub(in crate::app) order: bool,
-    pub(in crate::app) pick: Option<String>,
-}
 
 /// A one line SQL input with highlighting and suggestions. Returns whether Enter ended the edit, which runs the query.
 #[allow(clippy::too_many_arguments)]
@@ -150,28 +23,6 @@ fn sql_input(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, wa
     let (out, _) = sql_ac_field(ui, id, text, ac, scope, values, wants, |ui, text, _| egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono).hint_text(hint).desired_width(w).layouter(&mut sql_layout).show(ui));
     crate::ui::editor::paint_pair(ui, &out);
     out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-}
-
-/// Splits at commas outside quotes and parentheses: select lists and GROUP BY lists.
-pub(in crate::app) fn split_top(text: &str) -> Vec<String> {
-    let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0, None::<char>);
-    for c in text.chars() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"' | '`') => quote = Some(c),
-            (None, '(') => depth += 1,
-            (None, ')') => depth -= 1,
-            (None, ',') if depth == 0 => {
-                out.push(std::mem::take(&mut cur));
-                continue;
-            }
-            _ => {}
-        }
-        cur.push(c);
-    }
-    out.push(cur);
-    out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
 /// A plain column name from a name quoted the way `quote_ident` writes it or a bare word, or None for an expression.
@@ -233,12 +84,6 @@ pub(in crate::app) fn group_names(s: &SqlTab) -> Vec<String> {
 
 pub(in crate::app) fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
     keys.iter().map(|(c, desc)| format!("{} {}", d.quote_ident(c), if *desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")
-}
-
-/// What the worker is asked for, from the tab's texts.
-pub(in crate::app) fn page_query(t: &Tab) -> PageQuery {
-    let c = t.sql.as_ref().map(|s| s.bar.c.clone()).unwrap_or_default();
-    PageQuery { filter: t.filter_txt.clone(), order: t.sort_txt.clone(), select: split_top(&c.select), distinct: c.distinct, group: split_top(&c.group), having: c.having, limit: c.limit.trim().parse().ok(), skip: c.offset.trim().parse().unwrap_or(0), index_hint: c.hint }
 }
 
 /// SQL text colored by token: keywords, numbers and strings. Plugs into `TextEdit::layouter`.
@@ -1170,15 +1015,18 @@ fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
         return;
     }
     let stmt = select_sql(t, d);
+    let uid = t.uid;
     let Some(s) = t.sql.as_mut() else { return };
     let b = &mut s.bar;
     ui.add_space(8.0);
-    let mut job = match &b.fold {
-        Some((key, open, job)) if *open == b.fold_open && *key == stmt => job.clone(),
+    // The folded line as a job, kept per tab with the statement text and the fold state it was built from.
+    let memo = egui::Id::unique(("sql-fold", uid));
+    let mut job = match ui.data(|d| d.get_temp::<(String, bool, LayoutJob)>(memo)) {
+        Some((key, open, job)) if open == b.fold_open && key == stmt => job,
         _ => {
             let text = if b.fold_open { stmt.clone() } else { stmt.split_whitespace().collect::<Vec<_>>().join(" ") };
             let job = sql_job(&text, TXT_SMALL);
-            b.fold = Some((stmt.clone(), b.fold_open, job.clone()));
+            ui.data_mut(|d| d.insert_temp(memo, (stmt.clone(), b.fold_open, job.clone())));
             job
         }
     };

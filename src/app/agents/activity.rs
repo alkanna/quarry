@@ -3,15 +3,7 @@
 
 use super::*;
 use crate::app::sql::create::plural;
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(in crate::app) enum Filter {
-    #[default]
-    All,
-    Changes,
-    Refused,
-    Waiting,
-}
+pub(crate) use quarry_core::state::agents::activity::*;
 
 const FILTERS: [(Filter, &str); 4] = [(Filter::All, "All"), (Filter::Changes, "Changes"), (Filter::Refused, "Refused"), (Filter::Waiting, "Waiting")];
 

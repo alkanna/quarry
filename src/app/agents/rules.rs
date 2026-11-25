@@ -10,6 +10,7 @@ use super::activity::cell;
 use crate::agents::config::{Action, Detector, Matcher, PresetMode, RuleSpec, Tri};
 use crate::agents::presets;
 use crate::agents::scrub::{Fired, Rules};
+pub(crate) use quarry_core::state::agents::rules::*;
 
 /// Hashes in the tester use this key, not the keychain one: the tester must work in the demo, and a hash shown here
 /// must not match what agents get.
@@ -17,37 +18,6 @@ const TESTER_KEY: [u8; 32] = [0; 32];
 
 /// A rule row of the list: the 26 pt row and the line above it.
 const RULE_ROW_H: f32 = 32.0;
-
-const SAMPLE: &str = "{\n  \"full_name\": \"Ada Lovelace\",\n  \"email\": \"ada@example.com\",\n  \"card_number\": \"4111 1111 1111 1111\",\n  \"notes\": \"SSN 123-45-6789, call back\",\n  \"password\": \"hunter2\",\n  \"avatar\": { \"$binary\": { \"base64\": \"iVBORw0KGgo=\", \"subType\": \"00\" } }\n}";
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(in crate::app) enum RulesTab {
-    Secrets,
-    #[default]
-    Pii,
-    Custom,
-}
-
-pub(in crate::app) struct RulesWin {
-    pub(super) tab: RulesTab,
-    /// Whose custom rules show and which rules the tester runs: every connection, or one.
-    pub(in crate::app) scope: Option<u64>,
-    /// The custom rule open in the editor.
-    pub(in crate::app) sel: Option<usize>,
-    /// The editor's "where" globs as typed, and the rule they belong to.
-    globs: (Option<usize>, String),
-    pub(in crate::app) sample: String,
-    /// The tester's lines with what they were computed from (sample, scope, config revision), so they are rebuilt only when one changes.
-    tested: Option<((String, Option<u64>, u64), TesterLines)>,
-}
-
-type TesterLines = Result<Vec<(String, Option<String>)>, String>;
-
-impl Default for RulesWin {
-    fn default() -> Self {
-        Self { tab: RulesTab::default(), scope: None, sel: None, globs: (None, String::new()), sample: SAMPLE.into(), tested: None }
-    }
-}
 
 const DETECTORS: [(Detector, &str); 13] = [
     (Detector::CardNumber, "Card number, Luhn checked"),
@@ -67,14 +37,6 @@ const DETECTORS: [(Detector, &str); 13] = [
 
 pub(super) fn detector_label(d: Detector) -> &'static str {
     DETECTORS.iter().find(|x| x.0 == d).map_or("", |x| x.1)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Path,
-    Name,
-    Value,
-    Detect,
 }
 
 const KINDS: [(Kind, &str); 4] = [(Kind::Path, "Field path"), (Kind::Name, "Field name"), (Kind::Value, "Value regex"), (Kind::Detect, "Detector")];

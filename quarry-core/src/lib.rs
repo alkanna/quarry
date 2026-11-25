@@ -11,6 +11,7 @@ pub mod db;
 pub mod library;
 pub mod paths;
 pub mod ssh;
+pub mod state;
 pub mod sysmem;
 pub mod update;
 pub mod vault;

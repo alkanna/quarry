@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::library::Library;
+pub(crate) use quarry_core::state::library::*;
 
 pub(super) mod link_dialog;
 pub(super) mod linked;
@@ -12,47 +13,6 @@ pub(super) mod picker;
 pub(super) mod save_dialog;
 pub(super) mod snippet_form;
 pub(in crate::app) mod snippet_strip;
-
-/// What the Library panel and its dialogs remember while the app runs.
-#[derive(Default)]
-pub(super) struct LibUi {
-    /// A script asked for while its connection was not ready: opened by `library_tick` once it is, dropped if it fails.
-    pub(in crate::app) pending: Option<open::Pending>,
-    /// The folder the last save went to, which the Save dialog offers first.
-    pub(super) last_folder: Option<u64>,
-
-    /// The panel's open folders, selection, search and drags.
-    pub(in crate::app) panel: panel::PanelUi,
-
-    /// The last scan of each link, by link id. Entries keep their modified time and length, so a rescan reuses what did not change.
-    pub(super) scans: HashMap<u64, crate::library::disk::Scan>,
-    /// Links with a scan running, so each has at most one.
-    pub(super) scanning: HashSet<u64>,
-    /// Egui time each link was last scanned.
-    pub(super) scan_at: HashMap<u64, f64>,
-    /// Links to scan at the next frame, whatever the timer says.
-    pub(super) rescan: HashSet<u64>,
-    pub(super) was_focused: bool,
-    /// The scans are set by hand, as the demo does, and nothing reads the disk.
-    pub(super) frozen: bool,
-    /// What Quarry last read or wrote of each linked file, by link and path; a scan that finds another time or length marks the
-    /// file in `changed`. Neither is saved.
-    /// By link, then path, so a scan looks up each file without building a key.
-    pub(super) baseline: HashMap<u64, HashMap<std::path::PathBuf, (std::time::SystemTime, u64)>>,
-    pub(super) changed: HashSet<(u64, std::path::PathBuf)>,
-    /// Linked-file reads and writes running on the worker, by job id, and the last id given.
-    pub(in crate::app) jobs: HashMap<u64, linked::Job>,
-    pub(super) job_seq: u64,
-
-    /// Tabs, by uid, that Run opened instead of running because their script can write: they show "This script writes".
-    pub(in crate::app) writes: HashSet<u64>,
-    /// Cmd+O asked for the current view's picker; the picker button opens it when it draws and `pick_acts` clears it.
-    pub(in crate::app) open_picker: bool,
-    /// Cmd+Shift+L asked for the tree: the panel selects its first row if none is selected and takes the keys.
-    pub(in crate::app) focus_tree: bool,
-    /// The values each snippet last ran with, by script id, offered first the next time. Not saved.
-    pub(in crate::app) snippet_values: HashMap<u64, HashMap<String, String>>,
-}
 
 /// Whether the saved queries of ui.json come over at launch: the first run with a library, or a library.json so broken that
 /// nothing of it could be read, which leaves an empty library while the old queries are still in ui.json.

@@ -4,16 +4,7 @@
 use super::*;
 use crate::app::sql::create::plural;
 use crate::agents::config::{Action, ConnPolicy, Mode, PresetMode, Tri};
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(in crate::app) enum ClientKind {
-    #[default]
-    ClaudeCode,
-    ClaudeDesktop,
-    Cursor,
-    Codex,
-    Json,
-}
+pub(crate) use quarry_core::state::agents::settings::*;
 
 const CLIENTS: [(ClientKind, &str); 5] = [(ClientKind::ClaudeCode, "Claude Code"), (ClientKind::ClaudeDesktop, "Claude Desktop"), (ClientKind::Cursor, "Cursor"), (ClientKind::Codex, "Codex"), (ClientKind::Json, "JSON")];
 

@@ -5,21 +5,7 @@
 use super::conns_panel::color_swatches;
 use super::*;
 use crate::ui::dnd;
-
-/// The working copy of a group while the dialog is open.
-#[derive(Default)]
-pub(super) struct GroupForm {
-    pub(super) id: u64,
-    pub(super) name: String,
-    pub(super) color: String,
-    pub(super) fold_rail: bool,
-    /// In the order the group will have after Save.
-    pub(super) members: Vec<u64>,
-    /// The name field takes focus once, when the dialog opens.
-    pub(super) focus: bool,
-    /// The filter and folded groups of the Add connections list.
-    pub(super) pick: super::conns_panel::ConnsUi,
-}
+pub(crate) use quarry_core::state::group_dialog::*;
 
 const MEMBER_H: f32 = 44.0;
 

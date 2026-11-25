@@ -227,7 +227,7 @@ pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac
     let (b, f) = crate::ui::sql_complete::split_statement(&before, &full[before.len()..], scope.dialect);
     if let Some(o) = crate::ui::sql_complete::analyze(&b, &f, scope, values, false).filter(|o| !o.sugs.is_empty()) {
         let n = code[..at].chars().count();
-        *ac = Ac { id: Some(id), token: b[o.from..].chars().count(), items: o.sugs, cursor: n, title: o.title, foot: o.foot, ..Default::default() };
+        *ac = Ac { id: Some(id.value()), token: b[o.from..].chars().count(), items: o.sugs, cursor: n, title: o.title, foot: o.foot, ..Default::default() };
         ui.memory_mut(|m| m.request_focus(id));
         let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
         st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));
@@ -260,7 +260,7 @@ pub(super) fn shell_sig_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut A
         let item = |t: &str, note: &'static str| Sug { sql: None, back: 0, text: t.into(), note, insert: t.into(), caret: t.chars().count() };
         let items = vec![item("sendConfirmationToApprover", "property"), item("sentAt", "property"), item("severity", "property")];
         let d = db::JsDoc { sig: "(property) sendConfirmationToApprover?: boolean | undefined".into(), doc: String::new(), active: None };
-        *ac = Ac { id: Some(id), token: 2, items, cursor: n, doc: Some((0, d)), ..Default::default() };
+        *ac = Ac { id: Some(id.value()), token: 2, items, cursor: n, doc: Some((0, d)), ..Default::default() };
     }
     ui.memory_mut(|m| m.request_focus(id));
     let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
@@ -504,7 +504,7 @@ impl App {
 
     /// Asks for the docs of the selected suggestion when the list came from the server.
     fn js_resolve(&mut self, id: egui::Id, colls: &[String]) {
-        if self.ac.id != Some(id) || self.ac.doc.as_ref().is_some_and(|d| d.0 == self.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.ac.sel) {
+        if self.ac.id != Some(id.value()) || self.ac.doc.as_ref().is_some_and(|d| d.0 == self.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.ac.sel) {
             return;
         }
         let (sel, caret) = (self.ac.sel, self.ac.cursor);
@@ -624,7 +624,7 @@ impl App {
         let (items, raw): (Vec<Sug>, Vec<_>) = list.into_iter().map(|(s, i)| (s, i.raw)).unzip();
         self.js.raw = raw;
         self.js.resolve = None;
-        self.ac = Ac { id: Some(p.id), token: p.token, items, cursor: p.caret, ..Default::default() };
+        self.ac = Ac { id: Some(p.id.value()), token: p.token, items, cursor: p.caret, ..Default::default() };
     }
 }
 

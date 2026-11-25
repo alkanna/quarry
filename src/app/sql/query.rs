@@ -11,6 +11,8 @@ use crate::ui::sql_complete::{open_list, sql_ac_field};
 use egui::text::{CCursor, CCursorRange};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
+pub(crate) use quarry_core::state::sql::query::*;
+use quarry_core::state::sql::query::byte_at;
 
 /// Height of the editor's footer line.
 const FOOTER_H: f32 = 24.0;
@@ -21,107 +23,11 @@ const LINE_H: f32 = 20.0;
 /// How long typing rests before the statement under the caret is sent to the server to be checked, in seconds.
 const LINT_PAUSE: f64 = 0.6;
 
-/// How long a check that could not run (no connection, a lock) waits before the statement is asked again.
-const LINT_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The live check of the Query editor. Answers are kept by statement text for the current target, so moving the caret
-/// back to a checked statement asks nothing and every statement keeps its mark.
-#[derive(Default)]
-pub(in crate::app) struct LintState {
-    /// The connection, database and schema the answers in `seen` were read in; a change clears them.
-    target: String,
-    /// The statement in flight and its request, 0 when none.
-    asked: String,
-    req: u64,
-    /// The statement under the caret and when it last changed, until typing has rested for `LINT_PAUSE`.
-    wait: Option<(String, f64)>,
-    seen: HashMap<String, Seen>,
-}
-
-/// One answer of the live check, Err when the check could not run: it marks nothing and is asked again after `LINT_RETRY`.
-struct Seen {
-    lint: Result<Option<db::sql::Lint>, ()>,
-    at: std::time::Instant,
-}
-
-impl LintState {
-    /// What the check found in `stmt`, if it marked anything.
-    pub(in crate::app) fn mark(&self, stmt: &str) -> Option<&db::sql::Lint> {
-        self.seen.get(stmt).and_then(|s| s.lint.as_ref().ok()?.as_ref())
-    }
-
-    /// Whether `stmt` needs asking: never asked, or a check that could not run long enough ago.
-    fn stale(&self, stmt: &str) -> bool {
-        self.seen.get(stmt).is_none_or(|s| s.lint.is_err() && s.at.elapsed() >= LINT_RETRY)
-    }
-
-    /// Forgets the unknown-name warnings, once a run or a reread schema may have made what they named.
-    pub(in crate::app) fn drop_warnings(&mut self) {
-        self.seen.retain(|_, s| !matches!(&s.lint, Ok(Some(l)) if l.warn));
-    }
-
-    fn put(&mut self, stmt: String, lint: Result<Option<db::sql::Lint>, ()>) {
-        self.seen.insert(stmt, Seen { lint, at: std::time::Instant::now() });
-    }
-}
-
-/// 1-based line and column of a caret given as a char index.
-pub(in crate::app) fn line_col(text: &str, caret: usize) -> (usize, usize) {
-    text.chars().take(caret).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) })
-}
-
-fn byte_at(text: &str, caret: usize) -> usize {
-    text.char_indices().nth(caret).map_or(text.len(), |(b, _)| b)
-}
-
-/// Where the caret stands: line and column, and the statement under it.
-#[derive(Clone)]
-pub(in crate::app) struct CaretInfo {
-    key: (usize, u64, usize),
-    pub(in crate::app) line_col: (usize, usize),
-    pub(in crate::app) stmt: Option<(Range<usize>, usize, usize)>,
-    /// Every statement's byte range, kept so the gutter does not lex the script again each frame.
-    pub(in crate::app) stmts: std::sync::Arc<Vec<Range<usize>>>,
-}
-
-impl SqlTab {
-    /// The result set shown, clamped to the ones there are.
-    pub(in crate::app) fn cur_set(&self) -> Option<&db::sql::ResultSet> {
-        self.sets.get(self.set_sel.min(self.sets.len().saturating_sub(1)))
-    }
-
-    /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
-    /// until the text or the caret changes.
-    pub(in crate::app) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.query.hash(&mut h);
-        let key = (self.query.len(), h.finish(), self.caret);
-        let mut slot = self.caret_cache.borrow_mut();
-        match &*slot {
-            Some(c) if c.key == key => c.clone(),
-            _ => {
-                let stmts: Vec<Range<usize>> = lex::split_statements(&self.query, d).into_iter().map(|(r, _)| r).collect();
-                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_in(&stmts, &self.query, self.caret, d), stmts: std::sync::Arc::new(stmts) };
-                *slot = Some(c.clone());
-                c
-            }
-        }
-    }
-}
-
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
 #[cfg(test)]
 fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
     let all: Vec<Range<usize>> = lex::split_statements(text, d).into_iter().map(|(r, _)| r).collect();
     statement_in(&all, text, caret, d)
-}
-
-/// `statement_pos` with the statements of `text` already split.
-fn statement_in(all: &[Range<usize>], text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
-    let r = lex::statement_at(text, byte_at(text, caret), d)?;
-    let i = all.iter().position(|a| *a == r)?;
-    Some((r, i + 1, all.len()))
 }
 
 /// Wavy lines under what the live check marked, red for a syntax error and amber for a name the server does not know,

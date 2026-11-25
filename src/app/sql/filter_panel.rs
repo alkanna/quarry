@@ -4,112 +4,55 @@
 use super::filter_cells::{rule_editor, Hints};
 use crate::app::*;
 use crate::db::sql::{
-    facts::{FilterCount, FilterErr},
+    facts::FilterErr,
     filter::{self, Block, Cond, Item, Match, Tree},
     rules::Rule,
     Col, Dialect,
 };
 use crate::ui::dnd::{drag_cancelled, drag_source_with, grip_dots, paint_spot, y_frac, zone_at, Spot, Zone};
 use crate::ui::fold;
+pub(crate) use quarry_core::state::sql::filter_panel::*;
+use quarry_core::state::sql::bar::Bar;
 
-/// The pause after the last edit before a count is asked again, as long as the Query editor's live check waits.
-const PAUSE: f64 = 0.6;
-/// Counts of single rows kept while the panel is used, so hovering back and forth asks once per row.
-const HOVER_CACHE: usize = 64;
-
-pub(in crate::app) type Counted = Result<FilterCount, FilterErr>;
-
-/// What a count slot should do this frame.
-pub(in crate::app) enum Tick {
-    Ask,
-    /// Look again after this many seconds.
-    Wait(f32),
-    Idle,
+/// Opening and closing the panel animate its fold, which lives in egui's memory.
+pub(in crate::app) trait PanelFold {
+    fn toggle(&mut self, ctx: &egui::Context);
+    fn show(&mut self, ctx: &egui::Context, at: Option<u32>);
+    fn close(&mut self, ctx: &egui::Context);
 }
 
-/// One count the panel shows: the text last asked about under which request, and the answer with the text it is for.
-#[derive(Default)]
-pub(in crate::app) struct Count {
-    pub(in crate::app) req: u64,
-    pub(in crate::app) asked: Option<String>,
-    /// The text seen last and since when, for the pause before asking.
-    seen: String,
-    since: f64,
-    pub(in crate::app) res: Option<(String, Counted)>,
-}
-
-impl Count {
-    /// Whether to ask about `text` now: once it has rested PAUSE seconds and was not asked yet.
-    pub(in crate::app) fn tick(&mut self, text: &str, now: f64) -> Tick {
-        if text != self.seen {
-            self.seen = text.to_string();
-            self.since = now;
-        }
-        if self.asked.as_deref() == Some(text) {
-            return Tick::Idle;
-        }
-        let left = PAUSE - (now - self.since);
-        if left > 0.0 { Tick::Wait(left as f32) } else { Tick::Ask }
-    }
-
-    pub(in crate::app) fn ask(&mut self, req: u64, text: &str) {
-        self.req = req;
-        self.asked = Some(text.to_string());
-    }
-
-    /// Keeps the answer to request `req` when it is this slot's latest, and says whether it was.
-    pub(in crate::app) fn answer(&mut self, req: u64, res: &Counted) -> bool {
-        match &self.asked {
-            Some(text) if req == self.req => {
-                self.res = Some((text.clone(), res.clone()));
-                true
-            }
-            _ => false,
+impl PanelFold for Panel {
+    fn toggle(&mut self, ctx: &egui::Context) {
+        self.open = !self.open;
+        fold::start(ctx, fold_id(), self.open);
+        // The rows may have changed while it was closed, so counts are asked again.
+        if self.open {
+            self.forget_counts();
         }
     }
 
-    /// The answer for `text`, never one for an older text.
-    fn shown(&self, text: &str) -> Option<&Counted> {
-        self.res.as_ref().filter(|(t, _)| t == text).map(|(_, r)| r)
+    /// Opens the panel, if it is not, on node `at`.
+    fn show(&mut self, ctx: &egui::Context, at: Option<u32>) {
+        if !self.open {
+            self.toggle(ctx);
+        }
+        self.sel = at;
+    }
+
+    fn close(&mut self, ctx: &egui::Context) {
+        if self.open {
+            self.toggle(ctx);
+        }
     }
 }
 
-#[derive(Default)]
-pub(in crate::app) struct Panel {
-    pub(in crate::app) open: bool,
-    /// The selected row or group.
-    pub(in crate::app) sel: Option<u32>,
-    /// A row just added, whose column picker opens on its first frame.
-    pub(in crate::app) pick: Option<u32>,
-    /// A row whose operator menu opens on its first frame; only the demo of the menu sets it.
-    pub(in crate::app) ops: Option<u32>,
-    /// How many rows the whole WHERE matches.
-    pub(in crate::app) count: Count,
-    /// The row under the pointer, whose own count shows at its end.
-    pub(in crate::app) hover: Option<u32>,
-    pub(in crate::app) hover_count: Count,
-    pub(in crate::app) hover_cache: HashMap<String, Counted>,
-    /// Where the counts are from (connection, database, schema and table), since a tab can move.
-    pub(in crate::app) place: (u64, String, String, String),
-}
-
-impl Panel {
-    /// Keeps the answer to request `req` in the slot that asked. False when neither did.
-    pub(in crate::app) fn counted(&mut self, req: u64, res: &Counted) -> bool {
-        if self.count.answer(req, res) {
-            return true;
-        }
-        match self.hover_count.asked.clone().filter(|_| self.hover_count.req == req) {
-            Some(text) => {
-                if self.hover_cache.len() >= HOVER_CACHE {
-                    self.hover_cache.clear();
-                }
-                self.hover_cache.insert(text, res.clone());
-                true
-            }
-            None => false,
-        }
+/// Cmd+F in Rules mode: the filter panel, with a new row when it has none.
+pub(in crate::app) fn open_filters(bar: &mut Bar, ctx: &egui::Context, cols: &[Col], d: Dialect) {
+    if bar.tree.root.kids.is_empty() {
+        add(&mut bar.tree, &mut bar.panel, 0, false, cols, d);
     }
+    let at = bar.panel.sel;
+    bar.panel.show(ctx, at);
 }
 
 /// A count with its thousands separated.
@@ -128,36 +71,6 @@ fn count_line(c: &Counted) -> (String, Color32) {
 
 fn fold_id() -> egui::Id {
     egui::Id::unique("sql-filter-panel")
-}
-
-impl Panel {
-    pub(in crate::app) fn toggle(&mut self, ctx: &egui::Context) {
-        self.open = !self.open;
-        fold::start(ctx, fold_id(), self.open);
-        // The rows may have changed while it was closed, so counts are asked again.
-        if self.open {
-            self.forget_counts();
-        }
-    }
-
-    pub(in crate::app) fn forget_counts(&mut self) {
-        (self.count, self.hover_count) = (Count::default(), Count::default());
-        self.hover_cache.clear();
-    }
-
-    /// Opens the panel, if it is not, on node `at`.
-    pub(in crate::app) fn show(&mut self, ctx: &egui::Context, at: Option<u32>) {
-        if !self.open {
-            self.toggle(ctx);
-        }
-        self.sel = at;
-    }
-
-    fn close(&mut self, ctx: &egui::Context) {
-        if self.open {
-            self.toggle(ctx);
-        }
-    }
 }
 
 /// What the panel asks of the bar after a frame.

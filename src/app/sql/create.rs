@@ -3,83 +3,14 @@
 
 use crate::app::*;
 use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
-use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TableSpec, TYPES};
-use db::sql::ddl::{IdxCol, IndexDef, IndexKind};
+use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TYPES};
 use db::sql::pg::create::{Check, NewIndex, Unique};
-use db::sql::structure::{CheckConstraint, ForeignKey};
 use db::sql::Dialect;
+pub(crate) use quarry_core::state::sql::create::*;
 
 pub(in crate::app) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
 pub(in crate::app) const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
 pub(in crate::app) const NOTE_DROP: &str = "Read-only: unlock writes to drop or empty";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::app) enum DropKind {
-    Database,
-    Table,
-    View,
-    /// Delete every row and keep the table.
-    Truncate,
-    /// A PostgreSQL schema.
-    Schema,
-}
-
-pub(in crate::app) struct NewDb {
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) name: String,
-    pub(in crate::app) charset: String,
-    pub(in crate::app) collation: String,
-    /// None while the server's lists load.
-    pub(in crate::app) meta: Option<Meta>,
-    pub(in crate::app) load_err: Option<String>,
-}
-
-pub(in crate::app) struct NewTable {
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) name: String,
-    pub(in crate::app) engine: String,
-    pub(in crate::app) collation: String,
-    pub(in crate::app) cols: Vec<ColumnSpec>,
-    /// The UNIQUE keys, CHECKs, foreign keys and indexes, collected the way the PostgreSQL dialog does.
-    pub(in crate::app) keys: NewKeys,
-    pub(in crate::app) comment: String,
-    pub(in crate::app) meta: Option<Meta>,
-    pub(in crate::app) load_err: Option<String>,
-    pub(in crate::app) show_sql: bool,
-    /// The statement of the form as it was last built, with the spec it came from, made again only when the spec changed. None
-    /// inside until the server's lists arrived. The key check is not kept: it reads the parents as they are and is cheap.
-    pub(in crate::app) built: Option<(TableSpec, Option<db::Res<String>>)>,
-}
-
-impl NewTable {
-    /// What the form says, with the keys written the way the statement takes them. A key that points at the table itself follows
-    /// the name typed.
-    pub(in crate::app) fn spec(&self) -> TableSpec {
-        let cols = |v: &[String]| v.iter().map(|n| IdxCol { name: n.clone(), prefix: None, desc: false }).collect::<Vec<_>>();
-        let uniques = self.keys.uniques.iter().map(|u| IndexDef { name: u.name.clone(), kind: IndexKind::Unique, cols: cols(&u.cols), ..Default::default() });
-        let indexes = self.keys.indexes.iter().map(|x| IndexDef { name: x.name.clone(), kind: x.kind, cols: cols(&x.cols), ..Default::default() });
-        let checks = self.keys.checks.iter().map(|c| CheckConstraint { name: c.name.clone(), expr: c.expr.trim().to_string(), ..Default::default() }).collect();
-        let fks = self.keys.fk_keys(&self.schema, &self.name).into_iter().map(|key| ForeignKey { db: self.schema.clone(), ..key }).collect();
-        TableSpec { schema: self.schema.clone(), name: self.name.clone(), engine: self.engine.clone(), collation: self.collation.clone(), columns: self.cols.clone(), fks, checks, indexes: uniques.chain(indexes).collect(), comment: self.comment.clone() }
-    }
-
-}
-
-pub(in crate::app) struct DropForm {
-    pub(in crate::app) conn: u64,
-    /// PostgreSQL: the database the schema or table is in, or the database itself for a database drop. Empty on MySQL.
-    pub(in crate::app) database: String,
-    pub(in crate::app) schema: String,
-    /// Empty for a database.
-    pub(in crate::app) table: String,
-    pub(in crate::app) kind: DropKind,
-    pub(in crate::app) typed: String,
-    /// PostgreSQL: CASCADE for a schema or table, WITH (FORCE) for a database. Ticked inside the dialog, never by default.
-    pub(in crate::app) opt: bool,
-    /// None while the counts load.
-    pub(in crate::app) info: Option<Result<DropInfo, String>>,
-}
 
 pub(in crate::app) fn plural(n: u64, word: &str) -> String {
     format!("{} {word}{}", group(&n.to_string()), if n == 1 { "" } else { "s" })

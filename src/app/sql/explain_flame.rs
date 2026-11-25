@@ -6,6 +6,7 @@ use super::explain::{SqlExplain, XAct};
 use super::explain_panel::amount;
 use crate::app::*;
 use crate::db::sql::plan::{flame, Access, PlanNode};
+pub(crate) use quarry_core::state::sql::explain_flame::*;
 
 /// A bar holds two lines, the node and its weight, as in the design.
 const BAR_H: f32 = 36.0;
@@ -20,14 +21,6 @@ const MIN_BAR: f32 = 6.0;
 const MIN_GAP: f32 = 6.0;
 /// The color square of a legend entry.
 const SWATCH: f32 = 10.0;
-
-/// The bars laid out for one weight and width, with the bar of each node, kept until the plan or either changes.
-pub(super) struct FlameCache {
-    time: bool,
-    w: f32,
-    layout: flame::Layout,
-    bar_of: Vec<Option<usize>>,
-}
 
 pub(super) fn flame_view(ui: &mut egui::Ui, x: &mut SqlExplain, body_h: f32, acts: &mut Vec<XAct>) {
     let Some(p) = &x.plan else { return };

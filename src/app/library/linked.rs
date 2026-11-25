@@ -7,29 +7,13 @@ use crate::library::ops::{self, DropAt};
 use crate::library::tree::Node;
 use crate::library::{Script, ScriptRef, disk, format};
 use std::time::{Duration, SystemTime};
+pub(crate) use quarry_core::state::library::linked::*;
 
 /// How often a followed link, or one with an open tab, is scanned again while the window has focus. Polling replaces a
 /// file watcher, which would add a dependency and miss changes on network drives.
 const POLL_SECS: f64 = 2.0;
 
 pub(in crate::app) use crate::library::disk::{FileOut, Loaded, SaveOut, read_script};
-
-/// A linked-file job running on the worker, by id in `LibUi::jobs`: what to do with its answer. Tabs are named by their
-/// `uid`, since the tab list can change before the answer comes back.
-pub(in crate::app) enum Job {
-    /// Open a file into a tab on the connection `conn`, picked when it was asked for.
-    Open { r: ScriptRef, how: super::open::How, conn: u64 },
-    /// Copy a file into the library, at `at`.
-    Copy { link: u64, rel: PathBuf, at: DropAt },
-    /// Reload: the tab takes the file's text.
-    Reload { uid: u64, link: u64, rel: PathBuf },
-    /// Cmd+S on a tab bound to a file, which wrote `text`.
-    Save { uid: u64, link: u64, rel: PathBuf, text: String },
-    /// The Save dialog wrote a new file; the tab is bound to it in `view` with `body` as its base.
-    SaveNew { uid: u64, link: u64, rel: PathBuf, view: Option<View>, body: String, place: String, password: bool },
-    /// Move to Trash.
-    Trash { link: u64, rel: PathBuf, path: PathBuf },
-}
 
 /// The kind of the linked file `rel`: what the scan found, else what its extension says.
 pub(in crate::app) fn kind_in(scans: &crate::library::tree::Scans, link: u64, rel: &std::path::Path) -> String {

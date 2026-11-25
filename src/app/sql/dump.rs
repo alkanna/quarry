@@ -4,87 +4,9 @@
 use crate::app::*;
 use db::sql::csv::Source;
 use db::sql::dump::{DumpPlan, DumpTable};
-use db::sql::import::{JobDone, Progress};
+use db::sql::import::JobDone;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-#[derive(Clone, Copy, PartialEq)]
-pub(in crate::app) enum JobKind {
-    Import,
-    Script,
-}
-
-/// A CSV import or a script file running, with what Cancel needs.
-pub(in crate::app) struct SqlJob {
-    pub(in crate::app) req: u64,
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) db: db::sql::Db,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) kind: JobKind,
-    pub(in crate::app) prog: Arc<Progress>,
-    pub(in crate::app) id: Arc<AtomicU64>,
-    pub(in crate::app) cancel: Arc<AtomicBool>,
-    pub(in crate::app) total_rows: u64,
-    pub(in crate::app) total_bytes: u64,
-    /// False for an import into a table whose engine has no transactions, where Cancel keeps what was written.
-    pub(in crate::app) rolls_back: bool,
-}
-
-impl SqlJob {
-    pub(in crate::app) fn new(req: u64, conn: u64, db: db::sql::Db, schema: String, kind: JobKind, total_rows: u64, total_bytes: u64) -> SqlJob {
-        SqlJob { req, conn, db, schema, kind, prog: Arc::new(Progress::default()), id: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), total_rows, total_bytes, rolls_back: true }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum What {
-    /// The rows the Content view shows, with no structure.
-    Filtered,
-    Selected,
-    Whole,
-}
-
-struct Row {
-    name: String,
-    view: bool,
-    on: bool,
-    structure: bool,
-    content: bool,
-    drop: bool,
-    rows: Option<u64>,
-    /// Data and indexes on disk, once the server said.
-    bytes: Option<u64>,
-}
-
-pub(in crate::app) struct DumpForm {
-    conn: u64,
-    db: String,
-    /// The schema of a PostgreSQL database the table list is of; empty on MySQL, where the database is the namespace.
-    schema: String,
-    conn_name: String,
-    what: What,
-    /// The open table with a filter: its name, the WHERE text and the rows it matches.
-    filtered: Option<(String, String, u64)>,
-    rows: Vec<Row>,
-    extended: bool,
-    snapshot: bool,
-    extras: bool,
-    /// PostgreSQL only. Both off by default: they name roles, and a restore where one is missing stops there.
-    grants: bool,
-    owners: bool,
-    path: String,
-    /// The request the table sizes answer.
-    size_req: u64,
-}
-
-pub(in crate::app) struct RunForm {
-    conn: u64,
-    db: String,
-    /// The schema a PostgreSQL file's unqualified names land in (its search_path); empty on MySQL.
-    schema: String,
-    conn_name: String,
-    src: Source,
-    name: String,
-}
+pub(crate) use quarry_core::state::sql::dump::*;
 
 /// Today as YYYY-MM-DD in UTC, for a default file name.
 fn today() -> String {
@@ -545,16 +467,6 @@ impl App {
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None, bytes: None },
         ];
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into(), size_req: 0 })));
-    }
-}
-
-#[cfg(test)]
-impl DumpForm {
-    pub(in crate::app) fn path(&self) -> &str {
-        &self.path
-    }
-    pub(in crate::app) fn whole(&self) -> bool {
-        self.what == What::Whole
     }
 }
 

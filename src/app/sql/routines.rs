@@ -4,17 +4,10 @@
 //! tabs for the page and stays beside the table that calls it.
 
 use crate::app::*;
-use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Plan, Routine};
-use std::collections::{HashMap, HashSet};
+use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Routine};
+pub(crate) use quarry_core::state::sql::routines::*;
 
 const LINE_H: f32 = 20.0;
-
-/// What the sidebar knows of one schema's routines.
-pub(in crate::app) enum Loaded {
-    Wait,
-    Ok(Vec<Routine>),
-    Err(String),
-}
 
 /// What a click in the sidebar group asks for, done after the frame is drawn.
 pub(in crate::app) enum RAct {
@@ -27,78 +20,6 @@ pub(in crate::app) enum RAct {
     Run(String, String, Routine),
     New(String, String, Kind),
     Drop(String, String, Routine),
-}
-
-#[derive(Default)]
-pub(in crate::app) struct Routines {
-    lists: HashMap<(u64, String), Loaded>,
-    folded: HashSet<(u64, String)>,
-    win: Option<RoutineWin>,
-}
-
-impl Routines {
-    pub(in crate::app) fn window_open(&self) -> bool {
-        self.win.is_some()
-    }
-}
-
-#[derive(Default, PartialEq, Clone, Copy)]
-enum Pane {
-    #[default]
-    View,
-    Run,
-    Drop,
-}
-
-/// The preview of what a save sends, kept while the text and the drop-and-create choice stay as they are.
-type Memo = (String, bool, Result<Plan, String>);
-
-pub(in crate::app) struct RoutineWin {
-    conn: u64,
-    /// The sidebar's database, and its namespace: the schema on PostgreSQL, the database again on MySQL.
-    db: String,
-    schema: String,
-    dialect: db::sql::Dialect,
-    /// A schema that belongs to the server: shown, never changed.
-    system: bool,
-    kind: Kind,
-    /// None while a new routine is being written.
-    routine: Option<Routine>,
-    detail: Option<Detail>,
-    /// The read in flight.
-    req: u64,
-    /// A save or a drop in flight.
-    busy: bool,
-    error: Option<String>,
-    text: String,
-    base: String,
-    editing: bool,
-    recreate: bool,
-    /// PostgreSQL refused to replace the routine in place, so the window offers a drop and create.
-    offer_recreate: bool,
-    /// The text before the last save and whether that save dropped and created, for Undo.
-    undo: Option<(String, bool)>,
-    pane: Pane,
-    typed: String,
-    args: Vec<Arg>,
-    memo: Option<Memo>,
-}
-
-impl RoutineWin {
-    fn is(&self, conn: u64, db: &str, schema: &str, r: &Routine) -> bool {
-        self.conn == conn && self.db == db && self.schema == schema && self.routine.as_ref().is_some_and(|x| x.key() == r.key())
-    }
-
-    fn dirty(&self) -> bool {
-        self.text.trim() != self.base.trim()
-    }
-
-    fn title(&self) -> String {
-        match &self.routine {
-            Some(r) => r.label(self.dialect),
-            None => format!("New {}", self.kind.noun()),
-        }
-    }
 }
 
 impl App {

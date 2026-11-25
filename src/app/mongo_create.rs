@@ -3,15 +3,7 @@
 
 use super::*;
 use crate::db::collopts::{self, CollForm, Granularity, Kind};
-
-pub(super) struct MongoNewColl {
-    pub(super) conn: u64,
-    pub(super) db: String,
-    /// Asks for the database name too; the database does not exist yet.
-    pub(super) new_db: bool,
-    pub(super) name: String,
-    pub(super) form: CollForm,
-}
+pub(crate) use quarry_core::state::mongo_create::*;
 
 impl App {
     pub(super) fn mongo_new_db(&mut self, conn: u64) {

@@ -7,7 +7,8 @@ use super::explain_panel::{amount, mark_box, tag_chip, Mark, HEAD_H};
 use super::explain_tree::{paint_node, ROW, ROW_SUB};
 use crate::app::*;
 use crate::db::sql::plan::compare::{Delta, Diff, State};
-use crate::db::sql::plan::{Plan, PlanNode};
+use crate::db::sql::plan::PlanNode;
+pub(crate) use quarry_core::state::sql::explain_compare::*;
 
 const NUM_W: f32 = 120.0;
 const CHANGE_W: f32 = 90.0;
@@ -30,14 +31,6 @@ impl App {
             x.pane = if compare { Pane::Compare } else { Pane::Flame };
         }
     }
-}
-
-/// The plan this one is compared with and when it was made.
-pub(in crate::app) struct Prev {
-    pub(in crate::app) plan: std::sync::Arc<Plan>,
-    /// Unix seconds.
-    pub(in crate::app) at: u64,
-    pub(in crate::app) diff: Diff,
 }
 
 pub(super) fn compare_view(ui: &mut egui::Ui, x: &mut SqlExplain, screen_h: f32, acts: &mut Vec<XAct>) {

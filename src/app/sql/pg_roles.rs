@@ -6,9 +6,10 @@
 
 use crate::app::sql::users::{forget_secret, secret_id};
 use crate::app::*;
-use db::sql::pg::roles::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
-use std::sync::Arc;
+use db::sql::pg::roles::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
 use zeroize::Zeroize;
+pub(crate) use quarry_core::state::sql::pg_roles::*;
+pub(crate) use quarry_core::state::sql::pg_roles::DropForm;
 
 const NOTE_LOCKED: &str = "Read-only: unlock writes to change roles and privileges.";
 /// What a hash computed here means for a server that checks passwords.
@@ -31,188 +32,6 @@ const CELL_H: f32 = 31.0;
 const CHIP_PRIV_H: f32 = 18.0;
 const SIDE_W: f32 = 220.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::app) enum PTab {
-    Privileges,
-    Roles,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::app) enum RTab {
-    Role,
-    Membership,
-    Defaults,
-}
-
-/// The + Default privilege form of the Roles tab.
-pub(in crate::app) struct DefForm {
-    owner: String,
-    schema: String,
-    kind: DefKind,
-    privs: BTreeSet<String>,
-}
-
-pub(in crate::app) struct PgRolesWin {
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) tab: PTab,
-    pub(in crate::app) rtab: RTab,
-    pub(in crate::app) req_cluster: u64,
-    /// Shared so a frame borrows it alongside the window instead of copying every role and membership.
-    pub(in crate::app) cluster: Option<db::Res<Arc<Cluster>>>,
-    /// Each role's `Cluster::chain`, worked out once per answer rather than for every cell of every frame.
-    chains: HashMap<String, Vec<String>>,
-    pub(in crate::app) database: String,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) kind: Kind,
-    pub(in crate::app) inherited: bool,
-    /// Whether the pg_ roles are listed.
-    pub(in crate::app) system: bool,
-    pub(in crate::app) req_objs: u64,
-    pub(in crate::app) objs: Option<db::Res<Objects>>,
-    pub(in crate::app) req_defs: u64,
-    pub(in crate::app) defs: Option<db::Res<Defaults>>,
-    /// The role of the side panel and the Roles tab.
-    pub(in crate::app) role: Option<String>,
-    /// The cell whose editor is open: the object's oid and the grantee ("" for PUBLIC).
-    pub(in crate::app) cell: Option<(String, String)>,
-    pub(in crate::app) filter: String,
-    pub(in crate::app) staged: Vec<Change>,
-    pub(in crate::app) busy: bool,
-    /// The request id of the Apply in flight; an answer with another one is from an Apply this window no longer waits for.
-    pub(in crate::app) req_apply: u64,
-    /// The signed-in role's name typed to confirm a change to its own membership.
-    confirm: String,
-    /// The Role tab's text fields as typed, for the role in `fields_for`.
-    lim: String,
-    until: String,
-    fields_for: String,
-    field_err: Option<String>,
-    def_form: Option<DefForm>,
-}
-
-impl PgRolesWin {
-    pub(in crate::app) fn new(conn: u64, database: String) -> PgRolesWin {
-        PgRolesWin {
-            conn,
-            tab: PTab::Privileges,
-            rtab: RTab::Role,
-            req_cluster: 0,
-            cluster: None,
-            chains: HashMap::new(),
-            database,
-            schema: "public".into(),
-            kind: Kind::Tables,
-            inherited: true,
-            system: false,
-            req_objs: 0,
-            objs: None,
-            req_defs: 0,
-            defs: None,
-            role: None,
-            cell: None,
-            filter: String::new(),
-            staged: Vec::new(),
-            busy: false,
-            req_apply: 0,
-            confirm: String::new(),
-            lim: String::new(),
-            until: String::new(),
-            fields_for: String::new(),
-            field_err: None,
-            def_form: None,
-        }
-    }
-
-    fn cl(&self) -> Option<&Cluster> {
-        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).map(|c| &**c)
-    }
-
-    fn cl_arc(&self) -> Option<Arc<Cluster>> {
-        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).cloned()
-    }
-
-    fn set_cluster(&mut self, res: db::Res<Cluster>) {
-        self.chains = match &res {
-            Ok(c) => c.roles.iter().map(|r| (r.name.clone(), c.chain(&r.name))).chain([(String::new(), vec![String::new()])]).collect(),
-            Err(_) => HashMap::new(),
-        };
-        self.cluster = Some(res.map(Arc::new));
-    }
-
-    /// The staged changes to the signed-in role's own membership that need a typed confirmation, by index, with why.
-    fn risky(&self) -> Vec<(usize, String)> {
-        let Some(c) = self.cl() else { return Vec::new() };
-        self.staged.iter().enumerate().filter_map(|(i, s)| c.self_membership_risk(s).map(|why| (i, why))).collect()
-    }
-
-    fn objects(&self) -> Option<&Objects> {
-        self.objs.as_ref().and_then(|o| o.as_ref().ok())
-    }
-
-    fn defaults(&self) -> Option<&Defaults> {
-        self.defs.as_ref().and_then(|o| o.as_ref().ok())
-    }
-
-    /// The roles shown as matrix columns and in the list, pg_ roles only when asked for.
-    fn roles(&self) -> Vec<&Role> {
-        self.cl().map(|c| c.roles.iter().filter(|r| self.system || !r.system()).collect()).unwrap_or_default()
-    }
-
-    /// Staged changes of objects or default privileges, which tie the batch to the picked database.
-    fn tied(&self) -> bool {
-        self.staged.iter().any(Change::in_database)
-    }
-
-    /// Adds a change, folded into one staged earlier on the same thing so the batch holds one change per thing, from what the
-    /// server had to what the boxes say now. A change back to where it started is dropped.
-    fn stage(&mut self, c: Change) {
-        let k = key(&c);
-        if let Some(i) = self.staged.iter().position(|s| key(s) == k) {
-            let first = self.staged.remove(i);
-            let merged = match (first, c) {
-                (Change::Acl { target, grantee, from, .. }, Change::Acl { to, .. }) => Change::Acl { target, grantee, from, to },
-                (Change::Attrs { role, from, .. }, Change::Attrs { to, .. }) => Change::Attrs { role, from, to },
-                (Change::Member { group, member, from, .. }, Change::Member { to, .. }) => Change::Member { group, member, from, to },
-                (Change::Default { owner, schema, kind, grantee, from, .. }, Change::Default { to, .. }) => Change::Default { owner, schema, kind, grantee, from, to },
-                (_, c) => c,
-            };
-            if !merged.is_noop() {
-                self.staged.insert(i, merged);
-            }
-        } else if !c.is_noop() {
-            self.staged.push(c);
-        }
-    }
-
-    fn privs_now(&self, o: &Obj, grantee: &str) -> Privs {
-        let k = format!("acl|{:?}|{}|{grantee}", self.kind, o.oid);
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Acl { to, .. }) => to.clone(),
-            _ => o.direct(grantee),
-        }
-    }
-
-    fn attrs_now(&self, role: &str) -> Option<Attrs> {
-        let k = format!("attrs|{role}");
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Attrs { to, .. }) => Some(to.clone()),
-            _ => self.cl()?.role(role).map(|r| r.attrs.clone()),
-        }
-    }
-
-    fn member_now(&self, group: &str, member: &str) -> Option<Opts> {
-        let k = format!("mem|{group}|{member}");
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Member { to, .. }) => *to,
-            _ => self.cl()?.membership(group, member),
-        }
-    }
-
-    fn staged_key(&self, k: &str) -> bool {
-        self.staged.iter().any(|s| key(s) == k)
-    }
-}
-
 /// What the + Default privilege form stages for the row `k`: the privileges a staged change of that row leaves, else the
 /// server's, plus the ones ticked. Starting from the server's would cancel a staged revoke of the row, since stage keeps
 /// the earlier `from` with this `to`.
@@ -227,59 +46,6 @@ fn def_form_to(staged: &[Change], k: &str, server: &Privs, add: &BTreeSet<String
     to
 }
 
-fn key(c: &Change) -> String {
-    match c {
-        Change::Acl { target, grantee, .. } => format!("acl|{:?}|{}|{grantee}", target.kind, target.oid),
-        Change::Attrs { role, .. } => format!("attrs|{role}"),
-        Change::Member { group, member, .. } => format!("mem|{group}|{member}"),
-        Change::Default { owner, schema, kind, grantee, .. } => format!("def|{owner}|{schema}|{:?}|{grantee}", kind),
-    }
-}
-
-pub(in crate::app) struct NewRoleForm {
-    conn: u64,
-    name: String,
-    attrs: Attrs,
-    groups: Vec<String>,
-    /// Typed here and handed to the worker by Create; never shown, logged or kept after.
-    password: String,
-    serial: u64,
-}
-
-pub(in crate::app) struct PgPwForm {
-    conn: u64,
-    role: String,
-    oid: String,
-    password: String,
-    again: String,
-    serial: u64,
-}
-
-/// The typed passwords are wiped whenever a dialog goes away, by a button, Esc or another dialog taking its place.
-impl Drop for NewRoleForm {
-    fn drop(&mut self) {
-        self.password.zeroize();
-    }
-}
-
-impl Drop for PgPwForm {
-    fn drop(&mut self) {
-        self.password.zeroize();
-        self.again.zeroize();
-    }
-}
-
-#[cfg(test)]
-impl PgPwForm {
-    pub(in crate::app) fn for_test(conn: u64, role: &str, serial: u64) -> PgPwForm {
-        PgPwForm { conn, role: role.into(), oid: String::new(), password: String::new(), again: String::new(), serial }
-    }
-
-    pub(in crate::app) fn typed(&self) -> &str {
-        &self.password
-    }
-}
-
 /// Drops what egui keeps of a closing password dialog's fields, the undo history of their text included.
 pub(in crate::app) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
     match m {
@@ -287,16 +53,6 @@ pub(in crate::app) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
         Modal::PgPassword(f) => forget_secret(ctx, "pg-password", f.serial, 2),
         _ => {}
     }
-}
-
-pub(in crate::app) struct DropForm {
-    conn: u64,
-    role: String,
-    req: u64,
-    info: Option<db::Res<DropInfo>>,
-    reassign: bool,
-    heir: String,
-    typed: String,
 }
 
 enum Act {

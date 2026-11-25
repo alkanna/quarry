@@ -7,26 +7,7 @@ use crate::app::*;
 use db::sql::ddl::{self, Change};
 use db::sql::structure::CheckConstraint;
 use db::sql::Dialect;
-
-/// The Add check and Edit check dialog.
-pub(in crate::app) struct CheckForm {
-    /// The constraint being edited; None adds one.
-    from: Option<CheckConstraint>,
-    def: CheckConstraint,
-    /// The staged changes this one goes after.
-    rest: Vec<Change>,
-    view: Option<CheckView>,
-}
-
-/// The plan and the warnings of the constraint as it stands, kept until the definition changes.
-struct CheckView {
-    def: CheckConstraint,
-    changes_empty: bool,
-    /// The staged changes with this one added, which Stage change keeps.
-    all: Vec<Change>,
-    text: Result<String, String>,
-    warnings: Vec<String>,
-}
+pub(crate) use quarry_core::state::sql::checks::*;
 
 impl App {
     pub(in crate::app) fn open_check_form(&mut self, i: Option<usize>) {

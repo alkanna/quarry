@@ -9,51 +9,9 @@ use db::sql::ddl::Change;
 use db::sql::Maint;
 use db::sql::structure::{CheckConstraint, Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
+pub(crate) use quarry_core::state::sql::structure::*;
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
-
-/// What the four views keep per tab.
-#[derive(Default)]
-pub(in crate::app) struct StructState {
-    pub(in crate::app) load: Load,
-    pub(in crate::app) data: Option<Structure>,
-    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers, checks.
-    pub(in crate::app) sel: [Option<usize>; 6],
-    /// Column and index changes waiting to become one ALTER TABLE.
-    pub(in crate::app) staged: Vec<Change>,
-    /// The statement and warnings of `staged`, kept between frames.
-    pub(in crate::app) bar: Option<crate::app::sql::alter::PlanMemo>,
-    /// The ALTER or trigger statement is running.
-    pub(in crate::app) applying: bool,
-    /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
-    pub(in crate::app) trig: HashMap<String, db::sql::ddl::TrigDef>,
-    /// The editor shows the new trigger instead of the selected one.
-    pub(in crate::app) trig_new: bool,
-    /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
-    pub(in crate::app) trig_made: Option<String>,
-    /// The draft key of a trigger edit on its way, dropped once the server took it: the draft is the live trigger then,
-    /// and left behind it would show an Undo or someone else's later change as a pending edit of ours.
-    pub(in crate::app) trig_saving: Option<String>,
-    /// What the trigger editor shows for the draft, kept between frames.
-    pub(in crate::app) trig_memo: Option<sql::trig::TrigMemo>,
-}
-
-#[derive(Default)]
-pub(in crate::app) enum Load {
-    #[default]
-    Idle,
-    Loading,
-    Failed(String),
-}
-
-impl StructState {
-    pub(in crate::app) fn finish(&mut self, res: db::Res<Structure>) {
-        match res {
-            Ok(s) => (self.data, self.load) = (Some(s), Load::Idle),
-            Err(e) => self.load = Load::Failed(e),
-        }
-    }
-}
 
 /// What a frame of drawing asks the app to do afterwards.
 pub(in crate::app) enum Act {

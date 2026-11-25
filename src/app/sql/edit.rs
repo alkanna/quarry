@@ -7,85 +7,7 @@ use db::sql::check;
 use db::sql::value::{self, Kind};
 use db::sql::write::{self, NewRow, RowEdit};
 use db::sql::Col;
-
-/// A cell being edited in place. `done` is set by the editor: Some(true) to commit, Some(false) to cancel.
-#[derive(Default)]
-pub(in crate::app) struct CellEdit {
-    /// The row's key, because a reload while the editor is open moves rows around.
-    pub(in crate::app) id: Option<Bson>,
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) err: Option<String>,
-    pub(in crate::app) focus: bool,
-    pub(in crate::app) done: Option<bool>,
-    /// Shown in the large editor instead of over the cell.
-    pub(in crate::app) big: bool,
-    /// Edited since it opened, so the side panel must not drop it for another value.
-    pub(in crate::app) dirty: bool,
-    /// The large editor's live check of a JSON column: None until the text is checked again after an edit.
-    pub(in crate::app) json_err: Option<Option<String>>,
-    /// The calendar is open, holding the text from before it opened for Cancel.
-    pub(in crate::app) pick: Option<String>,
-    /// The row of the value list the arrows moved to, None until they are used.
-    pub(in crate::app) hl: Option<usize>,
-    /// What the helpers under the cell covered last frame, so a click in them is not a click outside the editor.
-    pub(in crate::app) pop: Option<egui::Rect>,
-    /// Give the text box focus back without selecting its text, after a helper button took it.
-    pub(in crate::app) refocus: bool,
-    /// A helper reads plain keys (arrows, Space, letters) with no text box focused, so the page must not.
-    pub(in crate::app) grabs_keys: bool,
-    pub(in crate::app) keys: Option<KeyLook>,
-}
-
-/// Rows of the table a foreign key column points at, looked up as the key is typed.
-#[derive(Default)]
-pub(in crate::app) struct KeyLook {
-    /// The single-column foreign key of the edited column, found once the table structure is loaded.
-    pub(in crate::app) fk: Option<db::sql::structure::ForeignKey>,
-    pub(in crate::app) req: u64,
-    /// The text the last lookup was for, and whether its answer is still on its way.
-    pub(in crate::app) asked: Option<String>,
-    pub(in crate::app) busy: bool,
-    /// What the first answer learned about the referenced table, sent with the next lookups.
-    pub(in crate::app) table: Option<db::sql::KeyTable>,
-    pub(in crate::app) rows: Vec<(String, String)>,
-}
-
-impl CellEdit {
-    /// Whether this editor belongs to the cell. A missing key never matches: two keyless rows are not the same row.
-    pub(in crate::app) fn is_at(&self, id: Option<Bson>, col: &str) -> bool {
-        self.id.is_some() && self.id == id && self.col == col
-    }
-}
-
-/// The "Set value on N rows" dialog.
-pub(in crate::app) struct SetForm {
-    pub(in crate::app) rows: Vec<Document>,
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) null: bool,
-    pub(in crate::app) err: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub(in crate::app) enum Mode {
-    Default,
-    Null,
-    Value,
-}
-
-pub(in crate::app) struct RowField {
-    col: Col,
-    mode: Mode,
-    text: String,
-}
-
-/// The "+ Row" dialog: one line per column.
-pub(in crate::app) struct RowForm {
-    title: String,
-    fields: Vec<RowField>,
-    err: Option<String>,
-}
+pub(crate) use quarry_core::state::sql::edit::*;
 
 /// What a cell's context menu asked for, besides the row actions.
 #[derive(Clone, Copy)]
@@ -234,7 +156,7 @@ fn sql_bool_cell(ui: &mut egui::Ui, e: &mut CellEdit, col: &Col, rect: egui::Rec
     let keyed = pickers::bool_keys(ui, cur, col.nullable);
     let label = format!("{} · {}", col.src, col.ty.to_uppercase());
     let (clicked, r) = pickers::bool_pick(ui.ctx(), egui::Id::unique("sql-bool-cell"), below, cur, col.nullable, &label);
-    e.pop = Some(r);
+    e.pop = Some([r.min.x, r.min.y, r.max.x, r.max.y]);
     e.grabs_keys = true;
     if let Some(m) = &e.err {
         pickers::callout(ui.ctx(), egui::Id::unique("sql-bool-err"), rect.left_top() - egui::vec2(0.0, 4.0), egui::Align2::LEFT_BOTTOM, m, Some(crate::app::errors::paint_alert as fn(&egui::Painter, egui::Pos2, Color32)), None);
@@ -371,7 +293,7 @@ impl App {
         }
         let ctx = ui.ctx().clone();
         let below = rect.left_bottom() + egui::vec2(0.0, 4.0);
-        let last_pop = e.pop.take();
+        let last_pop = e.pop.take().map(|[a, b, c, d]| egui::Rect::from_min_max(egui::pos2(a, b), egui::pos2(c, d)));
         let ours = |p: egui::Pos2| rect.contains(p) || last_pop.is_some_and(|r| r.contains(p));
         let click = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
         let click_out = click.is_some_and(|p| !ours(p));
@@ -514,7 +436,7 @@ impl App {
             }
             e.done = Some(true);
         }
-        e.pop = pop;
+        e.pop = pop.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
         e.grabs_keys = e.pick.is_some() || list_n > 0;
         self.sql_cell = Some(e);
     }
@@ -1233,7 +1155,6 @@ fn has_key(d: &Document) -> bool {
 mod tests {
     use super::*;
     use crate::db::sql::Dialect;
-
 
     #[test]
     fn edit_text_round_trips_through_parse_edit() {

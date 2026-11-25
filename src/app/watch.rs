@@ -3,34 +3,8 @@
 
 use super::*;
 
-/// Columns of the Watch table.
-pub(super) static WATCH_FIELDS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| ["at", "op", "_id", "changed", "doc"].map(String::from).to_vec());
-
 /// Changes kept on screen; the oldest go first.
 const WATCH_CAP: usize = 500;
-
-impl WatchTab {
-    pub(super) fn running(&self) -> bool {
-        self.cancel.is_some()
-    }
-
-    /// Ends the stream; its last events, already sent, are dropped since no tab has its id.
-    pub(super) fn stop(&mut self) {
-        self.cancel = None;
-        self.req = 0;
-    }
-}
-
-#[derive(Default)]
-pub(super) struct WatchTab {
-    /// The running stream's id, 0 when stopped.
-    pub(super) req: u64,
-    /// Dropping it stops the stream.
-    pub(super) cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    /// Kept as BSON bytes: each event can carry a whole document, up to WATCH_CAP of them.
-    pub(super) rows: Vec<db::Row>,
-    pub(super) err: Option<String>,
-}
 
 /// One table row from a change event: when, what, which document, the fields an update touched,
 /// and the document as it is now (absent for deletes).

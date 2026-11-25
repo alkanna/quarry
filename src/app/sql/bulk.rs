@@ -5,29 +5,7 @@ use crate::app::*;
 use db::sql::bulk::{self, BulkOp, BulkPlan, BulkPrep};
 use db::sql::value::{self, Kind};
 use db::sql::Col;
-
-/// One `column = value` of an update. `col` is the column's `Col::name`.
-#[derive(Clone, Default)]
-pub(in crate::app) struct Pair {
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) null: bool,
-}
-
-pub(in crate::app) struct BulkForm {
-    pub(in crate::app) update: bool,
-    pub(in crate::app) sel: Sel,
-    /// The namespace the page was read in, which the count and the write use too.
-    pub(in crate::app) ns: String,
-    /// The WHERE of the last page asked for, kept from when the dialog opened: the grid may reload while it is open.
-    pub(in crate::app) filter: String,
-    /// The last page had a LIMIT or OFFSET chip, which the write does not follow.
-    pub(in crate::app) capped: bool,
-    pub(in crate::app) req: u64,
-    pub(in crate::app) prep: Option<BulkPrep>,
-    pub(in crate::app) pairs: Vec<Pair>,
-    pub(in crate::app) typed: String,
-}
+pub(crate) use quarry_core::state::sql::bulk::*;
 
 /// Columns an update may set: the key would break undo, and computed and geometry columns cannot take a typed value.
 fn settable<'a>(p: &'a BulkPrep) -> Vec<&'a Col> {

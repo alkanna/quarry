@@ -9,17 +9,7 @@ use crate::db::sql::pg::hypo;
 use crate::db::sql::plan::findings::Fix;
 use crate::db::sql::plan::{self, compare, Plan};
 use crate::db::sql::Dialect;
-
-/// The answer of a trial, kept for the candidate it tried.
-pub(in crate::app) struct HypoRun {
-    /// The candidate's SQL, so the line shows under that candidate only.
-    pub(in crate::app) fix: String,
-    pub(in crate::app) plan: Plan,
-    /// The plan reads through the hypothetical index.
-    pub(in crate::app) used: bool,
-    /// From the dialog's plan to the trial's, for Compare.
-    pub(in crate::app) diff: compare::Diff,
-}
+pub(crate) use quarry_core::state::sql::explain_hypo::*;
 
 /// Why the trial cannot run, shown beside the disabled button. None when it can.
 fn blocked(x: &SqlExplain, fix: &Fix) -> Option<String> {

@@ -5,6 +5,7 @@
 use super::rail::{engine_mark, tile_face};
 use super::*;
 use std::sync::mpsc;
+pub(crate) use quarry_core::state::conn_icon::*;
 
 /// The stored icon's side: a 40 pt tile at 2x and 125 %, rounded up.
 const SIDE: u32 = 128;
@@ -13,8 +14,6 @@ const MAX_BYTES: u64 = 10 << 20;
 /// What the image crate is built to read, for the file picker and the error wording.
 const EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 const FORMATS: &str = "PNG, JPEG, GIF, WebP, BMP or ICO";
-
-type Job = mpsc::Receiver<Result<Vec<u8>, String>>;
 
 fn icons_dir() -> std::path::PathBuf {
     config_dir().join("icons")
@@ -99,6 +98,11 @@ fn spawn(ctx: &egui::Context, load: impl FnOnce() -> Result<Vec<u8>, String> + S
     rx
 }
 
+/// The staged icon's preview, which the dialog's state cannot hold since it lives in the core.
+fn preview_id(id: u64) -> egui::Id {
+    egui::Id::unique(("conn-icon-preview", id))
+}
+
 fn cache_id(id: u64) -> egui::Id {
     egui::Id::unique(("conn-icon", id))
 }
@@ -117,32 +121,6 @@ pub(super) fn texture(ctx: &egui::Context, meta: &ConnMeta) -> Option<egui::Text
     t
 }
 
-/// What Save writes.
-enum Staged {
-    /// Nothing picked yet.
-    Keep,
-    /// Back to the engine logo.
-    Logo,
-    /// A new icon, with its preview.
-    Png(Vec<u8>, Option<egui::TextureHandle>),
-}
-
-/// The Connection icon dialog's working copy. Nothing is written until Save.
-pub(super) struct IconForm {
-    conn: u64,
-    url: String,
-    staged: Staged,
-    /// The file or download being read. It belongs to this dialog, so a late answer never lands on another connection.
-    job: Option<Job>,
-    error: String,
-}
-
-impl IconForm {
-    pub(super) fn new(conn: u64) -> Self {
-        Self { conn, url: String::new(), staged: Staged::Keep, job: None, error: String::new() }
-    }
-}
-
 impl App {
     pub(super) fn icon_dialog(&mut self, ui: &mut egui::Ui, f: &mut IconForm, keep: &mut bool) {
         let ctx = ui.ctx().clone();
@@ -151,7 +129,8 @@ impl App {
             match res {
                 Ok(png) => {
                     let tex = super::rail::png_texture(&ctx, "conn-icon", &png);
-                    f.staged = Staged::Png(png, tex);
+                    ctx.data_mut(|d| d.insert_temp(preview_id(f.conn), tex));
+                    f.staged = Staged::Png(png);
                     f.error.clear();
                 }
                 Err(e) => f.error = e,
@@ -175,7 +154,7 @@ impl App {
                 let shown = match &f.staged {
                     Staged::Keep => current,
                     Staged::Logo => None,
-                    Staged::Png(_, t) => t.clone(),
+                    Staged::Png(_) => ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(preview_id(f.conn))).flatten(),
                 };
                 tile_face(ui.painter(), rect, shown.as_ref(), mark, 140, 34.0, Color32::WHITE);
                 ui.add_space(12.0);
@@ -247,7 +226,7 @@ impl App {
         let (png, tex) = match std::mem::replace(&mut f.staged, Staged::Keep) {
             Staged::Keep => return,
             Staged::Logo => (None, None),
-            Staged::Png(png, tex) => (Some(png), tex),
+            Staged::Png(png) => (Some(png), ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(preview_id(id))).flatten()),
         };
         let on = png.is_some();
         // The demo keeps its icon in memory only, since its ids may be real connections' ids.

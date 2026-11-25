@@ -2,6 +2,7 @@
 //! Literal colors and sizes belong here; views use these names.
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, RichText, Stroke, TextFormat};
+pub(crate) use quarry_core::state::groups::GROUP_COLORS;
 
 // Colors come from the palette of the theme in use, so they are functions, not constants.
 // Every theme shares one layout, only colors differ. Designs are in docs/themes.figcraft.
@@ -935,19 +936,6 @@ pub(crate) const ACCENTS: [(&str, u32, u32); 6] = [
     ("Orange", 0xf97316, 0xc2410c),
     ("Pink", 0xf472b6, 0xc0267a),
     ("Violet", 0xa78bfa, 0x6d3fd9),
-];
-
-/// Colors a connection group can take: name, the shade on dark themes, the shade on light ones. Stored by name in
-/// groups.json, so reordering the list or changing a shade never changes what a group was saved with.
-pub(crate) const GROUP_COLORS: [(&str, u32, u32); 8] = [
-    ("red", 0xef6a6a, 0xc43d3d),
-    ("amber", 0xf2b035, 0xb7791f),
-    ("green", 0x3fc27a, 0x2a8a52),
-    ("teal", 0x2fc4b8, 0x1b8a82),
-    ("blue", 0x5b9cf6, 0x2f6fd0),
-    ("purple", 0xa98bf5, 0x7449d6),
-    ("pink", 0xf07cb8, 0xc22f80),
-    ("gray", 0x8b93a1, 0x6b7280),
 ];
 
 /// The color named in a group, in the shade of the current mode. An unknown name, such as one from a newer build, is gray.

@@ -3,26 +3,8 @@
 
 use super::*;
 use crate::library::ScriptRef;
-
-/// How a script leaves the library: Return opens it, Alt+Return opens it in a new tab, Cmd+Enter runs it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::app) enum How {
-    Here,
-    NewTab,
-    Run,
-}
-
-/// What the view on screen holds, as a script of the library would hold it.
-pub(in crate::app) struct TabText {
-    pub kind: &'static str,
-    pub body: String,
-    pub sort: String,
-    pub project: String,
-    pub view: View,
-    pub db: String,
-    pub schema: String,
-    pub coll: String,
-}
+pub(crate) use quarry_core::state::library::open::*;
+pub(crate) use quarry_core::state::library::open::Target;
 
 /// The view whose text is a script of `kind`.
 pub(in crate::app) fn view_of_kind(kind: &str) -> Option<View> {
@@ -33,17 +15,6 @@ pub(in crate::app) fn view_of_kind(kind: &str) -> Option<View> {
         "pipeline" => View::Aggregate,
         _ => return None,
     })
-}
-
-
-/// Where a script runs, as `App::script_target` works it out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::app) enum Target {
-    On(u64),
-    /// No connection is the obvious one: the person picks from these.
-    Ask(Vec<u64>),
-    /// Nothing can run it, and why.
-    None(String),
 }
 
 /// Whether a script of `kind` can run on a connection of `engine`: SQL on MySQL, MariaDB and PostgreSQL, filters and
@@ -70,32 +41,6 @@ pub(in crate::app) fn uri_db(uri: &str) -> String {
     let host_on = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
     let Some((_, path)) = host_on.split_once('/') else { return String::new() };
     path.split(['?', '#']).next().unwrap_or_default().trim_matches('/').to_string()
-}
-
-/// A script waiting for its connection to be ready, which `library_tick` opens once it is.
-#[derive(Clone, Debug)]
-pub(in crate::app) struct Pending {
-    pub r: ScriptRef,
-    pub how: How,
-    pub conn: u64,
-    /// The tab that was current when it was asked for: a Run becomes a plain open if another tab is current by then.
-    pub uid: Option<u64>,
-    /// The connection's connect attempt when it was asked for, so the failure it had then is not taken for a new one.
-    pub attempt: u64,
-    /// Egui time the wait started while the connection was not connecting, for the time limit.
-    pub since: Option<f64>,
-    /// The connection was seen connecting since, so a failure now is news even on the same attempt.
-    pub seen_connecting: bool,
-    pub name: String,
-}
-
-/// The Open on dialog: the connections a script can run on when none is the obvious one.
-pub(in crate::app) struct OpenOnForm {
-    pub r: ScriptRef,
-    pub how: How,
-    pub conns: Vec<u64>,
-    pub sel: Option<u64>,
-    pub name: String,
 }
 
 impl App {

@@ -1,38 +1,7 @@
 //! The settings dialog: categories on the left, the chosen one's settings on the right.
 
 use super::*;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub(super) enum SettingsCat {
-    #[default]
-    Appearance,
-    Reading,
-    Documents,
-    Editing,
-    Tools,
-    Agents,
-    StatusBar,
-    Updates,
-}
-
-const CATS: [(SettingsCat, &str); 8] = [
-    (SettingsCat::Appearance, "Appearance"),
-    (SettingsCat::Reading, "Reading"),
-    (SettingsCat::Documents, "Documents"),
-    (SettingsCat::Editing, "Editing"),
-    (SettingsCat::Tools, "Queries and tools"),
-    (SettingsCat::Agents, "AI agents"),
-    (SettingsCat::StatusBar, "Status bar"),
-    (SettingsCat::Updates, "Updates"),
-];
-
-impl SettingsCat {
-    /// The category whose name starts with this word, for the QUARRY_TEST_SETTINGS switch.
-    pub(super) fn named(word: &str) -> Self {
-        let w = word.to_lowercase();
-        CATS.iter().find(|(_, n)| n.to_lowercase().split(' ').any(|p| p == w)).map_or_else(Self::default, |c| c.0)
-    }
-}
+pub(crate) use quarry_core::state::settings::*;
 
 const SETTINGS_W: f32 = 780.0;
 const SETTINGS_SIDE_W: f32 = 188.0;

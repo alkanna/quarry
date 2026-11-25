@@ -3,65 +3,11 @@
 
 use super::rail::{engine_mark, mark_color};
 use super::*;
-
-/// A connection attached to a shell tab, saved with it. `name` is the global the script uses.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Default, Debug)]
-#[serde(default)]
-pub(super) struct Attached {
-    pub(super) conn: u64,
-    pub(super) db: String,
-    pub(super) name: String,
-    /// Writes also need the connection itself to be unlocked, so this alone never allows one.
-    pub(super) allow_writes: bool,
-    /// PostgreSQL only: the schema the script runs in (its search_path). `db` is then the database.
-    pub(super) schema: String,
-    /// PostgreSQL only: the tables of `schema`, listed when attaching and before a run. Not saved, since they go stale.
-    #[serde(skip)]
-    pub(super) tables: Vec<String>,
-}
-
-/// The schema a PostgreSQL script starts in when none was picked, as a new database has it.
-pub(super) const PG_SCHEMA: &str = "public";
+pub(crate) use quarry_core::state::shell_attach::*;
 
 /// The schema a PostgreSQL attachment runs in. Its columns are cached under this name too, so every user of it must agree.
 pub(super) fn pg_schema(schema: &str) -> &str {
     if schema.is_empty() { PG_SCHEMA } else { schema }
-}
-
-/// The state of the Attach dialog.
-#[derive(Default)]
-pub(super) struct AttachForm {
-    filter: String,
-    conn: Option<u64>,
-    db: String,
-    /// PostgreSQL only: the schema to attach, and the schemas of `db`: None while listing, an error when that failed.
-    schema: String,
-    schemas: Option<Result<Vec<String>, String>>,
-    /// The (connection, database) whose schemas were asked for, so each is asked once.
-    asked: Option<(u64, String)>,
-    name: String,
-    /// The name was typed, so a new database no longer renames it.
-    name_set: bool,
-    writes: bool,
-    focused: bool,
-}
-
-/// What the language server was told about an attachment, kept to tell when it changed. Holding the
-/// Arcs keeps each pointer unique, so pointer equality means unchanged.
-pub(super) enum AttTyped {
-    Mongo(Vec<(String, Arc<Fields>)>),
-    Sql(Option<Arc<db::sql::schema::Schema>>),
-}
-
-impl AttTyped {
-    pub(super) fn same(&self, o: &AttTyped) -> bool {
-        match (self, o) {
-            (AttTyped::Mongo(a), AttTyped::Mongo(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && Arc::ptr_eq(&x.1, &y.1)),
-            (AttTyped::Sql(Some(a)), AttTyped::Sql(Some(b))) => Arc::ptr_eq(a, b),
-            (AttTyped::Sql(None), AttTyped::Sql(None)) => true,
-            _ => false,
-        }
-    }
 }
 
 /// What the language server needs of one attachment: its name, its collection or table names, and the types behind them.

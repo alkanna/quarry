@@ -4,105 +4,16 @@
 //! and a table is built from the structure editor's column model.
 
 use crate::app::sql::create::{list_and, plural, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
-use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
+use crate::app::sql::new_keys::{KeyEnv, NewFk};
 use crate::app::*;
 use db::sql::create::{Ddl, DropInfo};
-use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
-use db::sql::ddl::{self, ColDef, Dv};
+use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, Unique};
+use db::sql::ddl::{ColDef, Dv};
 use db::sql::Dialect;
-
-pub(in crate::app) struct PgNewDb {
-    conn: u64,
-    name: String,
-    /// The template is None for the server's own default, template1, and every other None is the template's own setting.
-    pub(in crate::app) opts: DbOpts,
-    /// None while the server's lists load.
-    pub(in crate::app) choices: Option<DbChoices>,
-    load_err: Option<String>,
-    focused: bool,
-}
-
-pub(in crate::app) struct PgNewSchema {
-    conn: u64,
-    database: String,
-    name: String,
-    focused: bool,
-}
-
-/// One column of the builder: the structure editor's definition and the two marks the table level needs.
-#[derive(Clone, PartialEq)]
-pub(in crate::app) struct PgCol {
-    def: ColDef,
-    pk: bool,
-    unique: bool,
-}
-
-pub(in crate::app) struct PgNewTable {
-    conn: u64,
-    database: String,
-    schema: String,
-    name: String,
-    cols: Vec<PgCol>,
-    /// The UNIQUE constraints over several columns (one over a single column is also its column's Unique box), the CHECKs, the
-    /// foreign keys and the indexes.
-    pub(in crate::app) keys: NewKeys,
-    comment: String,
-    show_sql: bool,
-    focused: bool,
-    /// The statements of the form as it was last built, with the spec they came from.
-    pub(in crate::app) built: Option<(TableSpec, db::Res<Vec<String>>)>,
-}
+pub(crate) use quarry_core::state::sql::create_pg::*;
 
 /// The types the picker offers. The type box takes any other name, and the server checks it before anything is made.
 const TYPES: [&str; 17] = ["integer", "bigint", "smallint", "text", "varchar(255)", "numeric(10,2)", "boolean", "date", "timestamp", "timestamptz", "time", "uuid", "jsonb", "json", "real", "double precision", "bytea"];
-
-impl PgNewTable {
-    fn new(conn: u64, database: String, schema: String) -> Self {
-        PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], keys: NewKeys::default(), comment: String::new(), show_sql: false, focused: false, built: None }
-    }
-
-    /// Builds the statements again only when the spec changed since the last frame.
-    fn refresh_built(&mut self) {
-        let spec = self.spec();
-        if self.built.as_ref().is_some_and(|(k, _)| *k == spec) {
-            return;
-        }
-        let stmts = create::create_table_stmts(&spec);
-        self.built = Some((spec, stmts));
-    }
-
-    fn spec(&self) -> TableSpec {
-        let cols: Vec<ColDef> = self.cols.iter().map(|c| ColDef { nullable: c.def.nullable && !c.pk && !c.def.auto_increment, ..c.def.clone() }).collect();
-        let marked = self.cols.iter().filter(|c| c.unique).map(|c| Unique { name: String::new(), cols: vec![c.def.name.clone()] });
-        let mut fks = self.keys.fk_keys(&self.schema, &self.name);
-        for (key, k) in fks.iter_mut().zip(&self.keys.fks) {
-            // The parent as the dialog saw it, so the transaction can refuse when it changed before the table was made.
-            key.ref_seen = k.parent.as_ref().filter(|p| !k.own && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &key.ref_cols)).unwrap_or_default();
-        }
-        TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: marked.chain(self.keys.uniques.iter().cloned()).collect(), checks: self.keys.checks.clone(), fks, indexes: self.keys.indexes.clone(), comment: self.comment.clone() }
-    }
-
-    /// The first thing stopping a key that the statements cannot see: a part not picked, a parent not read yet or one that does not
-    /// fit. The second value is true while a parent is still loading, which is not a mistake to point at.
-    fn key_problem(&self, spec: &TableSpec) -> Option<(String, bool)> {
-        self.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, false, None)
-    }
-
-    /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its.
-    fn col_renamed(&mut self, from: &str, to: &str) {
-        self.keys.renamed(self.cols.iter().map(|c| c.def.name.as_str()), from, to);
-    }
-
-    fn remove_col(&mut self, i: usize) {
-        let gone = self.cols.remove(i).def.name;
-        self.keys.removed(self.cols.iter().map(|c| c.def.name.as_str()), &gone);
-    }
-}
-
-/// The first column of a new table: an integer identity primary key, which is what most tables want.
-fn id_col() -> PgCol {
-    PgCol { def: ColDef { auto_increment: true, nullable: false, ..ColDef::new("id", "integer") }, pk: true, unique: false }
-}
 
 /// A combo over plain strings, with `none` as the first item standing for no pick.
 fn str_pick(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, label: &str, width: f32, value: &mut Option<String>, none: &str, items: &[String]) {

@@ -2,8 +2,9 @@
 //! whose read failed, the card of a connection that failed, and the details dialog.
 
 use super::*;
-use db::{ErrKind, Explained, Fix};
+use db::{ErrKind, Fix};
 use std::time::Instant;
+pub(crate) use quarry_core::state::errors::*;
 
 /// Errors kept for the status bar list; older ones drop off.
 const ERRORS_MAX: usize = 200;
@@ -13,65 +14,6 @@ const OK_S: u64 = 8;
 const WARN_S: u64 = 6;
 const TOAST_W: f32 = 380.0;
 const PANEL_W: f32 = 620.0;
-
-/// One error of this session, with what it was about.
-#[derive(Clone)]
-pub(super) struct ErrEntry {
-    pub(super) id: u64,
-    pub(super) at: std::time::SystemTime,
-    pub(super) conn: Option<u64>,
-    pub(super) conn_name: String,
-    pub(super) user: String,
-    pub(super) sel: Option<Sel>,
-    /// "Documents · orders"
-    pub(super) place: String,
-    pub(super) raw: String,
-    pub(super) ex: Explained,
-    /// A connection that could not open: Retry reconnects, which a toast can do for it.
-    pub(super) connect: bool,
-}
-
-/// A read for one view that failed: the view shows the panel instead of its results.
-pub(super) struct Failed {
-    pub(super) view: View,
-    pub(super) e: ErrEntry,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum Tone {
-    Ok,
-    Warn,
-    Err,
-}
-
-#[derive(Clone)]
-pub(super) enum Act {
-    Fix(Fix),
-    Undo(Instant),
-    /// Puts back what `App::restores` holds under this id: a deleted group, scripts or a file.
-    Restore(u64),
-    /// Opens the Edit group dialog on this group, for the Rename of a group just made by a drop.
-    EditGroup(u64),
-    Unlock(u64),
-    Connect(u64),
-    Settings,
-    Details,
-    Copy,
-    ShowDup,
-    /// Drops the library script waiting for its connection.
-    CancelOpen,
-}
-
-pub(super) struct Toast {
-    /// Buttons can add or drop toasts while they run, so a click finds its toast by id, not position.
-    id: u64,
-    tone: Tone,
-    title: String,
-    body: String,
-    acts: Vec<(String, Act)>,
-    at: Instant,
-    err: Option<ErrEntry>,
-}
 
 fn fix_label(f: Fix, timeout_ms: u64) -> String {
     match f {

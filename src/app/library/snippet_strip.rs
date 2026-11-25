@@ -5,26 +5,7 @@ use crate::app::*;
 use crate::app::sql::query::{run_db, run_schema_of};
 use crate::library::snippet::{self, Lang, Parsed, Ty};
 use std::ops::Range;
-
-/// The text of a tab that holds values: the SQL Query editor, the Shell editor, or the Documents bar's filter, sort and
-/// projection, read as one.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::app) enum Src {
-    Query,
-    Shell,
-    Bar,
-}
-
-pub(in crate::app) struct MakeValue {
-    pub uid: u64,
-    pub src: Src,
-    pub range: Range<usize>,
-    pub literal: String,
-    pub name: String,
-    pub ty: String,
-    pub default: Option<String>,
-    pub keep: bool,
-}
+pub(crate) use quarry_core::state::library::snippet_strip::*;
 
 /// What a strip shows: the values, where they run, and the script whose default target Make default would change.
 pub(in crate::app) struct Strip {

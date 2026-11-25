@@ -6,6 +6,7 @@
 use super::*;
 use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, y_frac, zone_at};
 use crate::ui::fold;
+pub(crate) use quarry_core::state::conns_panel::*;
 
 /// Whether the rail shows the Connections button.
 pub(super) const READY: bool = true;
@@ -24,31 +25,6 @@ const CONN_H: f32 = 48.0;
 /// The id a group's open and close animation goes by.
 fn fold_id(g: u64) -> egui::Id {
     egui::Id::unique(("conn-group-fold", g))
-}
-
-/// What the Connections panel remembers while the app runs.
-#[derive(Default)]
-pub(super) struct ConnsUi {
-    pub(super) filter: String,
-    /// The group being renamed in place, with the text so far.
-    pub(super) rename: Option<(u64, String)>,
-    /// The name being typed for a new group, in a field at the end of the groups.
-    pub(super) adding: Option<String>,
-    /// The field that was just opened asks for focus once.
-    pub(super) focus_edit: bool,
-    pub(super) picker_filter: String,
-    /// Groups the picker shows folded. Apart from `Group.open`, so folding in the picker never changes the panel.
-    pub(super) picker_closed: HashSet<u64>,
-    /// Demo states: the group menu drawn open, a connection shown hovering inside a group, and the rail's Connect popover opened.
-    pub(super) demo_menu: Option<u64>,
-    pub(super) demo_drop: Option<u64>,
-    pub(super) demo_picker: bool,
-    /// The rail's connection tile menu drawn open, for QUARRY_TEST_RAIL=menu.
-    pub(super) demo_tile_menu: Option<u64>,
-    /// The rail tile drawn as a drop target with a tile carried over it, for QUARRY_TEST_RAIL=drag.
-    pub(super) demo_rail_drop: Option<u64>,
-    /// The sidebar panel and hidden state the Manage tile opened the Connections panel from, which closing it goes back to.
-    pub(super) manage_back: Option<(super::config::SideMode, bool)>,
 }
 
 /// One row of the panel or of the picker.

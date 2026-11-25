@@ -4,54 +4,10 @@
 
 use crate::app::sql::create::{pick, sql_block};
 use crate::app::*;
-use db::sql::view::{self, ViewDef, ViewDone, ViewSpec};
+use db::sql::view::{self, ViewDef, ViewDone};
+pub(crate) use quarry_core::state::sql::viewdef::*;
 
 pub(in crate::app) const NOTE_VIEW: &str = "Read-only: unlock writes to save a view";
-
-pub(in crate::app) struct ViewForm {
-    pub(in crate::app) conn: u64,
-    /// PostgreSQL: the database the schema is in. Empty on MySQL, where `schema` is the database.
-    pub(in crate::app) database: String,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) name: String,
-    pub(in crate::app) body: String,
-    /// An edit of a view that exists; a new view otherwise.
-    pub(in crate::app) edit: bool,
-    /// The definition is being read.
-    pub(in crate::app) loading: bool,
-    /// Why the definition could not be read, or why the save was refused.
-    pub(in crate::app) error: Option<String>,
-    /// The definition as the server holds it, which an edit keeps what the dialog has no field for from.
-    pub(in crate::app) def: ViewDef,
-    pub(in crate::app) algorithm: String,
-    pub(in crate::app) security: String,
-    pub(in crate::app) check: String,
-    pub(in crate::app) keep_definer: bool,
-    pub(in crate::app) focused: bool,
-    /// A save is out, so the buttons wait for its answer.
-    pub(in crate::app) busy: bool,
-    /// PostgreSQL refused CREATE OR REPLACE because the columns changed, and the person is asked whether to drop and create instead.
-    pub(in crate::app) ask_drop: bool,
-}
-
-impl ViewForm {
-    fn new(conn: u64, database: String, schema: String, name: String, body: String, edit: bool) -> Self {
-        ViewForm { conn, database, schema, name, body, edit, loading: edit, error: None, def: ViewDef::default(), algorithm: "UNDEFINED".into(), security: "DEFINER".into(), check: "NONE".into(), keep_definer: true, focused: false, busy: false, ask_drop: false }
-    }
-
-    fn spec(&self, pg: bool, drop_first: bool) -> ViewSpec {
-        // An edit keeps what the dialog has no field for from the definition the server holds.
-        let old = self.edit.then_some(&self.def);
-        let mut def = ViewDef { schema: self.schema.clone(), name: self.name.clone(), body: self.body.clone(), materialized: old.is_some_and(|d| d.materialized), options: old.map(|d| d.options.clone()).unwrap_or_default(), definer: old.and_then(|d| d.definer.clone()), ..Default::default() };
-        if !pg {
-            (def.algorithm, def.security, def.check) = (self.algorithm.clone(), self.security.clone(), self.check.clone());
-            if !self.keep_definer {
-                def.definer = None;
-            }
-        }
-        ViewSpec { def, replace: self.edit, drop_first }
-    }
-}
 
 /// A combo box over `(value, label)` items that writes the picked value.
 fn choose(ui: &mut egui::Ui, id: &str, value: &mut String, items: &[(&str, &str)]) {

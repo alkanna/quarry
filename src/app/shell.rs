@@ -757,7 +757,7 @@ impl App {
                     }
                     make_value = acts.pop();
                 });
-                if ac.id == Some(id) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
+                if ac.id == Some(id.value()) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
                     (ac.title, ac.foot) = (title, foot);
                 }
                 sql_need = need.borrow_mut().take();

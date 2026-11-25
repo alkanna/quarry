@@ -3,7 +3,6 @@ use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, Undo
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
@@ -98,14 +97,10 @@ use watch::*;
 use tabs::new_tab_click;
 use drafts::*;
 use sql::edit::*;
-use sql::alter::*;
 use sql::create::*;
-use sql::rel::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
-/// Columns shown before the user picks their own; drawing every field of a wide collection is slow.
-const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
 const SHORTCUTS: [(&str, &str); 47] = [
@@ -343,20 +338,6 @@ pub struct App {
     upd_popup: bool,
     started: std::time::Instant,
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
-}
-
-/// Top-level fields of the shown documents, `_id` first, in the order they appear.
-fn auto_fields<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Vec<String> {
-    let mut cols = vec!["_id".to_string()];
-    let mut seen: HashSet<&str> = HashSet::from(["_id"]);
-    for d in docs {
-        for (k, _) in d.into().fields() {
-            if seen.insert(k) {
-                cols.push(k.to_string());
-            }
-        }
-    }
-    cols
 }
 
 pub(crate) use crate::db::collection_ref;

@@ -3,99 +3,15 @@
 //! tree and the node panel are drawn in `explain_tree` and `explain_panel`; the reading of the plan is in `db::sql::plan`.
 
 use super::explain_compare::{compare_view, Prev};
-use super::explain_flame::{flame_view, FlameCache};
-use super::explain_hypo::HypoRun;
+use super::explain_flame::flame_view;
 use super::explain_panel::{findings_strip, inspector};
-use super::explain_tree::{plan_tree, TreeRow};
+use super::explain_tree::plan_tree;
 use super::query::{run_db, run_target};
 use crate::app::*;
-use crate::db::sql::plan::{self, compare, Analyze, Plan};
+use crate::db::sql::plan::{self, compare, Analyze};
 use crate::db::sql::{Db, Dialect};
 use std::sync::Arc;
-
-/// The state of one open SQL explain dialog.
-pub(in crate::app) struct SqlExplain {
-    /// The id of the request in flight, so an old answer never fills a newer dialog.
-    req: u64,
-    busy: bool,
-    pub(super) stmt: String,
-    /// The statement as the session's plan history knows it, normalized once.
-    key_stmt: String,
-    conn: u64,
-    /// The tab's database, for the Query tab the classic rows open in.
-    tab_db: String,
-    /// The database the plan was made in: the run picker's when one is picked, else the tab's.
-    database: String,
-    pub(super) dialect: Dialect,
-    pub(super) db: Db,
-    pub(in crate::app) schema: String,
-    /// Shared with the session's plan history, which keeps it for the next Compare.
-    pub(in crate::app) plan: Option<Arc<Plan>>,
-    /// What each tree row shows and the flame chart's bars, worked out once per plan and its findings.
-    pub(super) tree_rows: Option<Vec<TreeRow>>,
-    pub(super) flame: Option<FlameCache>,
-    /// Why the plan could not be drawn, when the server's text could not be read.
-    unread: Option<String>,
-    raw: String,
-    /// The node the panel shows, and one the tree should scroll to.
-    pub(in crate::app) sel: Option<usize>,
-    pub(super) scroll_to: Option<usize>,
-    /// The findings strip shows all of them, not the first two.
-    pub(super) more: bool,
-    analyzed: bool,
-    /// The statement ran inside a transaction that was rolled back.
-    rolled_back: bool,
-    /// How ANALYZE may run this statement, or why it may not.
-    analyze: Result<Analyze, String>,
-    /// What the request in flight asked for.
-    asked: Option<Analyze>,
-    /// The handle Stop and closing the dialog use to end the run on the server.
-    run: db::sql::RunHandle,
-    /// Stop was pressed, so the answer that follows is no error to show.
-    stopped: bool,
-    /// The head tab.
-    pub(in crate::app) pane: Pane,
-    /// The flame chart is as wide as each node's time, not its cost.
-    pub(in crate::app) flame_time: bool,
-    /// The last plan of this statement this session, when it differs from this one.
-    pub(in crate::app) prev: Option<Prev>,
-    /// The catalog's evidence for the index suggestions, kept across an ANALYZE rerun of the same statement, and the
-    /// request reading it while it reads, apart from `req` so a rerun does not drop it.
-    pub(super) ev: Option<plan::Evidence>,
-    pub(super) ev_req: Option<u64>,
-    /// The offline demo and the tests: made-up evidence instead of a catalog read.
-    pub(super) demo: bool,
-    /// The connection is locked, as of the last frame drawn.
-    pub(super) locked: bool,
-    /// Why the statement cannot be tried with HypoPG, for the lock state it was checked under. Lexing it every frame
-    /// would cost more than the dialog.
-    pub(super) hypo_refused: Option<(bool, Option<String>)>,
-    /// The HypoPG trial of a candidate index: the request in flight and the candidate it tries, its answer, and whether
-    /// Compare shows the trial's plan instead of the last one. Apart from `req`, like `ev_req`.
-    pub(super) hypo_wait: Option<(u64, String)>,
-    pub(in crate::app) hypo: Option<HypoRun>,
-    pub(in crate::app) hypo_cmp: bool,
-}
-
-/// The head tabs: the views of a readable plan and the server's text.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::app) enum Pane {
-    Tree,
-    Flame,
-    Compare,
-    Raw,
-}
-
-impl Pane {
-    fn name(self) -> &'static str {
-        match self {
-            Pane::Tree => "Tree",
-            Pane::Flame => "Flame",
-            Pane::Compare => "Compare",
-            Pane::Raw => "Raw",
-        }
-    }
-}
+pub(crate) use quarry_core::state::sql::explain::*;
 
 /// What a click in the dialog asks for, done once the frame is drawn.
 pub(super) enum XAct {
@@ -107,26 +23,6 @@ pub(super) enum XAct {
     Hypo(plan::findings::Fix),
     /// Show the trial's plan in Compare.
     HypoCompare,
-}
-
-impl SqlExplain {
-    #[allow(clippy::too_many_arguments)]
-    fn new(stmt: String, conn: u64, tab_db: String, database: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
-        let key_stmt = compare::normalize(&stmt, dialect);
-        SqlExplain { req: 0, busy: false, stmt, key_stmt, conn, tab_db, database, dialect, db, schema, plan: None, tree_rows: None, flame: None, hypo_refused: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
-    }
-
-    /// Drops what was worked out from the plan or its findings, so the next frame works it out again.
-    fn plan_changed(&mut self) {
-        (self.tree_rows, self.flame) = (None, None);
-    }
-
-    /// Compare has nothing to show once neither a last plan nor a trial is set against this one.
-    pub(super) fn leave_empty_compare(&mut self) {
-        if self.pane == Pane::Compare && self.prev.is_none() && !self.hypo_cmp {
-            self.pane = Pane::Tree;
-        }
-    }
 }
 
 impl App {

@@ -7,57 +7,16 @@ use crate::db;
 use eframe::egui::{self, Color32, FontId, Key, text::LayoutJob};
 use mongodb::bson::Bson;
 use std::collections::{HashMap, HashSet};
+pub(crate) use quarry_core::state::complete::*;
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum FieldKind {
-    Query,
-    Sort,
-    Project,
+/// The parts of the suggestion list that move the caret or match the input go through egui.
+pub(crate) trait AcUi {
+    fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize);
+    fn shown(&self, id: egui::Id) -> bool;
 }
 
-/// One autocomplete suggestion: what is shown, a short note, what is inserted and where the
-/// caret lands inside it (in characters).
-pub(crate) struct Sug {
-    /// SQL only: what the row shows at the right instead of the kind, and the footer line while it is selected.
-    pub(crate) sql: Option<SqlInfo>,
-    /// Characters before the typed word that the insert also replaces, like the dot before `["my-field"]`.
-    pub(crate) back: usize,
-    pub(crate) text: String,
-    pub(crate) note: &'static str,
-    pub(crate) insert: String,
-    pub(crate) caret: usize,
-}
-
-pub(crate) struct SqlInfo {
-    pub(crate) detail: String,
-    pub(crate) foot: String,
-}
-
-/// Open suggestion list of one query input.
-#[derive(Default)]
-pub(crate) struct Ac {
-    pub(crate) id: Option<egui::Id>,
-    /// Length in characters of the word being completed, just before `cursor`.
-    pub(crate) token: usize,
-    pub(crate) items: Vec<Sug>,
-    pub(crate) sel: usize,
-    pub(crate) cursor: usize,
-    pub(crate) rect: Option<egui::Rect>,
-    /// Signature and docs of the item at this index, shown beside the list.
-    pub(crate) doc: Option<(usize, db::JsDoc)>,
-    /// The field's values are being fetched from the server; the list stays open and says so.
-    pub(crate) loading: bool,
-    /// Why the server was not asked for values matching the typed text, shown under the list.
-    pub(crate) note: Option<&'static str>,
-    /// SQL only: the heading row above the list and the footer when the selected row has none.
-    pub(crate) title: String,
-    pub(crate) foot: String,
-    /// SQL only: the "table.column" whose values the list is waiting for.
-    pub(crate) want: String,
-}
-
-impl Ac {
-    pub(crate) fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize) {
+impl AcUi for Ac {
+    fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize) {
         let Some(s) = self.items.get(i) else { return };
         let start = self.cursor.saturating_sub(self.token + s.back);
         let byte = |c: usize| text.char_indices().nth(c).map(|(b, _)| b).unwrap_or(text.len());
@@ -70,15 +29,16 @@ impl Ac {
         self.close();
     }
 
-    pub(crate) fn close(&mut self) {
-        self.items.clear();
-        self.loading = false;
-        self.note = None;
+    fn shown(&self, id: egui::Id) -> bool {
+        self.id == Some(id.value()) && (!self.items.is_empty() || self.loading || self.note.is_some())
     }
+}
 
-    pub(crate) fn shown(&self, id: egui::Id) -> bool {
-        self.id == Some(id) && (!self.items.is_empty() || self.loading || self.note.is_some())
-    }
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FieldKind {
+    Query,
+    Sort,
+    Project,
 }
 
 /// Query operators offered inside a field's own object, as in the original (renderer line 95668).
@@ -163,17 +123,6 @@ fn snippet(name: &str, template: &str, note: &'static str) -> Sug {
     let caret = template[..template.find('|').unwrap_or(template.len())].chars().count();
     Sug { sql: None, back: 0, text: name.to_string(), note, insert: template.replace('|', ""), caret }
 }
-
-/// What the loaded documents hold in one field: its most common kind and its most common values.
-#[derive(Default, Clone)]
-pub(crate) struct FieldInfo {
-    pub(crate) kind: &'static str,
-    pub(crate) values: Vec<Bson>,
-    /// SQL only: how many rows hold each of `values`, in the same order.
-    pub(crate) freq: Vec<u64>,
-}
-
-pub(crate) type Fields = HashMap<String, FieldInfo>;
 
 /// Paths kept per page, so very wide documents stay fast.
 const MAX_PATHS: usize = 2000;
@@ -581,10 +530,10 @@ pub(crate) fn ac_input_with(
     show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
 ) -> (egui::text_edit::TextEditOutput, bool, bool) {
     // Esc into Vim's Normal mode closes the list too: nothing is typed there for it to complete.
-    if ac.id == Some(id) && crate::ui::vim::normal(ui.ctx(), id) {
+    if ac.id == Some(id.value()) && crate::ui::vim::normal(ui.ctx(), id) {
         ac.close();
     }
-    let mut open = ac.id == Some(id) && !ac.items.is_empty();
+    let mut open = ac.id == Some(id.value()) && !ac.items.is_empty();
     // egui drops focus on a bare Esc before widgets run, so an open list takes Esc and gives the focus back.
     if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         ac.close();
@@ -620,17 +569,17 @@ pub(crate) fn ac_input_with(
         if out.response.changed() || force {
             let before: String = text.chars().take(ci).collect();
             match compute(&before, force) {
-                Some((token, items)) => *ac = Ac { id: Some(id), token, items, cursor: ci, ..Default::default() },
-                None if ac.id == Some(id) => ac.close(),
+                Some((token, items)) => *ac = Ac { id: Some(id.value()), token, items, cursor: ci, ..Default::default() },
+                None if ac.id == Some(id.value()) => ac.close(),
                 None => {}
             }
-        } else if ac.id == Some(id) && ci != ac.cursor {
+        } else if ac.id == Some(id.value()) && ci != ac.cursor {
             ac.close();
         }
     }
     let test_shot = std::env::var("QUARRY_TEST_AC").is_ok() || std::env::var("QUARRY_TEST_SHELL_SIG").is_ok() || std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v.starts_with("ac") || v == "shellac");
-    let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
-    if !focused && ac.id == Some(id) && !pointer_on_list {
+    let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|([x0, y0, x1, y1], p)| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)).contains(p));
+    if !focused && ac.id == Some(id.value()) && !pointer_on_list {
         ac.close();
     }
     (out, false, moved)
@@ -655,7 +604,7 @@ pub(crate) fn ac_list(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &m
             }
         })
         .response;
-    ac.rect = Some(r.rect);
+    ac.rect = Some([r.rect.min.x, r.rect.min.y, r.rect.max.x, r.rect.max.y]);
     let Some(i) = click else { return false };
     ac.apply(ui.ctx(), id, text, i);
     ui.memory_mut(|m| m.request_focus(id));

@@ -6,6 +6,7 @@ use super::explain::{SqlExplain, XAct};
 use super::explain_panel::{access_color, amount, figure, meter, paint_mark, severity_color, share_color, tag_chip, HEAD_H};
 use crate::app::*;
 use crate::db::sql::plan::{cond, findings, Op, Plan, PlanNode, Severity};
+pub(crate) use quarry_core::state::sql::explain_tree::*;
 
 /// A row's height, with a second line, and the indent of one level.
 pub(super) const ROW: f32 = 32.0;
@@ -70,14 +71,6 @@ fn columns(p: &Plan, w: f32) -> Vec<Col> {
         cols.retain(|c| !matches!(c, Col::Cost | Col::Off));
     }
     cols
-}
-
-/// What a row shows beside its numbers: the name screen readers and tests find it by, its second line and the mark of
-/// its most severe finding.
-pub(super) struct TreeRow {
-    name: String,
-    sub: Option<String>,
-    mark: Option<Severity>,
 }
 
 fn tree_rows(p: &Plan) -> Vec<TreeRow> {

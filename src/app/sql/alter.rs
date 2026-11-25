@@ -8,6 +8,17 @@ use crate::ui::dnd;
 use db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Plan, Pos};
 use db::sql::structure::Structure;
 use db::sql::Dialect;
+pub(crate) use quarry_core::state::sql::alter::*;
+
+/// The plan of `changes`, built again only when they, the table or the mode changed. It reads the app's mode and planner,
+/// so it stays here.
+pub(in crate::app) fn plan_memo<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
+    let mode = app.cur_mode();
+    if !slot.as_ref().is_some_and(|m| m.mode == mode && m.create == st.create && m.changes == changes) {
+        *slot = Some(PlanMemo { changes: changes.to_vec(), create: st.create.clone(), mode, warnings: ddl::warnings(st, changes), plan: app.plan_of(st, changes) });
+    }
+    slot.as_ref().unwrap()
+}
 
 const TYPES: &[&str] = &["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE", "BIT", "CHAR", "VARCHAR", "BINARY", "VARBINARY", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "JSON", "GEOMETRY", "POINT", "LINESTRING", "POLYGON"];
 
@@ -17,77 +28,6 @@ const PG_TYPES: &[&str] = &["smallint", "integer", "bigint", "numeric(10,2)", "r
 
 /// Collations worth a menu entry. The charset follows from the name, so one choice sets both.
 const COLLATIONS: &[&str] = &["utf8mb4_0900_ai_ci", "utf8mb4_0900_as_cs", "utf8mb4_uca1400_ai_ci", "utf8mb4_unicode_ci", "utf8mb4_general_ci", "utf8mb4_bin", "utf8mb3_general_ci", "utf8mb3_bin", "latin1_swedish_ci", "latin1_bin", "ascii_general_ci", "ascii_bin"];
-
-#[derive(Clone, Copy, PartialEq)]
-enum DMode {
-    None,
-    Null,
-    Value,
-    Expr,
-    /// The server computes the column from an expression, which `dtext` holds.
-    Generated,
-}
-
-/// The Add column and Edit column dialog.
-pub(in crate::app) struct ColForm {
-    /// The column's name now; None adds a new one.
-    from: Option<String>,
-    def: ColDef,
-    /// What the form opened with, so "nothing changed" is known.
-    orig: Option<(ColDef, Pos)>,
-    dmode: DMode,
-    dtext: String,
-    /// A generated column is STORED rather than VIRTUAL.
-    stored: bool,
-    pos: Pos,
-    /// The staged changes this one goes after.
-    rest: Vec<Change>,
-    /// The other columns in the order the staged changes leave them, for the position list.
-    order: Vec<String>,
-    memo: Option<PlanMemo>,
-}
-
-pub(in crate::app) struct IdxForm {
-    /// The index being edited; None adds one.
-    from: Option<IndexDef>,
-    pub(in crate::app) def: IndexDef,
-    /// The columns of the table with their types, in order.
-    avail: Vec<(String, String)>,
-    rest: Vec<Change>,
-    view: Option<IdxView>,
-    /// The INCLUDE columns as typed, comma separated, which `def.include` follows.
-    include_text: String,
-}
-
-/// The checks, the plan and the warnings of the index as it stands, kept until the definition changes.
-struct IdxView {
-    def: IndexDef,
-    changes_empty: bool,
-    /// The staged changes with this one added, which Stage change keeps.
-    all: Vec<Change>,
-    text: Result<String, String>,
-    warnings: Vec<String>,
-}
-
-/// The plan and the warnings of a list of changes, kept while the changes, the table definition and the session
-/// mode stay as they are. Both walk the whole structure and a bar or dialog draws them every frame.
-pub(in crate::app) struct PlanMemo {
-    changes: Vec<Change>,
-    create: String,
-    mode: Mode,
-    pub(in crate::app) warnings: Vec<String>,
-    pub(in crate::app) plan: Result<Plan, String>,
-}
-
-impl PlanMemo {
-    pub(in crate::app) fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
-        let mode = app.cur_mode();
-        if !slot.as_ref().is_some_and(|m| m.mode == mode && m.create == st.create && m.changes == changes) {
-            *slot = Some(PlanMemo { changes: changes.to_vec(), create: st.create.clone(), mode, warnings: ddl::warnings(st, changes), plan: app.plan_of(st, changes) });
-        }
-        slot.as_ref().unwrap()
-    }
-}
 
 /// Columns the staged changes drop and columns they change, for marks beside the grid rows.
 pub(in crate::app) fn staged_marks(staged: &[Change]) -> (HashSet<String>, HashSet<String>) {
@@ -553,7 +493,7 @@ impl App {
                     });
                 }
             });
-            let memo = PlanMemo::of(memo, self, st, staged);
+            let memo = plan_memo(memo, self, st, staged);
             for w in &memo.warnings {
                 ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
             }
@@ -762,7 +702,7 @@ impl App {
         let unchanged = f.orig.as_ref().is_some_and(|(d, p)| *d == f.def && *p == f.pos);
         let dup = f.order.iter().any(|n| ddl::same_name(n, &f.def.name));
         let st = self.structure();
-        let memo = st.map(|st| PlanMemo::of(&mut f.memo, self, st, &all));
+        let memo = st.map(|st| plan_memo(&mut f.memo, self, st, &all));
         let plan: Result<&Plan, String> = if dup {
             Err(format!("The table already has a column called {}.", f.def.name))
         } else if unchanged {

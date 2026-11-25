@@ -6,6 +6,7 @@ use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
+pub(crate) use quarry_core::state::sql::rel::*;
 
 /// Above this many rows the check for orphans waits for a click, because it joins the whole table.
 const CHECK_ROWS: u64 = 200_000;
@@ -14,124 +15,6 @@ const CHECK_ROWS: u64 = 200_000;
 /// nothing as the answer comes in. It is kept whatever is shown so the buttons below never move when the answer lands, where a
 /// click aimed at one could hit the space it just left.
 const ORPHAN_BOX_H: f32 = 64.0;
-
-/// What the orphan count depends on, as `ddl::orphan_key` names it.
-#[derive(Clone, PartialEq)]
-struct OrphanKey {
-    cols: Vec<String>,
-    ref_db: String,
-    ref_table: String,
-    ref_cols: Vec<String>,
-}
-
-impl OrphanKey {
-    fn of(fk: &ForeignKey) -> Self {
-        let (cols, ref_db, ref_table, ref_cols) = ddl::orphan_key(fk);
-        Self { cols, ref_db, ref_table, ref_cols }
-    }
-}
-
-/// The Add relation dialog.
-pub(in crate::app) struct FkForm {
-    name: String,
-    /// The name was typed, so it stops following the columns.
-    named: bool,
-    /// Column of this table and column it points to, in key order. Empty means not picked yet.
-    pairs: Vec<(String, String)>,
-    ref_db: String,
-    ref_table: String,
-    on_update: String,
-    on_delete: String,
-    own: Structure,
-    /// The columns of `own` the staged changes leave, for the pickers. Neither input changes while the dialog is open.
-    own_cols: Vec<String>,
-    rest: Vec<Change>,
-    /// The plan of the key as it stands, kept while the changes and the table stay as they are.
-    memo: Option<PlanMemo>,
-    parent: Option<Structure>,
-    /// The schema and table `parent` was asked for, and the request that carries the answer.
-    asked: (String, String),
-    parent_req: u64,
-    parent_err: Option<String>,
-    /// How many rows point at nothing for the key as it stands, and which columns and request that is for.
-    orphans: Option<Result<u64, String>>,
-    orphan_for: Option<OrphanKey>,
-    orphan_req: u64,
-    /// The server takes a key only on a whole primary or unique key, and the request that asks it.
-    strict: bool,
-    rules_req: u64,
-    /// The person asked for the check on a big table.
-    check: bool,
-    /// A few of the rows the count found, as their key values.
-    sample: Vec<String>,
-    /// PostgreSQL: the namespace is a schema of the tab's database, and these are the options only it has.
-    pg: bool,
-    match_full: bool,
-    deferrable: bool,
-    deferred: bool,
-    not_valid: bool,
-    /// The key being edited, which a change replaces (PostgreSQL). None for a new one.
-    from: Option<ForeignKey>,
-}
-
-impl FkForm {
-    pub(in crate::app) fn parent_loaded(&mut self, req: u64, res: db::Res<Structure>) -> bool {
-        if req != self.parent_req || req == 0 {
-            return false;
-        }
-        match res {
-            Ok(s) => (self.parent, self.parent_err) = (Some(s), None),
-            Err(e) => (self.parent, self.parent_err) = (None, Some(e)),
-        }
-        true
-    }
-
-    pub(in crate::app) fn rules_done(&mut self, req: u64, strict: bool) {
-        if req == self.rules_req && req != 0 {
-            self.strict = strict;
-        }
-    }
-
-    pub(in crate::app) fn orphans_done(&mut self, req: u64, res: db::Res<u64>, sample: Vec<String>) -> bool {
-        if req != self.orphan_req || req == 0 {
-            return false;
-        }
-        (self.orphans, self.sample) = (Some(res), sample);
-        true
-    }
-
-    /// Puts the form back in the state where the count of the rows with no match is asked and not answered yet.
-    #[cfg(test)]
-    pub(in crate::app) fn forget_orphan_answer(&mut self) {
-        self.orphans = None;
-    }
-
-    /// The key the form describes once every part is picked.
-    fn key(&self, schema: &str) -> Option<ForeignKey> {
-        if self.ref_table.is_empty() || self.pairs.is_empty() || self.pairs.iter().any(|(a, b)| a.is_empty() || b.is_empty()) {
-            return None;
-        }
-        Some(ForeignKey {
-            name: self.name.trim().to_string(),
-            db: schema.to_string(),
-            table: String::new(),
-            cols: self.pairs.iter().map(|p| p.0.clone()).collect(),
-            ref_db: self.ref_db.clone(),
-            ref_table: self.ref_table.clone(),
-            ref_cols: self.pairs.iter().map(|p| p.1.clone()).collect(),
-            on_update: self.on_update.clone(),
-            on_delete: self.on_delete.clone(),
-            match_full: self.pg && self.match_full,
-            deferrable: self.pg && self.deferrable,
-            deferred: self.pg && self.deferrable && self.deferred,
-            not_valid: self.pg && self.not_valid,
-            comment: self.from.as_ref().map(|o| o.comment.clone()).unwrap_or_default(),
-            // The parent as the form saw it, so the transaction can refuse when it changed before the key was added.
-            ref_seen: self.parent.as_ref().filter(|p| self.pg && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &self.pairs.iter().map(|x| x.1.clone()).collect::<Vec<_>>())).unwrap_or_default(),
-            ..Default::default()
-        })
-    }
-}
 
 /// What changing key `old` into `new` stages: a rename when only the name differs, else the key dropped and added again,
 /// which PostgreSQL does in the one transaction.
@@ -478,7 +361,7 @@ impl App {
             } else if all.len() == f.rest.len() {
                 Err("Nothing is changed.".into())
             } else {
-                PlanMemo::of(&mut f.memo, self, &f.own, &all).plan.as_ref().map(|p| p.sql()).map_err(Clone::clone)
+                super::alter::plan_memo(&mut f.memo, self, &f.own, &all).plan.as_ref().map(|p| p.sql()).map_err(Clone::clone)
             };
         } else if let Some(p) = &problem {
             text = Err(p.clone());
