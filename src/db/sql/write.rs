@@ -633,7 +633,7 @@ impl Worker {
     /// gets its own `Saved` so the app can settle every draft; only the first carries the undo.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_save(&self, tags: Vec<String>, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, pk: Vec<String>, edits: Vec<RowEdit>, read_only: bool) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let res = apply_updates(&db, &schema, &table, &cols, &pk, &edits, read_only).await;
             let n = edits.len();
@@ -646,7 +646,7 @@ impl Worker {
                 let res = res.clone().map(|_| format!("Saved {}", plural(n, "row")));
                 let _ = tx.send(Msg::Saved { tag, res, undo: undo.take() });
             }
-            ctx.request_repaint();
+            wake();
         });
     }
 
@@ -923,7 +923,7 @@ mod tests {
     fn live(table: &str, ddl: &str) -> Option<Live> {
         let uri = std::env::var("QUARRY_TEST_MYSQL").ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         let pool = w.rt.block_on(async {
             let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
             sqlx::raw_sql("CREATE DATABASE IF NOT EXISTS quarry_write_test").execute(&p).await.unwrap();

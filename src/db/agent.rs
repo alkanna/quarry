@@ -252,7 +252,7 @@ const BUSY_RETRY: Duration = Duration::from_secs(5);
 impl Worker {
     pub fn agents_listen(&self, dir: PathBuf, token: Option<Token>) -> AgentsHandle {
         let (tx, rx) = watch::channel(token);
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         self.rt.spawn(listen(dir, rx, out));
         AgentsHandle { token: tx }
     }
@@ -261,14 +261,14 @@ impl Worker {
 #[derive(Clone)]
 struct Out {
     tx: Sender<Msg>,
-    ctx: eframe::egui::Context,
+    wake: Wake,
 }
 
 impl Out {
     fn send(&self, ev: AgentEvent) {
         let _ = self.tx.send(Msg::Agent(ev));
         // Wakes logic() even while the window is hidden, so calls are answered then too.
-        self.ctx.request_repaint();
+        (self.wake)();
     }
 }
 
@@ -360,7 +360,7 @@ impl Worker {
     /// Runs an allowed call on the runtime. The answer goes to the agent through `reply`, then `AgentEvent::Done` tells
     /// the App how it ended. A cancelled call sends neither: the App already marked it.
     pub fn agent_run(&self, mut job: AgentJob, reply: Reply) -> AgentRun {
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         let h = sql::RunHandle::default();
         let sql = match &job.target {
             AgentTarget::Sql(db) => Some((db.clone(), h.clone())),
@@ -411,7 +411,7 @@ impl Worker {
 
     /// Sends `ev` to the App after `after`, from the runtime, so it arrives while no frame is drawn.
     pub fn agent_after(&self, after: Duration, ev: AgentEvent) {
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         self.rt.spawn(async move {
             tokio::time::sleep(after).await;
             out.send(ev);
@@ -422,7 +422,7 @@ impl Worker {
     /// thread. With `tail` above zero the last entries come back first as `AgentEvent::Tail`.
     pub fn agents_audit(&self, dir: PathBuf, max_bytes: u64, tail: usize) -> std::sync::mpsc::Sender<Entry> {
         let (tx, rx) = std::sync::mpsc::channel::<Entry>();
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         let spawned = std::thread::Builder::new().name("quarry-agents-audit".into()).spawn(move || {
             let mut a = match Audit::open(&dir, max_bytes) {
                 Ok(a) => a,
@@ -691,7 +691,7 @@ impl Worker {
     /// Reads what a write would touch, so the App can count it against the large-change threshold and the undo caps
     /// before deciding. Answers with `AgentEvent::Prepared`.
     pub fn agent_prepare(&self, activity: u64, target: AgentTarget, call: Call, limits: Limits) {
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         self.rt.spawn(async move {
             let t = Duration::from_secs(limits.secs.max(1) as u64);
             let work = async {
@@ -711,7 +711,7 @@ impl Worker {
     /// Reverts an agent change from the Activity window. Each document or row goes back only while it is as the agent
     /// left it; one changed since is left alone and counted. Answers with `AgentEvent::Undone`.
     pub fn agent_undo(&self, activity: u64, target: AgentTarget, u: AgentUndo) {
-        let out = Out { tx: self.tx.clone(), ctx: self.ctx.clone() };
+        let out = Out { tx: self.tx.clone(), wake: self.wake.clone() };
         self.rt.spawn(async move {
             let (res, back) = match (target, u) {
                 (AgentTarget::Sql(db), AgentUndo::Sql(a)) => {
@@ -1369,7 +1369,7 @@ mod tests {
     fn live(coll: &str) -> Option<(Worker, std::sync::mpsc::Receiver<Msg>, Client)> {
         let uri = std::env::var("QUARRY_TEST_MONGO").ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         let client = w.rt.block_on(async {
             let c = Client::with_uri_str(&uri).await.unwrap();
             let col = c.database("quarry_test").collection::<Document>(coll);
@@ -1521,7 +1521,7 @@ mod tests {
     #[test]
     fn a_structure_change_past_the_limit_answers_still_running() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         let c = w.rt.block_on(Client::with_uri_str("mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=60000")).unwrap();
         let call = Call::CreateIndex { ns: ns("x"), keys: doc! { "a": 1 }, name: None, unique: false };
         let (reply, ans) = oneshot::channel();

@@ -229,7 +229,7 @@ fn a_plain_insert_works_with_insert_only_privilege_row_level_security_and_a_do_i
 }"#;
         // A second login that holds only these privileges, so no session setting of the test login changes.
         let (tx, rx) = std::sync::mpsc::channel();
-        let w2 = Worker::new(tx, eframe::egui::Context::default());
+        let w2 = Worker::for_test(tx);
         w2.sql_connect(1, l.uri.replacen("postgres:quarry@", "t7_ins_role:pw@", 1), Duration::from_secs(30), crate::db::Net::default());
         let Msg::SqlConnected { res: Ok((role_db, _, _)), .. } = rx.recv_timeout(Duration::from_secs(20)).unwrap() else { panic!("{var}: the role could not connect") };
         let (_, res) = run(&w2, &rx, input(code, "pg", serde_json::json!([]), vec![entry("pg", &["only_ins", "rls", "vw"])]), vec![("pg".into(), relay(&role_db.at("quarry_test"), "t7_plain_ins", false))]);

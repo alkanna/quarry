@@ -624,7 +624,7 @@ fn live_a_weak_user_sees_only_itself() {
         let host = uri.split('@').nth(1).unwrap().to_string();
         let weak = format!("mysql://{}:pw-for-tests@{host}", a.user);
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         w.sql_connect(2, weak, std::time::Duration::from_secs(30), crate::db::Net::default());
         let Msg::SqlConnected { res: Ok((db, _, _)), .. } = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!("connect") };
         w.sql_users(2, 1, db);

@@ -45,7 +45,7 @@ fn run_max(db: &str, code: &str, max: Option<usize>) -> Option<Run> {
         return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     let mut input = serde_json::json!({ "mongo": [{ "name": "test", "uri": uri, "db": db, "proxy": null, "collections": [], "readOnly": false }], "sql": [], "code": code, "packages": [], "timeoutMs": 30000, "main": "test" });
     if let Some(max) = max {
         input["maxBytes"] = max.into();

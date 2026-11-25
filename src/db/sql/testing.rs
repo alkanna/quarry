@@ -18,7 +18,7 @@ pub struct Live {
 pub fn live(var: &str) -> Option<Live> {
     let uri = std::env::var(var).ok()?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     let pool = w.rt.block_on(async { sqlx::MySqlPool::connect(&uri).await.unwrap() });
     w.sql_connect(1, uri.clone(), std::time::Duration::from_secs(30), crate::db::Net::default());
     let Msg::SqlConnected { res: Ok((db, _, _)), .. } = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!("connect") };
@@ -107,7 +107,7 @@ pub fn live_pg(var: &str) -> Option<LivePg> {
 /// A connection to the server at `uri`, which a test can make as a login of its own.
 pub fn live_pg_at(uri: String) -> LivePg {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(&uri).await.unwrap() });
     w.sql_connect(1, uri.clone(), std::time::Duration::from_secs(30), crate::db::Net::default());
     let Msg::SqlConnected { res: Ok((db, dbs, _)), .. } = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!("connect") };

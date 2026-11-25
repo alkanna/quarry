@@ -40,7 +40,7 @@ struct Live {
 impl Live {
     fn new() -> Live {
         let (tx, rx) = std::sync::mpsc::channel();
-        Live { w: crate::db::Worker::new(tx, eframe::egui::Context::default()), rx }
+        Live { w: crate::db::Worker::for_test(tx), rx }
     }
 
     fn test(&self, a: &Addr, net: crate::db::Net) -> Result<String, String> {

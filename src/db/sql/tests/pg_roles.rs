@@ -243,7 +243,7 @@ fn live_each_write_and_its_undo() {
 /// A connection whose session runs in the given zone, made the way the app makes one from a connection with that zone setting.
 fn in_zone(uri: &str, zone: &str) -> LivePg {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
     let adv = crate::db::sql::advanced::Advanced { zone: crate::db::sql::advanced::Zone::Custom(zone.into()), ..Default::default() };
     w.sql_connect_with(1, 0, uri.to_string(), std::time::Duration::from_secs(30), crate::db::Net::default(), adv);

@@ -864,7 +864,7 @@ impl Worker {
     /// Sends `SqlCols` and then `Docs`.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_page(&self, req: u64, db: Db, schema: String, table: String, q: PageQuery, limit: u64, offset: u64) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let res = match page(&db, &schema, &table, &q, limit, offset, true).await {
                 Ok((cols, pk, rows, count, estimated, ms, matched)) => {
@@ -874,7 +874,7 @@ impl Worker {
                 Err(err) => Err(err),
             };
             let _ = tx.send(Msg::Docs { req, res, approx: false });
-            ctx.request_repaint();
+            wake();
         });
     }
 

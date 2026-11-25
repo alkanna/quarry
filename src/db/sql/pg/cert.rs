@@ -202,7 +202,7 @@ pub(crate) mod tests {
         for (var, (mode, ca)) in ["QUARRY_TEST_PGCERT", "QUARRY_TEST_PGCERT13"].into_iter().flat_map(|v| modes.clone().map(|m| (v, m))) {
             let Ok(base) = std::env::var(var) else { continue };
             let (tx, rx) = std::sync::mpsc::channel();
-            let w = Worker::new(tx, eframe::egui::Context::default());
+            let w = Worker::for_test(tx);
             let uri = |cert: &str, key: &str| {
                 let a = crate::db::sql::Addr::parse(&base).unwrap();
                 crate::db::sql::Addr { ssl_mode: mode, ssl_ca: ca.clone(), ssl_cert: cert.into(), ssl_key: key.into(), ..a }.to_uri()

@@ -139,7 +139,7 @@ fn pinned(w: &Worker, opts: sqlx::mysql::MySqlConnectOptions, mode: &str) -> sql
 fn start(var: &str) -> Option<Env> {
     let uri = std::env::var(var).ok()?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     w.sql_connect(1, uri.clone(), Duration::from_secs(30), crate::db::Net::default());
     let Msg::SqlConnected { res: Ok((mut db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
     let mode = db.sql_mode.split(',').filter(|m| !m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES")).collect::<Vec<_>>().join(",");

@@ -75,7 +75,7 @@ fn run(var: &str) {
     let db = ui.app().conn(CONN).unwrap().sql.clone().unwrap();
     // Through a worker of the test's own, so the answer does not go to the app. A run reads in the session the app's would.
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     let read = |q: &str| {
         // No tab schema, so the path is the saved list alone; with one, that schema would come first.
         w.sql_run(9, db.clone(), "".into(), q.into(), true, 0, db::sql::RunHandle::default());

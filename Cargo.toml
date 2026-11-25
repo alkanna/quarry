@@ -6,7 +6,13 @@ description = "A fast, native MongoDB and MySQL workbench"
 license = "MIT"
 repository = "https://github.com/alkanna/quarry"
 
+# quarry-core holds the state and everything that talks to a server, with no UI toolkit, so the app runs and is tested
+# without a window. This crate is the egui frontend over it.
+[workspace]
+members = ["quarry-core"]
+
 [dependencies]
+quarry-core = { path = "quarry-core" }
 eframe = { version = "0.37", features = ["persistence"] }
 # Only for its bundled monochrome icon font, used for toolbar icons; eframe already depends on it.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }

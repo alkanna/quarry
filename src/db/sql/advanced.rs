@@ -662,7 +662,7 @@ mod live {
     impl Conn {
         fn new(uri: &str) -> Conn {
             let (tx, rx) = std::sync::mpsc::channel();
-            Conn { w: Worker::new(tx, eframe::egui::Context::default()), rx, uri: uri.into() }
+            Conn { w: Worker::for_test(tx), rx, uri: uri.into() }
         }
 
         fn open(&self, adv: &Advanced) -> Result<Db, String> {

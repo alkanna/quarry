@@ -598,7 +598,7 @@ mod pg_tests {
         for var in crate::db::sql::testing::PG_ENVS {
             let Ok(uri) = std::env::var(var) else { continue };
             let (tx, rx) = std::sync::mpsc::channel();
-            let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+            let w = crate::db::Worker::for_test(tx);
             let adv = crate::db::sql::Advanced { query_secs: Some(1), ..Default::default() };
             w.sql_connect_with(1, 0, uri, Duration::from_secs(30), crate::db::Net::default(), adv);
             let Msg::SqlConnected { res: Ok((db, _, _)), .. } = rx.recv_timeout(Duration::from_secs(20)).unwrap() else { panic!("connect") };

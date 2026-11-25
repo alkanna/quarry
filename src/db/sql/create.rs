@@ -1332,7 +1332,7 @@ mod tests {
     fn live(var: &'static str) -> Option<Live> {
         let uri = std::env::var(var).ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         let pool = w.rt.block_on(async { sqlx::MySqlPool::connect(&uri).await.unwrap() });
         w.sql_connect(1, uri, Duration::from_secs(30), crate::db::Net::default());
         let Msg::SqlConnected { res: Ok((db, _, _)), .. } = rx.recv_timeout(Duration::from_secs(20)).unwrap() else { panic!("connect") };

@@ -57,7 +57,7 @@ fn each(f: impl Fn(&str, &str, bool)) {
 /// A connection made the way the app makes one from a saved connection with these settings.
 fn open(uri: &str, adv: &Advanced, pooled: bool) -> LivePg {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
     w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     let Msg::SqlConnected { res, .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("connect") };
@@ -69,7 +69,7 @@ fn open(uri: &str, adv: &Advanced, pooled: bool) -> LivePg {
 /// What the connect or the Test of these settings answered.
 fn connect_error(uri: &str, adv: &Advanced) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
         Msg::SqlConnected { res: Err(x), .. } => x,
@@ -80,7 +80,7 @@ fn connect_error(uri: &str, adv: &Advanced) -> String {
 
 fn test_answer(uri: &str, adv: &Advanced) -> (Result<String, String>, crate::db::sql::TestInfo) {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     w.sql_test_with(5, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     let Msg::Tested { res, info, .. } = rx.recv_timeout(Duration::from_secs(40)).unwrap() else { panic!("tested") };
     (res, info.expect("the Test always reports what it learned"))
@@ -356,7 +356,7 @@ fn the_application_name_is_shown_from_the_first_statement() {
 /// `open` that hands the refusal back instead of panicking, for settings a server or Quarry may refuse.
 fn try_open(uri: &str, adv: &Advanced) -> Result<LivePg, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
     w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     let Msg::SqlConnected { res, .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("connect") };

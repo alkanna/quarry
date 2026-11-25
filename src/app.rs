@@ -379,7 +379,7 @@ impl App {
         let _ = menu;
         let (tx, rx) = channel();
         Self {
-            worker: Worker::new(tx, cc.egui_ctx.clone()),
+            worker: Worker::new(tx, { let ctx = cc.egui_ctx.clone(); std::sync::Arc::new(move || ctx.request_repaint()) }),
             rx,
             conns: Vec::new(),
             active: None,

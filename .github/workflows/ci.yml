@@ -97,7 +97,7 @@ jobs:
       - if: matrix.os == 'ubuntu-22.04'
         run: rustup component add llvm-tools-preview
       - if: matrix.os == 'ubuntu-22.04'
-        run: cargo llvm-cov --locked --no-report
+        run: cargo llvm-cov --workspace --locked --no-report
         env:
           QUARRY_TEST_MONGO: mongodb://localhost:27017/?directConnection=true
           QUARRY_TEST_MONGO_RS: mongodb://localhost:27017/?directConnection=true
@@ -117,4 +117,4 @@ jobs:
           name: coverage-html
           path: target/llvm-cov/html
       - if: matrix.os != 'ubuntu-22.04'
-        run: cargo check --locked --all-targets
+        run: cargo check --workspace --locked --all-targets

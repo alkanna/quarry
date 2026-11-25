@@ -40,7 +40,7 @@ fn live(table: &str, ddl: &str) -> Option<(Worker, Receiver<Msg>, Db, Fixture)> 
     let uri = std::env::var("QUARRY_TEST_MYSQL").ok()?;
     *OPEN.lock().unwrap_or_else(|e| e.into_inner()) += 1;
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     let setup = w.rt.block_on(async {
         let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
         raw_sql("CREATE DATABASE IF NOT EXISTS quarry_test").execute(&p).await.unwrap();

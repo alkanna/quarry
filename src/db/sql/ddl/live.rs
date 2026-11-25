@@ -85,7 +85,7 @@ impl Env {
 fn start(var: &str) -> Option<Env> {
     let uri = std::env::var(var).ok()?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = Worker::new(tx, eframe::egui::Context::default());
+    let w = Worker::for_test(tx);
     let pool = w.rt.block_on(async {
         let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
         for sql in ["DROP DATABASE IF EXISTS quarry_ddl", "CREATE DATABASE quarry_ddl"] {

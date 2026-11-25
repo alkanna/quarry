@@ -2,10 +2,13 @@
 
 use super::*;
 
+/// What a sent message calls to wake whoever reads the channel.
+pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 pub struct Worker {
     pub(in crate::db) rt: tokio::runtime::Runtime,
     pub(in crate::db) tx: Sender<Msg>,
-    pub(in crate::db) ctx: eframe::egui::Context,
+    pub(in crate::db) wake: Wake,
 }
 
 /// How many leading documents of an ordered insert_many batch were written before `err`.
@@ -34,22 +37,29 @@ pub(crate) fn e(err: impl std::fmt::Display) -> String {
 }
 
 impl Worker {
-    pub fn new(tx: Sender<Msg>, ctx: eframe::egui::Context) -> Self {
+    /// `wake` runs after every message is sent, so the UI repaints, and handles it, even while hidden.
+    pub fn new(tx: Sender<Msg>, wake: Wake) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("tokio runtime");
-        Self { rt, tx, ctx }
+        Self { rt, tx, wake }
+    }
+
+    /// A worker whose answers are only read from the channel, for tests without a window.
+    #[cfg(test)]
+    pub fn for_test(tx: Sender<Msg>) -> Self {
+        Self::new(tx, std::sync::Arc::new(|| {}))
     }
 
     /// Runs a Shell script in a separate Bun process; `cancel` stops it.
     pub fn shell(&self, req: u64, job: ShellJob, cancel: tokio::sync::oneshot::Receiver<()>) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let send = move |m: Msg| {
                 let _ = tx.send(m);
-                ctx.request_repaint();
+                wake();
             };
             let start = Instant::now();
             let ran = run_shell(req, &job, &send, cancel).await;
@@ -70,11 +80,11 @@ impl Worker {
 
     /// Streams the collection's changes as `WatchEvent`s until `cancel` fires or its sender drops.
     pub fn watch(&self, req: u64, t: Target, cancel: tokio::sync::oneshot::Receiver<()>) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let send = move |m: Msg| {
                 let _ = tx.send(m);
-                ctx.request_repaint();
+                wake();
             };
             let run = async {
                 // UpdateLookup so an update shows the whole document as it is now, not just the change.
@@ -95,11 +105,11 @@ impl Worker {
     /// Starts the shell editor's language server; it stops once the sender drops or after a quiet spell.
     pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<JsLsReq> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (out, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (out, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let send = move |m: Msg| {
                 let _ = out.send(m);
-                ctx.request_repaint();
+                wake();
             };
             // Autocomplete falls back to the built-in suggestions, so a failure here is only logged.
             let res = run_js_ls(runtime, dir, packages, rx, &send).await;
@@ -113,10 +123,10 @@ impl Worker {
 
     /// Runs blocking work (such as the update check) off the UI thread.
     pub fn blocking(&self, f: impl FnOnce() -> Msg + Send + 'static) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn_blocking(move || {
             let _ = tx.send(f());
-            ctx.request_repaint();
+            wake();
         });
     }
 
@@ -127,12 +137,12 @@ impl Worker {
 
     pub(in crate::db) fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
         let tx = self.tx.clone();
-        let ctx = self.ctx.clone();
+        let wake = self.wake.clone();
         self.rt.spawn(async move {
             // A panic in the task would otherwise end it silently; say so instead.
             let msg = tokio::spawn(f).await.unwrap_or_else(|err| Msg::Info(Err(format!("Internal error: {err}"))));
             let _ = tx.send(msg);
-            ctx.request_repaint();
+            wake();
         });
     }
 
@@ -705,11 +715,11 @@ impl Worker {
 
     /// Runs mongodump or mongorestore, streaming its output; `cancel` stops it.
     pub fn tool(&self, exe: std::path::PathBuf, args: Vec<String>, cancel: tokio::sync::oneshot::Receiver<()>) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
         self.rt.spawn(async move {
             let send = move |m: Msg| {
                 let _ = tx.send(m);
-                ctx.request_repaint();
+                wake();
             };
             let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             // The address carries the password, and arguments are visible to every local user.
@@ -1289,7 +1299,7 @@ mod tests {
     fn live_at(var: &str, name: &str) -> Option<(Worker, std::sync::mpsc::Receiver<Msg>, Target)> {
         let uri = std::env::var(var).ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Worker::new(tx, eframe::egui::Context::default());
+        let w = Worker::for_test(tx);
         let t = w.rt.block_on(async {
             let client = Client::with_uri_str(&uri).await.unwrap();
             let t = Target { client, db: "quarry_test".into(), coll: name.into(), timeout: Duration::from_secs(5) };
