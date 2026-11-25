@@ -2,7 +2,7 @@
 //! Larger dialogs live with their feature and are called from here.
 
 use super::*;
-use quarry_core::action::{Action, DocsA};
+use quarry_core::action::{Action, DocsA, ShellA};
 
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
@@ -218,7 +218,7 @@ impl App {
                         }
                     });
                 }
-                Modal::ShellWrite(ops) => {
+                Modal::ShellWrite { tab, ops } => {
                     ui.set_width(480.0);
                     dialog_head(ui, &Head::new("Execute this command?").sub("Shell").glyph(glyphs::warn).tone(ALERT()));
                     dialog_body(ui, |ui| {
@@ -228,7 +228,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Execute").clicked() {
-                            self.start_shell();
+                            let tab = *tab;
+                            self.exec(Action::Shell(ShellA::Start { tab }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {

@@ -5,6 +5,7 @@ use crate::app::*;
 use crate::app::sql::query::{run_db, run_schema_of};
 use crate::library::snippet::{self, Lang, Parsed, Ty};
 use std::ops::Range;
+use quarry_core::action::{Action, LibA};
 pub(crate) use quarry_core::state::library::snippet_strip::*;
 
 /// What a strip shows: the values, where they run, and the script whose default target Make default would change.
@@ -133,7 +134,7 @@ impl App {
 
     pub(in crate::app) fn make_snippet_default(&mut self, s: &Strip) {
         if let Some((id, conn, db, schema)) = &s.make_default {
-            self.set_snippet_default(*id, *conn, db, schema);
+            self.exec(Action::Library(LibA::SnippetDefault { id: *id, conn: *conn, db: db.clone(), schema: schema.clone() }));
         }
     }
 
@@ -208,17 +209,9 @@ impl App {
                 });
             }
         });
-        if apply && let Some(ph) = ph {
+        if apply && let Some(placeholder) = ph {
             *keep = false;
-            let Some(t) = self.core.tabs.iter_mut().find(|t| t.uid == f.uid) else { return };
-            t.snip.filled = false;
-            let Some(text) = text_mut(t, f.src) else { return };
-            // The text may have changed under the dialog; only the literal it was opened on is replaced.
-            if text.get(f.range.clone()) == Some(f.literal.as_str()) {
-                text.replace_range(f.range.clone(), &ph);
-            } else {
-                self.warn("The statement changed, so the literal was not replaced.");
-            }
+            self.exec(Action::Library(LibA::MakeValue { tab: f.uid, src: f.src, range: f.range.clone(), literal: f.literal.clone(), placeholder }));
         }
     }
 }

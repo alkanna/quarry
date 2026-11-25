@@ -261,3 +261,85 @@ fn whats_new_remembers_the_app_version_as_seen() {
     assert_eq!(c.prefs.last_version, crate::VERSION);
     assert!(c.prefs_dirty && c.take_ui_fx().is_empty(), "a fresh install skips the notes");
 }
+
+fn sql_tab(query: &str) -> crate::state::Tab {
+    let mut t = crate::state::Tab::new(crate::state::Sel { conn: 1, db: "shop".into(), ..Default::default() }).for_engine(crate::db::sql::Engine::MySql);
+    t.view = crate::state::View::Sql;
+    if let Some(q) = t.sql.as_mut() {
+        q.query = query.into();
+    }
+    t
+}
+
+fn warned(c: &Core) -> String {
+    c.toasts.last().map(|t| t.title.clone()).unwrap_or_default()
+}
+
+#[test]
+fn save_to_library_binds_the_tab_and_a_second_save_replaces_with_an_undo() {
+    use crate::state::library::save_dialog::SaveForm;
+    let mut c = Core::for_test();
+    c.tabs.push(sql_tab("SELECT 1"));
+    let form = |body: &str| SaveForm { name: " Totals ".into(), new_folder: Some("reports".into()), kind: "sql".into(), body: body.into(), conn: 1, db: "shop".into(), view: Some(crate::state::View::Sql), ..Default::default() };
+    run(&mut c, Action::Library(LibA::Save(Box::new(form("SELECT 1")))));
+    let (id, folder) = (c.library.scripts[0].id, c.library.scripts[0].folder);
+    assert_eq!((c.library.scripts[0].name.as_str(), c.library.folders.len()), ("Totals", 1));
+    assert_eq!(folder, Some(c.library.folders[0].id));
+    assert_eq!(c.tabs[0].script.as_ref().map(|b| b.r.clone()), Some(ScriptRef::Saved(id)));
+    assert_eq!(c.status, "Saved \"Totals\" to the library");
+    // The same name in the same folder, which the new folder field finds again by its name, is replaced and can be put back.
+    run(&mut c, Action::Library(LibA::Save(Box::new(form("SELECT 2")))));
+    assert_eq!((c.library.scripts.len(), c.library.folders.len(), c.library.scripts[0].body.as_str()), (1, 1, "SELECT 2"));
+    assert!(matches!(c.toasts.last().unwrap().acts.first(), Some((l, Act::Restore(_))) if l == "Undo"));
+    // A linked folder that is gone takes nothing.
+    run(&mut c, Action::Library(LibA::Save(Box::new(SaveForm { link: Some(9), ..form("SELECT 3") }))));
+    assert!(warned(&c).starts_with("That folder is no longer linked"));
+    assert_eq!(c.library.scripts[0].body, "SELECT 2");
+}
+
+#[test]
+fn link_a_folder_adds_a_link_and_a_locate_reads_it_again() {
+    let mut c = Core::for_test();
+    let link = || crate::library::Link { id: 77, path: "/tmp/q".into(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() };
+    run(&mut c, Action::Library(LibA::SaveLink { edit: None, locate: false, link: link() }));
+    let id = c.library.links[0].id;
+    assert_ne!(id, 77, "a new link takes a fresh id, not the one in the action");
+    assert!(c.lib_ui.rescan.contains(&id));
+    assert_eq!(c.status, "Linked queries.");
+    c.lib_ui.scans.insert(id, Default::default());
+    run(&mut c, Action::Library(LibA::SaveLink { edit: Some(id), locate: true, link: link() }));
+    assert_eq!((c.library.links.len(), c.library.links[0].id), (1, id));
+    assert!(!c.lib_ui.scans.contains_key(&id), "a located folder is read from scratch");
+    assert_eq!(c.status, "queries found.");
+    run(&mut c, Action::Library(LibA::SaveLink { edit: Some(id), locate: false, link: link() }));
+    assert_eq!(c.status, "queries updated.");
+}
+
+#[test]
+fn snippet_values_and_default_are_kept() {
+    let mut c = Core::for_test();
+    c.conns.push(Conn::new(ConnMeta { id: 1, name: "local".into(), ..Default::default() }, Status::Ready));
+    c.library.scripts.push(script(1, None));
+    run(&mut c, Action::Library(LibA::SnippetValues { id: 1, values: [("n".to_string(), "3".to_string())].into() }));
+    assert_eq!(c.lib_ui.snippet_values[&1]["n"], "3");
+    run(&mut c, Action::Library(LibA::SnippetDefault { id: 1, conn: 1, db: "shop".into(), schema: String::new() }));
+    assert_eq!((c.library.scripts[0].conn, c.library.scripts[0].db.as_str()), (1, "shop"));
+    assert_eq!(c.status, "Runs on local \u{b7} shop by default");
+}
+
+#[test]
+fn make_it_a_value_replaces_only_the_literal_it_was_opened_on() {
+    use crate::state::library::snippet_strip::Src;
+    let mut c = Core::for_test();
+    c.tabs.push(sql_tab("SELECT * FROM t WHERE n = 5"));
+    let uid = c.tabs[0].uid;
+    let make = |literal: &str, range: std::ops::Range<usize>, tab: u64| Action::Library(LibA::MakeValue { tab, src: Src::Query, range, literal: literal.into(), placeholder: "{{n:int=5}}".into() });
+    run(&mut c, make("6", 26..27, uid));
+    assert!(warned(&c).starts_with("The statement changed"));
+    run(&mut c, make("5", 26..27, uid));
+    assert_eq!(c.tabs[0].sql.as_ref().unwrap().query, "SELECT * FROM t WHERE n = {{n:int=5}}");
+    // A range past the end of the text, or a tab closed meanwhile, changes nothing.
+    run(&mut c, make("5", 90..95, uid));
+    run(&mut c, make("5", 26..27, uid + 1));
+    assert_eq!(c.tabs[0].sql.as_ref().unwrap().query, "SELECT * FROM t WHERE n = {{n:int=5}}");
+}

@@ -8,7 +8,7 @@ use quarry_core::action::{Action, LibA};
 use std::time::{Duration, SystemTime};
 pub(crate) use quarry_core::state::library::linked::*;
 
-pub(in crate::app) use crate::library::disk::{FileOut, SaveOut, read_script};
+pub(in crate::app) use crate::library::disk::read_script;
 
 impl App {
     /// The conflict banner above the editor of a tab whose file changed on disk under unsaved edits.

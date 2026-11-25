@@ -3,7 +3,7 @@
 //! aliased to lower case names because information_schema reports them upper case or lower case
 //! depending on the server version.
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Dialect {
     #[default]
     MySql,

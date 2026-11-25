@@ -43,7 +43,7 @@ fn run(ui: &mut UiApp, code: &str) {
     a.core.tabs[c].shell.code = code.into();
     let before = shell(ui.app()).req;
     ui.click("Run");
-    if matches!(ui.app().modal, Some(Modal::ShellWrite(_))) {
+    if matches!(ui.app().modal, Some(Modal::ShellWrite { .. })) {
         ui.click("Execute");
     }
     assert_ne!(shell(ui.app()).req, before, "Run did not start the script; last error: {}", ui.app().last_problem());

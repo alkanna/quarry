@@ -27,6 +27,32 @@ pub enum ConnA {
     /// The connection form's Save and connect: the address and the form's secrets go to the Keychain, `meta` to
     /// connections.json, and a new connection joins `group`. Each secret is empty for one the form does not use.
     Save { meta: ConnMeta, uri: Secret, secrets: Vec<(String, Secret)>, group: Option<u64> },
+    /// The connection form's Test, built by `test_of`: the address and every password go as Secrets (empty for one the
+    /// form does not use), the network settings without them. The reply's request id is the one `Msg::Tested` answers.
+    Test { sql: bool, uri: Secret, ssh: Option<crate::ssh::SshConf>, ssh_pwd: Secret, ssh_pass: Secret, proxy: Option<db::Proxy>, proxy_pwd: Secret, cloud_sql: Option<crate::cloudsql::CloudSql>, key_pass: Secret, advanced: db::sql::Advanced },
+}
+
+/// The Test action of the connection form `f`, with the network settings `ConnForm::net` gives the worker.
+pub fn test_of(f: &ConnForm) -> ConnA {
+    let net = f.net();
+    let (ssh, (ssh_pwd, ssh_pass)) = match net.ssh {
+        Some((c, s)) => (Some(c), (s.password.unwrap_or_default(), s.passphrase.unwrap_or_default())),
+        None => (None, Default::default()),
+    };
+    let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
+    let proxy_pwd = net.proxy.as_ref().and_then(|p| p.password.clone()).unwrap_or_default();
+    ConnA::Test {
+        sql: f.engine.is_sql(),
+        uri: Secret::new(uri),
+        ssh,
+        ssh_pwd: Secret::new(ssh_pwd),
+        ssh_pass: Secret::new(ssh_pass),
+        proxy: net.proxy.map(|p| db::Proxy { password: None, ..p }),
+        proxy_pwd: Secret::new(proxy_pwd),
+        cloud_sql: net.cloud_sql,
+        key_pass: Secret::new(net.key_passphrase.unwrap_or_default()),
+        advanced: f.advanced().unwrap_or_default(),
+    }
 }
 
 /// Connection groups, as the Connections panel, the rail's folders and the Edit group dialog change them.
@@ -106,6 +132,30 @@ impl Core {
             ConnA::Switch { conn } => self.active = Some(conn),
             ConnA::Group(a) => self.group_act(a),
             ConnA::Save { meta, uri, secrets, group } => return self.save_conn(meta, uri, secrets, group),
+            ConnA::Test { sql, mut uri, ssh, mut ssh_pwd, mut ssh_pass, proxy, mut proxy_pwd, cloud_sql, mut key_pass, advanced } => {
+                // An action read back from JSON has no secrets, and testing without them would test something else.
+                let (Some(uri), Some(ssh_pwd), Some(ssh_pass), Some(proxy_pwd), Some(key_pass)) = (uri.take(), ssh_pwd.take(), ssh_pass.take(), proxy_pwd.take(), key_pass.take()) else {
+                    return Err(self.refuse("Nothing tested: the connection's address or a password did not come through."));
+                };
+                self.conn_test = None;
+                self.test_info = None;
+                self.req += 1;
+                let req = self.req;
+                self.test_started = Some(std::time::Instant::now());
+                let net = db::Net {
+                    ssh: ssh.map(|c| (c, crate::ssh::SshSecrets { password: Some(ssh_pwd), passphrase: Some(ssh_pass) })),
+                    proxy: proxy.map(|p| db::Proxy { password: Some(proxy_pwd), ..p }),
+                    cloud_sql,
+                    tools: self.cloud_tools(),
+                    key_passphrase: (!key_pass.is_empty()).then_some(key_pass),
+                };
+                if sql {
+                    self.worker.sql_test_with(req, uri, self.timeout(), net, advanced);
+                } else {
+                    self.worker.test(req, uri, self.timeout(), net);
+                }
+                return Ok(Reply::Pending(req));
+            }
         }
         Ok(Reply::Done)
     }

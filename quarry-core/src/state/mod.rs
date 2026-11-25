@@ -1123,7 +1123,7 @@ pub enum Modal<R> {
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),
-    ShellWrite(Vec<String>),
+    ShellWrite { tab: u64, ops: Vec<String> },
     ImportInsert(usize),
     /// A table maintenance statement of the Info page that locks or rebuilds the table, waiting for a yes.
     SqlMaintain { what: db::sql::Maint, stmt: String },

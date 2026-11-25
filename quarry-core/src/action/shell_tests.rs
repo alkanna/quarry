@@ -24,7 +24,7 @@ fn shell(core: &mut Core, a: ShellA) -> Result<Reply, Refusal> {
 
 fn confirms(core: &mut Core) -> Option<Vec<String>> {
     core.take_ui_fx().into_iter().find_map(|fx| match fx {
-        UiFx::Open(Dialog::ShellWrite(ops)) => Some(ops),
+        UiFx::Open(Dialog::ShellWrite { ops, .. }) => Some(ops),
         _ => None,
     })
 }
@@ -60,6 +60,26 @@ fn run_confirms_a_writing_script_only_when_unlocked() {
     core.tabs[0].shell.code = "async function run() { return 1; }".into();
     shell(&mut core, ShellA::Run { tab }).unwrap();
     assert!(confirms(&mut core).is_none(), "a reading script asked to confirm");
+}
+
+/// The confirm names the tab it was asked for, and its Execute is refused once that tab closed.
+#[test]
+fn the_write_confirm_runs_only_its_own_tab() {
+    let (mut core, tab) = offline();
+    core.conns[0].writable = true;
+    core.tabs[0].shell.code = "async function run() { return await orders.deleteMany({}); }".into();
+    shell(&mut core, ShellA::Run { tab }).unwrap();
+    let asked = core.take_ui_fx().into_iter().find_map(|fx| match fx {
+        UiFx::Open(Dialog::ShellWrite { tab, .. }) => Some(tab),
+        _ => None,
+    });
+    assert_eq!(asked, Some(tab));
+    core.tabs.clear();
+    core.tabs.push(Tab::new(Sel { conn: CONN, db: "shop".into(), coll: "orders".into(), ..Default::default() }));
+    core.cur = 0;
+    let r = shell(&mut core, ShellA::Start { tab }).unwrap_err();
+    assert_eq!(r.msg, super::tabs::TAB_GONE);
+    assert!(core.tabs[0].shell.started.is_none(), "another tab's script ran");
 }
 
 /// A value that does not read stops the run with a warning, before any confirm.

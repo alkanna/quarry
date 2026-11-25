@@ -463,7 +463,7 @@ impl App {
                 c.insert("gift", true);
                 Modal::Save { tag: String::new(), changes: db::diff(&d, &c) }
             }
-            "shell" => Modal::ShellWrite(vec!["deleteMany".into(), "drop".into()]),
+            "shell" => Modal::ShellWrite { tab: self.t().map_or(0, |t| t.uid), ops: vec!["deleteMany".into(), "drop".into()] },
             "agg" => Modal::AggWrite(vec![]),
             "column" => Modal::ColumnCustomize { key: String::new(), agg: false, col: "customer.name".into(), label: "Customer".into(), path: "customer.name".into() },
             "text" => Modal::Text { title: "Query help".into(), body: "{ status: 'paid' }            exact value\n{ total: { $gt: 100 } }       comparison\n{ tags: { $in: ['a', 'b'] } } any of".into(), code: true },

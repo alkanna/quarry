@@ -57,6 +57,18 @@ pub enum LibA {
     ScriptToLink { id: u64, link: u64, dir: PathBuf },
     MoveFile { link: u64, rel: PathBuf, dir: PathBuf },
     FileToQuarry { link: u64, rel: PathBuf, at: DropAt },
+    /// The Save to library dialog's Save: a Quarry script, new or replacing the one of its name and place, or a file
+    /// written in the linked folder the form names. The current tab is bound to it.
+    Save(Box<crate::state::library::save_dialog::SaveForm>),
+    /// The Link a folder dialog's Save: a new link, or link `edit` changed (or found where it moved, `locate`). The
+    /// id in `link` is not read.
+    SaveLink { edit: Option<u64>, locate: bool, link: crate::library::Link },
+    /// The values the snippet form of script `id` holds, kept for its next opening.
+    SnippetValues { id: u64, values: crate::library::snippet::Values },
+    /// Make default: snippet `id` runs on `conn` and `db` from Cmd+K from now on.
+    SnippetDefault { id: u64, conn: u64, db: String, schema: String },
+    /// Make it a value: the `literal` at `range` of the text `src` of tab `tab` becomes `placeholder`, unless it changed.
+    MakeValue { tab: u64, src: crate::state::library::snippet_strip::Src, range: std::ops::Range<usize>, literal: String, placeholder: String },
 }
 
 impl Core {
@@ -163,6 +175,13 @@ impl Core {
             }
             // The copy is selected, and its folder opened, once the file is read.
             LibA::FileToQuarry { link, rel, at } => self.file_to_quarry(link, &rel, at),
+            LibA::Save(f) => self.commit_save(&f),
+            LibA::SaveLink { edit, locate, link } => self.save_link(edit, locate, link),
+            LibA::SnippetValues { id, values } => {
+                self.lib_ui.snippet_values.insert(id, values);
+            }
+            LibA::SnippetDefault { id, conn, db, schema } => self.set_snippet_default(id, conn, &db, &schema),
+            LibA::MakeValue { tab, src, range, literal, placeholder } => self.make_value(tab, src, range, &literal, &placeholder),
         }
         Ok(Reply::Done)
     }

@@ -991,19 +991,11 @@ impl App {
             self.open_cloud_browser(true);
         }
         if test {
-            f.testing = true;
-            self.core.conn_test = None;
-            self.core.test_info = None;
-            self.core.req += 1;
-            f.test_req = self.core.req;
-            self.core.test_started = Some(std::time::Instant::now());
-            let mut net = f.net();
-            net.tools = self.cloud_tools();
-            if f.engine.is_sql() {
-                self.core.worker.sql_test_with(f.test_req, f.sql_addr().to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
-            } else {
-                self.core.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
+            if let Ok(quarry_core::action::Reply::Pending(req)) = self.core.execute(Action::Conn(quarry_core::action::conn::test_of(f))) {
+                f.testing = true;
+                f.test_req = req;
             }
+            self.run_fx();
         }
         if save {
             let id = f.id.unwrap_or_else(|| self.next_conn_id());

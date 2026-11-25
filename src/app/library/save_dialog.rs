@@ -1,10 +1,11 @@
 //! The Save to library dialog: a name, a folder and a preview of what is saved. Opened by Cmd+S on a script that is not
 //! bound to the library yet (see `save_script` in open.rs).
 
-use super::linked::{FileOut, Job, SaveOut, file_bytes, kind_ext};
+use super::linked::kind_ext;
 use super::open::TabText;
 use super::*;
-use crate::library::{Library, Script, ScriptRef, disk, format};
+use crate::library::{Library, ScriptRef, disk, format};
+use quarry_core::action::{Action, LibA};
 pub(crate) use quarry_core::state::library::save_dialog::*;
 
 /// Every Quarry folder in display order with its depth, as the panel shows them: a folder whose parent is gone sits at the
@@ -28,37 +29,12 @@ fn link_dirs(scan: &disk::Scan) -> Vec<PathBuf> {
     all.into_iter().collect()
 }
 
-/// `name` as a file name in the style of the files beside it: kebab-case among kebab-case names, snake_case among snake_case
-/// ones, as typed otherwise, so a team's folder keeps one style.
-pub(in crate::app) fn styled_name(name: &str, ext: &str, siblings: &[String]) -> String {
-    let stems: Vec<&str> = siblings.iter().map(|s| s.rsplit_once('.').map_or(s.as_str(), |(a, _)| a)).collect();
-    let style = |sep: char, other: char| stems.iter().filter(|s| s.contains(sep) && !s.contains(' ') && !s.contains(other) && **s == s.to_lowercase()).count();
-    let (kebab, snake) = (style('-', '_'), style('_', '-'));
-    let words = || name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>();
-    let styled = if kebab * 2 > stems.len() {
-        words().join("-")
-    } else if snake * 2 > stems.len() {
-        words().join("_")
-    } else {
-        name.to_string()
-    };
-    disk::file_name(if styled.is_empty() { name } else { &styled }, ext)
-}
-
 /// A name for a new script from the comment it starts with, such as "revenue per month" from "-- revenue per month".
 pub(in crate::app) fn comment_name(body: &str) -> Option<String> {
     let first = body.lines().map(str::trim).find(|l| !l.is_empty())?;
     let text = ["--", "//", "/*", "#"].iter().find_map(|m| first.strip_prefix(m))?;
     let text = text.trim().trim_end_matches("*/").trim().trim_start_matches('*').trim();
     (!text.is_empty()).then(|| text.chars().take(60).collect::<String>().trim().to_string())
-}
-
-/// The script a save would replace: same name, folder, kind and target. A filter or pipeline belongs to a collection, a SQL
-/// or Shell script to its connection only, since it runs on whichever database the tab has.
-pub(in crate::app) fn same_place(lib: &Library, f: &SaveForm, name: &str, folder: Option<u64>) -> Option<usize> {
-    lib.scripts.iter().position(|s| {
-        s.name == name && s.folder == folder && s.kind == f.kind && s.conn == f.conn && (matches!(f.kind.as_str(), "sql" | "shell") || (s.db == f.db && s.coll == f.coll))
-    })
 }
 
 impl App {
@@ -95,122 +71,6 @@ impl App {
         self.modal = Some(Modal::SaveScript(Box::new(form)));
     }
 
-    /// Writes the script the dialog describes: a new one, or the one of the same name in the same folder, replaced. The tab
-    /// is bound to it, so the next Cmd+S writes back without asking.
-    fn commit_save(&mut self, f: &SaveForm) {
-        if let Some(link) = f.link {
-            return self.commit_save_linked(f, link);
-        }
-        let name = f.name.trim().to_string();
-        let mut folder = f.folder;
-        if let Some(n) = f.new_folder.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            folder = Some(match self.core.library.folders.iter().find(|x| crate::library::tree::live_parent(&self.core.library, x.parent).is_none() && x.name == n) {
-                Some(x) => x.id,
-                None => {
-                    let id = self.core.library.next_id();
-                    self.core.library.folders.push(crate::library::Folder { id, name: n.to_string(), parent: None });
-                    id
-                }
-            });
-        }
-        let mut replaced = None;
-        let id = match same_place(&self.core.library, f, &name, folder) {
-            Some(i) => {
-                // Kept for the toast's Undo, since the old text is otherwise gone.
-                replaced = Some(self.core.library.scripts[i].clone());
-                let s = &mut self.core.library.scripts[i];
-                (s.body, s.sort, s.project, s.db, s.schema, s.updated) = (f.body.clone(), f.sort.clone(), f.project.clone(), f.db.clone(), f.schema.clone(), crate::library::now_secs());
-                s.id
-            }
-            None => {
-                let id = self.core.library.next_id();
-                self.core.library.scripts.push(Script {
-                    id,
-                    name: name.clone(),
-                    kind: f.kind.clone(),
-                    body: f.body.clone(),
-                    sort: f.sort.clone(),
-                    project: f.project.clone(),
-                    conn: f.conn,
-                    db: f.db.clone(),
-                    schema: f.schema.clone(),
-                    coll: f.coll.clone(),
-                    folder,
-                    updated: crate::library::now_secs(),
-                    ..Default::default()
-                });
-                id
-            }
-        };
-        self.core.lib_ui.last_folder = folder;
-        match f.view.filter(|v| self.t().is_some_and(|t| t.view == *v)) {
-            Some(v) => self.bind_script(ScriptRef::Saved(id), v, f.body.clone()),
-            None => {
-                self.core.library.push_recent(ScriptRef::Saved(id));
-                self.save_library();
-            }
-        }
-        match replaced {
-            Some(old) => self.toast_restore(format!("Replaced \"{name}\" in the library"), crate::app::restore::Restore::Script(old)),
-            None => self.ok(format!("Saved \"{name}\" to the library")),
-        }
-        let tt = TabText { kind: if f.kind == "sql" { "sql" } else { "" }, body: f.body.clone(), sort: String::new(), project: String::new(), view: f.view.unwrap_or(View::Sql), db: String::new(), schema: String::new(), coll: String::new() };
-        self.warn_plain_password(&tt);
-    }
-
-    /// Writes the script as a file in a linked folder: the text as it is, never with a header added, or the JSON shape for a
-    /// filter or pipeline. A file of that name is replaced. The tab is bound to it, so the next Cmd+S writes it again.
-    fn commit_save_linked(&mut self, f: &SaveForm, link: u64) {
-        let Some(l) = self.core.library.links.iter().find(|l| l.id == link).cloned() else { return self.warn("That folder is no longer linked.") };
-        if self.core.demo {
-            return self.warn("The demo does not write files.");
-        }
-        if self.core.link_missing(link) {
-            return self.warn(super::panel::MISSING);
-        }
-        let ext = kind_ext(&f.kind);
-        if !l.exts.iter().any(|e| e == ext) {
-            return self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
-        }
-        let file = self.file_for(f, f.name.trim());
-        let rel = f.dir.join(&file);
-        let Some(path) = self.core.library.link_join(link, &rel) else { return self.warn("That folder is outside the linked folder.") };
-        let (root, sub) = (l.path.clone(), f.dir.clone());
-        let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
-        let (kind, body, sort, project) = (f.kind.clone(), f.body.clone(), f.sort.clone(), f.project.clone());
-        let place = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
-        let password = f.kind == "sql" && !db::redact_sql(&f.body).1.is_empty();
-        let uid = self.t().map_or(0, |t| t.uid);
-        let job = Job::SaveNew { uid, link, rel: rel.clone(), view: f.view, body: f.body.clone(), place, password };
-        // The old file is read, the new one written and listed on the worker; the tab is bound when it is back.
-        self.core.run_job(job, move || {
-            let was = std::fs::read(&path).ok();
-            let old = was.as_deref().map(|b| String::from_utf8_lossy(b).into_owned());
-            let bytes = match file_bytes(&kind, &body, &sort, &project, target, old.as_deref()) {
-                Ok(b) => b,
-                Err(e) => return FileOut::Saved(SaveOut::Refused(format!("Not saved: {e}"))),
-            };
-            if let Err(e) = disk::dir_below(&root, &sub).and_then(|_| disk::write_file(&path, &bytes)) {
-                return FileOut::Saved(SaveOut::Failed(format!("Could not save {}: {e}", path.display())));
-            }
-            match disk::entry_of(&root, &rel) {
-                Some(e) => FileOut::Made(e, was.map(|w| (w, bytes))),
-                None => FileOut::Saved(SaveOut::Failed(format!("{} was written but cannot be read back", path.display()))),
-            }
-        });
-    }
-
-    /// The file a linked save writes: the name typed in the File row, else the script's name in the style of its folder.
-    fn file_for(&self, f: &SaveForm, name: &str) -> String {
-        let typed = f.file.trim();
-        if typed.is_empty() { self.styled_file(f, name, kind_ext(&f.kind)) } else { disk::file_name(typed, kind_ext(&f.kind)) }
-    }
-
-    fn styled_file(&self, f: &SaveForm, name: &str, ext: &str) -> String {
-        let siblings: Vec<String> = f.link.and_then(|l| self.core.lib_ui.scans.get(&l)).map(|s| s.entries.iter().filter(|e| e.rel.parent().unwrap_or(std::path::Path::new("")) == f.dir).filter_map(|e| e.rel.file_name().map(|n| n.to_string_lossy().into_owned())).collect()).unwrap_or_default();
-        styled_name(name, ext, &siblings)
-    }
-
     pub(in crate::app) fn save_dialog(&mut self, ui: &mut egui::Ui, f: &mut SaveForm, keep: &mut bool) {
         ui.set_width(fit_width(ui.ctx(), 520.0));
         dialog_head(ui, &Head::new("Save to library").sub(f.head.clone()).glyph(paint_book));
@@ -244,7 +104,7 @@ impl App {
                 }
                 if let Some(l) = f.link.and_then(|id| self.core.library.links.iter().find(|l| l.id == id)) {
                     let ext = kind_ext(&f.kind);
-                    let default = self.styled_file(f, f.name.trim(), ext);
+                    let default = self.core.styled_file(f, f.name.trim(), ext);
                     rows.row("File", "", |ui| {
                         let r = ui.add(egui::TextEdit::singleline(&mut f.file).font(egui::TextStyle::Monospace).hint_text(default).desired_width(ui.available_width()));
                         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "File name"));
@@ -275,7 +135,7 @@ impl App {
             });
             let folder = if f.new_folder.is_some() { None } else { f.folder };
             if let Some(l) = f.link.and_then(|id| self.core.library.links.iter().find(|l| l.id == id)) {
-                let file = self.file_for(f, &name);
+                let file = self.core.file_for(f, &name);
                 // Looked up once per path, not every frame: on a network drive each look is a round trip.
                 let path = l.path.join(&f.dir).join(&file);
                 if f.exists.as_ref().is_none_or(|(p, _)| *p != path) {
@@ -302,7 +162,7 @@ impl App {
             foot_note(ui, &format!("Then {} saves straight back to it", super::keys_text(true, false, false, "S")));
         });
         if save {
-            self.commit_save(f);
+            self.exec(Action::Library(LibA::Save(Box::new(std::mem::take(f)))));
             *keep = false;
         }
     }

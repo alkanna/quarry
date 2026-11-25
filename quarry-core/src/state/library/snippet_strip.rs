@@ -6,7 +6,7 @@ use std::ops::Range;
 
 /// The text of a tab that holds values: the SQL Query editor, the Shell editor, or the Documents bar's filter, sort and
 /// projection, read as one.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Src {
     Query,
     Shell,

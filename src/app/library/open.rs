@@ -167,11 +167,7 @@ impl App {
 
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
-        if let Some(t) = self.tm() {
-            bind(t, Bound { r: r.clone(), view, base, disk: None, conflict: None });
-        }
-        self.core.library.push_recent(r);
-        self.save_library();
+        self.core.bind_script(r, view, base);
     }
 
     /// Opens the script `r` in a tab, the way `how` says. A plain open takes the current tab only when it is a clean one
@@ -568,9 +564,7 @@ impl App {
     /// A SQL script with a password in it is saved as typed, since one with the password cut out would not run, and the
     /// person is told where it now sits.
     pub(in crate::app) fn warn_plain_password(&mut self, tt: &TabText) {
-        if tt.kind == "sql" && !db::redact_sql(&tt.body).1.is_empty() {
-            self.warn("Saved, but the script holds a password in plain text in the library file.");
-        }
+        self.core.warn_plain_password(tt);
     }
 
     /// What shows above a script's editor: the conflict of a linked file changed on disk, and the notice of a script that

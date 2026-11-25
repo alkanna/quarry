@@ -353,11 +353,6 @@ fn centered<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 }
 
 impl App {
-    /// Where the proxy and gcloud are: Settings first, else where the browser found them, else the worker looks.
-    pub(super) fn cloud_tools(&self) -> crate::cloudsql::Tools {
-        self.core.cloud_tools()
-    }
-
     /// Opens the browser. `change` is for a connection form that is open: Use then fills it.
     pub(super) fn open_cloud_browser(&mut self, change: bool) {
         self.cloud_load(false);

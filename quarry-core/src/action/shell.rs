@@ -81,7 +81,10 @@ impl Core {
             }
             ShellA::Run { tab } | ShellA::Start { tab } | ShellA::Stop { tab } | ShellA::Code { tab, .. } | ShellA::Detach { tab, .. } | ShellA::Attach { tab, .. } | ShellA::Help { tab, .. } | ShellA::Queries { tab, .. } | ShellA::Raw { tab, .. } | ShellA::Page { tab, .. } | ShellA::Filled { tab, .. } => *tab,
         };
-        let Some(i) = self.tabs.iter().position(|t| t.uid == tab) else { return Ok(Reply::Done) };
+        let Some(i) = self.tabs.iter().position(|t| t.uid == tab) else {
+            // A write confirm left open while its tab closed must not run another tab's script.
+            return if matches!(a, ShellA::Run { .. } | ShellA::Start { .. }) { Err(self.refuse(super::tabs::TAB_GONE)) } else { Ok(Reply::Done) };
+        };
         let t = &mut self.tabs[i];
         match a {
             // A run reads the current tab throughout, as the editor, the library and the confirm call it there.
@@ -140,7 +143,8 @@ impl Core {
         let ops = shell_ops(&code, t.sql.is_some(), t.shell.attached.iter().filter_map(|a| self.conn(a.conn)).map(|c| c.meta.engine.is_sql()));
         // Same check as the original; on a read-only connection the runner refuses writes anyway.
         if !ops.is_empty() && self.shell_writable() {
-            self.ui_fx.push(UiFx::Open(Dialog::ShellWrite(ops)));
+            let tab = t.uid;
+            self.ui_fx.push(UiFx::Open(Dialog::ShellWrite { tab, ops }));
             Ok(Reply::Done)
         } else {
             self.start_shell()

@@ -44,6 +44,7 @@ pub mod docs;
 pub mod undo;
 pub mod indexes;
 pub mod aggregate;
+pub mod lib_dialogs;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -153,8 +154,8 @@ pub enum Dialog {
     SqlPassword(Box<crate::state::sql::users::PwForm>),
     /// A confirmation that asks for a name to be typed.
     Typed { title: String, expect: String, action: crate::state::Danger },
-    /// The Shell's confirm before a script with these possibly destructive words runs.
-    ShellWrite(Vec<String>),
+    /// The Shell's confirm before the script of tab `tab` runs, with these possibly destructive words.
+    ShellWrite { tab: u64, ops: Vec<String> },
     /// MongoDB's New database or New collection dialog.
     MongoNewColl(Box<crate::state::mongo_create::MongoNewColl>),
     Settings,

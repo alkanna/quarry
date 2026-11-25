@@ -5,6 +5,7 @@ use super::*;
 use crate::app::sql::create::plural;
 use crate::library::{Link, disk, format};
 use db::sql::Engine;
+use quarry_core::action::{Action, LibA};
 pub(crate) use quarry_core::state::library::link_dialog::*;
 
 /// How long the path must rest before it is scanned.
@@ -357,19 +358,8 @@ impl App {
         });
         if save {
             let name = if f.name.trim().is_empty() { folder_name(&dir) } else { f.name.trim().to_string() };
-            let id = f.edit.unwrap_or_else(|| self.core.library.next_id());
-            let link = Link { id, path: dir, name: name.clone(), on: f.on.clone(), conns: if f.on == "conns" { f.conns.clone() } else { Vec::new() }, engine: if f.on == "engine" { format::engine_key(f.engine).into() } else { String::new() }, exts: f.exts(), follow: f.follow };
-            match self.core.library.links.iter_mut().find(|l| l.id == id) {
-                Some(l) => *l = link,
-                None => self.core.library.links.push(link),
-            }
-            self.save_library();
-            // A folder that moved is read from scratch: the old scan said it was missing.
-            if f.locate {
-                self.core.lib_ui.scans.remove(&id);
-            }
-            self.core.lib_ui.rescan.insert(id);
-            self.ok(if f.locate { format!("{name} found.") } else if edit { format!("{name} updated.") } else { format!("Linked {name}.") });
+            let link = Link { id: 0, path: dir, name, on: f.on.clone(), conns: if f.on == "conns" { f.conns.clone() } else { Vec::new() }, engine: if f.on == "engine" { format::engine_key(f.engine).into() } else { String::new() }, exts: f.exts(), follow: f.follow };
+            self.exec(Action::Library(LibA::SaveLink { edit: f.edit, locate: f.locate, link }));
             *keep = false;
         }
     }

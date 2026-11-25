@@ -319,7 +319,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     // A Shell script runs read-only, without the write confirmation.
     let id = add(ui.h.state_mut(), "shell", 1, "Clean", "async function run() {\n  return await orders.deleteMany({ a: 1 });\n}", "shop", "");
     open(&mut ui, id, How::Run);
-    assert!(!matches!(ui.app().modal, Some(Modal::ShellWrite(_))));
+    assert!(!matches!(ui.app().modal, Some(Modal::ShellWrite { .. })));
     assert!(ui.said("the shell needs a real connection"), "{}", ui.app().last_problem());
 }
 
@@ -351,7 +351,7 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     assert!(ui.app().t().is_some_and(|t| t.view == View::Shell && t.shell.code.contains("deleteMany")));
     assert!(ui.app().modal.is_none(), "the Shell asked before the person ran anything");
     ui.click("Run all");
-    assert!(matches!(ui.app().modal, Some(Modal::ShellWrite(_))), "Run all skipped the Shell's write confirmation");
+    assert!(matches!(ui.app().modal, Some(Modal::ShellWrite { .. })), "Run all skipped the Shell's write confirmation");
 }
 
 #[test]

@@ -51,6 +51,7 @@ pub(super) fn conn_actions() -> Vec<Action> {
     all.push(Action::Conn(ConnA::Switch { conn: 1 }));
     all.push(Action::Conn(ConnA::Save { meta: ConnMeta { id: 1, name: "local".into(), ..Default::default() }, uri: Secret::new("mongodb://ada:pw@localhost".into()), secrets: vec![("ssh-password".into(), Secret::new("pw".into()))], group: Some(2) }));
     all.extend(groups.into_iter().map(|g| Action::Conn(ConnA::Group(g))));
+    all.push(Action::Conn(super::conn::test_of(&crate::state::ConnForm::default())));
     all
 }
 
@@ -328,4 +329,48 @@ fn save_adds_the_connection_to_its_group_and_connects() {
     assert!(!serde_json::to_string(&back).unwrap().contains("Zq9secret"));
     assert_eq!(core.execute(back).unwrap_err().kind, RefusalKind::Invalid);
     assert_eq!(core.conns[0].meta.name, "shop");
+}
+
+/// The form's Test carries the address and every password as Secrets: none shows in Debug or JSON, and one read back
+/// from JSON tests nothing.
+#[test]
+fn a_test_never_shows_its_passwords() {
+    use crate::state::ConnForm;
+    let mut pg = ConnForm { engine: Engine::Postgres, ssh_on: true, ssh_pwd: "Ssh9pw".into(), ssh_pass: "Ssh9phrase".into(), pg_key_pass: "Key9phrase".into(), ..Default::default() };
+    pg.addr.scheme = "postgres".into();
+    (pg.addr.host, pg.addr.user, pg.addr.password) = ("db1".into(), "ada".into(), "Addr9pw".into());
+    let mongo = ConnForm { uri: "mongodb://ada:Uri9pw@db1:27017".into(), proxy_on: true, proxy: crate::db::Proxy { host: "socks".into(), ..Default::default() }, proxy_pwd: "Proxy9pw".into(), ..Default::default() };
+    let words = ["Ssh9pw", "Ssh9phrase", "Key9phrase", "Addr9pw", "Uri9pw", "Proxy9pw"];
+    for f in [&pg, &mongo] {
+        let a = Action::Conn(super::conn::test_of(f));
+        let (debug, json) = (format!("{a:?}"), serde_json::to_string(&a).unwrap());
+        for w in words {
+            assert!(!debug.contains(w) && !json.contains(w), "{w} shows in {debug} or {json}");
+        }
+        let mut core = Core::for_test();
+        assert_eq!(core.execute(serde_json::from_str(&json).unwrap()).unwrap_err().kind, RefusalKind::Invalid);
+        assert!(core.test_started.is_none(), "a refused test starts nothing");
+    }
+    // What the worker gets is what the form's own network settings say.
+    let ConnA::Test { ssh_pwd, ssh_pass, key_pass, proxy, .. } = super::conn::test_of(&pg) else { panic!() };
+    assert_eq!((ssh_pwd.expose(), ssh_pass.expose(), key_pass.expose(), proxy.is_none()), (Some("Ssh9pw"), Some("Ssh9phrase"), Some("Key9phrase"), true));
+    let ConnA::Test { uri, proxy_pwd, proxy, ssh, .. } = super::conn::test_of(&mongo) else { panic!() };
+    assert_eq!((uri.expose(), proxy_pwd.expose(), ssh.is_none()), (Some("mongodb://ada:Uri9pw@db1:27017"), Some("Proxy9pw"), true));
+    assert_eq!(proxy.unwrap().password, None);
+}
+
+/// Test starts a request the form waits for, and its answer says how long it took.
+#[test]
+fn a_test_answers_with_the_request_it_started() {
+    let mut core = Core::for_test();
+    core.conn_test = Some((1, Ok("old".into())));
+    // An address that does not parse fails on the worker without reaching the network.
+    let f = crate::state::ConnForm { uri: "not an address".into(), ..Default::default() };
+    let Ok(Reply::Pending(req)) = core.execute(Action::Conn(super::conn::test_of(&f))) else { panic!("the test did not start") };
+    assert_eq!(req, core.req);
+    assert!(core.conn_test.is_none() && core.test_started.is_some());
+    core.inject(Msg::Tested { req, res: Ok("Connected: 3 databases.".into()), info: None });
+    let (r, res) = core.conn_test.as_ref().unwrap();
+    assert_eq!(*r, req);
+    assert!(res.as_ref().unwrap().ends_with(" ms"));
 }

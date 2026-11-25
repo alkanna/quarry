@@ -340,6 +340,11 @@ fn all_actions() -> Vec<Action> {
         LibA::ScriptToLink { id: 1, link: 1, dir: "".into() },
         LibA::MoveFile { link: 1, rel: rel(), dir: "old".into() },
         LibA::FileToQuarry { link: 1, rel: rel(), at: DropAt::Into(3) },
+        LibA::Save(Box::new(crate::state::library::save_dialog::SaveForm { name: "a".into(), kind: "sql".into(), body: "SELECT 1".into(), ..Default::default() })),
+        LibA::SaveLink { edit: Some(1), locate: true, link: crate::library::Link { name: "q".into(), ..Default::default() } },
+        LibA::SnippetValues { id: 1, values: [("n".to_string(), "3".to_string())].into() },
+        LibA::SnippetDefault { id: 1, conn: 1, db: "shop".into(), schema: String::new() },
+        LibA::MakeValue { tab: 1, src: crate::state::library::snippet_strip::Src::Query, range: 0..1, literal: "1".into(), placeholder: "{{n:int=1}}".into() },
     ];
     all.extend(l.into_iter().map(Action::Library));
     all.extend(super::sql_tests::sql_actions().into_iter().map(Action::Sql));
@@ -440,7 +445,7 @@ fn variant(a: &Action) -> String {
             ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Stop | ToolsA::Close => {}
         },
         Action::Conn(c) => match c {
-            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Save { .. } => {}
+            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Save { .. } | ConnA::Test { .. } => {}
             ConnA::Group(g) => match g {
                 GroupA::Toggle { .. } | GroupA::FoldAll | GroupA::Move { .. } | GroupA::New { .. } | GroupA::Rename { .. } | GroupA::Color { .. } | GroupA::ConnectAll { .. } | GroupA::DisconnectAll { .. } | GroupA::RailOpen { .. } | GroupA::Unfold { .. } | GroupA::Save { .. } | GroupA::Delete { .. } | GroupA::Drop(_) | GroupA::RailOrder { .. } => {}
             },
@@ -459,7 +464,7 @@ fn variant(a: &Action) -> String {
             PrefsA::Open(_) | PrefsA::Cat(_) | PrefsA::Set(_) | PrefsA::Zoom(_) => {}
         },
         Action::Library(l) => match l {
-            LibA::CancelPending | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } => {}
+            LibA::CancelPending | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } | LibA::Save(_) | LibA::SaveLink { .. } | LibA::SnippetValues { .. } | LibA::SnippetDefault { .. } | LibA::MakeValue { .. } => {}
         },
         Action::Sql(a) => super::sql_tests::sql_variant(a),
         Action::Structure(a) => super::sql_tests::struct_variant(a),

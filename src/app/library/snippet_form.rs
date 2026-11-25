@@ -5,6 +5,7 @@ use super::*;
 use crate::library::snippet::{self, Ty};
 use super::snippet_strip::Src;
 use crate::library::ScriptRef;
+use quarry_core::action::{Action, LibA};
 pub(crate) use quarry_core::state::library::snippet_form::*;
 pub(crate) use quarry_core::state::library::snippet_form::Stage;
 
@@ -336,14 +337,14 @@ impl App {
                 }
                 Do::MakeDefault => {
                     if let Some(id) = f.conn {
-                        self.set_snippet_default(f.id, id, &f.db, &f.schema);
+                        self.exec(Action::Library(LibA::SnippetDefault { id: f.id, conn: id, db: f.db.clone(), schema: f.schema.clone() }));
                     }
                 }
                 Do::Edit => return self.open_script(&ScriptRef::Saved(f.id), crate::app::library::open::How::Here),
                 Do::Unlock => {
                     let Some(conn) = f.conn else { continue };
                     // Kept now, so "Stay read-only", which drops the form, does not drop what was typed.
-                    self.core.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    self.exec(Action::Library(LibA::SnippetValues { id: f.id, values: f.values.clone() }));
                     let mut back = f;
                     back.stage = Stage::Confirm;
                     self.ask_unlock_on(conn, move |a| a.modal = Some(Modal::Snippet(back)));
@@ -352,7 +353,7 @@ impl App {
                 Do::Run if writes && f.stage == Stage::Fill => f.stage = Stage::Confirm,
                 Do::Run => {
                     let (Ok(text), Some(conn)) = (filled.clone(), f.conn) else { continue };
-                    self.core.lib_ui.snippet_values.insert(f.id, f.values.clone());
+                    self.exec(Action::Library(LibA::SnippetValues { id: f.id, values: f.values.clone() }));
                     // The database is worked out now that the connection is ready, as opening a script does.
                     if f.db.is_empty() {
                         f.db = self.default_db(conn);
@@ -368,14 +369,6 @@ impl App {
         if self.modal.is_none() {
             self.modal = Some(Modal::Snippet(f));
         }
-    }
-
-    /// Make default, from the form or a snippet's tab: the script runs on `conn` and `db` from Cmd+K from now on.
-    pub(in crate::app) fn set_snippet_default(&mut self, id: u64, conn: u64, db: &str, schema: &str) {
-        crate::library::ops::set_target(&mut self.core.library, id, conn, db, schema);
-        self.save_library();
-        let at = if db.is_empty() { self.conn_name(conn) } else { format!("{} \u{b7} {db}", self.conn_name(conn)) };
-        self.ok(format!("Runs on {at} by default"));
     }
 
     /// What the form runs, filled in: the statement or script, or for a filter its filter, sort and projection one per line.
