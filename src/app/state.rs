@@ -23,47 +23,31 @@ impl App {
     }
 
     pub(super) fn tm(&mut self) -> Option<&mut Tab> {
-        self.core.tabs.get_mut(self.core.cur)
+        self.core.tm()
     }
 
     pub(super) fn sel_is_view(&self) -> bool {
-        self.t().is_some_and(|t| self.core.views.has(t.sel.conn, &t.sel.nskey(), &t.sel.coll))
+        self.core.sel_is_view()
     }
 
     pub(super) fn sel_writable(&self) -> bool {
-        if self.sel_is_view() {
-            return false;
-        }
-        self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
+        self.core.sel_writable()
     }
 
     pub(super) fn timeout(&self) -> Duration {
-        Duration::from_millis(self.core.prefs.timeout_ms)
+        self.core.timeout()
     }
 
     pub(super) fn target_for(&self, s: &Sel) -> Option<Target> {
-        let client = self.conn(s.conn)?.client.clone()?;
-        Some(Target { client, db: s.db.clone(), coll: s.coll.clone(), timeout: self.timeout() })
+        self.core.target_for(s)
     }
 
     pub(super) fn target(&self) -> Option<Target> {
-        self.target_for(&self.t()?.sel)
+        self.core.target()
     }
 
-    /// The single gate every write goes through.
     pub(super) fn writable_target(&mut self) -> Option<(u64, Target)> {
-        let conn = self.t()?.sel.conn;
-        if !self.sel_writable() {
-            self.warn_ro();
-            return None;
-        }
-        match self.target() {
-            Some(t) => Some((conn, t)),
-            None => {
-                self.warn_offline();
-                None
-            }
-        }
+        self.core.writable_target()
     }
 
     pub(super) fn ask_unlock(&mut self) {

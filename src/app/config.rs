@@ -46,12 +46,7 @@ impl PrefsLook for UiPrefs {
 
 impl App {
     pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
-        if self.core.ephemeral {
-            return;
-        }
-        if let Err(err) = write_atomic(&config_dir(), file, &bytes) {
-            self.err(format!("Could not save {file}: {err}"));
-        }
+        self.core.write_config(file, bytes)
     }
 
     pub(super) fn save_conns(&mut self) {
@@ -111,8 +106,7 @@ impl App {
     }
 
     pub(super) fn save_prefs(&mut self) {
-        let b = serde_json::to_vec_pretty(&self.core.prefs).unwrap_or_default();
-        self.write_config("ui.json", b);
+        self.core.save_prefs()
     }
 }
 

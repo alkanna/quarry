@@ -742,9 +742,8 @@ impl App {
 }
 
 impl App {
-    /// Documents per page, from the setting; a hand-edited value is kept in range.
     pub(super) fn page_size(&self) -> u64 {
-        self.core.prefs.page_size.clamp(1, db::PAGE_SIZE_MAX)
+        self.core.page_size()
     }
 
     pub(super) fn reload(&mut self) {

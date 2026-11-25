@@ -153,6 +153,11 @@ impl Core {
         Refusal { kind: RefusalKind::ReadOnly { conn }, msg: note.map_or_else(|| self.last_warning(), str::to_string) }
     }
 
+    /// Writes are locked on `conn`, for a site that opens Unlock without a toast first.
+    pub fn refuse_ro_quiet(&mut self, conn: u64) -> Refusal {
+        Refusal { kind: RefusalKind::ReadOnly { conn }, msg: String::new() }
+    }
+
     pub fn refuse_offline(&mut self, conn: u64) -> Refusal {
         self.warn_offline_on(Some(conn));
         Refusal { kind: RefusalKind::Offline, msg: self.last_warning() }

@@ -3,7 +3,7 @@
 
 use super::*;
 use db::{ErrKind, Fix};
-use quarry_core::core::notify::{fix_label, place_of, raised};
+use quarry_core::core::notify::{fix_label, raised};
 use std::time::Instant;
 pub(crate) use quarry_core::state::errors::*;
 
@@ -196,7 +196,7 @@ impl App {
     /// A failure of work the user did not start, like listing a database's collections on
     /// connect: it goes to the list with its own connection and place, without a toast.
     pub(super) fn err_quiet(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String) {
-        self.log_err(raw, conn, sel, place, "");
+        self.core.err_quiet(raw, conn, sel, place)
     }
 
     /// A connection that could not open. Its card explains it when on screen, else a toast does.
@@ -210,22 +210,11 @@ impl App {
 
     /// The read for `view` in tab `i` failed: the view shows the panel until its next read works.
     pub(super) fn fail_view(&mut self, i: usize, view: View, raw: String, what: &str) {
-        let Some(t) = self.core.tabs.get(i) else { return };
-        let (conn, sel) = (t.sel.conn, t.sel.clone());
-        let place = place_of(view, &sel);
-        let e = self.log_err(raw, Some(conn), Some(sel), place, what);
-        // Each view keeps its own: a background index load must not hide why the documents failed.
-        let t = &mut self.core.tabs[i];
-        t.clear_failed(view);
-        t.failed.push(Failed { view, e });
+        self.core.fail_view(i, view, raw, what)
     }
 
-    /// A success note with Undo when the change can be undone.
     pub(super) fn toast_ok(&mut self, s: String, undo_at: Option<Instant>) {
-        let acts = undo_at.map(|at| vec![("Undo".to_string(), Act::Undo(at))]).unwrap_or_default();
-        self.core.toasts.retain(|t| t.tone != Tone::Ok);
-        self.core.err_seq += 1;
-        self.core.toasts.push(Toast { id: self.core.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+        self.core.toast_ok(s, undo_at)
     }
 
     /// A note with buttons that fades like a success, such as a script waiting for its connection with Cancel.

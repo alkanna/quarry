@@ -2,10 +2,10 @@
 //! The egui app draws them; wording comes from `db::explain`.
 
 use super::Core;
-use crate::db::{self, Fix, UndoAction};
-use crate::state::errors::{Act, ErrEntry, Toast, Tone};
+use crate::db::{self, Fix, Target, UndoAction};
+use crate::state::errors::{Act, ErrEntry, Failed, Toast, Tone};
 use crate::state::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Errors kept for the status bar list; older ones drop off.
 pub const ERRORS_MAX: usize = 200;
@@ -196,5 +196,94 @@ impl Core {
 
     pub fn warn_settings(&mut self, s: impl Into<String>) {
         self.warn_act(s, Some(("Open Settings", Act::Settings)));
+    }
+
+    pub fn tm(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.cur)
+    }
+
+    pub fn sel_is_view(&self) -> bool {
+        self.t().is_some_and(|t| self.views.has(t.sel.conn, &t.sel.nskey(), &t.sel.coll))
+    }
+
+    pub fn sel_writable(&self) -> bool {
+        if self.sel_is_view() {
+            return false;
+        }
+        self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
+    }
+
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.prefs.timeout_ms)
+    }
+
+    pub fn target_for(&self, s: &Sel) -> Option<Target> {
+        let client = self.conn(s.conn)?.client.clone()?;
+        Some(Target { client, db: s.db.clone(), coll: s.coll.clone(), timeout: self.timeout() })
+    }
+
+    pub fn target(&self) -> Option<Target> {
+        self.target_for(&self.t()?.sel)
+    }
+
+    /// The single gate every write goes through.
+    pub fn writable_target(&mut self) -> Option<(u64, Target)> {
+        let conn = self.t()?.sel.conn;
+        if !self.sel_writable() {
+            self.warn_ro();
+            return None;
+        }
+        match self.target() {
+            Some(t) => Some((conn, t)),
+            None => {
+                self.warn_offline();
+                None
+            }
+        }
+    }
+
+    /// Documents per page, from the setting; a hand-edited value is kept in range.
+    pub fn page_size(&self) -> u64 {
+        self.prefs.page_size.clamp(1, db::PAGE_SIZE_MAX)
+    }
+
+    pub fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
+        if self.ephemeral {
+            return;
+        }
+        if let Err(err) = crate::state::config::write_atomic(&crate::paths::config_dir(), file, &bytes) {
+            self.err(format!("Could not save {file}: {err}"));
+        }
+    }
+
+    pub fn save_prefs(&mut self) {
+        let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
+        self.write_config("ui.json", b);
+    }
+
+    /// A failure of work the user did not start, like listing a database's collections on
+    /// connect: it goes to the list with its own connection and place, without a toast.
+    pub fn err_quiet(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String) {
+        self.log_err(raw, conn, sel, place, "");
+    }
+
+    /// The read for `view` in tab `i` failed: the view shows the panel until its next read works.
+    pub fn fail_view(&mut self, i: usize, view: View, raw: String, what: &str) {
+        let Some(t) = self.tabs.get(i) else { return };
+        let (conn, sel) = (t.sel.conn, t.sel.clone());
+        let place = place_of(view, &sel);
+        let e = self.log_err(raw, Some(conn), Some(sel), place, what);
+        // Each view keeps its own: a background index load must not hide why the documents failed.
+        let t = &mut self.tabs[i];
+        t.clear_failed(view);
+        t.failed.push(Failed { view, e });
+    }
+
+    /// A success note with Undo when the change can be undone.
+    pub fn toast_ok(&mut self, s: String, undo_at: Option<Instant>) {
+        let acts = undo_at.map(|at| vec![("Undo".to_string(), Act::Undo(at))]).unwrap_or_default();
+        self.toasts.retain(|t| t.tone != Tone::Ok);
+        self.err_seq += 1;
+        self.toasts.push(Toast { id: self.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
     }
 }
