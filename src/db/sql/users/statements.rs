@@ -1,5 +1,5 @@
 //! The GRANT, REVOKE, CREATE USER, DROP USER, ALTER USER, password and role statements, and the
-//! checks that run before any of them is built.
+//! checks that run before any of them is built, with the account settings they read (Settings, Caps, Loaded, AccountPlan).
 
 use super::*;
 
