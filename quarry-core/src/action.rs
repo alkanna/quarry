@@ -28,14 +28,18 @@ pub mod roles;
 pub mod server;
 pub mod users;
 pub mod sql;
+pub mod sql_server;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
 mod users_tests;
+#[cfg(test)]
+mod sql_server_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
 pub use users::{MongoUsersA, SqlUsersA, UsersA};
+pub use sql_server::{PgServerA, SqlServerA};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -188,6 +192,7 @@ impl Core {
             Msg::PgRoles { ans: Answer::DropInfo(_), .. } => false,
             Msg::PgRoles { .. } | Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } => true,
             Msg::Command { tag, .. } => matches!(tag.as_str(), "users" | "users-self" | "roles") || tag.starts_with("server:"),
+            Msg::SqlServer { .. } | Msg::PgServer { .. } => true,
             _ => false,
         }
     }
@@ -201,6 +206,8 @@ impl Core {
             Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
             Msg::Command { tag, res } if tag.starts_with("server:") => self.server_reply(&tag, res),
             Msg::Command { tag, res } => self.mongo_users_reply(&tag, res),
+            Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
+            Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
             _ => {}
         }
     }

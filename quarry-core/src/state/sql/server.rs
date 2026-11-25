@@ -18,7 +18,7 @@ pub struct Confirm {
     pub at: f64,
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SqlServerTab {
     Overview,
     Variables,
@@ -61,8 +61,6 @@ pub struct SqlServerWin {
     /// Quarry's own sessions on this server by thread id, with what each one is, read each frame. The list
     /// itself marks only the connection that ran SHOW PROCESSLIST.
     pub own: HashMap<u64, String>,
-    /// Unlock was clicked in the note above the list.
-    pub unlock: bool,
     pub global: bool,
     pub var_filter: String,
     pub vars: Option<db::Res<Variables>>,

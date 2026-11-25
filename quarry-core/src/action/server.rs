@@ -12,6 +12,8 @@ use std::time::Instant;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerA {
     Mongo(MongoServerA),
+    Sql(super::SqlServerA),
+    Pg(super::PgServerA),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -47,6 +49,8 @@ impl Core {
     pub(super) fn server(&mut self, a: ServerA) -> Result<Reply, Refusal> {
         match a {
             ServerA::Mongo(a) => self.mongo_server(a),
+            ServerA::Sql(a) => self.sql_server(a),
+            ServerA::Pg(a) => self.pg_server(a),
         }
     }
 

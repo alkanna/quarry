@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use crate::db;
 
-#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PgTab {
     #[default]
     Overview,
@@ -72,7 +72,6 @@ pub struct PgServerWin {
     pub writable: bool,
     /// Quarry's sessions that Stop ends (a Query run, an export, an import, the shell's relays) by pid, read each frame.
     pub own: HashMap<u64, String>,
-    pub unlock: bool,
 }
 
 impl PgServerWin {

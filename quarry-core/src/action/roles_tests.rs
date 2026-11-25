@@ -260,6 +260,40 @@ fn all_actions() -> Vec<Action> {
     all.extend(u.into_iter().map(|a| Action::Users(UsersA::Sql(a))));
     all.extend(m.into_iter().map(|a| Action::Users(UsersA::Mongo(a))));
     all.extend(s.into_iter().map(|a| Action::Server(ServerA::Mongo(a))));
+    let q = [
+        SqlServerA::Open { conn: 1 },
+        SqlServerA::Tab(crate::state::sql::server::SqlServerTab::Locks),
+        SqlServerA::Refresh,
+        SqlServerA::Auto(false),
+        SqlServerA::HideSleeping(false),
+        SqlServerA::Select(7),
+        SqlServerA::ArmKill { id: 7, whole: true, at: 1.5 },
+        SqlServerA::Disarm,
+        SqlServerA::Kill { id: 7 },
+        SqlServerA::Global(true),
+        SqlServerA::StGroup(crate::db::sql::server::StatusGroup::InnoDb),
+        SqlServerA::StAuto(false),
+        SqlServerA::Unlock,
+        SqlServerA::Close,
+    ];
+    all.extend(q.into_iter().map(|a| Action::Server(ServerA::Sql(a))));
+    let p = [
+        PgServerA::Open { conn: 1 },
+        PgServerA::Tab(crate::state::sql::pg_server::PgTab::Counters),
+        PgServerA::Refresh,
+        PgServerA::Auto(false),
+        PgServerA::HideIdle(false),
+        PgServerA::ChangedOnly(false),
+        PgServerA::Select(41),
+        PgServerA::Setting(Some("work_mem".into())),
+        PgServerA::ArmSignal { pid: 41, terminate: true, at: 1.5 },
+        PgServerA::Disarm,
+        PgServerA::Signal { pid: 41 },
+        PgServerA::FetchQuery { pid: 41 },
+        PgServerA::Unlock,
+        PgServerA::Close,
+    ];
+    all.extend(p.into_iter().map(|a| Action::Server(ServerA::Pg(a))));
     all
 }
 
@@ -278,6 +312,12 @@ fn variant(a: &Action) -> String {
         },
         Action::Server(ServerA::Mongo(s)) => match s {
             MongoServerA::Open { .. } | MongoServerA::Ops(_) | MongoServerA::Refresh | MongoServerA::AutoOps(_) | MongoServerA::ArmKill { .. } | MongoServerA::Disarm | MongoServerA::Kill { .. } | MongoServerA::Unlock | MongoServerA::Close => {}
+        },
+        Action::Server(ServerA::Sql(s)) => match s {
+            SqlServerA::Open { .. } | SqlServerA::Tab(_) | SqlServerA::Refresh | SqlServerA::Auto(_) | SqlServerA::HideSleeping(_) | SqlServerA::Select(_) | SqlServerA::ArmKill { .. } | SqlServerA::Disarm | SqlServerA::Kill { .. } | SqlServerA::Global(_) | SqlServerA::StGroup(_) | SqlServerA::StAuto(_) | SqlServerA::Unlock | SqlServerA::Close => {}
+        },
+        Action::Server(ServerA::Pg(s)) => match s {
+            PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Unlock | PgServerA::Close => {}
         },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")

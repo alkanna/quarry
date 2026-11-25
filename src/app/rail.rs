@@ -578,9 +578,9 @@ impl App {
     }
 
     pub(super) fn open_server(&mut self, conn: u64) {
-        match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
-            Some((db::sql::Engine::MySql, dialect, adv)) => self.core.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
-            Some((db::sql::Engine::Postgres, _, adv)) => self.core.pg_server = Some(PgServerWin::new(conn, db::sql::pg::server::set_by_quarry(&adv))),
+        match self.conn(conn).map(|c| c.meta.engine) {
+            Some(db::sql::Engine::MySql) => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Sql(quarry_core::action::SqlServerA::Open { conn }))),
+            Some(db::sql::Engine::Postgres) => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Pg(quarry_core::action::PgServerA::Open { conn }))),
             _ => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Mongo(quarry_core::action::MongoServerA::Open { conn }))),
         }
     }

@@ -61,8 +61,6 @@ impl App {
                 Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
-                Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
-                Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
                 Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
                 Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
@@ -83,6 +81,7 @@ impl App {
                 }
                 // Core::handles took these above.
                 Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } | Msg::PgRoles { .. } => {}
+                Msg::SqlServer { .. } | Msg::PgServer { .. } => {}
                 Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
