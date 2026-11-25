@@ -50,9 +50,7 @@ impl App {
     }
 
     pub(super) fn save_conns(&mut self) {
-        let metas: Vec<&ConnMeta> = self.core.conns.iter().map(|c| &c.meta).collect();
-        let b = serde_json::to_vec_pretty(&metas).unwrap_or_default();
-        self.write_config("connections.json", b);
+        self.core.save_conns();
     }
 
     pub(super) fn save_values(&mut self) {

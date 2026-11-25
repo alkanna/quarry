@@ -11,9 +11,7 @@ impl App {
                 continue;
             }
             match m {
-                Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
                 Msg::Agent(ev) => self.on_agent(ctx, ev),
-                Msg::SqlConnected { conn, attempt, res } => self.on_sql_connected(conn, attempt, res),
                 Msg::SqlCols { req, cols, pk, estimated, matched } => {
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
                         // The rules pick from table columns, which a grouped answer does not have.
@@ -82,6 +80,7 @@ impl App {
                 // Core::handles took these above.
                 Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } | Msg::PgRoles { .. } => {}
                 Msg::SqlServer { .. } | Msg::PgServer { .. } => {}
+                Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => {}
                 Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {
                     self.truncate_info_done(conn, &database, &schema, &table, &res);
@@ -93,22 +92,7 @@ impl App {
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
                 Msg::SqlFacts { conn, database, schema, table, column, res } => self.sql_facts_done(conn, database, schema, table, column, res),
                 Msg::SqlFilterCount { req, res } => self.sql_filter_counted(req, res),
-                Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
-                Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
-                Msg::Collections { conn, db, res } => match res {
-                    Ok((v, views)) => {
-                        self.core.side_err.remove(&(conn, db.clone()));
-                        self.core.views.set(conn, &db, views);
-                        if let Some(d) = self.core.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
-                            d.1 = Some(v);
-                        }
-                    }
-                    Err(e) => {
-                        self.core.side_err.insert((conn, db.clone()), e.clone());
-                        self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}"))
-                    }
-                },
                 Msg::Command { tag, res } => self.on_command(tag, res),
                 Msg::DbChanged { conn, db, copied, dropped, res } => self.on_db_changed(conn, db, copied, dropped, res),
                 Msg::IndexInfo { key, res } => match res {
@@ -231,16 +215,6 @@ impl App {
                 Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 Msg::LibScan { link, scan } => self.apply_scan(link, scan),
                 Msg::LibFile { job, out } => self.file_done(job, out),
-                Msg::Tested { req, res, info } => {
-                    // A SQL test already says how long it took; the others get the time measured here.
-                    let started = self.core.test_started.take();
-                    let res = res.map(|m| match started {
-                        Some(t) if !m.contains(" ms") => format!("{}  ·  {} ms", m.trim_end_matches('.'), t.elapsed().as_millis()),
-                        _ => m,
-                    });
-                    self.core.conn_test = Some((req, res));
-                    self.core.test_info = info.map(|i| (req, i));
-                }
                 Msg::Schema { req, res } => {
                     let Some(i) = self.core.tabs.iter().position(|t| t.schema.req == req) else { continue };
                     let t = &mut self.core.tabs[i];
@@ -264,116 +238,8 @@ impl App {
         }
     }
 
-    fn on_connected(&mut self, conn: u64, attempt: u64, res: db::Res<(mongodb::Client, Vec<String>, Option<crate::ssh::Tunnel>)>) {
-        // A connect the user stopped (Disconnect, removal) or replaced is dropped, and its tunnel with it.
-        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
-        match res {
-            Ok((client, dbs, tunnel)) => {
-                // Trust the SSH host key the first time; later a different key is refused.
-                let mut trusted = None;
-                if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) && sc.known_host.is_none() && !t.fingerprint.is_empty() {
-                    sc.known_host = Some(t.fingerprint.clone());
-                    trusted = Some(t.fingerprint.clone());
-                }
-                c.tunnel = tunnel.map(db::Way::Ssh);
-                // Load every database's collections up front so the list can show counts.
-                for d in &dbs {
-                    self.core.worker.collections(conn, client.clone(), d.clone());
-                }
-                // Version, replica set and host for the status bar.
-                self.core.worker.command(client.clone(), "admin".into(), doc! { "buildInfo": 1 }, &format!("srv-build:{conn}"));
-                self.core.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
-                c.client = Some(client);
-                c.status = Status::Ready;
-                c.forget_lists();
-                c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                self.core.pg_tables_asked.forget(conn, None, None);
-                let n = c.meta.name.clone();
-                self.ok(format!("Connected to {n} (read-only)"));
-                if let Some(fp) = trusted {
-                    self.save_conns();
-                    self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
-                }
-                let here = self.core.cur;
-                for i in 0..self.core.tabs.len() {
-                    if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
-                        self.core.cur = i;
-                        self.run_query();
-                    }
-                }
-                self.core.cur = here;
-
-            }
-            Err(e) => {
-                c.status = Status::Failed(e.clone());
-                self.err_conn(conn, e);
-            }
-        }
-    }
-
-    fn on_sql_connected(&mut self, conn: u64, attempt: u64, res: db::Res<(db::sql::Db, Vec<String>, Option<db::Way>)>) {
-        // Dropping a stopped or replaced connect's answer also stops its Cloud SQL proxy or SSH tunnel.
-        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { return };
-        match res {
-            Ok((sql, dbs, tunnel)) => {
-                let mut trusted = None;
-                if let (Some(db::Way::Ssh(t)), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) && sc.known_host.is_none() && !t.fingerprint.is_empty() {
-                    sc.known_host = Some(t.fingerprint.clone());
-                    trusted = Some(t.fingerprint.clone());
-                }
-                c.tunnel = tunnel;
-                // A server can hold hundreds of schemas, so only those on screen load now.
-                self.core.sql_asked.retain(|k| k.0 != conn);
-                let wanted: Vec<String> = dbs.iter().filter(|d| self.core.open_dbs.contains(&(conn, (*d).clone())) || self.core.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
-                let pg = sql.dialect == db::sql::Dialect::Postgres;
-                for d in wanted {
-                    self.core.sql_asked.insert((conn, d.clone()));
-                    // A PostgreSQL database lists its schemas first; the tables of the picked one follow.
-                    if pg {
-                        self.core.worker.sql_schemas(conn, sql.clone(), d);
-                    } else {
-                        self.core.worker.sql_tables(conn, sql.clone(), d);
-                    }
-                }
-                c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: match sql.dialect { db::sql::Dialect::MySql => "MySQL", db::sql::Dialect::MariaDb => "MariaDB", db::sql::Dialect::Postgres => "PostgreSQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
-                c.sql = Some(sql);
-                c.status = Status::Ready;
-                c.forget_lists();
-                c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                self.core.pg_tables_asked.forget(conn, None, None);
-                let n = c.meta.name.clone();
-                self.ok(format!("Connected to {n} (read-only)"));
-                if let Some(fp) = trusted {
-                    self.save_conns();
-                    self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
-                }
-                for i in 0..self.core.tabs.len() {
-                    if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
-                        self.reload_of(i);
-                    }
-                }
-            }
-            Err(e) => {
-                c.status = Status::Failed(e.clone());
-                self.err_conn(conn, e);
-            }
-        }
-    }
-
     fn on_command(&mut self, tag: String, res: db::Res<Document>) {
         match (tag.as_str(), res) {
-            (t, Ok(d)) if t.starts_with("srv-") => {
-                let (kind, id) = t.split_once(':').unwrap_or_default();
-                if let Some(c) = self.core.conns.iter_mut().find(|c| id.parse() == Ok(c.meta.id)) {
-                    if kind == "srv-build" {
-                        c.server.version = d.get_str("version").unwrap_or_default().to_string();
-                    } else {
-                        c.server.set_name = d.get_str("setName").unwrap_or_default().to_string();
-                        // The member answering, else the host from the connection string.
-                        c.server.host = d.get_str("me").map(str::to_string).unwrap_or_else(|_| host_of(&c.masked_uri));
-                    }
-                }
-            }
             (t, Ok(d)) if t.starts_with("tabstats\u{1f}") => {
                 let key: Vec<&str> = t.split('\u{1f}').skip(1).collect();
                 let n = |k: &str| match d.get(k) {
@@ -388,7 +254,7 @@ impl App {
             }
             ("shpg", Ok(d)) => self.shell_pg_listed(d),
             // Nice to have: a server that refuses these just shows less.
-            (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
+            (t, Err(_)) if t.starts_with("tabstats\u{1f}") => {}
             ("stats", Ok(d)) => {
                 let title = format!("Statistics of {}", d.get_str("collection").unwrap_or_default());
                 let mut lines = Vec::new();

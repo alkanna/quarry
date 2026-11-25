@@ -266,51 +266,24 @@ impl App {
                 self.show_sidebar();
             }
             PanelAct::Toggle(g) => {
-                if let Some(g) = self.core.groups.group_mut(g) {
-                    g.open = !g.open;
-                    fold::start(ctx, fold_id(g.id), g.open);
-                    self.save_groups();
+                if let Some(open) = self.core.groups.group(g).map(|g| !g.open) {
+                    fold::start(ctx, fold_id(g), open);
+                    self.exec(Action::Conn(ConnA::Group(GroupA::Toggle { group: g })));
                 }
             }
             PanelAct::FoldAll => {
-                // One press folds everything; with all folded already, the next one opens everything.
                 let any_open = self.core.groups.groups.iter().any(|g| g.open);
-                for g in &mut self.core.groups.groups {
-                    if g.open == any_open {
-                        fold::start(ctx, fold_id(g.id), !any_open);
-                    }
-                    g.open = !any_open;
+                for g in self.core.groups.groups.iter().filter(|g| g.open == any_open) {
+                    fold::start(ctx, fold_id(g.id), !any_open);
                 }
-                self.save_groups();
+                self.exec(Action::Conn(ConnA::Group(GroupA::FoldAll)));
             }
-            PanelAct::Move(c, to) => {
-                let all = self.conn_ids();
-                if self.core.groups.place(c, to, &all) {
-                    self.save_groups();
-                }
-            }
-            PanelAct::NewGroup(name) => {
-                let name = name.trim();
-                if !name.is_empty() {
-                    self.core.groups.new_group(name);
-                    self.save_groups();
-                }
-            }
-            PanelAct::Rename(g, name) => {
-                let name = name.trim();
-                if let Some(g) = self.core.groups.group_mut(g).filter(|_| !name.is_empty()) {
-                    g.name = name.into();
-                    self.save_groups();
-                }
-            }
-            PanelAct::Color(g, color) => {
-                if let Some(g) = self.core.groups.group_mut(g) {
-                    g.color = color.into();
-                    self.save_groups();
-                }
-            }
-            PanelAct::ConnectAll(g) => self.connect_group(g),
-            PanelAct::DisconnectAll(g) => self.disconnect_group(g),
+            PanelAct::Move(conn, to) => self.exec(Action::Conn(ConnA::Group(GroupA::Move { conn, to }))),
+            PanelAct::NewGroup(name) => self.exec(Action::Conn(ConnA::Group(GroupA::New { name }))),
+            PanelAct::Rename(group, name) => self.exec(Action::Conn(ConnA::Group(GroupA::Rename { group, name }))),
+            PanelAct::Color(group, color) => self.exec(Action::Conn(ConnA::Group(GroupA::Color { group, color: color.into() }))),
+            PanelAct::ConnectAll(group) => self.exec(Action::Conn(ConnA::Group(GroupA::ConnectAll { group }))),
+            PanelAct::DisconnectAll(group) => self.exec(Action::Conn(ConnA::Group(GroupA::DisconnectAll { group }))),
             PanelAct::NewConnIn(g) => {
                 self.new_conn_modal();
                 if let Some(Modal::Conn(f)) = &mut self.modal {
@@ -321,18 +294,13 @@ impl App {
             PanelAct::DeleteGroup(g) => self.delete_group(g),
             PanelAct::EditConn(id) => self.edit_conn(id),
             PanelAct::Connect(id) => {
-                self.core.active = Some(id);
+                self.exec(Action::Conn(ConnA::Switch { conn: id }));
                 if !self.core.demo {
-                    self.connect(id);
+                    self.exec(Action::Conn(ConnA::Connect { conn: id }));
                 }
             }
-            PanelAct::Disconnect(id) => self.disconnect(id),
-            PanelAct::Ungroup(id) => {
-                let all = self.conn_ids();
-                if self.core.groups.place(id, Place::Loose(None), &all) {
-                    self.save_groups();
-                }
-            }
+            PanelAct::Disconnect(id) => self.exec(Action::Conn(ConnA::Disconnect { conn: id })),
+            PanelAct::Ungroup(id) => self.exec(Action::Conn(ConnA::Group(GroupA::Move { conn: id, to: Place::Loose(None) }))),
             PanelAct::Remove(id) => {
                 let name = self.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
                 self.modal = Some(Modal::Typed {
@@ -345,45 +313,9 @@ impl App {
         }
     }
 
-    /// Connects every member of a group that is not open yet. The Connections panel and the rail's folder menu share it.
-    pub(super) fn connect_group(&mut self, g: u64) {
-        let ids: Vec<u64> = self.core.groups.group(g).map(|g| g.members.clone()).unwrap_or_default();
-        for id in ids {
-            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.core.demo {
-                self.connect(id);
-            }
-        }
-    }
-
-    /// Closes every open member of a group, with one message for the whole group.
-    pub(super) fn disconnect_group(&mut self, g: u64) {
-        let Some(group) = self.core.groups.group(g) else { return };
-        let (ids, name) = (group.members.clone(), group.name.clone());
-        let mut n = 0;
-        for id in ids {
-            if self.conn(id).is_some_and(|c| c.status.is_open()) && self.drop_session(id).is_some() {
-                n += 1;
-            }
-        }
-        // One message for the whole group, where `disconnect` would raise one per connection.
-        self.ok(if n == 1 { format!("Disconnected 1 connection in {name}") } else { format!("Disconnected {n} connections in {name}") });
-    }
-
     /// Deletes a group. Its members are in no group afterwards, and the toast offers Undo.
     pub(super) fn delete_group(&mut self, id: u64) {
-        let Some(at) = self.core.groups.groups.iter().position(|g| g.id == id) else { return };
-        let g = self.core.groups.groups.remove(at);
-        let all = self.conn_ids();
-        // The members follow the connections that were already loose, in saved order.
-        self.core.groups.loose = self.core.groups.loose_order(&all);
-        self.save_groups();
-        let (name, n) = (g.name.clone(), g.members.len());
-        let msg = match n {
-            0 => format!("Group {name} deleted."),
-            1 => format!("Group {name} deleted. Its connection is in no group now."),
-            _ => format!("Group {name} deleted. Its {n} connections are in no group now."),
-        };
-        self.toast_restore(msg, Restore::Group { g, at });
+        self.exec(Action::Conn(ConnA::Group(GroupA::Delete { group: id })));
     }
 
     /// QUARRY_TEST_CONNS=<state>: panel, filter, menu, new, edit, drag or picker.

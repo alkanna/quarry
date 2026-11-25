@@ -1007,64 +1007,38 @@ impl App {
         }
         if save {
             let id = f.id.unwrap_or_else(|| self.next_conn_id());
-            // Demo ids overlap real ones, so the demo keeps its edits in memory only.
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
             let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.core.ephemeral { Ok(()) } else { store_uri(id, &uri) };
-            match saved {
-                Ok(()) => {
-                    let stored = if self.core.ephemeral {
-                        Vec::new()
-                    } else {
-                        vec![
-                            set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
-                            set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
-                            set_secret(id, "proxy-password", if f.proxy_active() { &f.proxy_pwd } else { "" }),
-                            set_secret(id, "pg-key-passphrase", if f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty() { &f.pg_key_pass } else { "" }),
-                        ]
-                    };
-                    let meta = ConnMeta {
-                        id,
-                        engine: f.engine,
-                        name: f.name.trim().into(),
-                        tag: clean_tag(&f.tag).into(),
-                        // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
-                        ssh: f.ssh_on.then(|| {
-                            let old = self.core.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
-                            let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
-                            crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
-                        }),
-                        proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
-                        cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
-                        advanced: f.advanced().unwrap_or_default(),
-                        icon: self.core.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
-                    };
-                    match self.core.conns.iter_mut().find(|c| c.meta.id == id) {
-                        Some(c) => {
-                            c.meta = meta;
-                            c.masked_uri = db::mask_uri(&uri);
-                            c.writable = false;
-                            c.dbs.clear();
-                            c.server = Default::default();
-                        }
-                        None => self.core.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(meta, Status::Idle) }),
-                    }
-                    self.core.active = Some(id);
-                    self.save_conns();
-                    if let (None, Some(g)) = (f.id, f.group) {
-                        let all = self.conn_ids();
-                        if self.core.groups.place(id, Place::Into(g, None), &all) {
-                            self.save_groups();
-                        }
-                    }
-                    self.connect(id);
-                    *keep = false;
-                    if let Some(Err(e)) = stored.into_iter().find(|r| r.is_err()) {
-                        self.err(e);
-                    }
-                }
-                Err(e) => self.err(format!("Could not save the address to the Keychain: {e}")),
+            let secret = |what: &str, on: bool, v: &str| (what.to_string(), Secret::new(if on { v.to_string() } else { String::new() }));
+            let secrets = vec![
+                secret("ssh-password", f.ssh_on, &f.ssh_pwd),
+                secret("ssh-passphrase", f.ssh_on, &f.ssh_pass),
+                secret("proxy-password", f.proxy_active(), &f.proxy_pwd),
+                secret("pg-key-passphrase", f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty(), &f.pg_key_pass),
+            ];
+            let meta = ConnMeta {
+                id,
+                engine: f.engine,
+                name: f.name.trim().into(),
+                tag: clean_tag(&f.tag).into(),
+                // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
+                ssh: f.ssh_on.then(|| {
+                    let old = self.core.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
+                    let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
+                    crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
+                }),
+                proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
+                advanced: f.advanced().unwrap_or_default(),
+                icon: self.core.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
+            };
+            // A refused save keeps the form and what was typed in it.
+            let group = if f.id.is_none() { f.group } else { None };
+            let done = self.core.execute(Action::Conn(ConnA::Save { meta, uri: Secret::new(uri), secrets, group })).is_ok();
+            self.run_fx();
+            if done {
+                *keep = false;
             }
         }
     }

@@ -70,7 +70,7 @@ fn run(var: &str) {
     assert_eq!(saved.search_path, ["adv_ui2", "public"], "{var}");
 
     // Reconnecting uses the saved settings; the session answers with them.
-    ui.h.state_mut().connect_uri(CONN, uri);
+    ui.h.state_mut().core.connect_uri(CONN, uri);
     ui.wait("the reconnect", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready && c.sql.is_some()));
     let db = ui.app().conn(CONN).unwrap().sql.clone().unwrap();
     // Through a worker of the test's own, so the answer does not go to the app. A run reads in the session the app's would.

@@ -199,7 +199,7 @@ impl UiApp {
 
     /// Connects `id` to `uri` as Reconnect does, then waits until that attempt has ended, ready or failed.
     pub fn connect(&mut self, id: u64, uri: &str) {
-        self.h.state_mut().connect_uri(id, uri.into());
+        self.h.state_mut().core.connect_uri(id, uri.into());
         self.wait("the connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
     }
 

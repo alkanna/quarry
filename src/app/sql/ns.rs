@@ -100,57 +100,6 @@ impl App {
             self.pg_load_tables(conn, db, &s);
         }
     }
-
-    /// The schemas of a database arrived. The pick is kept while its schema still exists, else it falls back to the
-    /// default, and the tables of the pick load.
-    pub(in crate::app) fn pg_schemas_done(&mut self, conn: u64, database: String, res: db::Res<Vec<db::sql::PgSchema>>) {
-        let list = match res {
-            Ok(l) => l,
-            Err(e) => {
-                self.core.side_err.insert((conn, database.clone()), e.clone());
-                return self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), ..Default::default() }), format!("List schemas · {database}"));
-            }
-        };
-        self.core.side_err.remove(&(conn, database.clone()));
-        let user: Vec<String> = list.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
-        let listed = |name: &String| list.iter().any(|s| &s.name == name);
-        let keep = self.conn(conn).and_then(|c| c.pg.get(&database)).map(|p| p.picked.clone()).filter(|p| listed(p));
-        // A tab restored from the last session names its schema before any pick exists; the tree follows it.
-        let of_tab = self.t().filter(|t| t.sel.conn == conn && t.sel.db == database).map(|t| t.sel.schema.clone()).filter(|s| !s.is_empty() && listed(s));
-        let picked = keep.or(of_tab).unwrap_or_else(|| default_schema(&user).to_string());
-        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
-            c.set_schemas(&database, list, picked.clone());
-        }
-        // Query tabs opened or switched to this database before its schemas were known take the schema now.
-        for t in self.core.tabs.iter_mut().filter(|t| t.sel.conn == conn) {
-            if t.sel.db == database && t.sel.schema.is_empty() && t.sel.coll.is_empty() && t.sql.is_some() {
-                t.sel.schema = picked.clone();
-            }
-            if let Some(s) = t.sql.as_mut().filter(|s| s.run_db == database && s.run_schema.trim().is_empty()) {
-                s.run_schema = picked.clone();
-            }
-        }
-        self.pg_load_tables(conn, &database, &picked);
-    }
-
-    /// The tables of one schema arrived.
-    pub(in crate::app) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
-        match res {
-            Ok((names, views)) => {
-                self.core.side_err.remove(&(conn, ns_key(&database, &schema)));
-                self.core.views.set(conn, &ns_key(&database, &schema), views);
-                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
-                    c.tables.entry(database).or_default().insert(schema, names);
-                }
-            }
-            Err(e) => {
-                // A schema that failed to list may be asked again by picking it once more.
-                self.core.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
-                self.core.side_err.insert((conn, ns_key(&database, &schema)), e.clone());
-                self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), schema: schema.clone(), ..Default::default() }), format!("List tables · {database}.{schema}"))
-            }
-        }
-    }
 }
 
 /// The schemas a refresh reads the tables of: every one that was loaded plus the picked one, each once.

@@ -64,7 +64,7 @@ fn the_palette_has_new_database_for_mongo_and_not_for_sql() {
 #[test]
 fn the_collection_kind_hides_the_options_it_cannot_take() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    ui.h.state_mut().mongo_new_coll(1, "shop".into());
+    ui.h.state_mut().exec(Action::Side(SideA::MongoNewColl { conn: 1, db: "shop".into() }));
     ui.settle();
     assert!(!form(&ui).new_db);
     replace(&mut ui, "Collection name", "invoices");
@@ -94,7 +94,7 @@ fn the_collection_kind_hides_the_options_it_cannot_take() {
 fn new_collection_checks_the_name_against_the_database_it_was_opened_on() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     // The demo has no client, so the sidebar action would stop at the offline warning; the form is what is under test.
-    ui.h.state_mut().mongo_new_coll(1, "shop".into());
+    ui.h.state_mut().exec(Action::Side(SideA::MongoNewColl { conn: 1, db: "shop".into() }));
     ui.settle();
     assert!(matches!(&ui.app().modal, Some(Modal::MongoNewColl(f)) if !f.new_db && f.db == "shop"), "the form is not New collection for shop");
     replace(&mut ui, "Collection name", "carts");

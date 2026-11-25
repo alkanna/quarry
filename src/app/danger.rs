@@ -69,8 +69,14 @@ impl App {
         if let Danger::DropTrigger(sel, name) = action {
             return self.on_tab(&sel, |a| a.drop_trigger(name));
         }
+        if let Danger::DropDatabase { conn, db } = action {
+            return self.exec(Action::Side(SideA::DropDb { conn, db }));
+        }
+        if let Danger::DropCollAt { conn, db, coll } = action {
+            return self.exec(Action::Side(SideA::DropColl { conn, db, coll }));
+        }
         let conn_specific = match &action {
-            Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
+            Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
             _ => None,
         };
         if let Some(conn) = conn_specific {
@@ -78,17 +84,6 @@ impl App {
                 return self.modal = Some(Modal::Unlock(conn, None));
             };
             match action {
-                Danger::DropDatabase { db, .. } => {
-                    self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db);
-                    self.core.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
-                    if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
-                        c.dbs.retain(|d| d.0 != db);
-                    }
-                }
-                Danger::DropCollAt { db, coll, .. } => {
-                    self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
-                    self.core.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
-                }
                 Danger::Sync { .. } => {
                     let timeout = self.timeout();
                     self.drop_agg_row();

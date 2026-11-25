@@ -27,7 +27,26 @@ impl App {
                         Dialog::SqlPassword(f) => Modal::SqlPassword(f),
                         Dialog::Typed { title, expect, action } => Modal::Typed { title, expect, typed: String::new(), action },
                         Dialog::ShellWrite(ops) => Modal::ShellWrite(ops),
+                        Dialog::MongoNewColl(f) => Modal::MongoNewColl(f),
                     })
+                }
+                UiFx::Connected { conn, sql: false } => {
+                    let here = self.core.cur;
+                    for i in 0..self.core.tabs.len() {
+                        if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
+                            self.core.cur = i;
+                            self.run_query();
+                        }
+                    }
+                    self.core.cur = here;
+                }
+                UiFx::CloseTabs { conn, db, coll } => self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && coll.as_ref().is_none_or(|c| t.sel.coll == *c)),
+                UiFx::Connected { conn, sql: true } => {
+                    for i in 0..self.core.tabs.len() {
+                        if self.core.tabs[i].sel.conn == conn && self.core.tabs[i].docs.is_empty() {
+                            self.reload_of(i);
+                        }
+                    }
                 }
             }
         }

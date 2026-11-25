@@ -153,7 +153,7 @@ impl ShellTab {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct ConnMeta {
     pub id: u64,
     pub name: String,

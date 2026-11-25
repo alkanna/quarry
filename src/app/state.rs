@@ -64,47 +64,7 @@ impl App {
     }
 
     pub(super) fn connect(&mut self, id: u64) {
-        // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
-        if self.core.ephemeral {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let uri = match stored_uri(id) {
-            Ok(u) => u,
-            Err(e) => return self.err(uri_err(e)),
-        };
-        self.connect_uri(id, uri);
-    }
-
-    /// Connects with a known address, so tests need no keychain.
-    pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
-        let tools = self.cloud_tools();
-        self.stop_conn_work(id);
-        self.core.req += 1;
-        let attempt = self.core.req;
-        let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == id) else { return };
-        c.status = Status::Connecting;
-        c.attempt = attempt;
-        c.client = None;
-        c.sql = None;
-        c.tunnel = None;
-        // A new session may see other indexes and statistics, so its plans start fresh.
-        self.core.explain_prev.forget(id);
-        // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
-        c.writable = false;
-        // Asked again once connected, so a changed or failed server never shows the old one.
-        c.server = ServerInfo::default();
-        let mut net = net_of(&c.meta);
-        let adv = c.meta.advanced.clone();
-        net.tools = tools;
-        // Only a connection with a client key can have a passphrase, so the others never ask the Keychain for one.
-        if c.meta.engine == db::sql::Engine::Postgres && db::sql::Addr::parse(&uri).is_some_and(|a| !a.ssl_key.is_empty()) {
-            net.key_passphrase = secret(id, "pg-key-passphrase");
-        }
-        if c.meta.engine.is_sql() {
-            self.core.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
-        } else {
-            self.core.worker.connect(id, attempt, uri, self.timeout(), net);
-        }
+        self.exec(Action::Conn(ConnA::Connect { conn: id }));
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.

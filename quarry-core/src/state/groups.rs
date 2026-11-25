@@ -34,7 +34,7 @@ pub struct Group {
 /// Where `Groups::place` puts a connection. The index counts the members (or the loose connections) that stay after
 /// the connection is taken out of where it was, so a move inside one list reads the same as a move into another.
 /// None is the end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Place {
     Into(u64, Option<usize>),
     Loose(Option<usize>),

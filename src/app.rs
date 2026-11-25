@@ -1,6 +1,7 @@
 use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
 use quarry_core::core::Core;
+use quarry_core::action::{Action, ConnA, GroupA, Secret, SideA};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};

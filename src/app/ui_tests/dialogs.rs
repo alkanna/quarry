@@ -216,7 +216,7 @@ fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
         if let Some(c) = a.core.conns.iter_mut().find(|c| c.meta.id == 1) {
             c.writable = false;
         }
-        a.mongo_new_coll(1, "shop".into());
+        a.exec(Action::Side(SideA::MongoNewColl { conn: 1, db: "shop".into() }));
     }) else {
         return;
     };

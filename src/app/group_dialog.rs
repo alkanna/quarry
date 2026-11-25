@@ -73,22 +73,7 @@ impl App {
     /// Writes the form into the group: the fields, then the members, those that left first. Placing the members one by one in
     /// their order gives the group exactly that order and takes new ones out of their old groups.
     fn save_group_form(&mut self, f: &GroupForm) {
-        let Some(old) = self.core.groups.group(f.id).map(|g| g.members.clone()) else { return };
-        let all = self.conn_ids();
-        for c in old.iter().filter(|c| !f.members.contains(c)) {
-            self.core.groups.place(*c, Place::Loose(None), &all);
-        }
-        for (i, c) in f.members.iter().enumerate() {
-            self.core.groups.place(*c, Place::Into(f.id, Some(i)), &all);
-        }
-        if let Some(g) = self.core.groups.group_mut(f.id) {
-            if !f.name.trim().is_empty() {
-                g.name = f.name.trim().into();
-            }
-            g.color = f.color.clone();
-            g.fold_rail = f.fold_rail;
-        }
-        self.save_groups();
+        self.exec(Action::Conn(ConnA::Group(GroupA::Save { group: f.id, name: f.name.clone(), color: f.color.clone(), fold_rail: f.fold_rail, members: f.members.clone() })));
     }
 }
 

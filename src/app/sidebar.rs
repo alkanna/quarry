@@ -417,13 +417,13 @@ impl App {
             self.side_act(id, act);
         }
         if let Some(id) = refresh && !self.core.demo {
-            self.connect(id);
+            self.exec(Action::Conn(ConnA::Connect { conn: id }));
         }
         if let Some(id) = server {
             self.open_server(id);
         }
         if let Some(id) = disconnect {
-            self.disconnect(id);
+            self.exec(Action::Conn(ConnA::Disconnect { conn: id }));
         }
         if let Some((id, name)) = remove {
             self.modal = Some(Modal::Typed {
@@ -489,10 +489,7 @@ impl App {
     }
 
     pub(super) fn activate(&mut self, id: u64) {
-        self.core.active = Some(id);
-        if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.core.demo {
-            self.connect(id);
-        }
+        self.exec(Action::Conn(ConnA::Activate { conn: id }));
     }
 
     /// Opens the explorer if it was collapsed from the rail or showing another panel, remembering that for the next launch.
@@ -951,42 +948,34 @@ impl App {
             }
         }
         if revealed {
-            self.core.reveal = None;
+            self.exec(Action::Side(SideA::Revealed));
         }
-        for k in folded {
-            if !self.core.side_closed.remove(&k) {
-                self.core.side_closed.insert(k);
-            }
+        for (conn, db, views) in folded {
+            self.exec(Action::Side(SideA::Fold { conn, db, views }));
         }
         for d in lazy {
-            self.core.sql_asked.insert((id, d.clone()));
+            self.exec(Action::Side(SideA::Asked { conn: id, db: d.clone(), retry: false }));
             self.side_act(id, SideAct::Refresh(d));
         }
         if connect {
-            self.connect(id);
+            self.exec(Action::Conn(ConnA::Connect { conn: id }));
         }
         if let Some(d) = retry {
-            let pre = ns_key(&d, "x");
-            let pre = &pre[..pre.len() - 1];
-            self.core.side_err.retain(|k, _| k.0 != id || (k.1 != d && !k.1.starts_with(pre)));
-            self.core.sql_asked.insert((id, d.clone()));
+            self.exec(Action::Side(SideA::Asked { conn: id, db: d.clone(), retry: true }));
             self.side_act(id, SideAct::Refresh(d));
         }
-        if let Some((d, schema)) = pick_schema {
-            self.pg_set_schema(id, &d, schema);
+        if let Some((db, schema)) = pick_schema {
+            self.exec(Action::Side(SideA::Schema { conn: id, db, schema }));
         }
         if let Some(d) = open_recent {
             // Like a click on the database in the tree, except that it never closes one that is open, and the tree scrolls to it.
             fold::start(ui.ctx(), db_fold_id(id, &d), true);
-            self.core.reveal = Some((id, d.clone(), None));
-            self.core.open_dbs.insert((id, d));
+            self.exec(Action::Side(SideA::OpenDb { conn: id, db: d }));
         }
         if let Some(d) = toggle {
-            let open = !self.core.open_dbs.remove(&(id, d.clone()));
+            let open = !self.core.open_dbs.contains(&(id, d.clone()));
             fold::start(ui.ctx(), db_fold_id(id, &d), open);
-            if open {
-                self.core.open_dbs.insert((id, d));
-            }
+            self.exec(Action::Side(SideA::ToggleDb { conn: id, db: d }));
         }
         if let Some((s, how)) = open {
             self.open_collection(s, how);
@@ -1079,7 +1068,7 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         match a {
-            SideAct::NewColl(db, false) => self.mongo_new_coll(conn, db),
+            SideAct::NewColl(db, false) => self.exec(Action::Side(SideA::MongoNewColl { conn, db })),
             SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
             SideAct::Refresh(db) => {
                 self.refresh_db(conn, &db);
@@ -1089,8 +1078,8 @@ impl App {
             SideAct::DropDb(db) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
             }
-            SideAct::Stats(db, coll) => self.core.worker.coll_stats(client, db, coll, "stats".into()),
-            SideAct::ViewDef(db, coll) => self.core.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
+            SideAct::Stats(db, coll) => self.exec(Action::Side(SideA::Stats { conn, db, coll })),
+            SideAct::ViewDef(db, coll) => self.exec(Action::Side(SideA::ViewDef { conn, db, coll })),
             SideAct::Rename(db, coll) => self.modal = Some(Modal::RenameColl { conn, db, name: coll.clone(), coll }),
             SideAct::Duplicate(db, coll) => self.modal = Some(Modal::DuplicateColl { conn, db, name: format!("{coll}_copy"), coll }),
             SideAct::Dump(db, coll) => {

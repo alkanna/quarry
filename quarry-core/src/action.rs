@@ -32,6 +32,8 @@ pub mod sql_server;
 pub mod shell;
 pub mod tools;
 pub mod watch;
+pub mod conn;
+pub mod side;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -40,6 +42,8 @@ mod users_tests;
 mod sql_server_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod conn_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
@@ -48,6 +52,8 @@ pub use sql_server::{PgServerA, SqlServerA};
 pub use shell::ShellA;
 pub use tools::ToolsA;
 pub use watch::WatchA;
+pub use conn::{ConnA, GroupA, RailDrop};
+pub use side::SideA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -57,6 +63,8 @@ pub enum Action {
     Shell(ShellA),
     Watch(WatchA),
     Tools(ToolsA),
+    Conn(ConnA),
+    Side(SideA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -84,6 +92,10 @@ pub enum RefusalKind {
 /// Effects only the UI can carry out, drained by the app after each action and each frame.
 pub enum UiFx {
     Open(Dialog),
+    /// A connection opened: the app reloads its tabs that hold no rows, Mongo ones through their query bar.
+    Connected { conn: u64, sql: bool },
+    /// Closes the tabs of a dropped or renamed database or collection, every collection of `db` when `coll` is None.
+    CloseTabs { conn: u64, db: String, coll: Option<String> },
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -99,6 +111,8 @@ pub enum Dialog {
     Typed { title: String, expect: String, action: crate::state::Danger },
     /// The Shell's confirm before a script with these possibly destructive words runs.
     ShellWrite(Vec<String>),
+    /// MongoDB's New database or New collection dialog.
+    MongoNewColl(Box<crate::state::mongo_create::MongoNewColl>),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -158,6 +172,8 @@ impl Core {
             Action::Shell(a) => self.shell(a),
             Action::Watch(a) => self.watch(a),
             Action::Tools(a) => self.tools(a),
+            Action::Conn(a) => self.conn_act(a),
+            Action::Side(a) => self.side(a),
         }
     }
 
@@ -207,6 +223,8 @@ impl Core {
             // The drop dialog's answer fills a form the app's Modal holds.
             Msg::PgRoles { ans: Answer::DropInfo(_), .. } => false,
             Msg::PgRoles { .. } | Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } => true,
+            Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => true,
+            Msg::Command { tag, .. } if tag.starts_with("srv-") => true,
             Msg::Command { tag, .. } => matches!(tag.as_str(), "users" | "users-self" | "roles") || tag.starts_with("server:"),
             Msg::SqlServer { .. } | Msg::PgServer { .. } => true,
             Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => true,
@@ -222,6 +240,13 @@ impl Core {
             Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
             Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
             Msg::Command { tag, res } if tag.starts_with("server:") => self.server_reply(&tag, res),
+            Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
+            Msg::SqlConnected { conn, attempt, res } => self.on_sql_connected(conn, attempt, res),
+            Msg::Tested { req, res, info } => self.tested(req, res, info),
+            Msg::Collections { conn, db, res } => self.collections_done(conn, db, res),
+            Msg::Command { tag, res } if tag.starts_with("srv-") => self.srv_reply(&tag, res),
+            Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
+            Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
             Msg::Command { tag, res } => self.mongo_users_reply(&tag, res),
             Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
             Msg::PgServer { req, ans } => self.pg_server_done(req, ans),

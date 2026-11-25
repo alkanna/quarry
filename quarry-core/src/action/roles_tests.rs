@@ -312,6 +312,7 @@ fn all_actions() -> Vec<Action> {
     all.extend([WatchA::Start { tab: 1 }, WatchA::Stop { tab: 1 }, WatchA::Clear { tab: 1 }].into_iter().map(Action::Watch));
     let tools = [ToolsA::Install, ToolsA::Dump { conn: 1, db: "d".into(), coll: None, path: "/tmp/a".into(), gzip: true }, ToolsA::Stop, ToolsA::Close];
     all.extend(tools.into_iter().map(Action::Tools));
+    all.extend(super::conn_tests::conn_actions());
     all
 }
 
@@ -345,6 +346,15 @@ fn variant(a: &Action) -> String {
         },
         Action::Tools(t) => match t {
             ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Stop | ToolsA::Close => {}
+        },
+        Action::Conn(c) => match c {
+            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Save { .. } => {}
+            ConnA::Group(g) => match g {
+                GroupA::Toggle { .. } | GroupA::FoldAll | GroupA::Move { .. } | GroupA::New { .. } | GroupA::Rename { .. } | GroupA::Color { .. } | GroupA::ConnectAll { .. } | GroupA::DisconnectAll { .. } | GroupA::RailOpen { .. } | GroupA::Unfold { .. } | GroupA::Save { .. } | GroupA::Delete { .. } | GroupA::Drop(_) | GroupA::RailOrder { .. } => {}
+            },
+        },
+        Action::Side(s) => match s {
+            SideA::ToggleDb { .. } | SideA::OpenDb { .. } | SideA::Fold { .. } | SideA::Revealed | SideA::Asked { .. } | SideA::Schema { .. } | SideA::MongoNewDb { .. } | SideA::MongoNewColl { .. } | SideA::MongoCreate { .. } | SideA::MongoCreateView { .. } | SideA::Rename { .. } | SideA::Duplicate { .. } | SideA::DropDb { .. } | SideA::DropColl { .. } | SideA::Stats { .. } | SideA::ViewDef { .. } => {}
         },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")

@@ -5,13 +5,11 @@ pub(crate) use quarry_core::state::groups::*;
 
 impl App {
     pub(super) fn save_groups(&mut self) {
-        self.core.groups.v = 1;
-        let b = serde_json::to_vec_pretty(&self.core.groups).unwrap_or_default();
-        self.write_config("groups.json", b);
+        self.core.save_groups();
     }
 
     pub(super) fn conn_ids(&self) -> Vec<u64> {
-        self.core.conns.iter().map(|c| c.meta.id).collect()
+        self.core.conn_ids()
     }
 }
 

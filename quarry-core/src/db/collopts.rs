@@ -16,7 +16,7 @@ pub fn at_least(v: Ver, major: u32, minor: u32) -> bool {
 }
 
 /// What the collection is. One choice, so a capped time series or a capped clustered collection cannot be asked for.
-#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     #[default]
     Plain,
@@ -61,7 +61,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Granularity {
     #[default]
     Seconds,
@@ -82,7 +82,7 @@ impl Granularity {
 }
 
 /// The options of the New collection dialog, as typed.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CollForm {
     pub kind: Kind,
     pub capped_size: String,

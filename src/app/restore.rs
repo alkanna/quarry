@@ -8,27 +8,8 @@ impl App {
     pub(super) fn apply_restore(&mut self, id: u64) {
         let Some(i) = self.core.restores.iter().position(|(r, _)| *r == id) else { return };
         match self.core.restores.remove(i).1 {
-            Restore::Group { g, at } => {
-                let (name, alive) = (g.name.clone(), self.conn_ids());
-                self.core.groups.restore(g, at, &alive);
-                self.save_groups();
-                self.ok(format!("Group {name} is back."));
-            }
-            Restore::Placed { moved, created, tile, prev, at } => {
-                let alive = self.conn_ids();
-                self.core.groups.undo_drop(&moved, created, &alive);
-                // The tile goes back after the tile it followed, or to its old index when that one has closed since.
-                if self.core.rail_order.contains(&tile) {
-                    self.core.rail_order.retain(|c| *c != tile);
-                    let i = match prev {
-                        None => 0,
-                        Some(p) => self.core.rail_order.iter().position(|c| *c == p).map_or(at.min(self.core.rail_order.len()), |i| i + 1),
-                    };
-                    self.core.rail_order.insert(i, tile);
-                }
-                self.save_groups();
-                self.ok("Grouping undone.");
-            }
+            Restore::Group { g, at } => self.core.restore_group(g, at),
+            Restore::Placed { moved, created, tile, prev, at } => self.core.restore_placed(moved, created, tile, prev, at),
             Restore::Saved { scripts, folders, written } => {
                 let n = scripts.len();
                 self.core.library.restore(folders, scripts);

@@ -83,10 +83,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Allow writes", ALERT()).clicked() {
-                            if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == *id) {
-                                c.writable = true;
-                            }
-                            self.ok(format!("Writes allowed on {name} for this session"));
+                            self.exec(Action::Conn(ConnA::Unlock { conn: *id }));
                             keep = false;
                             if let Some(then) = then.take() {
                                 then(self);
@@ -177,12 +174,7 @@ impl App {
                     dialog_foot(ui, |ui| {
                         let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
                         if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
-                            if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
-                                let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
-                                let (c, d, k) = (*conn, db.clone(), coll.clone());
-                                self.remove_tabs(|t| t.sel.conn == c && t.sel.db == d && t.sel.coll == k);
-                                self.core.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
-                            }
+                            self.exec(Action::Side(SideA::Rename { conn: *conn, db: db.clone(), coll: coll.clone(), to: name.trim().to_string() }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -429,17 +421,20 @@ impl App {
         dialog_foot(ui, |ui| {
             let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
             if ui.add_enabled(ok, primary_button(ui, if *view { "Create view" } else { "Create" }, PRIMARY())).clicked() {
-                let cmd = match &parsed {
-                    Some(p) => p.clone().map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p }),
-                    None => Ok(doc! { "create": name.trim() }),
+                let view = match &parsed {
+                    Some(p) => p.clone().map(|p| Some((source.clone(), p))),
+                    None => Ok(None),
                 };
-                match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
-                    (Ok(cmd), Some(client)) => {
-                        self.core.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
-                        *keep = false;
+                match view {
+                    // An offline refusal keeps the dialog and what was typed in it.
+                    Ok(view) => {
+                        let done = self.core.execute(Action::Side(SideA::MongoCreateView { conn: *conn, db: db.clone(), name: name.trim().to_string(), view })).is_ok();
+                        self.run_fx();
+                        if done {
+                            *keep = false;
+                        }
                     }
-                    (Err(e), _) => self.err(e),
-                    (_, None) => self.warn_offline(),
+                    Err(e) => self.err(e),
                 }
             }
             if ui.button("Cancel").clicked() {
@@ -470,14 +465,7 @@ impl App {
         });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
-                match self.conn(*conn).and_then(|c| c.client.clone()) {
-                    Some(client) => {
-                        // The sidebar shows it with a spinner until the copy ends.
-                        self.core.copying.insert((*conn, db.clone(), to.clone()));
-                        self.core.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.clone());
-                    }
-                    None => self.warn_offline(),
-                }
+                self.exec(Action::Side(SideA::Duplicate { conn: *conn, db: db.clone(), coll: coll.clone(), to: to.clone() }));
                 *keep = false;
             }
             if ui.button("Cancel").clicked() {

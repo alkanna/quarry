@@ -276,7 +276,7 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     // Plans of a connection that closed are forgotten.
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
     let conn = ui.app().t().map(|t| t.sel.conn).unwrap();
-    ui.h.state_mut().drop_session(conn);
+    ui.h.state_mut().core.drop_session(conn);
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
     ui.settle();
     ui.show("Flame");

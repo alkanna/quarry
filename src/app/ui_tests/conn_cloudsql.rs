@@ -115,7 +115,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     assert_eq!(ui.app().conn(id).unwrap().meta.cloud_sql.as_ref().map(|c| c.iam), Some(false));
     // The app keeps no keychain in tests, so Connect gets the address the form saved; the proxy replaces its host.
     let saved = db::sql::Addr { host: CLOUD_HOST.into(), port: 5432, ..live };
-    ui.h.state_mut().connect_uri(id, saved.to_uri());
+    ui.h.state_mut().core.connect_uri(id, saved.to_uri());
     ui.wait("the connection through the proxy", |a| a.conn(id).is_some_and(|c| c.status == Status::Ready));
     assert!(matches!(ui.app().conn(id).unwrap().tunnel, Some(db::Way::CloudSql(_))), "the proxy is kept with the connection");
     *crate::cloudsql::stub::TARGET.lock().unwrap() = None;

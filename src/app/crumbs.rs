@@ -163,10 +163,7 @@ impl App {
             // No lock to toggle: writes are always on.
         } else if writable {
             if lock_chip(ui, true).on_hover_text("Click to lock this connection again").clicked() {
-                if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == s.conn) {
-                    c.writable = false;
-                }
-                self.ok("Writes locked");
+                self.exec(Action::Conn(ConnA::Lock { conn: s.conn }));
             }
         } else if lock_chip(ui, false).on_hover_text("Click to allow edits on this connection for this session").clicked() {
             self.modal = Some(Modal::Unlock(s.conn, None));

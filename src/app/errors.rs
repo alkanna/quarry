@@ -171,10 +171,6 @@ impl App {
         self.core.conn_card_shown(conn)
     }
 
-    pub(super) fn err_toast(&mut self, e: ErrEntry) {
-        self.core.err_toast(e)
-    }
-
     pub(super) fn warn(&mut self, s: impl Into<String>) {
         self.core.warn(s)
     }
@@ -191,15 +187,6 @@ impl App {
     /// connect: it goes to the list with its own connection and place, without a toast.
     pub(super) fn err_quiet(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String) {
         self.core.err_quiet(raw, conn, sel, place)
-    }
-
-    /// A connection that could not open. Its card explains it when on screen, else a toast does.
-    pub(super) fn err_conn(&mut self, conn: u64, raw: String) {
-        let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        let e = self.log_err(raw, Some(conn), None, format!("Connect · {name}"), "connect");
-        if !self.conn_card_shown(conn) {
-            self.err_toast(e);
-        }
     }
 
     /// The read for `view` in tab `i` failed: the view shows the panel until its next read works.
@@ -222,11 +209,6 @@ impl App {
     /// read-only connection: a group, saved scripts or a file.
     pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
         self.core.toast_restore(s, r)
-    }
-
-    /// `toast_restore` with a Rename beside Undo that opens the Edit group dialog on `group`.
-    pub(super) fn toast_restore_edit(&mut self, s: String, r: Restore, group: Option<u64>) {
-        self.core.toast_restore_edit(s, r, group)
     }
 
     /// Runs a toast, panel or card button. `tab` is the tab whose panel it was on.

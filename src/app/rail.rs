@@ -113,10 +113,10 @@ impl App {
             ui.add_space(2.0);
         });
         if let Some(id) = pick {
-            self.core.active = Some(id);
+            self.exec(Action::Conn(ConnA::Switch { conn: id }));
             // A closed connection opens, and a failed one retries; an open one is only switched to.
             if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.core.demo {
-                self.connect(id);
+                self.exec(Action::Conn(ConnA::Connect { conn: id }));
             }
         }
         if let Some(a) = act {
@@ -379,7 +379,7 @@ impl App {
             });
         });
         if let Some(id) = pick {
-            self.core.active = Some(id);
+            self.exec(Action::Conn(ConnA::Switch { conn: id }));
         }
         if let Some(gid) = toggle {
             self.toggle_rail_folder(&ctx, gid);
@@ -397,9 +397,7 @@ impl App {
         } else if let Some((gid, members, m)) = inner {
             let full = self.core.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
             if let Some(at) = member_slot(&full, &members, m) {
-                let all = self.conn_ids();
-                self.core.groups.place(members[m.from], Place::Into(gid, Some(at)), &all);
-                self.save_groups();
+                self.exec(Action::Conn(ConnA::Group(GroupA::Move { conn: members[m.from], to: Place::Into(gid, Some(at)) })));
             }
         }
         if !folder_acts.is_empty() {
@@ -408,28 +406,21 @@ impl App {
         for (gid, a) in folder_acts {
             match a {
                 FolderAct::Toggle => self.toggle_rail_folder(&ctx, gid),
-                FolderAct::ConnectAll => self.connect_group(gid),
-                FolderAct::DisconnectAll => self.disconnect_group(gid),
+                FolderAct::ConnectAll => self.exec(Action::Conn(ConnA::Group(GroupA::ConnectAll { group: gid }))),
+                FolderAct::DisconnectAll => self.exec(Action::Conn(ConnA::Group(GroupA::DisconnectAll { group: gid }))),
                 FolderAct::Edit => self.edit_group(gid),
-                FolderAct::Unfold => {
-                    if let Some(g) = self.core.groups.group_mut(gid) {
-                        g.fold_rail = false;
-                        let name = g.name.clone();
-                        self.save_groups();
-                        self.ok(format!("{name} shows its connections one by one in the rail. Edit group turns folding back on."));
-                    }
-                }
+                FolderAct::Unfold => self.exec(Action::Conn(ConnA::Group(GroupA::Unfold { group: gid }))),
             }
         }
         match act {
             Some((id, TileAct::Reconnect)) => {
-                self.core.active = Some(id);
-                self.connect(id);
+                self.exec(Action::Conn(ConnA::Switch { conn: id }));
+                self.exec(Action::Conn(ConnA::Connect { conn: id }));
             }
             Some((id, TileAct::Server)) => self.open_server(id),
             Some((id, TileAct::Edit)) => self.edit_conn(id),
             Some((id, TileAct::Icon)) => self.modal = Some(Modal::ConnIcon(Box::new(super::conn_icon::IconForm::new(id)))),
-            Some((id, TileAct::Disconnect)) => self.disconnect(id),
+            Some((id, TileAct::Disconnect)) => self.exec(Action::Conn(ConnA::Disconnect { conn: id })),
             None => {}
         }
     }
@@ -466,8 +457,7 @@ impl App {
     /// Opens or closes a folder in the rail, with its animation.
     fn toggle_rail_folder(&mut self, ctx: &egui::Context, gid: u64) {
         let open = !self.core.groups.rail_open(gid);
-        self.core.groups.set_rail_open(gid, open);
-        self.save_groups();
+        self.exec(Action::Conn(ConnA::Group(GroupA::RailOpen { group: gid })));
         fold::start(ctx, fold_id(gid), open);
     }
 
@@ -509,8 +499,8 @@ impl App {
     /// tile (a new group) or of a folder (into it). A folder let go on a tile does nothing, since groups do not nest.
     fn apply_rail_move(&mut self, items: &[RailItem], m: dnd::Move) {
         if !m.into {
-            self.core.rail_order = order_after_move(&self.core.rail_order, items, m);
-            return;
+            let order = order_after_move(&self.core.rail_order, items, m);
+            return self.exec(Action::Conn(ConnA::Group(GroupA::RailOrder { order })));
         }
         let Some(RailItem::Conn(conn)) = items.get(m.from) else { return };
         match items.get(m.to) {
@@ -520,61 +510,8 @@ impl App {
         }
     }
 
-    /// Applies one drop on the rail: the groups are saved, and the toast offers Undo.
     fn apply_rail_drop(&mut self, d: RailDrop) {
-        let all = self.conn_ids();
-        // Undo puts back only what this drop moves: each connection's spot in the groups, the tile's place in the rail and
-        // the group it makes. A whole snapshot would also throw away group edits made while the toast is up.
-        let tile = match d {
-            RailDrop::Reorder { conn, .. } | RailDrop::Into { conn, .. } | RailDrop::Pair { conn, .. } => conn,
-        };
-        let at = self.core.rail_order.iter().position(|c| *c == tile).unwrap_or(0);
-        let prev = at.checked_sub(1).and_then(|i| self.core.rail_order.get(i).copied());
-        let spot = |a: &App, c: u64| {
-            let (g, i) = a.core.groups.spot(c, &all);
-            (c, g, i)
-        };
-        let undo = |moved: Vec<(u64, Option<u64>, usize)>, created: Option<u64>| Restore::Placed { moved, created, tile, prev, at };
-        let name = |a: &App, id: u64| a.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
-        match d {
-            RailDrop::Reorder { conn, anchor, after } => {
-                if !self.core.rail_order.contains(&conn) {
-                    return;
-                }
-                // A member of a folded group dropped between tiles leaves its group. An unfolded one is loose in the rail already.
-                let left = self.core.groups.group_of(conn).filter(|g| g.fold_rail).map(|g| g.name.clone());
-                if let Some(g) = left {
-                    let was = vec![spot(self, conn)];
-                    self.core.groups.place(conn, Place::Loose(None), &all);
-                    self.toast_restore(format!("{} left {g}.", name(self, conn)), undo(was, None));
-                }
-                move_next_to(&mut self.core.rail_order, conn, anchor, after);
-            }
-            RailDrop::Into { conn, gid, at } => {
-                let joined = self.core.groups.group_of(conn).map(|g| g.id) != Some(gid);
-                let was = vec![spot(self, conn)];
-                if self.core.groups.place(conn, Place::Into(gid, at), &all) && joined {
-                    let g = self.core.groups.group(gid).map(|g| g.name.clone()).unwrap_or_default();
-                    // The folder sits at its first open member, so a tile from above it must follow the group or the folder jumps.
-                    let members = self.core.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
-                    if let Some(last) = self.core.rail_order.iter().copied().filter(|c| *c != conn && members.contains(c)).last() {
-                        move_next_to(&mut self.core.rail_order, conn, last, true);
-                    }
-                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), undo(was, None));
-                }
-            }
-            RailDrop::Pair { conn, target } => {
-                let was = vec![spot(self, conn), spot(self, target)];
-                let gid = self.core.groups.new_group("New group");
-                self.core.groups.place(target, Place::Into(gid, None), &all);
-                self.core.groups.place(conn, Place::Into(gid, None), &all);
-                self.core.groups.set_rail_open(gid, true);
-                move_next_to(&mut self.core.rail_order, conn, target, true);
-                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), undo(was, Some(gid)), Some(gid));
-            }
-        }
-        self.save_groups();
-        self.save_prefs();
+        self.exec(Action::Conn(ConnA::Group(GroupA::Drop(d))));
     }
 
     pub(super) fn open_server(&mut self, conn: u64) {
@@ -585,34 +522,8 @@ impl App {
         }
     }
 
-    /// Drops the session but keeps the saved connection, which then leaves the rail.
     pub(super) fn disconnect(&mut self, id: u64) {
-        if let Some(name) = self.drop_session(id) {
-            self.ok(format!("Disconnected from {name}"));
-        }
-    }
-
-    /// Closes the connection's session and forgets what was listed on it. Returns its name, or None when it is gone.
-    pub(super) fn drop_session(&mut self, id: u64) -> Option<String> {
-        let c = self.core.conns.iter_mut().find(|c| c.meta.id == id)?;
-        (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
-        c.forget_lists();
-        let name = c.meta.name.clone();
-        self.stop_conn_work(id);
-        self.core.pg_tables_asked.forget(id, None, None);
-        self.core.explain_prev.forget(id);
-        Some(name)
-    }
-
-    /// A watch holds its own client and a Shell run its own tunnel or relay, any of which would keep an old session alive.
-    pub(super) fn stop_conn_work(&mut self, id: u64) {
-        for t in &mut self.core.tabs {
-            if t.sel.conn == id {
-                t.stop_work();
-            } else if t.shell.attached.iter().any(|a| a.conn == id) {
-                t.shell.stop();
-            }
-        }
+        self.exec(Action::Conn(ConnA::Disconnect { conn: id }));
     }
 }
 
@@ -704,12 +615,7 @@ enum DropOn {
     FolderTop { gid: u64, anchor: u64 },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RailDrop {
-    Reorder { conn: u64, anchor: u64, after: bool },
-    Into { conn: u64, gid: u64, at: Option<usize> },
-    Pair { conn: u64, target: u64 },
-}
+use quarry_core::action::RailDrop;
 
 /// How a drop is marked on the tile: an insertion line at its top or bottom, or a fill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -942,17 +848,6 @@ fn folder_anchor(order: &[u64], members: &[u64]) -> u64 {
     order.iter().copied().find(|id| members.contains(id)).unwrap_or(members[0])
 }
 
-/// Moves `conn` to just before or after `anchor` in the rail order. An anchor that is gone, or is `conn` itself, puts it last.
-fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
-    // A connection dragged in from the sidebar may be closed, and a closed one has no tile to place.
-    if !order.contains(&conn) {
-        return;
-    }
-    order.retain(|c| *c != conn);
-    let at = order.iter().position(|c| *c == anchor).map_or(order.len(), |i| i + after as usize);
-    order.insert(at, conn);
-}
-
 /// A tile carried beside the pointer at `p`: its engine logo on a raised square, painted without a widget so it never
 /// covers the drop targets under the pointer.
 fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
@@ -1117,6 +1012,7 @@ pub(super) fn search_icon(p: &egui::Painter, c: egui::Pos2, s: Stroke) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarry_core::action::conn::move_next_to;
 
     #[test]
     fn shortcuts_keep_the_order_they_opened_in() {
