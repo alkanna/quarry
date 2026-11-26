@@ -695,10 +695,10 @@ mod open_shell {
     }
 }
 
-/// Tool arguments can hold passwords; the action's Debug, which tests and panics print, shows only their size.
+/// Tool arguments can hold passwords; the action's Debug, which tests and panics print, never shows them.
 #[test]
 fn a_tool_calls_arguments_never_show_in_debug() {
     let a = Action::Agents(AgentsA::ToolCall { session: 1, call: 1, tool: "run_sql".into(), args: ToolArgs(json!({ "sql": "CREATE USER app IDENTIFIED BY 'hunter2'" })), client: "claude-code".into() });
     let shown = format!("{a:?}");
-    assert!(!shown.contains("hunter2") && shown.contains("bytes"), "{shown}");
+    assert!(!shown.contains("hunter2") && shown.contains("ToolArgs(..)"), "{shown}");
 }

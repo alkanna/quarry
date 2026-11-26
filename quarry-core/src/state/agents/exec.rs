@@ -56,7 +56,7 @@ pub struct Exec {
     pub running: HashMap<u64, Running>,
     /// (link session, link call id) to Activity id, so a cancel finds its call.
     pub calls: HashMap<(u64, u64), u64>,
-    /// The reply of a call that arrived over the link, waiting while the call runs as an `AgentsA::ToolCall` action.
+    /// Replies of link calls, held while each runs as an `AgentsA::ToolCall`: a oneshot cannot travel in an action.
     pub replies: HashMap<(u64, u64), Reply>,
     /// What the user allowed "for this session", per (link session, connection).
     pub grants: HashMap<(u64, u64), Grants>,

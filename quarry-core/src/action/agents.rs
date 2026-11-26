@@ -61,14 +61,14 @@ pub enum AgentsA {
     ToolCall { session: u64, call: u64, tool: String, args: ToolArgs, client: String },
 }
 
-/// An agent's tool arguments. They can hold passwords (a CREATE USER, a createUser command), so Debug shows only their size.
+/// An agent's tool arguments. They can hold passwords (a CREATE USER, a createUser command), so Debug never shows them.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(transparent)]
 pub struct ToolArgs(pub Value);
 
 impl std::fmt::Debug for ToolArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ToolArgs({} bytes)", self.0.to_string().len())
+        f.write_str("ToolArgs(..)")
     }
 }
 
