@@ -4,6 +4,7 @@
 
 use super::rail::{engine_mark, tile_face};
 use super::*;
+use quarry_core::action::{Action, ConnA};
 use std::sync::mpsc;
 pub(crate) use quarry_core::state::conn_icon::*;
 
@@ -240,10 +241,7 @@ impl App {
             }
         }
         ctx.data_mut(|d| d.insert_temp(cache_id(id), tex));
-        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == id) {
-            c.meta.icon = on;
-        }
-        self.save_conns();
+        self.exec(Action::Conn(ConnA::Icon { conn: id, on }));
     }
 }
 

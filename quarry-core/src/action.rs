@@ -51,6 +51,8 @@ pub mod routines;
 pub mod agents;
 pub mod replies;
 pub mod confirm;
+pub mod cloud;
+pub mod lib_open;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -103,6 +105,7 @@ pub use sql::ddl::{DdlA, SqlForm};
 pub use sql::ops::SqlOpsA;
 pub use agents::{AgentCall, AgentsA, Origin};
 pub use confirm::ConfirmA;
+pub use cloud::CloudA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -132,6 +135,7 @@ pub enum Action {
     SqlOps(SqlOpsA),
     Agents(AgentsA),
     Confirm(ConfirmA),
+    Cloud(CloudA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -231,6 +235,8 @@ pub enum Dialog {
     SqlMaintain { what: crate::db::sql::Maint, stmt: String },
     /// A SQL create, drop, rename, duplicate, empty, view or bulk dialog.
     SqlForm(SqlForm),
+    /// The Save to library dialog, for the text of the tab Cmd+S found bound to no script.
+    SaveScript(Box<crate::state::library::open::TabText>),
 }
 
 /// A password in an action. It is wiped on drop, prints as *** and serializes as null, so a journal or an echo never
@@ -310,6 +316,7 @@ impl Core {
             Action::Ddl(a) => self.ddl(a),
             Action::SqlOps(a) => self.sql_ops(a),
             Action::Agents(a) => self.agents_act(a),
+            Action::Cloud(a) => self.cloud_act(a),
         }
     }
 
@@ -380,6 +387,7 @@ impl Core {
             // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved does too, and hands the rest to `sql_view_saved`.
             Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => true,
             Msg::Agent(_) => true,
+            Msg::CloudSql { .. } => true,
             _ => false,
         }
     }
@@ -443,6 +451,7 @@ impl Core {
             Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
             Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
             Msg::Agent(ev) => self.on_agent(ev),
+            Msg::CloudSql { req, found } => self.cloud_found(req, found),
             _ => {}
         }
     }
@@ -464,6 +473,9 @@ impl Core {
         self.stop_hidden_watches();
         // Once per frame: the list the header counts drops what a day made too old, and the next launch reopens these tabs.
         crate::core::notify::trim_undo(&mut self.undo, std::time::Instant::now());
+        // The rail's tiles follow the open connections, each in the place it had.
+        let open: Vec<u64> = self.conns.iter().filter(|c| c.status.is_open()).map(|c| c.meta.id).collect();
+        conn::sync_order(&mut self.rail_order, &open);
         self.remember_tabs();
         rest
     }

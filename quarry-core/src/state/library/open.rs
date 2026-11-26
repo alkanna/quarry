@@ -113,3 +113,20 @@ pub fn snippet_of(s: &crate::library::Script, dialect: impl FnOnce() -> db::sql:
     };
     Some(snippet::merge(parts.into_iter().map(|p| snippet::parse(p, l)))).filter(|p| p.is_snippet())
 }
+
+/// The text of a tab's view as a script of the library would hold it, or None for a view that holds no script (Indexes,
+/// Schema, a SQL table's Structure and the like). A SQL table's Content view holds its WHERE and ORDER BY as a table filter.
+pub fn text_of(t: &Tab) -> Option<TabText> {
+    let (db, coll) = (t.sel.db.clone(), t.sel.coll.clone());
+    Some(match (t.view, t.sql.as_ref()) {
+        (View::Sql, Some(s)) => {
+            let run_db = if s.run_db.is_empty() { db } else { s.run_db.clone() };
+            TabText { kind: "sql", body: s.query.clone(), sort: String::new(), project: String::new(), view: View::Sql, db: run_db, schema: s.run_schema.trim().to_string(), coll: String::new() }
+        }
+        (View::Shell, _) => TabText { kind: "shell", body: t.shell.code.clone(), sort: String::new(), project: String::new(), view: View::Shell, db, schema: String::new(), coll: String::new() },
+        (View::Documents, Some(_)) if !coll.is_empty() => TabText { kind: "where", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: String::new(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
+        (View::Documents, None) => TabText { kind: "filter", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
+        (View::Aggregate, None) => TabText { kind: "pipeline", body: t.agg_txt.clone(), sort: String::new(), project: String::new(), view: View::Aggregate, db, schema: t.sel.schema.clone(), coll },
+        _ => return None,
+    })
+}

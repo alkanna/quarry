@@ -4,8 +4,9 @@ use super::*;
 pub(crate) use quarry_core::state::groups::*;
 
 impl App {
+    /// Startup only: the groups pruned of removed connections are written back before the first frame.
     pub(super) fn save_groups(&mut self) {
-        self.core.save_groups();
+        self.core.setup().save_groups();
     }
 
     pub(super) fn conn_ids(&self) -> Vec<u64> {

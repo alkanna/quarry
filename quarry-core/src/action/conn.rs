@@ -36,6 +36,10 @@ pub enum ConnA {
     /// The connection form's Test, built by `test_of`: the address and every password go as Secrets (empty for one the
     /// form does not use), the network settings without them. The reply's request id is the one `Msg::Tested` answers.
     Test { sql: bool, uri: Secret, ssh: Option<crate::ssh::SshConf>, ssh_pwd: Secret, ssh_pass: Secret, proxy: Option<db::Proxy>, proxy_pwd: Secret, cloud_sql: Option<crate::cloudsql::CloudSql>, key_pass: Secret, advanced: db::sql::Advanced },
+    /// The Connection icon dialog saved: `conn` shows its own icon file (true) or its engine's logo (false).
+    Icon { conn: u64, on: bool },
+    /// The connection form took the server facts the last Test learned, which are kept once.
+    TestInfoTaken,
 }
 
 /// The Test action of the connection form `f`, with the network settings `ConnForm::net` gives the worker.
@@ -97,6 +101,17 @@ pub enum RailDrop {
     Pair { conn: u64, target: u64 },
 }
 
+/// Keeps the ids still open in their old order and appends the newly open ones, so a shortcut
+/// never jumps when another connection opens or closes.
+pub fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
+    order.retain(|id| open.contains(id));
+    for id in open {
+        if !order.contains(id) {
+            order.push(*id);
+        }
+    }
+}
+
 /// Moves `conn` to just before or after `anchor` in the rail order. An anchor that is gone, or is `conn` itself, puts it last.
 pub fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
     // A connection dragged in from the sidebar may be closed, and a closed one has no tile to place.
@@ -138,6 +153,13 @@ impl Core {
             ConnA::Switch { conn } => self.active = Some(conn),
             ConnA::Remove { conn } => self.remove_conn(conn),
             ConnA::ForgetTest => (self.conn_test, self.test_info) = (None, None),
+            ConnA::TestInfoTaken => self.test_info = None,
+            ConnA::Icon { conn, on } => {
+                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                    c.meta.icon = on;
+                }
+                self.save_conns();
+            }
             ConnA::DropWays => self.conns.iter_mut().for_each(|c| c.tunnel = None),
             ConnA::Group(a) => self.group_act(a),
             ConnA::Save { meta, uri, secrets, group } => return self.save_conn(meta, uri, secrets, group),

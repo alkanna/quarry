@@ -41,6 +41,12 @@ pub enum SideA {
     DropColl { conn: u64, db: String, coll: String },
     Stats { conn: u64, db: String, coll: String },
     ViewDef { conn: u64, db: String, coll: String },
+    /// The explorer's filter box, as typed.
+    TreeFilter(String),
+    /// A jump to a connection, database or collection: the tree opens the database, clears its filter and scrolls there.
+    Reveal { conn: u64, db: Option<String>, coll: Option<String> },
+    /// Refresh on a database: its list is read again (see `Core::refresh_db`).
+    Refresh { conn: u64, db: String },
 }
 
 impl Core {
@@ -60,6 +66,17 @@ impl Core {
                 if !self.side_closed.remove(&k) {
                     self.side_closed.insert(k);
                 }
+            }
+            SideA::TreeFilter(text) => self.tree_filter = text,
+            SideA::Reveal { conn, db, coll } => {
+                self.reveal = db.clone().map(|d| (conn, d, coll));
+                if let Some(db) = db {
+                    self.tree_filter.clear();
+                    self.open_dbs.insert((conn, db));
+                }
+            }
+            SideA::Refresh { conn, db } => {
+                self.refresh_db(conn, &db);
             }
             SideA::Revealed => self.reveal = None,
             SideA::Asked { conn, db, retry } => {

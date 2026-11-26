@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ui::fold;
-use quarry_core::action::DdlA;
+use quarry_core::action::{CmpA, DdlA, MongoA, Pref, PrefsA, SideA};
 
 /// A connection with more databases than this lists its recently opened ones above them.
 const RECENT_MIN_DBS: usize = 8;
@@ -256,9 +256,14 @@ impl App {
         let mut mode = was;
         segmented_fill(ui, &mut mode, &[(SideMode::Explorer, "Tables", true), (SideMode::Library, "Scripts", library::panel::READY)]);
         if mode != was {
-            self.core.prefs.set_side_mode(mode);
-            self.save_prefs();
+            self.exec(Action::Prefs(PrefsA::Set(Pref::SidePanel(mode.name().into()))));
         }
+    }
+
+    /// Shows the sidebar panel `mode`, with the sidebar open or collapsed as `hidden` says.
+    pub(super) fn set_side(&mut self, mode: SideMode, hidden: bool) {
+        self.exec(Action::Prefs(PrefsA::Set(Pref::SidePanel(mode.name().into()))));
+        self.exec(Action::Prefs(PrefsA::Set(Pref::SidebarHidden(hidden))));
     }
 
     /// The database explorer: the Tables and Scripts switch, the active connection's card, tree filter and the tree.
@@ -268,14 +273,18 @@ impl App {
         self.conn_picker(ui);
         ui.add_space(8.0);
         let hint = if self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
+        let mut filter = self.core.tree_filter.clone();
         let r = ui.add(
-            egui::TextEdit::singleline(&mut self.core.tree_filter)
+            egui::TextEdit::singleline(&mut filter)
                 .id(egui::Id::unique("tree-filter"))
                 .hint_text(RichText::new(hint).color(FAINT()))
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
         );
-        if !r.has_focus() && self.core.tree_filter.is_empty() {
+        if filter != self.core.tree_filter {
+            self.exec(Action::Side(SideA::TreeFilter(filter.clone())));
+        }
+        if !r.has_focus() && filter.is_empty() {
             let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
             let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
             paint_kbd(ui.painter(), kr, g);
@@ -439,8 +448,7 @@ impl App {
     /// Opens the connection form for a saved connection.
     pub(super) fn edit_conn(&mut self, id: u64) {
         if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
-            self.core.conn_test = None;
-            self.core.test_info = None;
+            self.exec(Action::Conn(ConnA::ForgetTest));
             // Opening the form with an empty address would overwrite the stored one on save,
             // unless there is none, which is when re-entering it is the way out.
             // Demo ids overlap real ones, so the demo must not show the user's real secrets.
@@ -497,9 +505,7 @@ impl App {
     /// Callers reach for the tree: a jump, `/` or Cmd+Shift+F.
     pub(super) fn show_sidebar(&mut self) {
         if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Explorer {
-            self.core.prefs.sidebar_hidden = false;
-            self.core.prefs.set_side_mode(SideMode::Explorer);
-            self.save_prefs();
+            self.set_side(SideMode::Explorer, false);
         }
     }
 
@@ -512,12 +518,8 @@ impl App {
             Jump::Coll(s) => (s.conn, Some(s.db.clone())),
         };
         self.activate(id);
-        self.core.reveal = db.clone().map(|d| (id, d, if let Jump::Coll(s) = &j { Some(s.coll.clone()) } else { None }));
-        // Reveal the target in the tree, which a leftover filter could hide.
-        if let Some(db) = db {
-            self.core.tree_filter.clear();
-            self.core.open_dbs.insert((id, db));
-        }
+        // Reveals the target in the tree, which a leftover filter could hide.
+        self.exec(Action::Side(SideA::Reveal { conn: id, db, coll: if let Jump::Coll(s) = &j { Some(s.coll.clone()) } else { None } }));
         if let Jump::Coll(sel) = j {
             self.open_collection(sel, how);
         }
@@ -999,7 +1001,11 @@ impl App {
 
     /// Refresh on a database; see `Core::refresh_db`. False when the connection is not open.
     pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
-        self.core.refresh_db(conn, db)
+        let open = self.conn(conn).is_some_and(|c| c.sql.is_some() || c.client.is_some());
+        if open {
+            self.exec(Action::Side(SideA::Refresh { conn, db: db.to_string() }));
+        }
+        open
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
@@ -1075,10 +1081,10 @@ impl App {
             SideAct::Restore(db) => self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, restore: true, gzip: true, ..Default::default() }))),
             SideAct::Compare(db, coll) => {
                 self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, Open::Here);
-                let t = self.tm().unwrap();
-                t.view = View::Compare;
-                if t.compare.conn == 0 {
-                    (t.compare.conn, t.compare.db) = (conn, db);
+                self.set_view(View::Compare);
+                if let Some(tab) = self.t().filter(|t| t.compare.conn == 0).map(|t| t.uid) {
+                    self.exec(Action::Mongo(MongoA::Compare(CmpA::Conn { tab, conn })));
+                    self.exec(Action::Mongo(MongoA::Compare(CmpA::Db { tab, db })));
                 }
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),

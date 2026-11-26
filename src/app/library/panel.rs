@@ -7,7 +7,7 @@
 //! except while a folder opens or closes, when `tree::lay_out` places them.
 
 use super::*;
-use quarry_core::action::{Action, LibA};
+use quarry_core::action::{Action, LibA, Pref, PrefsA};
 use crate::library::ops::{self, DropAt};
 use crate::library::tree::{self, Node, Row, Scans};
 use crate::library::{Library, ScriptRef};
@@ -511,11 +511,14 @@ fn has_menu(_node: &Node) -> bool {
 impl App {
     /// The body of the sidebar in Library mode.
     pub(in crate::app) fn library_panel(&mut self, ui: &mut egui::Ui) {
-        let mut st = std::mem::take(&mut self.core.lib_ui.panel);
+        let before = self.core.lib_ui.panel.clone();
+        let mut st = before.clone();
         let mut acts = Vec::new();
         self.library_body(ui, &mut st, &mut acts);
         // Back in Core before the actions run, since they select and open rows of it.
-        self.core.lib_ui.panel = st;
+        if st != before {
+            self.exec(Action::Library(LibA::Panel(Box::new(st))));
+        }
         for a in acts {
             self.apply_lib_act(ui.ctx(), a);
         }
@@ -741,12 +744,11 @@ impl App {
             let mut pref = if self.core.prefs.lib_preview_h > 0.0 { avail - preview_h } else { 0.0 };
             let r = splitter(ui);
             if resize_editor(&r, &mut pref, out.inner_rect.height(), TREE_MIN, avail - PREVIEW_MIN - 6.0) {
-                self.core.prefs.lib_preview_h = if pref > 0.0 { avail - pref } else { 0.0 };
-                self.save_prefs();
+                self.exec(Action::Prefs(PrefsA::Set(Pref::LibPreviewH(if pref > 0.0 { avail - pref } else { 0.0 }))));
             }
             // A drag in progress moves the card at once; the preference is saved when it ends.
             if r.dragged() && pref > 0.0 {
-                self.core.prefs.lib_preview_h = avail - pref;
+                self.exec(Action::Prefs(PrefsA::Set(Pref::LibPreviewH(avail - pref))));
             }
             if let Some(sel) = st.sel.clone() {
                 self.library_preview(ui, &sel, st, all, acts);
@@ -944,28 +946,11 @@ impl App {
             }
             Act::SaveCurrent => self.save_script(),
             Act::Toggle(n) => {
-                let st = &mut self.core.lib_ui.panel;
-                let open = !st.open.remove(&n);
-                if open {
-                    st.open.insert(n.clone());
-                }
+                let open = !self.core.lib_ui.panel.open.contains(&n);
                 fold::start(ctx, fold_id(&n), open);
-                st.folding.insert(n);
+                self.exec(lib(LibA::Toggle(n)));
             }
-            Act::Rename(n) => {
-                let name = match &n {
-                    Node::Folder(id) => self.core.library.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()),
-                    Node::Script(id) => self.core.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()),
-                    Node::Link(id) => self.core.library.links.iter().find(|l| l.id == *id).map(|l| if l.name.is_empty() { l.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { l.name.clone() }),
-                    Node::Dir { rel, .. } => rel.file_name().map(|n| n.to_string_lossy().into_owned()),
-                    Node::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()),
-                };
-                if let Some(name) = name {
-                    let st = &mut self.core.lib_ui.panel;
-                    st.sel = Some(n.clone());
-                    st.rename = Some((n, name, true));
-                }
-            }
+            Act::Rename(n) => self.exec(lib(LibA::StartRename(n))),
             Act::Commit(node, text) => self.exec(lib(LibA::Commit { node, text })),
             Act::Duplicate(id) => self.exec(lib(LibA::Duplicate(id))),
             Act::Move(node, at) => self.exec(lib(LibA::Move { node, at })),
@@ -979,11 +964,10 @@ impl App {
             Act::Delete(n) => self.exec(lib(LibA::Delete(n))),
             Act::NewFolder(parent) => self.exec(lib(LibA::NewFolder(parent))),
             Act::FoldAll => {
-                let st = &mut self.core.lib_ui.panel;
-                for n in st.open.drain() {
-                    fold::start(ctx, fold_id(&n), false);
-                    st.folding.insert(n);
+                for n in &self.core.lib_ui.panel.open {
+                    fold::start(ctx, fold_id(n), false);
                 }
+                self.exec(lib(LibA::FoldAll));
             }
             Act::Scope(all) => self.exec(lib(LibA::Scope(all))),
             Act::Link => self.open_link_dialog(None),
@@ -1035,13 +1019,15 @@ impl App {
     /// Mongo kinds on "Local sample", so the All connections scope shows every glyph and a removed connection.
     fn demo_library_panel(&mut self, state: &str) {
         use crate::library::{Folder, Script};
-        if self.conn(3).is_none() {
-            self.core.conns.push(Conn { masked_uri: "mysql://app:****@shop.internal:3306".into(), ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
+        let missing = self.conn(3).is_none();
+        let c = self.core.setup();
+        if missing {
+            c.conns.push(Conn { masked_uri: "mysql://app:****@shop.internal:3306".into(), ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready) });
         }
-        self.core.active = Some(3);
-        self.core.prefs.set_side_mode(SideMode::Library);
-        self.core.prefs.sidebar_hidden = false;
-        self.core.prefs.lib_scope_all = state == "all";
+        c.active = Some(3);
+        c.prefs.set_side_mode(SideMode::Library);
+        c.prefs.sidebar_hidden = false;
+        c.prefs.lib_scope_all = state == "all";
         let now = crate::library::now_secs();
         let folder = |id, name: &str, parent| Folder { id, name: name.into(), parent };
         let script = |id, name: &str, kind: &str, conn, folder, db: &str, coll: &str, body: &str, age: u64| Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), folder, updated: now - age, ..Default::default() };
@@ -1065,8 +1051,8 @@ impl App {
             lib.scripts = vec![script(20, "Paid orders", "filter", 1, None, "shop", "orders", "{ status: 'paid' }", 86400), script(21, "Revenue by status", "pipeline", 1, None, "shop", "orders", "[]", 86400), script(22, "Backfill totals", "shell", 1, None, "", "", "console.log(1)", 86400)];
             lib.folders.clear();
         }
-        self.core.library = lib;
-        let st = &mut self.core.lib_ui.panel;
+        c.library = lib;
+        let st = &mut c.lib_ui.panel;
         st.open = [1, 2].map(Node::Folder).into_iter().collect();
         match state {
             "search" => st.query = "orders".into(),

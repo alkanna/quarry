@@ -50,7 +50,7 @@ impl App {
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
-        let demo_open = std::mem::take(&mut self.core.conns_ui.demo_picker);
+        let demo_open = std::mem::take(&mut self.ui.conns.demo_picker);
         if demo_open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
@@ -86,11 +86,11 @@ impl App {
             let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
             ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
             if opened {
-                self.core.conns_ui.picker_filter.clear();
+                self.ui.conns.picker_filter.clear();
             }
-            conns_panel::picker_filter(ui, &mut self.core.conns_ui.picker_filter, opened);
+            conns_panel::picker_filter(ui, &mut self.ui.conns.picker_filter, opened);
             egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                if let Some(id) = conns_panel::picker_list(ui, &self.core.conns, &self.core.groups, &mut self.core.conns_ui, self.core.active, opened) {
+                if let Some(id) = conns_panel::picker_list(ui, &self.core.conns, &self.core.groups, &mut self.ui.conns, self.core.active, opened) {
                     pick = Some(id);
                     ui.close();
                 }
@@ -139,10 +139,8 @@ impl App {
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Manage connections").clicked() {
             if on {
                 // Back to the panel and sidebar state Manage was opened from.
-                let (mode, hidden) = self.core.conns_ui.manage_back.take().unwrap_or((SideMode::Explorer, false));
-                self.core.prefs.set_side_mode(mode);
-                self.core.prefs.sidebar_hidden = hidden;
-                self.save_prefs();
+                let (mode, hidden) = self.ui.conns.manage_back.take().unwrap_or((SideMode::Explorer, false));
+                self.set_side(mode, hidden);
             } else {
                 self.rail_act(RailAct::Manage);
             }
@@ -184,8 +182,8 @@ impl App {
             RailAct::NewGroup => {
                 self.open_manage();
                 // The panel's own New group field, at the end of its groups.
-                self.core.conns_ui.adding = Some(String::new());
-                self.core.conns_ui.focus_edit = true;
+                self.ui.conns.adding = Some(String::new());
+                self.ui.conns.focus_edit = true;
             }
         }
     }
@@ -193,11 +191,9 @@ impl App {
     /// Shows the Connections panel, remembering what the sidebar showed so closing it from the Manage tile goes back.
     fn open_manage(&mut self) {
         if !self.manages() {
-            self.core.conns_ui.manage_back = Some((self.core.prefs.side_mode(), self.core.prefs.sidebar_hidden));
+            self.ui.conns.manage_back = Some((self.core.prefs.side_mode(), self.core.prefs.sidebar_hidden));
         }
-        self.core.prefs.set_side_mode(SideMode::Connections);
-        self.core.prefs.sidebar_hidden = false;
-        self.save_prefs();
+        self.set_side(SideMode::Connections, false);
     }
 }
 
@@ -227,8 +223,6 @@ impl App {
     /// members, and a connection dragged in from the sidebar lands here, through the same `tile_drop` targets. Such a
     /// drop wins over the move the list would make, since it is the more precise of the two.
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
-        let open: Vec<u64> = self.core.conns.iter().filter(|c| c.status.is_open()).map(|c| c.meta.id).collect();
-        sync_order(&mut self.core.rail_order, &open);
         if self.core.rail_order.is_empty() {
             return;
         }
@@ -478,7 +472,7 @@ impl App {
         }
         r.context_menu(|ui| tile_menu(ui, id, act));
         // The picture of a drag over this tile, since a screenshot cannot hold one.
-        if self.core.conns_ui.demo_rail_drop == Some(id) {
+        if self.ui.conns.demo_rail_drop == Some(id) {
             drop_ring(ui.painter(), r.rect);
             let at = r.rect.center() + egui::vec2(4.0, 2.0);
             if let Some(c) = self.conn(1) {
@@ -487,7 +481,7 @@ impl App {
             hint_card(ui.ctx(), at, "New group");
         }
         // The picture of the menu, drawn beside its tile since a screenshot has no right click to open it with.
-        if self.core.conns_ui.demo_tile_menu == Some(id) {
+        if self.ui.conns.demo_tile_menu == Some(id) {
             egui::Area::new(egui::Id::unique("demo-tile-menu")).order(egui::Order::Foreground).fixed_pos(r.rect.right_top() + egui::vec2(8.0, 0.0)).show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| tile_menu(ui, id, act));
             });
@@ -541,17 +535,6 @@ fn tile_menu(ui: &mut egui::Ui, id: u64, act: &mut Option<(u64, TileAct)>) {
     }
     if danger_item(ui, "Disconnect").clicked() {
         *act = Some((id, TileAct::Disconnect));
-    }
-}
-
-/// Keeps the ids still open in their old order and appends the newly open ones, so a shortcut
-/// never jumps when another connection opens or closes.
-fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
-    order.retain(|id| open.contains(id));
-    for id in open {
-        if !order.contains(id) {
-            order.push(*id);
-        }
     }
 }
 
@@ -1000,7 +983,7 @@ pub(super) fn search_icon(p: &egui::Painter, c: egui::Pos2, s: Stroke) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quarry_core::action::conn::move_next_to;
+    use quarry_core::action::conn::{move_next_to, sync_order};
 
     #[test]
     fn shortcuts_keep_the_order_they_opened_in() {

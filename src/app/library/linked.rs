@@ -60,19 +60,6 @@ impl App {
     pub(in crate::app) fn conflict_compare(&mut self) {
         self.exec(Action::Library(LibA::ConflictCompare { tab: self.cur_uid() }));
     }
-
-    // The linked folders live in Core; these forward for the app's other callers.
-    pub(in crate::app) fn rescan_link(&mut self, id: u64) {
-        self.core.rescan_link(id)
-    }
-
-    pub(in crate::app) fn drop_entry(&mut self, link: u64, rel: &std::path::Path) {
-        self.core.drop_entry(link, rel)
-    }
-
-    pub(in crate::app) fn relink(&mut self, l: crate::library::Link, at: usize, tabs: Vec<(u64, Bound)>, recent: Vec<(usize, ScriptRef)>) {
-        self.core.relink(l, at, tabs, recent)
-    }
 }
 
 /// Opens `path` in the file manager, selecting it where the system can. The one place that starts the file manager, so
@@ -139,29 +126,32 @@ impl App {
             return false;
         }
         self.demo_library("panel");
-        self.core.lib_ui.panel.sel = None;
-        self.core.lib_ui.frozen = true;
+        self.core.setup().lib_ui.panel.sel = None;
+        self.core.setup().lib_ui.frozen = true;
         let link = |id, name: &str, path: &str| crate::library::Link { id, name: name.into(), path: path.into(), on: "engine".into(), engine: "mysql".into(), exts: ["sql", "js", "json"].map(String::from).to_vec(), follow: true, ..Default::default() };
         if state != "link" {
-            self.core.library.links.push(link(100, "shop-queries", "/Users/demo/work/shop-queries"));
-            self.core.lib_ui.scans.insert(100, demo_scan(&DEMO_FILES));
-            let st = &mut self.core.lib_ui.panel;
+            let c = self.core.setup();
+            c.library.links.push(link(100, "shop-queries", "/Users/demo/work/shop-queries"));
+            c.lib_ui.scans.insert(100, demo_scan(&DEMO_FILES));
+            let st = &mut c.lib_ui.panel;
             st.open.insert(Node::Link(100));
             st.open.insert(Node::Dir { link: 100, rel: "reports".into() });
-            self.core.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
+            c.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
         }
         // The Library shows the scripts that fit the current tab's connection, so the .sql link needs a MySQL tab in front.
         if matches!(state, "linked" | "missing") {
             let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
             t.view = View::Sql;
-            self.core.tabs = vec![t];
-            self.core.cur = 0;
+            let c = self.core.setup();
+            c.tabs = vec![t];
+            c.cur = 0;
         }
         match state {
-            "linked" => self.core.lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
+            "linked" => self.core.setup().lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
             "missing" => {
-                self.core.library.links.push(link(101, "legacy-exports", "/Volumes/archive/exports"));
-                self.core.lib_ui.scans.insert(101, disk::Scan { missing: true, ..Default::default() });
+                let c = self.core.setup();
+                c.library.links.push(link(101, "legacy-exports", "/Volumes/archive/exports"));
+                c.lib_ui.scans.insert(101, disk::Scan { missing: true, ..Default::default() });
             }
             "link" => {
                 self.open_link_dialog(None);
@@ -189,8 +179,9 @@ impl App {
                     q.query = mine;
                 }
                 t.script = Some(Bound { r: ScriptRef::File { link: 100, rel }, view: View::Sql, base, disk: None, conflict: Some(theirs) });
-                self.core.tabs = vec![t];
-                self.core.cur = 0;
+                let c = self.core.setup();
+                c.tabs = vec![t];
+                c.cur = 0;
             }
         }
         true

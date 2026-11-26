@@ -398,9 +398,7 @@ impl App {
                 self.open_tab(Sel { conn, db: f.db.clone(), schema: String::new(), coll: String::new() }, Open::NewTab);
             }
             self.open_in_shell(text);
-            if let Some(t) = self.tm() {
-                (t.script, t.snip) = (None, Snip { off: true, ..Default::default() });
-            }
+            self.exec(Action::Library(LibA::FillSnippet { kind: "shell".into(), body: String::new(), sort: String::new(), project: String::new(), schema: String::new() }));
             return self.start_shell();
         }
         let p = snippet::merge(f.parts().into_iter().map(|t| snippet::parse(t, l)));
@@ -410,11 +408,7 @@ impl App {
             (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => return self.warn(e),
         };
         self.open_tab(Sel { conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() }, Open::Link);
-        if let Some(t) = self.tm() {
-            t.clear_options();
-            (t.filter_txt, t.sort_txt, t.proj_txt, t.view) = (filter, sort, project, View::Documents);
-            (t.script, t.snip) = (None, Snip { off: true, ..Default::default() });
-        }
+        self.exec(Action::Library(LibA::FillSnippet { kind: "filter".into(), body: filter, sort, project, schema: String::new() }));
         self.run_query();
     }
 
@@ -430,16 +424,7 @@ impl App {
         if !reuse {
             self.sql_new_query(conn, f.db.clone());
         }
-        if let Some(t) = self.tm() {
-            t.script = None;
-            t.snip = Snip { off: true, ..Default::default() };
-            if let Some(q) = t.sql.as_mut() {
-                q.query = text;
-                q.caret = 0;
-                q.run_schema = f.schema.clone();
-                q.run_db = String::new();
-            }
-        }
+        self.exec(Action::Library(LibA::FillSnippet { kind: "sql".into(), body: text, sort: String::new(), project: String::new(), schema: f.schema.clone() }));
         self.sql_run(true, false);
     }
 }
@@ -490,7 +475,7 @@ impl App {
         use crate::library::Script;
         // Over the Mongo demo: shell (a Shell script with values) and docs (the Documents bar with values).
         if matches!(state, "shell" | "docs") {
-            let Some(t) = self.core.tabs.get_mut(1) else { return };
+            let Some(t) = self.core.setup().tabs.get_mut(1) else { return };
             if state == "shell" {
                 t.view = View::Shell;
                 t.shell.code = "async function run() {\n  return await orders.find({\n    status: {{status:paid|shipped|refunded=paid}},\n    createdAt: { $gte: {{from:date}} },\n  }).limit({{n:int=20}}).toArray();\n}".into();
@@ -500,32 +485,34 @@ impl App {
                 t.sort_txt = "{ createdAt: -1 }".into();
             }
             t.snip.vals.insert("from".into(), "2026-11-01".into());
-            self.core.cur = 1;
+            self.core.setup().cur = 1;
             return;
         }
-        (self.core.conns, self.core.tabs) = (Vec::new(), Vec::new());
-        self.core.open_dbs.clear();
+        let c = self.core.setup();
+        (c.conns, c.tabs) = (Vec::new(), Vec::new());
+        c.open_dbs.clear();
         self.load_sql_demo();
         self.sql_query_demo();
         self.demo_scripts();
         let folder = |a: &App, name: &str| a.core.library.folders.iter().find(|f| f.name == name).map(|f| f.id);
         let add = |a: &mut App, name: &str, body: &str, folder: Option<u64>| {
-            let id = a.core.library.next_id();
-            a.core.library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), folder, updated: 1_731_400_000, ..Default::default() });
+            let lib = &mut a.core.setup().library;
+            let id = lib.next_id();
+            lib.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), folder, updated: 1_731_400_000, ..Default::default() });
             id
         };
         let (reports, maint) = (folder(self, "Reports"), folder(self, "Maintenance"));
         let read = add(self, "Orders on a day", "SELECT o.id, o.customer_id, o.total, o.status\nFROM orders o\nWHERE DATE(o.created_at) = {{day:date}}\n  AND o.status = {{status:paid|pending|refunded=paid}}\nORDER BY o.created_at\nLIMIT {{limit:int=100}};", reports);
         let write = add(self, "Mark orders shipped", "UPDATE orders SET status = 'shipped', shipped_at = NOW()\nWHERE id IN ({{ids:int list}});", maint);
         let named = |v: &[(&str, &str)]| -> snippet::Values { v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
-        self.core.lib_ui.snippet_values.insert(read, named(&[("day", "2026-11-03"), ("status", "paid"), ("limit", "100")]));
-        self.core.lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
+        self.core.setup().lib_ui.snippet_values.insert(read, named(&[("day", "2026-11-03"), ("status", "paid"), ("limit", "100")]));
+        self.core.setup().lib_ui.snippet_values.insert(write, named(&[("ids", "4405, 4407, 4412")]));
         match state {
             "palette" => self.open_palette_with("orders".into()),
             "form" => self.open_snippet_form(read, Some("orders".into())),
             "write" | "locked" => {
                 if state == "write"
-                    && let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3)
+                    && let Some(c) = self.core.setup().conns.iter_mut().find(|c| c.meta.id == 3)
                 {
                     c.writable = true;
                 }
@@ -538,7 +525,7 @@ impl App {
             }
             "tab" | "filled" => {
                 self.open_script(&ScriptRef::Saved(read), crate::app::library::open::How::Here);
-                if let Some(t) = self.tm() {
+                if let Some(t) = self.core.setup().tm() {
                     t.snip.vals = [("day", "2026-11-03"), ("status", "paid"), ("limit", "100")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
                     t.snip.filled = state == "filled";
                 }

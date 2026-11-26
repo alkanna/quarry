@@ -213,8 +213,7 @@ impl App {
         let fresh = f.preview.as_ref().is_some_and(|(p, _)| *p == path);
         if !path.is_empty() && !fresh && f.asking.is_none() && now - f.typed_at >= TYPING_PAUSE {
             f.asking = Some(path.clone());
-            let (root, all) = (expand(&path), ["sql", "js", "json"].map(String::from).to_vec());
-            self.core.worker.blocking(move || db::Msg::LibScan { link: 0, scan: disk::scan(&root, &all, None) });
+            self.exec(Action::Library(LibA::Preview { root: expand(&path) }));
         } else if !path.is_empty() && !fresh {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TYPING_PAUSE));
         }

@@ -30,6 +30,9 @@ pub(super) fn conn_actions() -> Vec<Action> {
         SideA::DropColl { conn: 1, db: db(), coll: coll() },
         SideA::Stats { conn: 1, db: db(), coll: coll() },
         SideA::ViewDef { conn: 1, db: db(), coll: coll() },
+        SideA::TreeFilter("ord".into()),
+        SideA::Reveal { conn: 1, db: Some(db()), coll: None },
+        SideA::Refresh { conn: 1, db: db() },
     ];
     all.extend(side.into_iter().map(Action::Side));
     let groups = [
@@ -52,6 +55,8 @@ pub(super) fn conn_actions() -> Vec<Action> {
     all.push(Action::Conn(ConnA::Remove { conn: 1 }));
     all.push(Action::Conn(ConnA::DropWays));
     all.push(Action::Conn(ConnA::ForgetTest));
+    all.push(Action::Conn(ConnA::Icon { conn: 1, on: true }));
+    all.push(Action::Conn(ConnA::TestInfoTaken));
     all.push(Action::Conn(ConnA::Save { meta: ConnMeta { id: 1, name: "local".into(), ..Default::default() }, uri: Secret::new("mongodb://ada:pw@localhost".into()), secrets: vec![("ssh-password".into(), Secret::new("pw".into()))], group: Some(2) }));
     all.extend(groups.into_iter().map(|g| Action::Conn(ConnA::Group(g))));
     all.push(Action::Conn(super::conn::test_of(&crate::state::ConnForm::default())));

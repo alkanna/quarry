@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::library::ScriptRef;
+use quarry_core::action::{Action, LibA};
 pub(crate) use quarry_core::state::library::open::*;
 pub(crate) use quarry_core::state::library::open::Target;
 
@@ -20,23 +21,7 @@ impl App {
     /// The text of the current tab's view as a script, or None for a view that holds no script (Indexes, Schema, a SQL
     /// table's Structure and the like). A SQL table's Content view holds its WHERE and ORDER BY as a table filter.
     pub(in crate::app) fn tab_text(&self) -> Option<TabText> {
-        Self::text_of(self.t()?)
-    }
-
-    fn text_of(t: &Tab) -> Option<TabText> {
-        let (db, coll) = (t.sel.db.clone(), t.sel.coll.clone());
-        Some(match (t.view, t.sql.as_ref()) {
-            (View::Sql, Some(s)) => {
-                let run_db = if s.run_db.is_empty() { db } else { s.run_db.clone() };
-                TabText { kind: "sql", body: s.query.clone(), sort: String::new(), project: String::new(), view: View::Sql, db: run_db, schema: s.run_schema.trim().to_string(), coll: String::new() }
-            }
-            (View::Shell, _) => TabText { kind: "shell", body: t.shell.code.clone(), sort: String::new(), project: String::new(), view: View::Shell, db, schema: String::new(), coll: String::new() },
-            // A SQL table's Content view: its WHERE and ORDER BY.
-            (View::Documents, Some(_)) if !coll.is_empty() => TabText { kind: "where", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: String::new(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
-            (View::Documents, None) => TabText { kind: "filter", body: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), view: View::Documents, db, schema: t.sel.schema.clone(), coll },
-            (View::Aggregate, None) => TabText { kind: "pipeline", body: t.agg_txt.clone(), sort: String::new(), project: String::new(), view: View::Aggregate, db, schema: t.sel.schema.clone(), coll },
-            _ => return None,
-        })
+        self.core.tab_text()
     }
 
     /// The binding a restored tab gets back: the script is still in the library and the tab shows the view it is written in.
@@ -52,7 +37,7 @@ impl App {
                 (view_of_kind(&s.kind)?, s.body.clone())
             }
             ScriptRef::File { .. } => {
-                let tt = Self::text_of(t)?;
+                let tt = text_of(t)?;
                 (tt.view, tt.body)
             }
         };
@@ -161,7 +146,7 @@ impl App {
 
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
-        self.core.bind_script(r, view, base);
+        self.exec(Action::Library(LibA::Bind { r, view, base }));
     }
 
     /// Opens the script `r` in a tab, the way `how` says. A plain open takes the current tab only when it is a clean one
@@ -186,7 +171,8 @@ impl App {
             if let ScriptRef::Saved(id) = r
                 && let Some(s) = self.core.library.scripts.iter().find(|s| s.id == *id).cloned()
             {
-                return self.reload_bound(i, &s);
+                let Some(tab) = self.core.tabs.get(i).map(|t| t.uid) else { return };
+                return self.exec(Action::Library(LibA::ReloadBound { tab, script: s.id }));
             }
         }
         match self.script_target(r) {
@@ -210,7 +196,7 @@ impl App {
                 None => self.warn("That script is no longer in the library."),
             },
             // A linked file is read on the worker, and opens on `conn` when it is back.
-            ScriptRef::File { link, rel } => self.core.read_file_job(*link, rel, super::linked::Job::Open { r: r.clone(), how, conn }),
+            ScriptRef::File { .. } => self.exec(Action::Library(LibA::OpenFile { r: r.clone(), how, conn })),
         }
     }
 
@@ -246,7 +232,7 @@ impl App {
         if !status_ready && !self.core.demo {
             let uid = self.t().map(|t| t.uid);
             let seen_connecting = self.conn(s.conn).is_some_and(|c| c.status == Status::Connecting);
-            self.core.lib_ui.pending = Some(Pending { r: r.clone(), how, conn: s.conn, uid, attempt, since: None, seen_connecting, name: s.name.clone() });
+            self.exec(Action::Library(LibA::Wait { r: r.clone(), how, conn: s.conn, uid, attempt, seen_connecting, name: s.name.clone() }));
             // activate connects only an idle connection; a failed one is tried again.
             if self.conn(s.conn).is_some_and(|c| matches!(c.status, Status::Failed(_))) {
                 self.connect(s.conn);
@@ -255,7 +241,7 @@ impl App {
             self.toast_acts(format!("Opening {} when {cname} connects", s.name), vec![("Cancel".into(), crate::app::errors::Act::CancelOpen)]);
             return;
         }
-        self.core.lib_ui.pending = None;
+        self.exec(Action::Library(LibA::CancelPending));
         let new_tab = how == How::NewTab;
         // Run is "Run all". On a writable connection a script that can change data is opened, not run, with a notice
         // above the editor, and the person runs it from there. A read-only connection keeps its own gates.
@@ -268,20 +254,9 @@ impl App {
                 if !reuse {
                     self.sql_new_query(s.conn, db);
                 }
-                // The values of what the tab held before are not this script's.
-                if let Some(t) = self.tm() {
-                    t.snip = Default::default();
-                }
-                if let Some(q) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    q.query = s.body.clone();
-                    q.caret = 0;
-                    q.run_schema = s.schema.clone();
-                    // A reused tab may have been switched to another database; the script runs in its own.
-                    q.run_db = String::new();
-                }
                 // A linked file with {{...}} values opens to be filled in; it never runs with them empty.
                 let snippet = self.script_snippet(&s).is_some();
-                self.bind_script(r.clone(), View::Sql, s.body);
+                self.exec(Action::Library(LibA::Fill { r: r.clone(), script: Box::new(s) }));
                 if run && !snippet {
                     self.sql_run(true, false);
                 }
@@ -299,10 +274,7 @@ impl App {
                 // The values of what the tab held before are not this script's, and a linked file with values opens to
                 // be filled in.
                 let snippet = self.script_snippet(&s).is_some();
-                if let Some(t) = self.tm() {
-                    t.snip = Default::default();
-                }
-                self.bind_script(r.clone(), View::Shell, s.body);
+                self.exec(Action::Library(LibA::Fill { r: r.clone(), script: Box::new(s) }));
                 if run && !snippet {
                     self.run_shell_script();
                 }
@@ -310,50 +282,34 @@ impl App {
             "filter" => {
                 let sel = Sel { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
                 self.open_tab(sel, if new_tab { Open::NewTab } else { Open::Link });
-                if let Some(t) = self.tm() {
-                    t.clear_options();
-                    (t.filter_txt, t.sort_txt, t.proj_txt) = (s.body.clone(), s.sort.clone(), s.project.clone());
-                    t.view = View::Documents;
-                    t.snip = Default::default();
-                }
-                self.bind_script(r.clone(), View::Documents, s.body);
+                self.exec(Action::Library(LibA::Fill { r: r.clone(), script: Box::new(s) }));
                 // A filter only reads, so it runs on open, as a click on a collection does.
                 self.run_query();
             }
             "where" => {
                 let sel = Sel { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
                 self.open_tab(sel, if new_tab { Open::NewTab } else { Open::Link });
-                if let Some(t) = self.tm() {
-                    (t.filter_txt, t.sort_txt, t.page) = (s.body.clone(), s.sort.clone(), 0);
-                    t.view = View::Documents;
-                }
-                self.bind_script(r.clone(), View::Documents, s.body);
+                self.exec(Action::Library(LibA::Fill { r: r.clone(), script: Box::new(s) }));
                 // A filter only reads, so it runs on open, as a click on the table does.
                 self.reload();
             }
             "pipeline" => {
                 let sel = Sel { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
                 self.open_tab(sel, if new_tab { Open::NewTab } else { Open::Link });
-                if let Some(t) = self.tm() {
-                    t.agg_txt = s.body.clone();
-                    t.view = View::Aggregate;
-                }
-                self.bind_script(r.clone(), View::Aggregate, s.body.clone());
+                let body = s.body.clone();
+                self.exec(Action::Library(LibA::Fill { r: r.clone(), script: Box::new(s) }));
                 // A pipeline can be heavy, so only Run runs it; Open loads it.
                 if run {
-                    self.run_script_pipeline(&s.body);
+                    self.run_script_pipeline(&body);
                 }
             }
             other => return self.warn(format!("This build does not know scripts of kind \"{other}\".")),
         }
         if writes && let Some(uid) = self.t().map(|t| t.uid) {
-            self.core.lib_ui.writes.insert(uid);
+            self.exec(Action::Library(LibA::Writes { tab: uid, on: true }));
         }
         if let Some((link, rel, meta)) = file {
-            if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
-                b.disk = meta;
-            }
-            self.core.mark_seen(link, &rel, meta);
+            self.exec(Action::Library(LibA::Seen { link, rel, meta }));
         }
     }
 
@@ -372,38 +328,7 @@ impl App {
     /// library dialog when there is none. Page handlers consume Cmd+S first (staged grid edits, document drafts), so this
     /// only runs when the person means the script.
     pub(in crate::app) fn save_script(&mut self) {
-        let Some(tt) = self.tab_text() else { return self.warn("There is no script to save in this view. Open a Query, Documents, Content, Aggregate or Shell view.") };
-        if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
-            return self.warn("Nothing to save: the script is empty.");
-        }
-        // A tab bound to a linked file writes that file, or raises the conflict when it changed on disk.
-        if self.core.save_linked() {
-            return;
-        }
-        let bound = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == tt.view).map(|b| b.r.clone());
-        // A bound linked file is written by the linked folders' code; until then it takes the dialog.
-        if let Some(ScriptRef::Saved(id)) = bound
-            && let Some(i) = self.core.library.scripts.iter().position(|s| s.id == id)
-        {
-            let tab_conn = self.t().map(|t| t.sel.conn);
-            let sc = &mut self.core.library.scripts[i];
-            (sc.body, sc.sort, sc.project, sc.updated) = (tt.body.clone(), tt.sort.clone(), tt.project.clone(), crate::library::now_secs());
-            // The database and collection the tab runs on now are part of what is saved, as the Save dialog keeps them. A script
-            // opened on another connection keeps its own, which name places on its own server.
-            let own = tab_conn == Some(sc.conn);
-            if own && !tt.db.is_empty() {
-                (sc.db, sc.schema) = (tt.db.clone(), tt.schema.clone());
-            }
-            if own && !tt.coll.is_empty() {
-                sc.coll = tt.coll.clone();
-            }
-            let name = sc.name.clone();
-            self.bind_script(ScriptRef::Saved(id), tt.view, tt.body.clone());
-            self.ok(format!("Saved \"{name}\""));
-            self.warn_plain_password(&tt);
-            return;
-        }
-        self.open_save_dialog(tt);
+        self.exec(Action::Library(LibA::SaveTab));
     }
 
     /// Cmd+Shift+S and the chip's Save as new: the Save dialog for the tab's text as a new script, whatever the tab is bound
@@ -424,73 +349,21 @@ impl App {
     /// Cmd+Shift+L: the Library panel on screen with the keys on its tree.
     pub(in crate::app) fn focus_library(&mut self) {
         if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Library {
-            self.core.prefs.set_side_mode(SideMode::Library);
-            self.core.prefs.sidebar_hidden = false;
-            self.save_prefs();
+            self.set_side(SideMode::Library, false);
         }
         self.ui.lib_focus_tree = true;
     }
 
     /// The chip's Show in library: the panel on screen with the script selected and the folders above it open.
     pub(in crate::app) fn show_in_library(&mut self, r: &ScriptRef) {
-        use crate::library::tree::Node;
         self.focus_library();
-        let st = &mut self.core.lib_ui.panel;
-        st.query.clear();
-        let node = match r {
-            ScriptRef::Saved(id) => {
-                let lib = &self.core.library;
-                let mut at = lib.scripts.iter().find(|s| s.id == *id).and_then(|s| crate::library::tree::live_parent(lib, s.folder));
-                // Bounded, since a hand-edited file could hold a loop of folders.
-                for _ in 0..32 {
-                    let Some(f) = at else { break };
-                    st.open.insert(Node::Folder(f));
-                    at = lib.folders.iter().find(|x| x.id == f).and_then(|x| crate::library::tree::live_parent(lib, x.parent));
-                }
-                // A script of another connection shows only in the All connections scope.
-                let conn = lib.scripts.iter().find(|s| s.id == *id).map(|s| s.conn);
-                if conn.is_some() && conn != self.t().map(|t| t.sel.conn).or(self.core.active) {
-                    self.core.prefs.lib_scope_all = true;
-                }
-                Node::Script(*id)
-            }
-            ScriptRef::File { link, rel } => {
-                st.open.insert(Node::Link(*link));
-                let mut at = std::path::PathBuf::new();
-                for c in rel.parent().into_iter().flat_map(|p| p.components()) {
-                    at.push(c);
-                    st.open.insert(Node::Dir { link: *link, rel: at.clone() });
-                }
-                Node::File { link: *link, rel: rel.clone() }
-            }
-        };
-        let st = &mut self.core.lib_ui.panel;
-        st.sel = Some(node);
-        st.focus = true;
+        self.exec(Action::Library(LibA::Show(r.clone())));
     }
 
     /// The chip's Unbind: the tab keeps its text but no longer writes back to the script, so Cmd+S asks again.
     pub(in crate::app) fn unbind_script(&mut self) {
-        if let Some(t) = self.tm() {
-            t.script = None;
-        }
-    }
-
-    /// Puts saved script `s` back in tab `i`, which is bound to it, with a toast whose Undo restores the replaced text.
-    fn reload_bound(&mut self, i: usize, s: &crate::library::Script) {
-        let t = &mut self.core.tabs[i];
-        let mine = super::linked::bound_text(t).map(String::from);
-        super::linked::set_bound_text(t, &s.body, None);
-        if t.script.as_ref().is_some_and(|b| b.view == View::Documents) {
-            (t.sort_txt, t.proj_txt) = (s.sort.clone(), s.project.clone());
-        }
-        if let Some(b) = t.script.as_mut() {
-            b.base = s.body.clone();
-        }
-        let uid = t.uid;
-        match mine {
-            Some(text) => self.toast_restore(format!("\"{}\" reloaded from the library.", s.name), crate::app::restore::Restore::TabText { uid, text }),
-            None => self.ok(format!("\"{}\" reloaded from the library.", s.name)),
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Library(LibA::Unbind { tab }));
         }
     }
 
@@ -555,12 +428,6 @@ impl App {
         self.core.active.filter(|c| self.conn(*c).is_some()).or(self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()))
     }
 
-    /// A SQL script with a password in it is saved as typed, since one with the password cut out would not run, and the
-    /// person is told where it now sits.
-    pub(in crate::app) fn warn_plain_password(&mut self, tt: &TabText) {
-        self.core.warn_plain_password(tt);
-    }
-
     /// What shows above a script's editor: the conflict of a linked file changed on disk, and the notice of a script that
     /// Run opened instead of running because it can write.
     pub(in crate::app) fn script_banners(&mut self, ui: &mut egui::Ui) {
@@ -600,7 +467,7 @@ impl App {
         if act == 0 {
             return;
         }
-        self.core.lib_ui.writes.remove(&uid);
+        self.exec(Action::Library(LibA::Writes { tab: uid, on: false }));
         if act == 1 {
             match view {
                 View::Sql => self.sql_run(true, false),

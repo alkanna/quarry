@@ -1,6 +1,7 @@
 //! The connection form: engine, address, auth, SSH, TLS and proxy settings, with Test and Save.
 
 use super::*;
+use quarry_core::action::{Action, ConnA};
 
 /// One engine in the left column. Disabled cards show what comes later.
 fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Color32, selected: bool, enabled: bool) -> egui::Response {
@@ -854,8 +855,9 @@ impl App {
             self.cloud_load(false);
         }
         // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
-        if let Some((req, info)) = self.core.test_info.take() {
+        if let Some((req, info)) = self.core.test_info.clone() {
             f.take_test_info(req, info);
+            self.exec(Action::Conn(ConnA::TestInfoTaken));
         }
         ui.set_width(fit_width(ui.ctx(), 800.0));
         let tabs = conn_tabs(f.engine);
@@ -933,7 +935,7 @@ impl App {
         }
         // An answer for an older Test or another form is not this form's.
         if self.core.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
-            self.core.conn_test = None;
+            self.exec(Action::Conn(ConnA::ForgetTest));
         }
         match self.core.conn_test.as_ref().map(|(_, r)| r) {
             // Testing and a success show in the footer, beside the Test button.

@@ -69,7 +69,7 @@ impl CloudCache {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CloudBrowser {
     pub search: String,
     pub stopped: bool,

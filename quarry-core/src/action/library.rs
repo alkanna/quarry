@@ -11,7 +11,7 @@ use crate::library::ops::{self, DropAt};
 use crate::library::tree::Node;
 use crate::library::{format, Script, ScriptRef};
 use crate::state::library::linked::*;
-use crate::state::library::open::{bind, uri_db, How};
+use crate::state::library::open::{bind, uri_db, How, Pending};
 use crate::state::restore::Restore;
 use crate::state::{Bound, Status, View};
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,40 @@ pub enum LibA {
     SnippetDefault { id: u64, conn: u64, db: String, schema: String },
     /// Make it a value: the `literal` at `range` of the text `src` of tab `tab` becomes `placeholder`, unless it changed.
     MakeValue { tab: u64, src: crate::state::library::snippet_strip::Src, range: std::ops::Range<usize>, literal: String, placeholder: String },
+    /// The Undo of a library, group or file change, by the id its toast carries.
+    Restore(u64),
+    /// A script asked for while its connection is not ready waits for it, on tab `uid` when it was asked for.
+    Wait { r: ScriptRef, how: How, conn: u64, uid: Option<u64>, attempt: u64, seen_connecting: bool, name: String },
+    /// Puts the script in the current tab, bound to `r`, once the tab is open on the script's connection and database.
+    Fill { r: ScriptRef, script: Box<Script> },
+    /// Ties the current tab to a script, so Cmd+S writes it back.
+    Bind { r: ScriptRef, view: View, base: String },
+    /// A linked file was read for the current tab, with the time and length it had.
+    Seen { link: u64, rel: PathBuf, meta: Option<(SystemTime, u64)> },
+    /// Opens a linked file on `conn`: it is read on the worker first.
+    OpenFile { r: ScriptRef, how: How, conn: u64 },
+    Unbind { tab: u64 },
+    /// Opened again on the tab it is in, a saved script takes its text back.
+    ReloadBound { tab: u64, script: u64 },
+    /// Run opened the script of tab `tab` instead of running it because it can write (`on`), or its banner was dealt with.
+    Writes { tab: u64, on: bool },
+    /// The chip's Show in library.
+    Show(ScriptRef),
+    /// Cmd+S on the current tab.
+    SaveTab,
+    /// The snippet strip's values and Filled or Template choice on a tab.
+    Snip { tab: u64, vals: crate::library::snippet::Values, filled: bool },
+    /// A snippet filled by the Cmd+K form, put in the current tab as plain text.
+    FillSnippet { kind: String, body: String, sort: String, project: String, schema: String },
+    /// What the panel holds after a frame of drawing.
+    Panel(Box<crate::state::library::panel::PanelUi>),
+    Toggle(Node),
+    FoldAll,
+    StartRename(Node),
+    /// The Link a folder dialog's folder, scanned for its summary.
+    Preview { root: PathBuf },
+    /// A Query result exported as SQL to another table makes that table the base table of script `id`.
+    BaseTable { id: u64, table: String },
 }
 
 impl Core {
@@ -185,6 +219,25 @@ impl Core {
             }
             LibA::SnippetDefault { id, conn, db, schema } => self.set_snippet_default(id, conn, &db, &schema),
             LibA::MakeValue { tab, src, range, literal, placeholder } => self.make_value(tab, src, range, &literal, &placeholder),
+            LibA::Restore(id) => self.apply_restore(id),
+            LibA::Wait { r, how, conn, uid, attempt, seen_connecting, name } => self.lib_wait(Pending { r, how, conn, uid, attempt, since: None, seen_connecting, name }),
+            LibA::Fill { r, script } => self.fill_script(r, *script),
+            LibA::Bind { r, view, base } => self.bind_script(r, view, base),
+            LibA::Seen { link, rel, meta } => self.script_seen(link, &rel, meta),
+            LibA::OpenFile { r, how, conn } => self.open_file(r, how, conn),
+            LibA::Unbind { tab } => self.unbind_tab(tab),
+            LibA::ReloadBound { tab, script } => self.reload_bound(tab, script),
+            LibA::Writes { tab, on } => self.tab_writes(tab, on),
+            LibA::Show(r) => self.show_in_library(&r),
+            LibA::SaveTab => self.save_script(),
+            LibA::Snip { tab, vals, filled } => self.tab_snip(tab, vals, filled),
+            LibA::FillSnippet { kind, body, sort, project, schema } => self.fill_snippet(&kind, body, sort, project, schema),
+            LibA::Panel(p) => self.panel_set(*p),
+            LibA::Toggle(n) => self.panel_toggle(n),
+            LibA::FoldAll => self.panel_fold_all(),
+            LibA::StartRename(n) => self.panel_rename(n),
+            LibA::Preview { root } => self.link_preview(root),
+            LibA::BaseTable { id, table } => self.base_table(id, &table),
         }
         Ok(Reply::Done)
     }

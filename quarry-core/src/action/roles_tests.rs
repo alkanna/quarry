@@ -315,6 +315,8 @@ fn all_actions() -> Vec<Action> {
     all.extend(super::conn_tests::conn_actions());
     use crate::library::ops::DropAt;
     use crate::library::tree::Node;
+    use crate::library::ScriptRef;
+    use crate::state::library::open::How;
     use crate::state::settings::SettingsCat;
     all.extend([UpdateA::CheckNow, UpdateA::Press(UpdBtn::Restart), UpdateA::ShowNotes, UpdateA::OfferedNotes].map(Action::Update));
     all.extend([AppA::Dismiss(1), AppA::Details(1), AppA::ErrorsSeen, AppA::ClearErrors, AppA::RaiseLimit].map(Action::App));
@@ -345,7 +347,25 @@ fn all_actions() -> Vec<Action> {
         LibA::SaveLink { edit: Some(1), locate: true, link: crate::library::Link { name: "q".into(), ..Default::default() } },
         LibA::SnippetValues { id: 1, values: [("n".to_string(), "3".to_string())].into() },
         LibA::SnippetDefault { id: 1, conn: 1, db: "shop".into(), schema: String::new() },
-        LibA::MakeValue { tab: 1, src: crate::state::library::snippet_strip::Src::Query, range: 0..1, literal: "1".into(), placeholder: "{{n:int=1}}".into() },
+        LibA::MakeValue { tab: 1, src: crate::state::library::snippet_strip::Src::Query, range: 0..1, literal: "1".into(), placeholder: "{{n:int=1}}".into() },        LibA::Restore(1),
+        LibA::Wait { r: ScriptRef::Saved(1), how: How::Run, conn: 1, uid: Some(2), attempt: 3, seen_connecting: true, name: "a".into() },
+        LibA::Fill { r: ScriptRef::Saved(1), script: Box::new(crate::library::Script { id: 1, name: "a".into(), kind: "sql".into(), ..Default::default() }) },
+        LibA::Bind { r: ScriptRef::Saved(1), view: crate::state::View::Sql, base: "SELECT 1".into() },
+        LibA::Seen { link: 1, rel: rel(), meta: None },
+        LibA::OpenFile { r: ScriptRef::File { link: 1, rel: rel() }, how: How::Here, conn: 1 },
+        LibA::Unbind { tab: 1 },
+        LibA::ReloadBound { tab: 1, script: 2 },
+        LibA::Writes { tab: 1, on: true },
+        LibA::Show(ScriptRef::Saved(1)),
+        LibA::SaveTab,
+        LibA::Snip { tab: 1, vals: [("n".to_string(), "3".to_string())].into(), filled: true },
+        LibA::FillSnippet { kind: "sql".into(), body: "SELECT 1".into(), sort: String::new(), project: String::new(), schema: String::new() },
+        LibA::Panel(Box::default()),
+        LibA::Toggle(Node::Folder(1)),
+        LibA::FoldAll,
+        LibA::StartRename(Node::Script(1)),
+        LibA::Preview { root: "/tmp/q".into() },
+        LibA::BaseTable { id: 1, table: "orders".into() },
     ];
     all.extend(l.into_iter().map(Action::Library));
     all.extend(super::sql_tests::sql_actions().into_iter().map(Action::Sql));
@@ -355,6 +375,7 @@ fn all_actions() -> Vec<Action> {
     all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
     all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
     all.extend(super::agents_tests::agents_actions().into_iter().map(Action::Agents));
+    all.extend([CloudA::Load { force: true }, CloudA::Proxy { install: false }, CloudA::GcloudAsk, CloudA::GcloudForget, CloudA::Open { change: true }, CloudA::Close, CloudA::Set(Box::default())].map(Action::Cloud));
     let (scope, sel, one) = (crate::db::Scope::default(), crate::state::Sel::default(), || vec![mongodb::bson::doc! { "$match": { "a": 1 } }]);
     let confirm = [
         ConfirmA::DeleteMatching { tab: 1, scope: scope.clone() },
@@ -480,13 +501,13 @@ fn variant(a: &Action) -> String {
             ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Restore { .. } | ToolsA::Stop | ToolsA::Close => {}
         },
         Action::Conn(c) => match c {
-            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Remove { .. } | ConnA::DropWays | ConnA::ForgetTest | ConnA::Save { .. } | ConnA::Test { .. } => {}
+            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Remove { .. } | ConnA::DropWays | ConnA::ForgetTest | ConnA::Save { .. } | ConnA::Test { .. } | ConnA::Icon { .. } | ConnA::TestInfoTaken => {}
             ConnA::Group(g) => match g {
                 GroupA::Toggle { .. } | GroupA::FoldAll | GroupA::Move { .. } | GroupA::New { .. } | GroupA::Rename { .. } | GroupA::Color { .. } | GroupA::ConnectAll { .. } | GroupA::DisconnectAll { .. } | GroupA::RailOpen { .. } | GroupA::Unfold { .. } | GroupA::Save { .. } | GroupA::Delete { .. } | GroupA::Drop(_) | GroupA::RailOrder { .. } => {}
             },
         },
         Action::Side(s) => match s {
-            SideA::ToggleDb { .. } | SideA::OpenDb { .. } | SideA::Fold { .. } | SideA::Revealed | SideA::Asked { .. } | SideA::Schema { .. } | SideA::MongoNewDb { .. } | SideA::MongoNewColl { .. } | SideA::MongoCreate { .. } | SideA::MongoCreateView { .. } | SideA::Rename { .. } | SideA::Duplicate { .. } | SideA::DropDb { .. } | SideA::DropColl { .. } | SideA::Stats { .. } | SideA::ViewDef { .. } => {}
+            SideA::ToggleDb { .. } | SideA::OpenDb { .. } | SideA::Fold { .. } | SideA::Revealed | SideA::Asked { .. } | SideA::Schema { .. } | SideA::MongoNewDb { .. } | SideA::MongoNewColl { .. } | SideA::MongoCreate { .. } | SideA::MongoCreateView { .. } | SideA::Rename { .. } | SideA::Duplicate { .. } | SideA::DropDb { .. } | SideA::DropColl { .. } | SideA::Stats { .. } | SideA::ViewDef { .. } | SideA::TreeFilter(_) | SideA::Reveal { .. } | SideA::Refresh { .. } => {}
         },
         Action::Update(u) => match u {
             UpdateA::CheckNow | UpdateA::Press(_) | UpdateA::ShowNotes | UpdateA::OfferedNotes => {}
@@ -499,7 +520,7 @@ fn variant(a: &Action) -> String {
             PrefsA::Open(_) | PrefsA::Cat(_) | PrefsA::Set(_) | PrefsA::Zoom(_) | PrefsA::RecentDb { .. } => {}
         },
         Action::Library(l) => match l {
-            LibA::CancelPending | LibA::TreeKeys(_) | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } | LibA::Save(_) | LibA::SaveLink { .. } | LibA::SnippetValues { .. } | LibA::SnippetDefault { .. } | LibA::MakeValue { .. } => {}
+            LibA::CancelPending | LibA::TreeKeys(_) | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } | LibA::Save(_) | LibA::SaveLink { .. } | LibA::SnippetValues { .. } | LibA::SnippetDefault { .. } | LibA::MakeValue { .. } | LibA::Restore(_) | LibA::Wait { .. } | LibA::Fill { .. } | LibA::Bind { .. } | LibA::Seen { .. } | LibA::OpenFile { .. } | LibA::Unbind { .. } | LibA::ReloadBound { .. } | LibA::Writes { .. } | LibA::Show(_) | LibA::SaveTab | LibA::Snip { .. } | LibA::FillSnippet { .. } | LibA::Panel(_) | LibA::Toggle(_) | LibA::FoldAll | LibA::StartRename(_) | LibA::Preview { .. } | LibA::BaseTable { .. } => {}
         },
         Action::Sql(a) => super::sql_tests::sql_variant(a),
         Action::Structure(a) => super::sql_tests::struct_variant(a),
@@ -529,6 +550,9 @@ fn variant(a: &Action) -> String {
         Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
         Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
         Action::Agents(a) => super::agents_tests::agents_variant(a),
+        Action::Cloud(c) => match c {
+            CloudA::Load { .. } | CloudA::Proxy { .. } | CloudA::GcloudAsk | CloudA::GcloudForget | CloudA::Open { .. } | CloudA::Close | CloudA::Set(_) => {}
+        },
         Action::Confirm(c) => match c {
             ConfirmA::DeleteMatching { .. } | ConfirmA::DropIndex { .. } | ConfirmA::Validator { .. } | ConfirmA::RenameMany { .. } | ConfirmA::UpdateMany { .. } | ConfirmA::UpdatePreview { .. } | ConfirmA::Upsert { .. } | ConfirmA::AggWrite { .. } | ConfirmA::Sync { .. } | ConfirmA::OpenGrouped { .. } => {}
         },

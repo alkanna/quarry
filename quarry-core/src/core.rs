@@ -150,8 +150,7 @@ pub struct Core {
     pub groups: Groups,
     /// The script library, from library.json.
     pub library: crate::library::Library,
-    /// What the Connections panel and the Library panel remember while the app runs.
-    pub conns_ui: conns_panel::ConnsUi,
+    /// What the Library panel remembers while the app runs.
     pub lib_ui: library::LibUi,
     /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
     pub restores: Vec<(u64, Restore)>,
@@ -265,7 +264,6 @@ impl Core {
             rail_order: Vec::new(),
             groups: Groups::default(),
             library: Default::default(),
-            conns_ui: Default::default(),
             lib_ui: Default::default(),
             restores: Vec::new(),
             demo,

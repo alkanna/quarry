@@ -124,9 +124,16 @@ impl App {
     /// The strip, drawn when `src` on the current tab has values. Returns whether the editor shows them filled in.
     pub(in crate::app) fn snippet_strip(&mut self, ui: &mut egui::Ui, src: Src) -> bool {
         let Some(strip) = self.strip_of(src) else { return false };
-        let Some(t) = self.core.tabs.get_mut(self.core.cur) else { return false };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return false };
         let toggle = src != Src::Bar;
-        if strip_ui(ui, &strip, &mut t.snip, toggle) {
+        // Edited on a copy, since the values are the tab's: what changed goes back as one action.
+        let mut snip = Snip { vals: t.snip.vals.clone(), filled: t.snip.filled, off: t.snip.off };
+        let (tab, before) = (t.uid, (t.snip.vals.clone(), t.snip.filled));
+        let make_default = strip_ui(ui, &strip, &mut snip, toggle);
+        if (snip.vals.clone(), snip.filled) != before {
+            self.exec(Action::Library(LibA::Snip { tab, vals: snip.vals, filled: snip.filled }));
+        }
+        if make_default {
             self.make_snippet_default(&strip);
         }
         toggle && self.core.tabs[self.core.cur].snip.filled

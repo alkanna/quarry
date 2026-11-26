@@ -2,7 +2,8 @@
 //! missing gcloud or proxy and a signed-out account, and the card of a connection whose proxy failed.
 
 use super::*;
-use crate::cloudsql::{CloudSql, Found, Instance, IpKind};
+use crate::cloudsql::{CloudSql, Instance, IpKind};
+use quarry_core::action::{Action, CloudA, ConnA};
 pub(crate) use quarry_core::state::cloud_sql::*;
 
 /// Content width of the browser, from the design: the project list, a gap and the instance table.
@@ -355,20 +356,12 @@ fn centered<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 impl App {
     /// Opens the browser. `change` is for a connection form that is open: Use then fills it.
     pub(super) fn open_cloud_browser(&mut self, change: bool) {
-        self.cloud_load(false);
-        self.core.cloud_browser = Some(CloudBrowser { change, ..Default::default() });
+        self.exec(Action::Cloud(CloudA::Open { change }));
     }
 
     /// Asks gcloud again, or for the first time. The demo and tests fill the cache themselves and never run gcloud.
     pub(super) fn cloud_load(&mut self, force: bool) {
-        if self.core.demo || (self.core.cloud.req != 0 && !force) {
-            return;
-        }
-        self.core.req += 1;
-        let req = self.core.req;
-        self.core.cloud.reload(req);
-        let (g, p) = (self.core.prefs.gcloud.clone(), self.core.prefs.cloud_sql_proxy.clone());
-        self.core.worker.blocking(move || Msg::CloudSql { req, found: Found::Start(crate::cloudsql::start(&g, &p)) });
+        self.exec(Action::Cloud(CloudA::Load { force }));
     }
 
     /// Where gcloud is found, for Settings: asked once each time Settings opens, off the UI thread. The demo shows a
@@ -377,10 +370,7 @@ impl App {
         if self.core.demo {
             return "Found automatically at ~/google-cloud-sdk/bin/gcloud. Set a path only to use another gcloud.".into();
         }
-        if !self.core.cloud.gcloud_asked {
-            self.core.cloud.gcloud_asked = true;
-            self.core.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Gcloud(crate::cloudsql::find_gcloud("")) });
-        }
+        self.exec(Action::Cloud(CloudA::GcloudAsk));
         match &self.core.cloud.gcloud_seen {
             None => "Looking for gcloud\u{2026}".into(),
             Some(Some(p)) => format!("Found automatically at {}. Set a path only to use another gcloud.", p.display()),
@@ -390,85 +380,19 @@ impl App {
 
     /// Settings closed: it looks again the next time it opens.
     pub(super) fn gcloud_forget(&mut self) {
-        (self.core.cloud.gcloud_asked, self.core.cloud.gcloud_seen) = (false, None);
-    }
-
-    /// Starts the next instance lists, up to `PARALLEL` at once.
-    fn cloud_pump(&mut self) {
-        let req = self.core.cloud.req;
-        let Some(g) = self.core.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
-        while let Some(project) = self.core.cloud.next_project() {
-            let g = g.clone();
-            self.core.worker.blocking(move || {
-                let res = crate::cloudsql::instances(&g, &project);
-                Msg::CloudSql { req, found: Found::Instances { project, res } }
-            });
-        }
-    }
-
-    pub(super) fn cloud_found(&mut self, req: u64, found: Found) {
-        match found {
-            Found::Gcloud(p) => {
-                // An answer for a Settings that has closed since is dropped, so the next opening looks again.
-                if self.core.cloud.gcloud_asked {
-                    self.core.cloud.gcloud_seen = Some(p);
-                }
-            }
-            // Counted whatever load it was for, since it ran until now.
-            Found::Instances { project, res } => {
-                self.core.cloud.listed(req, project, res);
-                self.cloud_pump();
-            }
-            Found::Proxy(res) => {
-                self.core.cloud.busy = None;
-                match res {
-                    Ok(p) => {
-                        self.ok(format!("Cloud SQL proxy ready at {}", p.display()));
-                        if let Some(s) = &mut self.core.cloud.start {
-                            s.proxy = Some(p);
-                        }
-                    }
-                    Err(e) => self.err(e),
-                }
-            }
-            // An answer to a load that Refresh has replaced.
-            _ if req != self.core.cloud.req => {}
-            Found::Start(s) => {
-                // A project already answered (a test feeds them first) is not asked again.
-                if let Ok(ps) = &s.projects {
-                    self.core.cloud.queue = ps.iter().filter(|p| !self.core.cloud.instances.contains_key(&p.id)).map(|p| p.id.clone()).collect();
-                }
-                self.core.cloud.start = Some(s);
-                self.core.cloud.prev = None;
-                self.cloud_pump();
-            }
-        }
+        self.exec(Action::Cloud(CloudA::GcloudForget));
     }
 
     /// Downloads the pinned proxy, or installs it with gcloud.
     pub(super) fn cloud_get_proxy(&mut self, install: bool) {
-        if self.core.demo {
-            return self.warn("Offline demo: nothing is downloaded.");
-        }
-        if self.core.cloud.busy.is_some() {
-            return;
-        }
-        if install {
-            let Some(g) = self.core.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
-            self.core.cloud.busy = Some("Installing cloud-sql-proxy with gcloud…");
-            self.core.worker.blocking(move || Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::install_and_find(&g)) });
-        } else {
-            self.core.cloud.busy = Some("Downloading and checking cloud-sql-proxy…");
-            self.core.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Proxy(crate::cloudsql::download_proxy(&tools_dir())) });
-        }
+        self.exec(Action::Cloud(CloudA::Proxy { install }));
     }
 
     /// Fills the form the browser was opened for, or a new one.
     fn cloud_use(&mut self, inst: &Instance, change: bool) {
         let account = self.core.cloud.account().map(str::to_string);
         if !(change && matches!(self.modal, Some(Modal::Conn(_)))) {
-            self.core.conn_test = None;
-            self.core.test_info = None;
+            self.exec(Action::Conn(ConnA::ForgetTest));
             self.modal = Some(Modal::Conn(Box::default()));
         }
         if let Some(Modal::Conn(f)) = self.modal.as_mut() {
@@ -563,7 +487,8 @@ impl App {
 
     /// The "Add from Cloud SQL" browser.
     pub(super) fn cloud_browser_window(&mut self, ctx: &egui::Context) {
-        let Some(mut b) = self.core.cloud_browser.take() else { return };
+        let Some(shown) = self.core.cloud_browser.clone() else { return };
+        let mut b = shown.clone();
         let mut close = false;
         let mut pick: Option<Instance> = None;
         let mut act = None;
@@ -644,12 +569,15 @@ impl App {
         if let Some(i) = pick {
             // Without Application Default Credentials the proxy cannot sign in to IAM, so the browser asks for them first.
             if !(i.iam && !self.core.cloud.adc()) {
+                self.exec(Action::Cloud(CloudA::Close));
                 return self.cloud_use(&i, b.change);
             }
             (b.adc_for, b.sel) = (Some(i.connection_name.clone()), Some(i.connection_name));
         }
-        if !(close || r.should_close()) {
-            self.core.cloud_browser = Some(b);
+        if close || r.should_close() {
+            self.exec(Action::Cloud(CloudA::Close));
+        } else if b != shown {
+            self.exec(Action::Cloud(CloudA::Set(Box::new(b))));
         }
     }
 

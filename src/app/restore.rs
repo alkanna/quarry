@@ -3,85 +3,12 @@
 
 use super::*;
 pub(crate) use quarry_core::state::restore::*;
+use quarry_core::action::{Action, LibA};
 
 impl App {
+    /// The Undo of a toast: Core puts back what its id stands for.
     pub(super) fn apply_restore(&mut self, id: u64) {
-        let Some(i) = self.core.restores.iter().position(|(r, _)| *r == id) else { return };
-        match self.core.restores.remove(i).1 {
-            Restore::Group { g, at } => self.core.restore_group(g, at),
-            Restore::Placed { moved, created, tile, prev, at } => self.core.restore_placed(moved, created, tile, prev, at),
-            Restore::Saved { scripts, folders, written } => {
-                let n = scripts.len();
-                self.core.library.restore(folders, scripts);
-                self.save_library();
-                // A script moved into a linked folder left a file there. It goes too, unless it was changed since, which
-                // would make the undo throw away the person's edits.
-                if let Some((link, rel, bytes)) = written
-                    && let Some(path) = self.core.library.link_join(link, &rel)
-                {
-                    if std::fs::read(&path).is_ok_and(|now| now == bytes) {
-                        if let Err(e) = std::fs::remove_file(&path) {
-                            self.warn(format!("The script is back, but {} could not be removed: {e}", path.display()));
-                            return;
-                        }
-                        self.drop_entry(link, &rel);
-                    } else if path.exists() {
-                        self.warn(format!("The script is back. {} was changed since, so it was kept.", path.display()));
-                        return;
-                    }
-                }
-                self.ok(if n == 1 { "Script restored.".to_string() } else { format!("{n} scripts restored.") });
-            }
-            Restore::TabText { uid, text } => {
-                let Some(t) = self.core.tabs.iter_mut().find(|t| t.uid == uid) else { return self.warn("That tab was closed.") };
-                super::library::linked::set_bound_text(t, &text, None);
-                self.ok("Your edits are back.");
-            }
-            Restore::Script(old) => {
-                let name = old.name.clone();
-                match self.core.library.scripts.iter_mut().find(|s| s.id == old.id) {
-                    Some(s) => *s = old,
-                    None => self.core.library.restore(Vec::new(), vec![old]),
-                }
-                self.save_library();
-                self.ok(format!("\"{name}\" is back as it was."));
-            }
-            Restore::File { path, bytes } => {
-                // A name the person has taken again since must not be overwritten by an undo.
-                if std::fs::symlink_metadata(&path).is_ok() {
-                    self.warn(format!("{} exists again, so the old file was not put back.", path.display()));
-                    return;
-                }
-                let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
-                    // An Undo that does nothing must say so, or the person believes the file is back.
-                    return self.err(format!("Could not restore \"{}\": it names no file.", path.display()));
-                };
-                match write_atomic(dir, file, &bytes) {
-                    Ok(()) => {
-                        // The folder it came from shows the file again at the next scan.
-                        let links: Vec<u64> = self.core.library.links.iter().filter(|l| path.starts_with(&l.path)).map(|l| l.id).collect();
-                        self.core.lib_ui.rescan.extend(links);
-                        self.ok(format!("{file} restored."));
-                    }
-                    Err(e) => self.err(format!("Could not restore {}: {e}", path.display())),
-                }
-            }
-            Restore::Link { link, at, tabs, recent } => self.relink(link, at, tabs, recent),
-            Restore::Replaced { link, path, old, new } => {
-                let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                if !std::fs::read(&path).is_ok_and(|now| now == new) {
-                    self.warn(format!("{name} was changed since, so it was kept."));
-                    return;
-                }
-                match crate::library::disk::write_file(&path, &old) {
-                    Ok(()) => {
-                        self.rescan_link(link);
-                        self.ok(format!("{name} is back as it was."));
-                    }
-                    Err(e) => self.err(format!("Could not restore {}: {e}", path.display())),
-                }
-            }
-        }
+        self.exec(Action::Library(LibA::Restore(id)));
     }
 }
 

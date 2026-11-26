@@ -53,10 +53,6 @@ pub(super) fn load_library() -> (Library, Option<String>) {
 }
 
 impl App {
-    pub(super) fn save_library(&mut self) {
-        self.core.save_library()
-    }
-
     /// Called every frame from `logic()`: the library's timers in Core, the repaint they ask for, and the script they may
     /// open.
     pub(super) fn library_tick(&mut self, ctx: &egui::Context) {
@@ -67,8 +63,9 @@ impl App {
         self.run_fx();
     }
 
+    /// Startup only: the first run with a library brings the queries saved in ui.json over.
     pub(super) fn migrate_library(&mut self) {
-        self.core.migrate_library()
+        self.core.setup().migrate_library()
     }
 }
 

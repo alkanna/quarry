@@ -203,8 +203,8 @@ impl App {
                     acts.push(PanelAct::NewConnIn(None));
                 }
                 if icon_btn(ui, "New group", glyphs::folder_plus).clicked() {
-                    self.core.conns_ui.adding = Some(String::new());
-                    self.core.conns_ui.focus_edit = true;
+                    self.ui.conns.adding = Some(String::new());
+                    self.ui.conns.focus_edit = true;
                 }
                 if icon_btn(ui, "Fold all", paint_fold_all).clicked() {
                     acts.push(PanelAct::FoldAll);
@@ -213,7 +213,7 @@ impl App {
         });
         ui.add_space(6.0);
         let r = ui.add(
-            egui::TextEdit::singleline(&mut self.core.conns_ui.filter)
+            egui::TextEdit::singleline(&mut self.ui.conns.filter)
                 .id(egui::Id::unique("conns-filter"))
                 .hint_text(RichText::new("Filter connections").color(FAINT()))
                 .desired_width(f32::INFINITY)
@@ -222,12 +222,12 @@ impl App {
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Filter connections"));
         ui.add_space(10.0);
 
-        let toks = tokens(&self.core.conns_ui.filter);
+        let toks = tokens(&self.ui.conns.filter);
         let all = self.conn_ids();
         let ctx = ui.ctx().clone();
         // A group still closing keeps its members in the list until they have folded away, while its own row reads closed
         // for the keys, the drops and the dots.
-        let mut rows = panel_rows(&self.core.conns, &self.core.groups, &self.core.conns_ui.filter, |g| g.open || fold::openness(&ctx, fold_id(g.id), false) > 0.0);
+        let mut rows = panel_rows(&self.core.conns, &self.core.groups, &self.ui.conns.filter, |g| g.open || fold::openness(&ctx, fold_id(g.id), false) > 0.0);
         for r in &mut rows {
             if let CRow::Group { id, open, .. } = r {
                 *open = !toks.is_empty() || self.core.groups.group(*id).is_some_and(|g| g.open);
@@ -239,7 +239,7 @@ impl App {
             ui.spacing_mut().item_spacing.y = 2.0;
             auto_scroll_while_dragging(ui);
             let cx = Cx { conns: &self.core.conns, by_id: self.core.conns.iter().map(|c| (c.meta.id, c)).collect(), groups: &self.core.groups, all: &all, active: self.core.active, toks: &toks };
-            draw_rows(ui, &rows, &cx, &mut self.core.conns_ui, &mut acts);
+            draw_rows(ui, &rows, &cx, &mut self.ui.conns, &mut acts);
         });
         ui.add_space(4.0);
         ui.separator();
@@ -323,7 +323,7 @@ impl App {
         let db_ = |id: u64, name: &str, tag: &str, uri: &str, engine: db::sql::Engine, status: Status| Conn { masked_uri: uri.into(), ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine, ..Default::default() }, status) };
         use db::sql::Engine::{MySql, Postgres};
         let mongo = db::sql::Engine::default();
-        self.core.conns.extend([
+        self.core.setup().conns.extend([
             db_(11, "prod-eu", "Production", "mongodb+srv://app:****@prod-eu.example.net", mongo, Status::Ready),
             db_(12, "prod-us", "Production", "mongodb+srv://app:****@prod-us.example.net", mongo, Status::Idle),
             db_(13, "billing", "Production", "postgres://billing:****@pg.internal:5432/billing", Postgres, Status::Ready),
@@ -333,34 +333,35 @@ impl App {
             db_(17, "sandbox", "Development", "mongodb://sandbox.internal:27017", mongo, Status::Idle),
         ]);
         let all = self.conn_ids();
-        let (prod, stage, local) = (self.core.groups.new_group("Production"), self.core.groups.new_group("Staging"), self.core.groups.new_group("Local"));
+        let (prod, stage, local) = { let c = self.core.setup(); (c.groups.new_group("Production"), c.groups.new_group("Staging"), c.groups.new_group("Local")) };
         for (c, g) in [(11, prod), (12, prod), (13, prod), (2, stage), (14, stage), (1, local), (15, local)] {
-            self.core.groups.place(c, Place::Into(g, None), &all);
+            self.core.setup().groups.place(c, Place::Into(g, None), &all);
         }
-        if let Some(g) = self.core.groups.group_mut(local) {
+        if let Some(g) = self.core.setup().groups.group_mut(local) {
             g.open = false;
         }
         for (g, c) in [(prod, "red"), (stage, "amber"), (local, "teal")] {
-            if let Some(g) = self.core.groups.group_mut(g) {
+            if let Some(g) = self.core.setup().groups.group_mut(g) {
                 g.color = c.into();
             }
         }
-        self.core.rail_order = vec![1, 11, 13, 16];
-        self.core.active = Some(11);
-        self.core.prefs.set_side_mode(SideMode::Connections);
-        self.core.prefs.sidebar_hidden = false;
+        let c = self.core.setup();
+        c.rail_order = vec![1, 11, 13, 16];
+        c.active = Some(11);
+        c.prefs.set_side_mode(SideMode::Connections);
+        c.prefs.sidebar_hidden = false;
         match state {
-            "filter" => self.core.conns_ui.filter = "prod".into(),
-            "menu" => self.core.conns_ui.demo_menu = Some(prod),
+            "filter" => self.ui.conns.filter = "prod".into(),
+            "menu" => self.ui.conns.demo_menu = Some(prod),
             "new" => {
-                self.core.conns_ui.adding = Some("Analytics".into());
-                self.core.conns_ui.focus_edit = true;
+                self.ui.conns.adding = Some("Analytics".into());
+                self.ui.conns.focus_edit = true;
             }
             "edit" => self.edit_group(prod),
-            "drag" => self.core.conns_ui.demo_drop = Some(stage),
+            "drag" => self.ui.conns.demo_drop = Some(stage),
             "picker" => {
-                self.core.prefs.set_side_mode(SideMode::Explorer);
-                self.core.conns_ui.demo_picker = true;
+                self.core.setup().prefs.set_side_mode(SideMode::Explorer);
+                self.ui.conns.demo_picker = true;
             }
             _ => {}
         }

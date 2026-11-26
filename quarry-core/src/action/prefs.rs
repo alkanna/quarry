@@ -108,6 +108,8 @@ prefs! {
     ShowCpu show_cpu: bool,
     AutoUpdate auto_update: bool,
     SidebarHidden sidebar_hidden: bool,
+    SidePanel side_panel: String,
+    LibPreviewH lib_preview_h: f32,
 }
 
 impl Pref {

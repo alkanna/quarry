@@ -232,9 +232,7 @@ impl App {
                 PickAct::Unbind => self.unbind_script(),
                 PickAct::Sidebar => {
                     if self.core.prefs.sidebar_hidden || self.core.prefs.side_mode() != SideMode::Library {
-                        self.core.prefs.set_side_mode(SideMode::Library);
-                        self.core.prefs.sidebar_hidden = false;
-                        self.save_prefs();
+                        self.set_side(SideMode::Library, false);
                     }
                 }
             }
@@ -511,8 +509,9 @@ impl App {
         }
         // The SQL states show the MySQL demo's Query tab; the others stay on the Mongo demo.
         if matches!(state, "save" | "picker") {
-            (self.core.conns, self.core.tabs) = (Vec::new(), Vec::new());
-            self.core.open_dbs.clear();
+            let c = self.core.setup();
+            (c.conns, c.tabs) = (Vec::new(), Vec::new());
+            c.open_dbs.clear();
             self.load_sql_demo();
             self.sql_query_demo();
         }
@@ -520,7 +519,7 @@ impl App {
         match state {
             "save" => self.save_script(),
             "picker-shell" => {
-                if let Some(t) = self.tm() {
+                if let Some(t) = self.core.setup().tm() {
                     t.view = View::Shell;
                 }
             }
@@ -532,7 +531,8 @@ impl App {
     /// Three folders and a dozen scripts on the two demo connections, with some of them opened recently.
     pub(in crate::app) fn demo_scripts(&mut self) {
         use crate::library::{Folder, Library, Script};
-        let lib = &mut self.core.library;
+        let c = self.core.setup();
+        let lib = &mut c.library;
         let folder = |lib: &mut Library, name: &str, parent: Option<u64>| {
             let id = lib.next_id();
             lib.folders.push(Folder { id, name: name.into(), parent });
@@ -557,6 +557,6 @@ impl App {
         let backfill = add(lib, "shell", 1, "Backfill note field", "// Fill the empty notes\nasync function run() {\n  return await orders.find({ note: null }, { limit: 20 });\n}", Some(maint));
         add(lib, "shell", 3, "Count orders by status", "async function run() {\n  return await sql`SELECT status, COUNT(*) AS n FROM orders GROUP BY status`;\n}", None);
         lib.recent = [late, tier, orphans, paid, grouped, backfill].map(ScriptRef::Saved).to_vec();
-        self.core.lib_ui.last_folder = Some(reports);
+        c.lib_ui.last_folder = Some(reports);
     }
 }

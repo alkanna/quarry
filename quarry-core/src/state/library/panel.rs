@@ -4,7 +4,7 @@ use crate::library::tree::Node;
 use std::collections::HashSet;
 
 /// What the panel remembers while the app runs. Folders open or closed are not saved: a fresh start shows them closed.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PanelUi {
     pub open: HashSet<Node>,
     pub sel: Option<Node>,
@@ -21,7 +21,9 @@ pub struct PanelUi {
     pub demo_drag: Option<(Node, Node)>,
     /// What a drop where the drag rests would do to the dragged item, as the ghost's badge says it: set by the row under
     /// the pointer this frame, read by the ghost the next, since the ghost may be drawn before that row.
+    #[serde(skip)]
     pub badge: Option<&'static str>,
+    #[serde(skip)]
     pub badge_next: Option<&'static str>,
     /// Folders a person opened or closed that may still be moving.
     pub folding: HashSet<Node>,

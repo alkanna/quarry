@@ -176,6 +176,12 @@ impl Front {
         self.0.toasts_tick()
     }
 
+    /// The library's timers (scheduled scans, a script waiting for its connection): `now` is the UI clock in seconds and
+    /// `focused` whether the window has focus; the answer is when to look again.
+    pub fn library_tick(&mut self, now: f64, focused: bool) -> Option<f64> {
+        self.0.library_tick(now, focused)
+    }
+
     /// Tests set up state directly; release builds have no such door.
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_mut(&mut self) -> &mut Core {

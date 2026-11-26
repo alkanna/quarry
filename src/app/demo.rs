@@ -18,10 +18,10 @@ impl App {
         self.core.setup().conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
         match state {
             // The Connect popover over the rail, and the menu of the MySQL tile.
-            "connect" => self.core.setup().conns_ui.demo_picker = true,
-            "menu" => self.core.setup().conns_ui.demo_tile_menu = Some(3),
+            "connect" => self.ui.conns.demo_picker = true,
+            "menu" => self.ui.conns.demo_tile_menu = Some(3),
             // The Mongo demo carried over the MySQL tile, which is about to make a new group.
-            "drag" => self.core.setup().conns_ui.demo_rail_drop = Some(3),
+            "drag" => self.ui.conns.demo_rail_drop = Some(3),
             // A failed connection leaves the rail, so it shows only as the worst status of a closed folder.
             "status" => self.core.setup().conns.push(Conn::new(ConnMeta { id: 5, name: "legacy".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Failed("Connection refused".into()))),
             _ => {}

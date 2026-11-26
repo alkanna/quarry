@@ -98,7 +98,6 @@ impl App {
                     Err(e) => self.err(e),
                 }
                 Msg::Notice { title, body } => self.show_late(Modal::Text { title, body, code: false }),
-                Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 // Link 0 is the Link a folder dialog's preview, which fills a form the app's Modal holds.
                 Msg::LibScan { scan, .. } => {
                     if let Some(Modal::LinkFolder(f)) = &mut self.modal {
@@ -108,7 +107,7 @@ impl App {
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 // Core::handles took the Shell, Watch and database tools answers above.
-                Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) => {}
+                Msg::ShellLog { .. } | Msg::ShellQuery { .. } | Msg::ShellDone { .. } | Msg::WatchEvent { .. } | Msg::WatchDone { .. } | Msg::ToolLog(_) | Msg::ToolDone(_) | Msg::ToolsInstalled(_) | Msg::CloudSql { .. } => {}
                 // Core::handles took the Compare, Schema, relations and field menu answers above.
                 Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => {}
             }

@@ -34,11 +34,13 @@ pub(crate) struct UiState {
     pub open_picker: bool,
     /// Cmd+Shift+L asked for the library tree: the panel selects its first row if none is selected and takes the keys.
     pub lib_focus_tree: bool,
+    /// What the Connections panel and the rail's Connect popover remember: filters, the group being named, demo states.
+    pub conns: quarry_core::state::conns_panel::ConnsUi,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false }
+        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default() }
     }
 }
 

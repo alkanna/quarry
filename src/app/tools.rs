@@ -11,7 +11,7 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        let Some(t) = &mut self.core.tool else { return };
+        let Some(t) = &self.core.tool else { return };
         let (mut close, mut stop) = (false, false);
         let running = t.done.is_none();
         let r = banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
@@ -76,11 +76,6 @@ impl App {
         } else if ui.button("Install the MongoDB Database Tools").on_hover_text(format!("Downloads MongoDB's official build into {}", tools_dir().display())).clicked() {
             self.exec(Action::Tools(ToolsA::Install));
         }
-    }
-
-    /// mongorestore after its typed confirm; its arguments hold the address, so they never go into an action.
-    pub(super) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
-        let _ = self.core.start_tool(restore, title, args);
     }
 }
 
