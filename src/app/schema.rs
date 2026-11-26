@@ -5,16 +5,15 @@ use quarry_core::action::{MongoA, SchemaA};
 
 impl App {
     pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
-        // The analysis when the view opens and the validator, asked for by the view itself.
-        self.core.schema_tick();
         let mut acts: Vec<SchemaA> = Vec::new();
         let key = self.core.tabs[self.core.cur].coll_key();
         let maps = self.core.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
         let sel = &self.core.tabs[self.core.cur].sel;
         // Views refuse a $natural sort, so they only offer the first documents.
         let view = self.core.views.has(sel.conn, &sel.db, &sel.coll);
-        let t = &mut self.core.tabs[self.core.cur];
+        let t = &self.core.tabs[self.core.cur];
         let tab = t.uid;
+        let mut vtext = t.schema.vtext.clone();
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
                 caption(ui, "SCHEMA  ·  fields of the documents matching the current query");
@@ -52,7 +51,7 @@ impl App {
         ui.add_space(6.0);
         // QUARRY_TEST_VALIDATOR opens it in the demo picture.
         egui::CollapsingHeader::new(caption_text("VALIDATOR")).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
-            let s = &mut t.schema;
+            let s = &t.schema;
             ui.horizontal(|ui| {
                 let (mut level, mut warn) = (s.vlevel, s.vwarn);
                 ui.label(RichText::new("Level").color(MUTED()));
@@ -69,8 +68,8 @@ impl App {
             // Apply buttons and the field list stay in the window.
             let max_h = (ui.ctx().content_rect().height() * 0.4).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt("validator-scroll").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                crate::ui::editor::format_on_key(ui, id, &mut s.vtext);
-                crate::ui::vim::wrap(ui, id, &mut s.vtext, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
+                crate::ui::editor::format_on_key(ui, id, &mut vtext);
+                crate::ui::vim::wrap(ui, id, &mut vtext, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             });
             ui.horizontal(|ui| {
                 if primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked() {
@@ -89,7 +88,10 @@ impl App {
         if t.schema.err.is_some() {
             self.failed_panel(ui, View::Schema);
         }
-        let t = &mut self.core.tabs[self.core.cur];
+        let t = &self.core.tabs[self.core.cur];
+        if vtext != t.schema.vtext {
+            acts.push(SchemaA::VText { tab, text: vtext });
+        }
         if t.schema.err.is_some() {
         } else if let Some(ms) = t.schema.ms {
             ui.horizontal(|ui| {

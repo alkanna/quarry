@@ -31,12 +31,14 @@ pub enum SchemaA {
     FilterHas { tab: u64, path: String, exists: bool },
     /// Treat an object's keys as map entries, or show them as fields again; saved for the collection.
     Map { tab: u64, path: String },
+    /// The validator editor's text after a frame of typing.
+    VText { tab: u64, text: String },
 }
 
 impl Core {
     pub(super) fn schema(&mut self, a: SchemaA) -> Result<Reply, Refusal> {
         let tab = match &a {
-            SchemaA::Analyze { tab } | SchemaA::Limit { tab, .. } | SchemaA::Rules { tab, .. } | SchemaA::Generate { tab } | SchemaA::Reload { tab } | SchemaA::Apply { tab } | SchemaA::Fold { tab, .. } | SchemaA::FoldAll { tab, .. } | SchemaA::AddColumn { tab, .. } | SchemaA::FilterHas { tab, .. } | SchemaA::Map { tab, .. } => *tab,
+            SchemaA::Analyze { tab } | SchemaA::Limit { tab, .. } | SchemaA::Rules { tab, .. } | SchemaA::Generate { tab } | SchemaA::Reload { tab } | SchemaA::Apply { tab } | SchemaA::Fold { tab, .. } | SchemaA::FoldAll { tab, .. } | SchemaA::AddColumn { tab, .. } | SchemaA::FilterHas { tab, .. } | SchemaA::Map { tab, .. } | SchemaA::VText { tab, .. } => *tab,
         };
         self.cur_tab(tab)?;
         let t = &mut self.tabs[self.cur];
@@ -47,6 +49,7 @@ impl Core {
                 let last = last && !self.views.has(t.sel.conn, &t.sel.db, &t.sel.coll);
                 (t.schema.limit, t.schema.last) = (limit, last);
             }
+            SchemaA::VText { text, .. } => t.schema.vtext = text,
             SchemaA::Rules { level, warn, .. } => (t.schema.vlevel, t.schema.vwarn) = (level.min(2), warn),
             SchemaA::Generate { .. } => {
                 let s = &mut t.schema;
@@ -110,6 +113,13 @@ impl Core {
             }
         }
         Ok(Reply::Done)
+    }
+
+    /// `schema_tick` for the frames the Schema view is the one showing.
+    pub fn schema_tick_view(&mut self) {
+        if self.t().is_some_and(|t| t.view == crate::state::View::Schema) {
+            self.schema_tick();
+        }
     }
 
     /// What the Schema view asks for by itself, each frame it shows: an analysis once it opens, the validator once.

@@ -37,6 +37,12 @@ pub enum ShellA {
     Filled { tab: u64, on: bool },
     /// The npm packages every script gets.
     Packages(Vec<String>),
+    /// The editor's text after a frame of typing. A script the Cmd+K form filled reads its braces as placeholders again.
+    Edit { tab: u64, code: String },
+    /// The Attach dialog asks for the schemas of a PostgreSQL database; the answer fills the dialog.
+    PgSchemas { conn: u64, db: String },
+    /// Opens a Shell tab on the current tab's database with this script in it.
+    OpenIn { code: String },
 }
 
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
@@ -79,7 +85,17 @@ impl Core {
                 self.save_prefs();
                 return Ok(Reply::Done);
             }
-            ShellA::Run { tab } | ShellA::Start { tab } | ShellA::Stop { tab } | ShellA::Code { tab, .. } | ShellA::Detach { tab, .. } | ShellA::Attach { tab, .. } | ShellA::Help { tab, .. } | ShellA::Queries { tab, .. } | ShellA::Raw { tab, .. } | ShellA::Page { tab, .. } | ShellA::Filled { tab, .. } => *tab,
+            ShellA::OpenIn { code } => {
+                self.open_in_shell(code.clone());
+                return Ok(Reply::Done);
+            }
+            ShellA::PgSchemas { conn, db } => {
+                if let Some(sql) = self.conn(*conn).and_then(|c| c.sql.clone()) {
+                    self.worker.pg_shell_list(*conn, sql, db.clone(), String::new());
+                }
+                return Ok(Reply::Done);
+            }
+            ShellA::Edit { tab, .. } | ShellA::Run { tab } | ShellA::Start { tab } | ShellA::Stop { tab } | ShellA::Code { tab, .. } | ShellA::Detach { tab, .. } | ShellA::Attach { tab, .. } | ShellA::Help { tab, .. } | ShellA::Queries { tab, .. } | ShellA::Raw { tab, .. } | ShellA::Page { tab, .. } | ShellA::Filled { tab, .. } => *tab,
         };
         let Some(i) = self.tabs.iter().position(|t| t.uid == tab) else {
             // A write confirm left open while its tab closed must not run another tab's script.
@@ -93,6 +109,10 @@ impl Core {
             ShellA::Start { .. } => return self.start_shell(),
             ShellA::Stop { .. } => t.shell.stop(),
             ShellA::Code { code, .. } => t.shell.code = code,
+            ShellA::Edit { code, .. } => {
+                t.shell.code = code;
+                t.snip.off = false;
+            }
             ShellA::Detach { name, .. } => t.shell.attached.retain(|a| a.name != name),
             ShellA::Attach { conn, db, name, allow_writes, schema, .. } => {
                 let pg = self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres);
@@ -114,7 +134,7 @@ impl Core {
                 }
             }
             ShellA::Filled { on, .. } => t.snip.filled = on,
-            ShellA::Packages(_) => {}
+            ShellA::Packages(_) | ShellA::PgSchemas { .. } | ShellA::OpenIn { .. } => {}
         }
         Ok(Reply::Done)
     }
@@ -389,6 +409,29 @@ impl Core {
                 a.tables = tables.clone();
             }
         }
+    }
+
+    /// The SQL Shell asks once for the tables and columns its script editor completes from.
+    pub(crate) fn shell_schema_tick(&mut self) {
+        if self.t().is_some_and(|t| t.view == View::Shell && t.sql.is_some()) {
+            self.sql_columns_ask(false);
+        }
+    }
+
+    /// The JSON text the Shell shows for a result that is not a table, built once per result and cut for display.
+    pub(crate) fn fill_shell_raw(&mut self) {
+        const RAW_MAX: usize = 300_000;
+        let Some(t) = self.tabs.get_mut(self.cur).filter(|t| t.view == View::Shell && t.shell.raw_text.is_none()) else { return };
+        if t.shell.value.is_none() && t.shell.docs.is_empty() || !t.shell.docs.is_empty() && !t.shell.raw {
+            return;
+        }
+        let mut s = t.shell.json_text(RAW_MAX);
+        if s.len() > RAW_MAX {
+            let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
+            s.truncate(cut);
+            s.push_str("\n… cut for display. Use Export to save the whole result.");
+        }
+        t.shell.raw_text = Some(s);
     }
 
     pub(crate) fn shell_log(&mut self, req: u64, level: String, text: String) {

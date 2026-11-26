@@ -64,6 +64,7 @@ impl App {
                 // Sent by `logic()`, which holds the egui context.
                 UiFx::Attention => self.attention = true,
                 UiFx::UpdPopup => self.ui.upd_popup = true,
+                UiFx::WidthsStale => self.ui.width_cache.clear(),
                 // A debounce waiting out its pause; the drawing code that asked reads it back with `take_repaint`.
                 UiFx::RepaintAfter(s) => self.repaint = Some(self.repaint.map_or(s, |r| r.min(s))),
                 UiFx::ForgetPlans(conn) => self.ui.explain_prev.forget(conn),
@@ -71,7 +72,7 @@ impl App {
         }
     }
 
-    /// Opens a dialog an action or an answer named. The Explain dialog is built by the app with its first request.
+    /// Opens a dialog an action or an answer named. The Explain and Save to library dialogs are built by the app.
     fn open_dialog(&mut self, d: Dialog) {
         if let Dialog::SqlExplain(text) = d {
             return self.sql_explain(text);

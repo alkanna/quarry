@@ -693,7 +693,7 @@ impl CompareTab {
 }
 
 /// A field holding ids of another collection's documents (the original's dataRelations).
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 #[serde(default)]
 pub struct Relation {
     pub coll: String,

@@ -153,17 +153,17 @@ impl App {
                 let (mut enter, mut picked_path) = (false, false);
                 well_field(ui, id, FieldIcon::Search, None, |ui| {
                     let w = ui.available_width();
-                    let (out, picked, m) = ac_input(ui, id, &mut self.core.col_filter, &mut self.core.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
+                    let (out, picked, m) = ac_input(ui, id, &mut self.ui.col_filter, &mut self.ui.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
                     moved = m;
                     picked_path = picked;
                     enter = picked || (out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
                 });
                 // Drawn in the menu, not as a popup: a click on another layer would close the menu.
-                if ac_list(ui, id, &mut self.core.col_filter, &mut self.core.ac, moved, Some(ui.available_width() - 2.0)) {
+                if ac_list(ui, id, &mut self.ui.col_filter, &mut self.ui.ac, moved, Some(ui.available_width() - 2.0)) {
                     (enter, picked_path) = (true, true);
                 }
                 ui.add_space(12.0);
-                let typed = self.core.col_filter.trim().to_string();
+                let typed = self.ui.col_filter.trim().to_string();
                 let needle = typed.to_lowercase();
                 let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
                 let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
@@ -268,7 +268,7 @@ impl App {
         });
         if let Some(c) = add {
             acts.push(ColAct::Show(c));
-            self.core.col_filter.clear();
+            self.ui.col_filter.clear();
         }
         if !acts.is_empty() {
             self.exec(Action::Grid(GridA::Cols { key, agg, acts }));
@@ -287,20 +287,22 @@ impl App {
         // on every frame. The generation says which answer the rows came from; where they live and how
         // many say which window of it is on screen.
         let answer = self.t().map_or(0, |t| t.rows_gen);
+        // The window of rows is held for the frame, so what tells results apart is the generation, the window's offset and which view's.
+        let store = usize::from(agg) | usize::from(self.t().is_some_and(|t| t.view == View::Shell)) << 1;
         let widths: Vec<f32> = cols
             .iter()
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
-                    let k = (answer, docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
-                    if let Some(w) = self.core.width_cache.get(&k) {
+                    let k = (answer, (base as usize) << 2 | store, docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
+                    if let Some(w) = self.ui.width_cache.get(&k) {
                         return *w;
                     }
                     let w = optimal_width(ui, docs, c, prefs.label(c), summarize, OPTIMAL_MAX_W);
-                    if self.core.width_cache.len() > 512 {
-                        self.core.width_cache.clear();
+                    if self.ui.width_cache.len() > 512 {
+                        self.ui.width_cache.clear();
                     }
-                    self.core.width_cache.insert(k, w);
+                    self.ui.width_cache.insert(k, w);
                     w
                 })
             })

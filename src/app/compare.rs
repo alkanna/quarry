@@ -9,16 +9,11 @@ impl App {
         let i = self.core.cur;
         let src = self.core.tabs[i].sel.clone();
         let tab = self.core.tabs[i].uid;
-        if self.core.tabs[i].compare.conn == 0 {
-            let c = &mut self.core.tabs[i].compare;
-            (c.conn, c.db) = (src.conn, src.db.clone());
-        }
-        self.core.compare_follow();
         let conns: Vec<(u64, String)> = self.core.conns.iter().filter(|c| c.client.is_some() || self.core.demo).map(|c| (c.meta.id, c.meta.name.clone())).collect();
         let dbs = self.conn(self.core.tabs[i].compare.conn).map(|c| c.dbs.clone()).unwrap_or_default();
         let mut acts = Vec::new();
         let failed = self.core.tabs[i].failed.iter().any(|f| f.view == View::Compare);
-        let c = &mut self.core.tabs[i].compare;
+        let c = &self.core.tabs[i].compare;
         toolbar(ui, |ui| {
             ui.set_width(ui.available_width());
             caption(ui, format!("COMPARE  ·  {}.{} is the source, documents are matched by _id and field order is ignored", src.db, src.coll));
@@ -96,7 +91,6 @@ impl App {
             });
             let n = c.rows().len();
             let pages = n.div_ceil(PAGE_SIZE as usize).max(1);
-            c.page = c.page.min(pages - 1);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let what = if c.list == CmpList::Changed { "differing fields" } else { "documents" };

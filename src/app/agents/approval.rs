@@ -52,10 +52,12 @@ fn fact(ui: &mut egui::Ui, dot: Color32, main: &str, sub: Option<&str>) {
 
 impl App {
     pub(in crate::app) fn agents_approval(&mut self, ctx: &egui::Context) {
-        let Some(ask) = self.core.agents.asks.front_mut() else { return };
+        let Some(ask) = self.core.agents.asks.front().cloned() else { return };
         let now = std::time::Instant::now();
-        let shown = *ask.shown.get_or_insert(now);
-        let ask = ask.clone();
+        let shown = match self.ui.ask_shown {
+            Some((id, at)) if id == ask.id => at,
+            _ => self.ui.ask_shown.insert((ask.id, now)).1,
+        };
         let total = self.core.agents.asks.len();
         let awake = now.saturating_duration_since(shown) >= WAKE;
         let conn = self.conn(ask.conn);

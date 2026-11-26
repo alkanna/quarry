@@ -51,6 +51,7 @@ pub(super) fn all_mongo() -> Vec<Action> {
         SchemaA::AddColumn { tab: 1, path: "a".into() },
         SchemaA::FilterHas { tab: 1, path: "a".into(), exists: false },
         SchemaA::Map { tab: 1, path: "a".into() },
+        SchemaA::VText { tab: 1, text: "{}".into() },
     ];
     let i = [
         ImportA::Opts { tab: 1, kind: db::ImportKind::Csv, separator: Some(';'), header: true, camel: false, upsert: true },
@@ -58,6 +59,7 @@ pub(super) fn all_mongo() -> Vec<Action> {
         ImportA::Start { tab: 1 },
         ImportA::Insert { tab: 1 },
         ImportA::Export { tab: 1, path: "a.json".into() },
+        ImportA::UpsertBy { tab: 1, field: "sku".into() },
     ];
     let f = [
         FieldA::PinColumn { tab: 1, path: "a".into() },
@@ -80,6 +82,7 @@ pub(super) fn all_mongo() -> Vec<Action> {
     all.extend(i.into_iter().map(|a| Action::Mongo(MongoA::Import(a))));
     all.extend(f.into_iter().map(|a| Action::Mongo(MongoA::Field(a))));
     all.extend(g.into_iter().map(Action::Grid));
+    all.extend([MongoA::Explain { tab: 1 }, MongoA::Relations { key: "1/shop".into(), list: vec![Default::default()] }, MongoA::ReloadRelated { conn: 1, db: "shop".into() }, MongoA::AnalyzeRelations { conn: 1, db: "shop".into(), coll: String::new() }].into_iter().map(Action::Mongo));
     all
 }
 
@@ -90,11 +93,12 @@ pub(super) fn mongo_variant(a: &MongoA) {
             CmpA::Conn { .. } | CmpA::Db { .. } | CmpA::Coll { .. } | CmpA::List { .. } | CmpA::Page { .. } | CmpA::Opts { .. } | CmpA::Run { .. } | CmpA::Sync { .. } => {}
         },
         MongoA::Schema(s) => match s {
-            SchemaA::Analyze { .. } | SchemaA::Limit { .. } | SchemaA::Rules { .. } | SchemaA::Generate { .. } | SchemaA::Reload { .. } | SchemaA::Apply { .. } | SchemaA::Fold { .. } | SchemaA::FoldAll { .. } | SchemaA::AddColumn { .. } | SchemaA::FilterHas { .. } | SchemaA::Map { .. } => {}
+            SchemaA::Analyze { .. } | SchemaA::Limit { .. } | SchemaA::Rules { .. } | SchemaA::Generate { .. } | SchemaA::Reload { .. } | SchemaA::Apply { .. } | SchemaA::Fold { .. } | SchemaA::FoldAll { .. } | SchemaA::AddColumn { .. } | SchemaA::FilterHas { .. } | SchemaA::Map { .. } | SchemaA::VText { .. } => {}
         },
         MongoA::Import(i) => match i {
-            ImportA::Opts { .. } | ImportA::File { .. } | ImportA::Start { .. } | ImportA::Insert { .. } | ImportA::Export { .. } => {}
+            ImportA::Opts { .. } | ImportA::File { .. } | ImportA::Start { .. } | ImportA::Insert { .. } | ImportA::Export { .. } | ImportA::UpsertBy { .. } => {}
         },
+        MongoA::Explain { .. } | MongoA::Relations { .. } | MongoA::ReloadRelated { .. } | MongoA::AnalyzeRelations { .. } => {}
         MongoA::Field(f) => match f {
             FieldA::PinColumn { .. } | FieldA::Highlight { .. } | FieldA::Group { .. } | FieldA::Distinct { .. } | FieldA::Index { .. } | FieldA::GoRef { .. } | FieldA::Rename { .. } => {}
         },

@@ -16,6 +16,8 @@ pub enum ImportA {
     File { tab: u64, path: PathBuf },
     /// Import or Upsert: asks first.
     Start { tab: u64 },
+    /// The Upsert by field's text.
+    UpsertBy { tab: u64, field: String },
     /// The insert confirmation's Import.
     Insert { tab: u64 },
     /// The Documents menu's Export of the query's documents, to the file picked; its extension picks JSON, CSV or TSV.
@@ -25,7 +27,7 @@ pub enum ImportA {
 impl Core {
     pub(super) fn import(&mut self, a: ImportA) -> Result<Reply, Refusal> {
         let tab = match &a {
-            ImportA::Opts { tab, .. } | ImportA::File { tab, .. } | ImportA::Start { tab } | ImportA::Insert { tab } | ImportA::Export { tab, .. } => *tab,
+            ImportA::Opts { tab, .. } | ImportA::UpsertBy { tab, .. } | ImportA::File { tab, .. } | ImportA::Start { tab } | ImportA::Insert { tab } | ImportA::Export { tab, .. } => *tab,
         };
         self.cur_tab(tab)?;
         match a {
@@ -34,6 +36,7 @@ impl Core {
                 (im.kind, im.separator, im.header, im.camel, im.upsert) = (kind, separator, header, camel, upsert);
                 self.import_parse();
             }
+            ImportA::UpsertBy { field, .. } => self.tabs[self.cur].import.upsert_by = field,
             ImportA::File { path, .. } => {
                 match std::fs::read_to_string(&path) {
                     Ok(text) => {
@@ -98,6 +101,12 @@ impl Core {
 
     /// Parses the current tab's import input again when it or its options changed since the last parse. Run each
     /// frame the view shows and before Import, so typing in the box is picked up.
+    pub fn import_tick(&mut self) {
+        if self.t().is_some_and(|t| t.view == crate::state::View::Import) {
+            self.import_parse();
+        }
+    }
+
     pub fn import_parse(&mut self) {
         let Some(t) = self.tabs.get_mut(self.cur) else { return };
         let im = &mut t.import;

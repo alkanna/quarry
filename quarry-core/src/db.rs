@@ -75,16 +75,17 @@ pub const UNDO_MAX_AGE_S: u64 = 86_400; // maxActionsAge
 pub type Res<T> = Result<T, String>;
 
 /// A loaded document kept as its BSON bytes. Decoded, a document takes about 11 times the memory
-/// (every field and subdocument is its own allocation), so only rows that are open keep a decoded copy.
+/// (every field and subdocument is its own allocation), so only rows that are open keep a decoded copy. Both are shared
+/// on clone, so a frame can hold the rows it draws without copying them.
 #[derive(Clone)]
 pub struct Row {
-    raw: RawDocumentBuf,
-    doc: std::cell::OnceCell<Document>,
+    raw: std::sync::Arc<RawDocumentBuf>,
+    doc: std::cell::OnceCell<std::sync::Arc<Document>>,
 }
 
 impl Row {
     pub fn from_raw(raw: RawDocumentBuf) -> Row {
-        Row { raw, doc: Default::default() }
+        Row { raw: std::sync::Arc::new(raw), doc: Default::default() }
     }
 
     /// Fails only for keys BSON cannot hold, such as ones with a NUL character.
@@ -95,7 +96,7 @@ impl Row {
     /// A decoded copy; the worker checks every page with this, so later decodes cannot fail.
     pub fn decode(&self) -> Res<Document> {
         match self.doc.get() {
-            Some(d) => Ok(d.clone()),
+            Some(d) => Ok(Document::clone(d)),
             None => self.raw.to_document().map_err(|err| format!("A document could not be read: {err}")),
         }
     }
@@ -107,7 +108,7 @@ impl Row {
 
     /// The decoded document, kept until `forget`, for rows that are open.
     pub fn doc(&self) -> &Document {
-        self.doc.get_or_init(|| self.raw.to_document().unwrap_or_default())
+        self.doc.get_or_init(|| std::sync::Arc::new(self.raw.to_document().unwrap_or_default()))
     }
 
     pub fn forget(&mut self) {

@@ -54,12 +54,11 @@ fn settings_drawn_on_a_copy_become_actions() {
     (v.vim, v.data_font) = (true, "Geist Mono".into());
     let changes = before.diff(&v);
     assert_eq!(changes, vec![Pref::DataFont("Geist Mono".into()), Pref::Vim(true)]);
-    c.width_cache.insert((1, 0, 0, "a".into(), None, false), 40.0);
     for p in changes {
         run(&mut c, Action::Prefs(PrefsA::Set(p)));
     }
     assert!(c.prefs.vim && c.prefs.data_font == "Geist Mono");
-    assert!(c.width_cache.is_empty(), "widths measured in the old font are dropped");
+    assert!(c.take_ui_fx().iter().any(|f| matches!(f, UiFx::WidthsStale)), "widths measured in the old font are dropped");
 }
 
 #[test]

@@ -4,7 +4,8 @@
 use super::*;
 use db::copy::{self, CopyCol, Fmt, Sheet};
 use db::sql::export::{Done, Plan, Sink};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use quarry_core::action::LibA;
+use std::sync::atomic::Ordering;
 pub(crate) use quarry_core::state::export::*;
 
 /// "1.2M" from a million up, the exact count below.
@@ -379,7 +380,7 @@ impl App {
         if f.scope == Scope::All {
             let (Some(a), Some(target)) = (&f.all, target) else { return };
             let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
-            self.start_stream(a, plan, Sink::File(path), false);
+            self.core.export().stream(a, plan, Sink::File(path), false);
             return;
         }
         if f.scope == Scope::Script {
@@ -388,7 +389,7 @@ impl App {
             let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
             // Only text formats with room for several results go in one file.
             let single = f.single && plan.text().is_some_and(db::sql::export::can_single);
-            return self.start_script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
+            return self.core.export().script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
         }
         // Shell rows can reach a gigabyte, so they are written a batch at a time off the UI thread, in the same bytes as
         // the whole list. Markdown pads its table to the widest cell, which only the whole list knows, so a small one
@@ -432,9 +433,8 @@ impl App {
     /// so the next Copy as SQL INSERT writes to it.
     fn keep_base_table(&mut self, src: Src, table: &str) {
         let Some(Some(crate::library::ScriptRef::Saved(id))) = self.t().filter(|_| src == Src::Query).map(|t| t.script.as_ref().map(|b| b.r.clone())) else { return };
-        if let Some(s) = self.core.library.scripts.iter_mut().find(|s| s.id == id && s.kind == "sql" && s.coll != table) {
-            s.coll = table.to_string();
-            self.save_library();
+        if self.core.library.scripts.iter().any(|s| s.id == id && s.kind == "sql" && s.coll != table) {
+            self.exec(Action::Library(LibA::BaseTable { id, table: table.to_string() }));
         }
     }
 
@@ -446,22 +446,8 @@ impl App {
         }
     }
 
-    /// Streams a Query result's statement to `sink` in a worker task, tracked in the status bar.
-    fn start_stream(&mut self, a: &AllRows, plan: Plan, sink: Sink, copy: bool) {
-        if self.core.export_job.is_some() {
-            return self.warn("An export is already running.");
-        }
-        self.core.req += 1;
-        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(a.db.clone()), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
-        self.core.worker.sql_export(job.req, a.db.clone(), a.schema.clone(), a.stmt.clone(), plan, sink, job.count.clone(), job.id.clone(), job.cancel.clone());
-        self.core.export_job = Some(job);
-    }
-
     /// Writes every Shell row to `path` on a blocking thread, tracked in the status bar like a stream.
     fn start_shell_export(&mut self, f: &ExportForm, table: String, path: PathBuf) {
-        if self.core.export_job.is_some() {
-            return self.warn("An export is already running.");
-        }
         let out = match f.fmt {
             // Shell rows have no primary key, which UPDATE needs, as the whole-list export says too.
             Format::T(Fmt::SqlUpdate) => return self.warn("SQL UPDATE needs a table with a primary key."),
@@ -472,24 +458,8 @@ impl App {
             Format::MongoLines => db::RowsOut::MongoLines,
         };
         let Some(t) = self.t() else { return };
-        // A copy of the bytes, freed when the export ends, so the result stays on screen meanwhile.
         let rows: Vec<mongodb::bson::RawDocumentBuf> = t.shell.docs.iter().map(|r| r.raw().to_owned()).collect();
-        self.core.req += 1;
-        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: None, copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
-        let (req, count, cancel) = (job.req, job.count.clone(), job.cancel.clone());
-        self.core.worker.blocking(move || Msg::SqlExport { req, res: db::export_rows(&rows, &out, &path, &count, &cancel) });
-        self.core.export_job = Some(job);
-    }
-
-    /// Runs the editor's statements in a worker task and streams their results to files.
-    fn start_script(&mut self, sc: &Script, stmts: Vec<String>, ap: db::sql::export::AllPlan, path: PathBuf) {
-        if self.core.export_job.is_some() {
-            return self.warn("An export is already running.");
-        }
-        self.core.req += 1;
-        let job = ExportJob { req: self.core.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sc.db.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
-        self.core.worker.sql_export_all(job.req, sc.db.clone(), sc.schema.clone(), stmts, ap, path, job.count.clone(), job.step.clone(), job.id.clone(), job.cancel.clone());
-        self.core.export_job = Some(job);
+        self.core.export().shell(rows, out, path);
     }
 
     /// Copy as for every page of the selected Query result: the text is built in a worker task.
@@ -505,15 +475,14 @@ impl App {
         let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { target: crate::db::sql::export::Target::Text(fmt), header, table, bs: self.sql_bs() };
-        self.start_stream(&a, plan, Sink::Clipboard, true);
+        self.core.export().stream(&a, plan, Sink::Clipboard, true);
     }
 
     /// The finished stream: a file is reported, clipboard text is copied.
     pub(super) fn export_done(&mut self, ctx: &egui::Context, req: u64, res: db::Res<Done>) {
-        if self.core.export_job.as_ref().is_none_or(|j| j.req != req) {
+        if !self.core.export().finish(req) {
             return;
         }
-        self.core.export_job = None;
         match res {
             Ok(Done { rows, path: Some(p), files, .. }) if files > 1 => self.ok(format!("Exported {} rows to {files} files, from {}", human_rows(rows), p.display())),
             Ok(Done { rows, path: Some(p), .. }) => self.ok(format!("Exported {} rows to {}", human_rows(rows), p.display())),
@@ -534,11 +503,8 @@ impl App {
         spin(ui);
         let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
-        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() && let Some(j) = &self.core.export_job {
-            match &j.db {
-                Some(db) => self.core.worker.sql_kill(db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone()),
-                None => j.cancel.store(true, Ordering::Relaxed),
-            }
+        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() {
+            self.core.export().cancel();
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true

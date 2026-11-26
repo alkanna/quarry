@@ -1,7 +1,7 @@
 //! The JS shell view and running scripts.
 
 use super::*;
-use quarry_core::action::{Action, ShellA};
+use quarry_core::action::{Action, LibA, Pref, PrefsA, ShellA};
 use crate::ui::sql_complete::{Wants, analyze, split_statement};
 use crate::app::library::snippet_strip::{self as snip, Src};
 use crate::library::snippet::Lang;
@@ -374,7 +374,7 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
 
 impl App {
     pub(super) fn open_in_shell(&mut self, code: String) {
-        self.core.open_in_shell(code);
+        self.exec(Action::Shell(ShellA::OpenIn { code }));
     }
 
     /// Runs the current tab's script, after the write confirm when it may write.
@@ -402,16 +402,13 @@ impl App {
         let att_pills = self.attached_pills();
         let kinds = self.shell_kinds();
         let (mut detach, mut open_attach) = (None, false);
-        if sql {
-            self.core.sql_columns_ask(false);
-        }
         let history = self.t().and_then(|t| self.core.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
         let mut packages = self.core.prefs.shell_packages.clone();
         let mut pkg_names: Vec<String> = packages.iter().map(|p| package_ident(p)).collect();
         if packages.iter().any(|p| db::package_spec(p).0 == "lodash") {
             pkg_names.push("_".into());
         }
-        let mut new_pkg = std::mem::take(&mut self.core.new_pkg);
+        let mut new_pkg = self.ui.new_pkg.clone();
         let pick = self.pick_data(ui.ctx(), PickKind::Shell);
         let (mut pick_acts, mut demo_pick) = (Vec::new(), None);
         let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
@@ -423,14 +420,14 @@ impl App {
         let values = sql_cx.as_ref().and_then(|(c, d, s)| self.core.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
         let strip = self.strip_of(Src::Shell);
         let (mut make_default, mut make_value) = (false, None);
-        let (t, ac) = (&mut self.core.tabs[self.core.cur], &mut self.core.ac);
-        if t.shell.code.is_empty() {
-            t.shell.code = default_script(&coll, sql);
-        }
+        let (t, ac) = (&self.core.tabs[self.core.cur], &mut self.ui.ac);
+        // Edited on a copy and sent back as one action when it changed, the starter script when there is none yet.
+        let mut code = if t.shell.code.is_empty() { default_script(&coll, sql) } else { t.shell.code.clone() };
         let running = t.shell.started;
         let uid = t.uid;
         // Clicks become actions, run after drawing.
         let mut acts: Vec<ShellA> = Vec::new();
+        let mut snip_acts: Vec<Action> = Vec::new();
         let (mut run, mut stop, mut editor, mut fmt) = (false, false, None, false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -495,11 +492,10 @@ impl App {
             ui.add_space(8.0);
         }
         if let Some(s) = &strip {
-            let was = t.snip.filled;
-            make_default = snip::strip_ui(ui, s, &mut t.snip, true);
-            if t.snip.filled != was {
-                acts.push(ShellA::Filled { tab: uid, on: t.snip.filled });
-                t.snip.filled = was;
+            let mut edited = Snip { vals: t.snip.vals.clone(), filled: t.snip.filled, off: t.snip.off };
+            make_default = snip::strip_ui(ui, s, &mut edited, true);
+            if (&edited.vals, edited.filled) != (&t.snip.vals, t.snip.filled) {
+                snip_acts.push(Action::Library(LibA::Snip { tab: uid, vals: edited.vals, filled: edited.filled }));
             }
         }
         let filled_view = strip.is_some() && t.snip.filled;
@@ -510,9 +506,10 @@ impl App {
         let esc = ui.input(|i| i.key_pressed(Key::Escape));
         // The editor keeps three lines, and the results below it the Console, the header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, ui.available_height() - SHELL_PANEL_H - 3.0 * ROW_H - TABLE_HEAD_H - 70.0);
-        let pref = self.core.prefs.shell_editor_h;
+        // While the bar is dragged the height lives in the app, and is saved when the drag ends.
+        let pref = self.ui.shell_h.unwrap_or(self.core.prefs.shell_editor_h);
         let custom = pref > 0.0;
-        let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
+        let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
             crate::ui::editor::memo_galley(ui, if sql { 3 } else { 2 }, buf.as_str(), wrap, || {
                 let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
@@ -527,7 +524,7 @@ impl App {
             })
         };
         // Inside sql`...` the suggestions are SQL ones; elsewhere the built-in and server ones stay.
-        let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &t.shell.code) } else { String::new() };
+        let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &code) } else { String::new() };
         let (meta, need): (RefCell<Option<(String, String)>>, RefCell<Option<crate::ui::sql_complete::Need>>) = Default::default();
         let compute = |b: &str, force: bool| -> Option<(usize, Vec<Sug>)> {
             let tpl = scope.as_ref().and_then(|_| sql_at(b, b.len()));
@@ -539,21 +536,21 @@ impl App {
             (!o.sugs.is_empty()).then(|| (sb[o.from..].chars().count(), o.sugs))
         };
         if let (Some(scope), true) = (&scope, std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac")) {
-            shell_ls::shell_ac_demo(ui, id, &t.shell.code, ac, scope, values);
+            shell_ls::shell_ac_demo(ui, id, &code, ac, scope, values);
         }
-        shell_ls::shell_sig_demo(ui, id, &t.shell.code, ac, &mut self.js);
+        shell_ls::shell_sig_demo(ui, id, &code, ac, &mut self.js);
         let mut sql_need = None;
         if fmt || crate::ui::editor::format_key(ui, id) {
-            crate::ui::editor::format_in(ui.ctx(), id, &mut t.shell.code);
+            crate::ui::editor::format_in(ui.ctx(), id, &mut code);
         }
         if filled_view {
-            let out = snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true);
+            let out = snip::fill_tab(t, &code, Src::Shell, Lang::Shell, true);
             snip::preview_ui(ui, out, 11, |c| if sql { shell_ls::js_sql_job(c) } else { js_job(c) });
         }
         let framed = (!filled_view).then(|| egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
-                crate::ui::vim::demo(ui, id, &t.shell.code);
-                let (out, picked) = crate::ui::vim::wrap_with(ui, id, &mut t.shell.code, |ui, code| {
+                crate::ui::vim::demo(ui, id, &code);
+                let (out, picked) = crate::ui::vim::wrap_with(ui, id, &mut code, |ui, code| {
                     ac_field(ui, id, code, ac, &compute, |ui, text, _open| {
                     egui::TextEdit::multiline(text)
                         .id(id)
@@ -567,16 +564,12 @@ impl App {
                     })
                 });
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "Shell editor"));
-                // A script the Cmd+K form filled reads its braces as placeholders again once the person edits it.
-                if out.response.changed() {
-                    t.snip.off = false;
-                }
                 out.response.context_menu(|ui| {
                     menu_list(ui);
                     let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
                         let (a, b) = (r.primary.index.0, r.secondary.index.0);
-                        let (a, b) = (crate::ui::editor::byte_at(&t.shell.code, a.min(b)), crate::ui::editor::byte_at(&t.shell.code, a.max(b)));
-                        snip::literal_at(&t.shell.code, a..b.max(a + 1), Lang::Shell)
+                        let (a, b) = (crate::ui::editor::byte_at(&code, a.min(b)), crate::ui::editor::byte_at(&code, a.max(b)));
+                        snip::literal_at(&code, a..b.max(a + 1), Lang::Shell)
                     });
                     let mut acts = Vec::new();
                     if let Some(r) = picked {
@@ -591,7 +584,7 @@ impl App {
                 }
                 sql_need = need.borrow_mut().take();
                 let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
-                let cur_line = caret.map_or(0, |c| t.shell.code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
+                let cur_line = caret.map_or(0, |c| code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
                 paint_gutter(ui, &out, Some(cur_line));
                 let hover = out.response.hover_pos().and_then(|p| {
                     // The character under the pointer, not just the nearest gap between two.
@@ -615,7 +608,11 @@ impl App {
             });
         }));
         let bar = splitter(ui);
-        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut self.core.prefs.shell_editor_h, f.response.rect.height(), lo, hi));
+        let mut live_h = pref;
+        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut live_h, f.response.rect.height(), lo, hi));
+        if code != t.shell.code {
+            acts.push(ShellA::Edit { tab: uid, code });
+        }
         ui.add_space(2.0);
         if let Some(e) = &t.shell.error {
             egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
@@ -715,22 +712,12 @@ impl App {
             });
             ui.add_space(4.0);
             if !has_table {
-                // Very large results are cut for display; Export writes everything.
-                const RAW_MAX: usize = 300_000;
-                if t.shell.raw_text.is_none() {
-                    let mut s = t.shell.json_text(RAW_MAX);
-                    if s.len() > RAW_MAX {
-                        let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
-                        s.truncate(cut);
-                        s.push_str("\n… cut for display. Use Export to save the whole result.");
-                    }
-                    t.shell.raw_text = Some(s);
-                }
-                let text = t.shell.raw_text.as_ref().unwrap();
+                // Very large results are cut for display (by Core); Export writes everything.
+                let mut text: &str = t.shell.raw_text.as_deref().unwrap_or_default();
                 let raw_h = (ui.available_height() - SHELL_PANEL_H - 30.0).max(80.0);
                 toolbar(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("shell-raw").max_height(raw_h).auto_shrink([false, true]).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
+                        ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
                     });
                 });
             }
@@ -769,14 +756,17 @@ impl App {
         if let Some(code) = use_example {
             acts.push(ShellA::Code { tab: uid, code });
         }
-        self.core.new_pkg = new_pkg;
+        self.ui.new_pkg = new_pkg;
         if packages != self.core.prefs.shell_packages {
             acts.push(ShellA::Packages(packages));
             // Package changes need a fresh language server, which installs them so their types load.
             self.js_restart();
         }
         if saved {
-            self.save_prefs();
+            self.ui.shell_h = None;
+            self.exec(Action::Prefs(PrefsA::Set(Pref::ShellEditorH(live_h))));
+        } else if live_h != pref {
+            self.ui.shell_h = Some(live_h);
         }
         if let (Some(n), Some((c, d, s))) = (sql_need, &sql_cx) {
             self.sql_serve(*c, d, s, Wants { schema: false, values: Some(n) });
@@ -795,6 +785,9 @@ impl App {
         }
         for a in acts {
             self.exec(Action::Shell(a));
+        }
+        for a in snip_acts {
+            self.exec(a);
         }
         if open_attach {
             self.open_attach();
@@ -817,7 +810,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=shell: the SQL shell of the design, with a finished run and its Queries panel.
     pub(super) fn sql_shell_demo(&mut self) {
-        let t = &mut self.core.tabs[0];
+        let t = &mut self.core.setup().tabs[0];
         t.view = View::Shell;
         t.selected = None;
         let ac_demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac");

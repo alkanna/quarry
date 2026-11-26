@@ -323,7 +323,7 @@ impl App {
                 return None;
             }
             let runtime = find_bun(&self.core.prefs.shell_runtime)?;
-            self.js.tx = Some(self.core.worker.js_ls(runtime, config_dir().join("shell"), self.core.prefs.shell_packages.clone()));
+            self.js.tx = Some(self.core.js_ls(runtime, config_dir().join("shell"), self.core.prefs.shell_packages.clone()));
             self.js.globals = None;
         }
         let names: Vec<String> = self.core.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
@@ -366,9 +366,9 @@ impl App {
         // Placeholders swapped for text of their length, so {{day:date}} is no syntax error and positions still match.
         let code = crate::library::snippet::mask(&self.core.tabs[self.core.cur].shell.code, crate::library::snippet::Lang::Shell);
         let (line, col) = db::lsp_pos(&code, at);
-        self.core.req += 1;
-        self.js.tx.as_ref()?.send(db::JsLsReq { req: self.core.req, ask, code, line, col, globals }).ok()?;
-        Some(self.core.req)
+        let req = self.core.next_req();
+        self.js.tx.as_ref()?.send(db::JsLsReq { req, ask, code, line, col, globals }).ok()?;
+        Some(req)
     }
 
     /// The server stopped. Idle stops are normal; failures count toward turning it off.
@@ -411,7 +411,7 @@ impl App {
             self.js_ask(f.id, caret, colls);
         }
         self.js_resolve(f.id, colls);
-        let completion = self.core.ac.shown(f.id);
+        let completion = self.ui.ac.shown(f.id);
         let sig_doc = self.js.sig.as_ref().is_some_and(|s| s.doc.is_some());
         self.js_hover(ctx, f.hover, completion || sig_doc, colls);
         let top = ctx.content_rect().top() + 4.0;
@@ -486,10 +486,10 @@ impl App {
 
     /// Asks for the docs of the selected suggestion when the list came from the server.
     fn js_resolve(&mut self, id: egui::Id, colls: &[String]) {
-        if self.core.ac.id != Some(id.value()) || self.core.ac.doc.as_ref().is_some_and(|d| d.0 == self.core.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.core.ac.sel) {
+        if self.ui.ac.id != Some(id.value()) || self.ui.ac.doc.as_ref().is_some_and(|d| d.0 == self.ui.ac.sel) || self.js.resolve.is_some_and(|r| r.1 == self.ui.ac.sel) {
             return;
         }
-        let (sel, caret) = (self.core.ac.sel, self.core.ac.cursor);
+        let (sel, caret) = (self.ui.ac.sel, self.ui.ac.cursor);
         let Some(raw) = self.js.raw.get(sel).cloned() else { return };
         self.js.resolve = self.js_send(db::JsAsk::Resolve(raw), caret, colls).map(|r| (r, sel));
     }
@@ -563,8 +563,8 @@ impl App {
             db::JsOut::Doc(doc) => {
                 if let Some((_, sel)) = self.js.resolve.filter(|r| r.0 == req) {
                     self.js.resolve = None;
-                    if let Some(d) = doc.filter(|_| self.core.ac.sel == sel) {
-                        self.core.ac.doc = Some((sel, d));
+                    if let Some(d) = doc.filter(|_| self.ui.ac.sel == sel) {
+                        self.ui.ac.doc = Some((sel, d));
                     }
                 } else if let Some(s) = self.js.sig.as_mut().filter(|s| s.req == Some(req)) {
                     s.doc = doc;
@@ -606,7 +606,7 @@ impl App {
         let (items, raw): (Vec<Sug>, Vec<_>) = list.into_iter().map(|(s, i)| (s, i.raw)).unzip();
         self.js.raw = raw;
         self.js.resolve = None;
-        self.core.ac = Ac { id: Some(p.id.value()), token: p.token, items, cursor: p.caret, ..Default::default() };
+        self.ui.ac = Ac { id: Some(p.id.value()), token: p.token, items, cursor: p.caret, ..Default::default() };
     }
 }
 

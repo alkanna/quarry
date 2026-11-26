@@ -1,6 +1,6 @@
 //! State behind src/app/agents/rules.rs, which draws it.
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RulesTab {
     Secrets,
     #[default]
@@ -8,6 +8,7 @@ pub enum RulesTab {
     Custom,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RulesWin {
     pub tab: RulesTab,
     /// Whose custom rules show and which rules the tester runs: every connection, or one.
@@ -38,3 +39,7 @@ pub enum Kind {
 }
 
 pub const SAMPLE: &str = "{\n  \"full_name\": \"Ada Lovelace\",\n  \"email\": \"ada@example.com\",\n  \"card_number\": \"4111 1111 1111 1111\",\n  \"notes\": \"SSN 123-45-6789, call back\",\n  \"password\": \"hunter2\",\n  \"avatar\": { \"$binary\": { \"base64\": \"iVBORw0KGgo=\", \"subType\": \"00\" } }\n}";
+
+/// Hashes in the tester use this key, not the keychain one: the tester must work in the demo, and a hash shown here
+/// must not match what agents get.
+pub const TESTER_KEY: [u8; 32] = [0; 32];

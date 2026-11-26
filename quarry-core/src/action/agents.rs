@@ -3,7 +3,10 @@
 //! approval, Activity and settings windows (src/app/agents/) and turns their clicks into `AgentsA`.
 
 use super::{Refusal, RefusalKind, Reply};
-use crate::agents::config::Access;
+use crate::agents::config::{Access, AgentsConfig, Matcher, PresetMode, RuleSpec};
+use crate::state::agents::activity::Filter;
+use crate::state::agents::rules::{RulesTab, RulesWin};
+use crate::state::agents::settings::ClientKind;
 use crate::agents::link::{self, ToolErr};
 use crate::agents::store;
 use crate::core::Core;
@@ -30,6 +33,30 @@ pub enum AgentsA {
     SetAccess { conn: u64, access: Access },
     /// Signs and saves the settings after an edit the window made in place.
     Save,
+    /// The settings as a window edited them on a copy: replaces them, then signs and saves.
+    Config(Box<AgentsConfig>),
+    /// The Data protection window as it was drawn this frame; None closes it, dropping the rules still empty.
+    Rules(Option<Box<RulesWin>>),
+    /// Opens Data protection on a preset's checks or the custom rules, as `scope` sees them.
+    OpenRules { scope: Option<u64>, tab: RulesTab },
+    /// Opens Data protection on a custom rule of `scope`, or on a new one when `rule` is None.
+    RulesFor { scope: Option<u64>, rule: Option<usize> },
+    /// Adds the rules of an exported file to `scope`'s list. A file that does not parse or compile changes nothing.
+    ImportRules { scope: Option<u64>, text: String },
+    /// Opens the Activity window with its filter set, or closes it.
+    Activity { open: bool, filter: Option<Filter> },
+    /// The Activity window's filter.
+    ActivityFilter(Filter),
+    /// The Activity row whose arguments show below the list.
+    Pick(Option<u64>),
+    /// The connection page of Settings > AI agents, or the list again when None.
+    Page(Option<u64>),
+    /// The scope glob field of that page, as typed.
+    Globs(String),
+    /// The client whose setup snippet Settings shows.
+    Client(ClientKind),
+    /// Settings > AI agents' Edit rules: the window on its defaults.
+    EditRules,
 }
 
 /// Who asks Core for something. The user's clicks go through `execute`; only agents make tool calls.
@@ -81,8 +108,94 @@ impl Core {
             AgentsA::SetEnabled(on) => self.set_agents_enabled(on),
             AgentsA::SetAccess { conn, access } => self.set_agent_access(conn, access),
             AgentsA::Save => self.save_agents(),
+            AgentsA::Config(c) => {
+                self.agents.cfg = *c;
+                self.save_agents();
+            }
+            AgentsA::Rules(w) => match w {
+                Some(w) => self.agents.rules = Some(*w),
+                None => {
+                    self.agents.rules = None;
+                    self.drop_empty_rules();
+                }
+            },
+            AgentsA::OpenRules { scope, tab } => self.agents.rules = Some(RulesWin { tab, scope, ..Default::default() }),
+            AgentsA::RulesFor { scope, rule } => self.rules_for(scope, rule),
+            AgentsA::ImportRules { scope, text } => {
+                if let Err(msg) = self.import_rules(scope, &text) {
+                    return Err(Refusal { kind: RefusalKind::Invalid, msg });
+                }
+            }
+            AgentsA::Activity { open, filter } => {
+                if let Some(f) = filter {
+                    self.agents.filter = f;
+                }
+                self.agents.activity_open = open;
+            }
+            AgentsA::ActivityFilter(f) => self.agents.filter = f,
+            AgentsA::Pick(id) => self.agents.picked = id,
+            AgentsA::Page(id) => {
+                self.agents.page = id;
+                if let Some(id) = id {
+                    self.agents.globs = self.agents.cfg.conns.get(&id).map(|p| p.scope.globs.join(", ")).unwrap_or_default();
+                }
+            }
+            AgentsA::Globs(g) => self.agents.globs = g,
+            AgentsA::Client(c) => self.agents.client = c,
+            AgentsA::EditRules => self.agents.rules = Some(RulesWin::default()),
         }
         Ok(Reply::Done)
+    }
+
+    /// The custom rules of `scope`: every connection's, or one connection's own.
+    pub fn rule_list(&mut self, scope: Option<u64>) -> &mut Vec<RuleSpec> {
+        match scope {
+            None => &mut self.agents.cfg.rules,
+            Some(id) => {
+                let cfg = &mut self.agents.cfg;
+                &mut cfg.conns.entry(id).or_insert_with(|| cfg.defaults.clone()).rules
+            }
+        }
+    }
+
+    /// A rule that does nothing until its pattern is filled in: one that does not compile stops every agent call.
+    fn rules_for(&mut self, scope: Option<u64>, rule: Option<usize>) {
+        let i = rule.unwrap_or_else(|| {
+            let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: crate::agents::config::Action::Replace("hidden".into()), mode: PresetMode::Hide };
+            let list = self.rule_list(scope);
+            list.push(r);
+            list.len() - 1
+        });
+        self.agents.rules = Some(RulesWin { tab: RulesTab::Custom, scope, sel: Some(i), ..Default::default() });
+        if rule.is_none() {
+            self.save_agents();
+        }
+    }
+
+    /// Add rule starts a rule with no pattern; one still empty when the window closes was never filled in.
+    fn drop_empty_rules(&mut self) {
+        let empty = |r: &RuleSpec| matches!(&r.matcher, Matcher::FieldPath(s) | Matcher::FieldName(s) | Matcher::ValueRegex(s) if s.trim().is_empty());
+        let before = self.agents.cfg.clone();
+        self.agents.cfg.rules.retain(|r| !empty(r));
+        for p in self.agents.cfg.conns.values_mut() {
+            p.rules.retain(|r| !empty(r));
+        }
+        if before != self.agents.cfg {
+            self.save_agents();
+        }
+    }
+
+    /// Adds the rules of an exported file to the global list, or to connection `scope`'s. A file that does not parse,
+    /// or holds a rule that does not compile, changes nothing: such a rule would stop every agent call.
+    pub fn import_rules(&mut self, scope: Option<u64>, text: &str) -> Result<usize, String> {
+        let rules: Vec<RuleSpec> = serde_json::from_str(text).map_err(|e| format!("not a Quarry rules file: {e}"))?;
+        // Tested alone before anything changes.
+        let none = crate::agents::config::Presets { secrets: crate::agents::config::Preset { on: false, ..self.agents.cfg.presets.secrets.clone() }, pii: crate::agents::config::Preset { on: false, ..self.agents.cfg.presets.pii.clone() } };
+        crate::agents::scrub::Rules::compile(&none, &Default::default(), &rules, &[], &crate::state::agents::rules::TESTER_KEY).map_err(|e| format!("Nothing was imported. {e}"))?;
+        let n = rules.len();
+        self.rule_list(scope).extend(rules);
+        self.save_agents();
+        Ok(n)
     }
 
     /// Loads agents.json and starts the listener. The listener runs while Quarry does, so a bridge can tell

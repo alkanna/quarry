@@ -285,10 +285,8 @@ impl App {
         let label = self.core.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
             HeadAct::AddSort if t.sql.is_some() => {
-                let t = self.tm().unwrap();
-                t.sort_txt = super::sql::bar::add_sort_key(&t.sort_txt, c, dialect);
-                t.page = 0;
-                self.reload();
+                let (tab, text) = (t.uid, super::sql::bar::add_sort_key(&t.sort_txt, c, dialect));
+                self.exec(Action::Grid(GridA::Sort { tab, text, sort: None }));
             }
             HeadAct::AddSort => {}
             HeadAct::Sort(next) => {

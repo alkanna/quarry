@@ -68,6 +68,19 @@ impl Core {
 
     /// Syncing writes the old diff to whatever target is picked, so a diff for another one is dropped. Open rows are
     /// kept by position, so whenever the rows under them change they are closed. Run each frame and after each pick.
+    pub fn compare_tick(&mut self) {
+        let Some(t) = self.tabs.get_mut(self.cur).filter(|t| t.view == crate::state::View::Compare) else { return };
+        let c = &mut t.compare;
+        // The target starts as the source's own connection and database.
+        if c.conn == 0 {
+            (c.conn, c.db) = (t.sel.conn, t.sel.db.clone());
+        }
+        self.compare_follow();
+        let Some(c) = self.tabs.get_mut(self.cur).map(|t| &mut t.compare).filter(|c| c.result.is_some()) else { return };
+        let pages = c.rows().len().div_ceil(crate::db::PAGE_SIZE as usize).max(1);
+        c.page = c.page.min(pages - 1);
+    }
+
     pub fn compare_follow(&mut self) {
         let Some(c) = self.tabs.get_mut(self.cur).map(|t| &mut t.compare) else { return };
         if c.result.is_some() && c.ran != (c.conn, c.db.clone(), c.coll.clone()) {

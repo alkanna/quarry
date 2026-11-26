@@ -1,14 +1,14 @@
 //! The database users window.
 
 use super::*;
-use quarry_core::action::users::{roles_text, short_err};
+use quarry_core::action::users::{roles_text, short_err, MongoUsersText};
 use quarry_core::action::{Action, MongoUsersA, UsersA};
 
 impl App {
     /// Users of all databases with their roles, custom roles, and user actions. Writes need the
     /// connection unlocked; dropping a user asks for its name.
     pub(super) fn users_window(&mut self, ctx: &egui::Context) {
-        let Some(mut u) = self.core.users.take() else { return };
+        let Some(u) = self.core.users.as_ref() else { return };
         let conn = u.conn;
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let atlas = self.conn(conn).is_some_and(|c| c.masked_uri.contains(".mongodb.net"));
@@ -63,16 +63,23 @@ impl App {
                             });
                             // On its own line and wrapped: a user can hold dozens of roles.
                             ui.add(egui::Label::new(RichText::new(roles_text(user)).monospace().size(TXT_SMALL).color(C_STRING())).wrap());
-                            if let Some((en, edb, pwd, roles)) = &mut u.edit && *en == name && *edb == db {
+                            if let Some((en, edb, pwd, roles)) = &u.edit && *en == name && *edb == db {
+                                let (mut pwd_t, mut roles_t) = (pwd.clone(), roles.clone());
                                 egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
                                     egui::Grid::new(("edit", &name)).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
                                         form_label(ui, "New password");
-                                        ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
+                                        ui.add(egui::TextEdit::singleline(&mut pwd_t).password(true).hint_text("leave empty to keep").desired_width(280.0));
                                         ui.end_row();
                                         form_label(ui, "Roles");
-                                        ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
+                                        ui.add(egui::TextEdit::singleline(&mut roles_t).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
                                         ui.end_row();
                                     });
+                                    if pwd_t != *pwd {
+                                        acts.push(MongoUsersA::Password { edit: true, password: Secret::new(pwd_t) });
+                                    }
+                                    if roles_t != *roles {
+                                        acts.push(MongoUsersA::Text(MongoUsersText::EditRoles, roles_t));
+                                    }
                                     ui.horizontal(|ui| {
                                         if primary(ui, "Save", PRIMARY()).clicked() {
                                             acts.push(MongoUsersA::Save);
@@ -88,21 +95,30 @@ impl App {
                     }
                 });
                 settings_section(ui, "ADD USER", |ui| {
+                    let (mut name_t, mut pwd_t, mut db_t, mut roles_t) = (u.new_name.clone(), u.new_pwd.clone(), u.new_db.clone(), u.new_roles.clone());
                     egui::Grid::new("adduser").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
                         form_label(ui, "Name");
-                        ui.add(egui::TextEdit::singleline(&mut u.new_name).desired_width(280.0));
+                        ui.add(egui::TextEdit::singleline(&mut name_t).desired_width(280.0));
                         ui.end_row();
                         form_label(ui, "Password");
-                        ui.add(egui::TextEdit::singleline(&mut u.new_pwd).password(true).desired_width(280.0));
+                        ui.add(egui::TextEdit::singleline(&mut pwd_t).password(true).desired_width(280.0));
                         ui.end_row();
                         form_label(ui, "Database");
-                        ui.add(egui::TextEdit::singleline(&mut u.new_db).hint_text("admin").desired_width(280.0));
+                        ui.add(egui::TextEdit::singleline(&mut db_t).hint_text("admin").desired_width(280.0));
                         ui.end_row();
                         form_label(ui, "Roles");
-                        ui.add(egui::TextEdit::singleline(&mut u.new_roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
+                        ui.add(egui::TextEdit::singleline(&mut roles_t).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
                         ui.end_row();
                     });
-                    let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
+                    for (f, new, old) in [(MongoUsersText::NewName, name_t, &u.new_name), (MongoUsersText::NewDb, db_t, &u.new_db), (MongoUsersText::NewRoles, roles_t, &u.new_roles)] {
+                        if new != *old {
+                            acts.push(MongoUsersA::Text(f, new));
+                        }
+                    }
+                    let ok = writable && !u.new_name.trim().is_empty() && !pwd_t.is_empty();
+                    if pwd_t != u.new_pwd {
+                        acts.push(MongoUsersA::Password { edit: false, password: Secret::new(pwd_t) });
+                    }
                     if ui.add_enabled(ok, primary_button(ui, "Add user", PRIMARY())).clicked() {
                         acts.push(MongoUsersA::Add);
                     }
@@ -133,7 +149,6 @@ impl App {
             b.end(outer);
             open = !dialog_done(outer);
         });
-        self.core.users = Some(u);
         for a in acts {
             self.exec(Action::Users(UsersA::Mongo(a)));
         }

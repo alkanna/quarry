@@ -53,6 +53,7 @@ pub mod replies;
 pub mod confirm;
 pub mod cloud;
 pub mod lib_open;
+pub mod export;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -189,6 +190,8 @@ pub enum UiFx {
     RepaintAfter(f64),
     /// A connection's session ended or it was removed: its Explain plans kept for Compare go.
     ForgetPlans(u64),
+    /// What the app measured for the look it drew (column widths) no longer holds: a font, theme or number display changed.
+    WidthsStale,
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -486,8 +489,8 @@ impl Core {
         self.stop_hidden_watches();
         // The Server windows poll while Quarry is focused, and the Roles window fills its fields before it draws.
         if self.agents.ui.focused {
-            let (sql, pg) = (self.sql_server.is_some() && self.sql_server_poll(), self.pg_server.is_some() && self.pg_server_poll());
-            if sql || pg {
+            let (sql, pg, mongo) = (self.sql_server.is_some() && self.sql_server_poll(), self.pg_server.is_some() && self.pg_server_poll(), self.server.is_some() && self.server_poll());
+            if sql || pg || mongo {
                 self.ui_fx.push(UiFx::RepaintAfter(crate::state::server::POLL.as_secs_f64()));
             }
         }
@@ -497,6 +500,19 @@ impl Core {
         if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
             t.record = false;
         }
+        // The Documents view's page numbers follow a page size changed from another tab, and the Shell's raw result text is
+        // built once per result.
+        if self.t().is_some_and(|t| t.view == crate::state::View::Documents) {
+            self.follow_page_size();
+        }
+        self.fill_shell_raw();
+        self.aggregate_tick();
+        self.values_typed_tick();
+        self.forget_closed_rows();
+        self.shell_schema_tick();
+        self.compare_tick();
+        self.schema_tick_view();
+        self.import_tick();
         // Once per frame: the list the header counts drops what a day made too old, and the next launch reopens these tabs.
         crate::core::notify::trim_undo(&mut self.undo, std::time::Instant::now());
         // The rail's tiles follow the open connections, each in the place it had.

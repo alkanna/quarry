@@ -19,6 +19,8 @@ pub enum AggA {
     Run { tab: u64 },
     /// A stage chip of Text mode: the output after stage `stage`.
     RunTo { tab: u64, stage: usize },
+    /// The pipeline text of Text mode after a frame of typing.
+    Text { tab: u64, text: String },
 }
 
 /// A stage card's click or edit.
@@ -34,6 +36,12 @@ pub enum StageA {
     /// Show 10 more documents; `usize::MAX` is the collection sample.
     More(usize),
     Preview(usize),
+    /// The stage's switch: includes it in the pipeline or skips it.
+    Flip(usize),
+    /// A stage's text after a frame of typing.
+    Text(usize, String),
+    /// Opens or closes sample document `k` of the stage (`usize::MAX` is the collection sample).
+    OpenSample(usize, usize),
 }
 
 impl Core {
@@ -42,6 +50,10 @@ impl Core {
             AggA::Stages { tab, acts } => {
                 self.cur_tab(tab)?;
                 self.apply_stage_acts(acts);
+            }
+            AggA::Text { tab, text } => {
+                self.cur_tab(tab)?;
+                self.tabs[self.cur].agg_txt = text;
             }
             AggA::TextMode { tab, on } => {
                 self.cur_tab(tab)?;
@@ -81,6 +93,17 @@ impl Core {
 
     /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
     /// library, a pasted query).
+    pub fn aggregate_tick(&mut self) {
+        if !self.t().is_some_and(|t| t.view == View::Aggregate) {
+            return;
+        }
+        self.sync_stages();
+        // Previews run while the builder shows stages it could build from the text.
+        if self.t().is_some_and(|t| !t.agg_text_mode && t.stages_src == t.agg_txt) && let Some(at) = self.pump_previews() {
+            self.ui_fx.push(super::UiFx::RepaintAfter(at.saturating_duration_since(Instant::now()).as_secs_f64()));
+        }
+    }
+
     pub fn sync_stages(&mut self) {
         let Some(t) = self.tm() else { return };
         if t.agg_text_mode || t.stages_src == t.agg_txt || db::is_shell(&t.agg_txt) {
@@ -111,6 +134,24 @@ impl Core {
             match a {
                 StageA::Edited(i) => self.stages_changed(i, true),
                 StageA::Toggled(i) => self.stages_changed(i, false),
+                StageA::Flip(i) => {
+                    if let Some(s) = t.stages.get_mut(i) {
+                        s.on = !s.on;
+                        self.stages_changed(i, false);
+                    }
+                }
+                StageA::Text(i, text) => {
+                    if let Some(s) = t.stages.get_mut(i) {
+                        s.text = text;
+                        self.stages_changed(i, true);
+                    }
+                }
+                StageA::OpenSample(i, k) => {
+                    let s = if i == usize::MAX { Some(&mut t.agg_input) } else { t.stages.get_mut(i) };
+                    if let Some(s) = s && !s.open.remove(&k) {
+                        s.open.insert(k);
+                    }
+                }
                 StageA::Move(i, j) => {
                     if i < t.stages.len() && j < t.stages.len() && i != j {
                         let s = t.stages.remove(i);

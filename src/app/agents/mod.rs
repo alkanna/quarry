@@ -47,15 +47,16 @@ impl App {
 
     /// QUARRY_TEST_SETTINGS=agents: agents on with two shared demo connections and one client, never touching disk.
     pub(super) fn agents_demo(&mut self) {
-        self.core.agents.cfg.enabled = true;
+        let core = self.core.setup();
+        core.agents.cfg.enabled = true;
         for (i, access) in [Access::ReadWrite, Access::Read].into_iter().enumerate() {
-            if let Some(c) = self.core.conns.get(i) {
-                let p = crate::agents::config::ConnPolicy { access, ..self.core.agents.cfg.defaults.clone() };
-                self.core.agents.cfg.conns.insert(c.meta.id, p);
+            if let Some(c) = core.conns.get(i) {
+                let p = crate::agents::config::ConnPolicy { access, ..core.agents.cfg.defaults.clone() };
+                core.agents.cfg.conns.insert(c.meta.id, p);
             }
         }
-        self.core.agents.link = LinkState::Listening;
-        self.core.agents.sessions.push(AgentSession { id: 1, client: "claude-code".into(), calls: 14 });
+        core.agents.link = LinkState::Listening;
+        core.agents.sessions.push(AgentSession { id: 1, client: "claude-code".into(), calls: 14 });
     }
 }
 

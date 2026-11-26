@@ -16,6 +16,8 @@ use std::ops::Deref;
 pub enum TextRef {
     /// The Insert a document dialog's JSON.
     Insert,
+    /// The Import view's source text.
+    ImportText,
 }
 
 pub struct Front(Core, bool);
@@ -65,7 +67,23 @@ impl Front {
     pub fn text_mut(&mut self, r: TextRef) -> Option<&mut String> {
         match r {
             TextRef::Insert => self.0.insert.as_mut(),
+            TextRef::ImportText => self.0.tabs.get_mut(self.0.cur).map(|t| &mut t.import.text),
         }
+    }
+
+    /// The editors a value opens over the grid and the document tree: the large editor of a document or a field, the inline
+    /// one of the tree and its New field row. Like the cell editor, the app edits them every frame while they are open, taking
+    /// one and putting it back; opening, applying and closing them are actions.
+    pub fn json_edit(&mut self) -> &mut Option<crate::state::JsonEdit> {
+        &mut self.0.json_edit
+    }
+
+    pub fn inline_edit(&mut self) -> &mut Option<crate::state::Inline> {
+        &mut self.0.inline
+    }
+
+    pub fn new_field_edit(&mut self) -> &mut Option<crate::state::NewField> {
+        &mut self.0.new_field
     }
 
     // Answers the app tries on its own dialogs first, and hands to Core when none of them took it. Core applies them as
@@ -76,6 +94,29 @@ impl Front {
 
     pub fn structure_loaded(&mut self, req: u64, res: crate::db::Res<crate::db::sql::structure::Structure>) {
         self.0.structure_loaded(req, res)
+    }
+
+    /// A new request id, for a request the app sends to something other than the database (the Shell's language server).
+    pub fn next_req(&mut self) -> u64 {
+        self.0.req += 1;
+        self.0.req
+    }
+
+    /// Starts the Shell's language server and hands its channel to the app, which keeps it with the editor's popups. A read of
+    /// the worker, not a change of Core.
+    pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<crate::db::JsLsReq> {
+        self.0.worker.js_ls(runtime, dir, packages)
+    }
+
+    /// The tables part of a PostgreSQL schema list answer: they go to the attachments of every tab that match. The schemas part
+    /// fills the Attach dialog, which is the app's Modal, so the app tries that first.
+    pub fn shell_pg_tables(&mut self, d: &mongodb::bson::Document) {
+        self.0.shell_pg_tables(d)
+    }
+
+    /// The Export dialog's streams, whose sources (connection handles, rows) its form holds, so they are not actions.
+    pub fn export(&mut self) -> ExportDoor<'_> {
+        ExportDoor(&mut self.0)
     }
 
     /// The duplicate-key toast's wait for the table's indexes, when `req` is the one it waits on.
@@ -176,5 +217,31 @@ impl Front {
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_mut(&mut self) -> &mut Core {
         &mut self.0
+    }
+}
+
+/// What the app asks of Core for the Export dialog's streams. Each starts one job, tracked as `Core.export_job`.
+pub struct ExportDoor<'a>(&'a mut Core);
+
+impl ExportDoor<'_> {
+    pub fn stream(&mut self, a: &crate::state::export::AllRows, plan: crate::db::sql::export::Plan, sink: crate::db::sql::export::Sink, copy: bool) {
+        self.0.export_stream(a, plan, sink, copy)
+    }
+
+    pub fn shell(&mut self, rows: Vec<mongodb::bson::RawDocumentBuf>, out: crate::db::RowsOut, path: std::path::PathBuf) {
+        self.0.export_shell(rows, out, path)
+    }
+
+    pub fn script(&mut self, sc: &crate::state::export::Script, stmts: Vec<String>, ap: crate::db::sql::export::AllPlan, path: std::path::PathBuf) {
+        self.0.export_script(sc, stmts, ap, path)
+    }
+
+    pub fn cancel(&mut self) {
+        self.0.export_cancel()
+    }
+
+    /// The stream `req` ended: true when it was the one tracked, which is cleared.
+    pub fn finish(&mut self, req: u64) -> bool {
+        self.0.export_job.take_if(|j| j.req == req).is_some()
     }
 }

@@ -137,7 +137,7 @@ impl App {
         let selected = self.t().and_then(|t| t.selected);
         let passive = row.is_some() && row != selected;
         // Edit state is keyed by field path only, so other open documents must not see it.
-        let parked = passive.then(|| (self.core.inline.take(), self.core.new_field.take()));
+        let parked = passive.then(|| (self.core.inline_edit().take(), self.core.new_field_edit().take()));
         // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
         // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
         let doc_id = d.get("_id").map(db::compact);
@@ -192,7 +192,7 @@ impl App {
         });
         ui.separator();
         let key = self.draft_key(d);
-        self.core.changed = match self.core.drafts.get(&key) {
+        self.ui.changed = match self.core.drafts.get(&key) {
             Some(dr) if !from_agg => {
                 let changes = db::diff(&dr.original, &dr.current);
                 // Same visible span as the header row, so Save stays on screen.
@@ -205,7 +205,7 @@ impl App {
             _ => HashSet::new(),
         };
         let mut path = Vec::new();
-        self.core.fold_busy = false;
+        self.ui.fold_busy = false;
         // Runs every frame, so capped like doc_paths: deeper keys just truncate.
         fn longest(d: &Document, depth: usize) -> usize {
             d.iter().map(|(k, v)| k.chars().count().max(match v {
@@ -215,7 +215,7 @@ impl App {
                 _ => 0,
             })).max().unwrap_or(0)
         }
-        self.core.char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(MONO_PX), 'x'));
+        self.ui.char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(MONO_PX), 'x'));
         // Cached per document and field count, so open documents are not walked every frame.
         let cache = id.with(("key-chars", d.len()));
         let chars = ui.data(|m| m.get_temp::<usize>(cache)).unwrap_or_else(|| {
@@ -223,23 +223,23 @@ impl App {
             ui.data_mut(|m| m.insert_temp(cache, n));
             n
         });
-        self.core.key_w = (chars as f32 * self.core.char_w + 24.0).clamp(96.0, 320.0);
+        self.ui.key_w = (chars as f32 * self.ui.char_w + 24.0).clamp(96.0, 320.0);
         self.tree_x = ui.max_rect().x_range().expand(8.0);
         // Tree rows keep egui's compact 18 px; the global BUTTON_H would show a quarter fewer fields.
         let interact_h = std::mem::replace(&mut ui.spacing_mut().interact_size.y, 18.0);
-        self.core.fold_seen = None;
+        self.ui.fold_seen = None;
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, id, &mut path, !from_agg, &mut acts);
             path.pop();
         }
-        if ui.data(|m| m.get_temp::<Option<bool>>(fold_key)) != Some(self.core.fold_seen) {
-            ui.data_mut(|m| m.insert_temp(fold_key, self.core.fold_seen));
+        if ui.data(|m| m.get_temp::<Option<bool>>(fold_key)) != Some(self.ui.fold_seen) {
+            ui.data_mut(|m| m.insert_temp(fold_key, self.ui.fold_seen));
             ui.ctx().request_repaint();
         }
         ui.spacing_mut().interact_size.y = interact_h;
         // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
-        if !self.core.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
+        if !self.ui.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
             self.fold = None;
         }
         // Picked after this frame's headers ran, so applied after the clear above to reach the next frame.
@@ -249,10 +249,10 @@ impl App {
         if self.core.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
             self.new_field_row(ui, &mut acts);
         }
-        self.core.changed.clear();
+        self.ui.changed.clear();
         if let Some((inline, new_field)) = parked {
-            self.core.inline = inline;
-            self.core.new_field = new_field;
+            *self.core.inline_edit() = inline;
+            *self.core.new_field_edit() = new_field;
         }
         if let (true, Some((agg, row)), false) = (passive, row, acts.is_empty()) {
             let tab = self.t().unwrap().uid;
@@ -346,7 +346,7 @@ impl App {
     }
 
     pub(super) fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
-        let Some(n) = &mut self.core.new_field else { return };
+        let Some(n) = self.core.new_field_edit().as_mut() else { return };
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             let bad = n.err.is_some();
@@ -401,10 +401,10 @@ impl App {
                     _ => unreachable!(),
                 };
                 let band = ui.painter().add(egui::Shape::Noop);
-                let key_px = key.chars().count() as f32 * self.core.char_w;
+                let key_px = key.chars().count() as f32 * self.ui.char_w;
                 let mut job = LayoutJob::default();
                 job.append(key, 0.0, mono(BRIGHT()));
-                job.append(&leaf_text(v), (self.core.key_w - key_px).max(12.0), mono(FAINT()));
+                job.append(&leaf_text(v), (self.ui.key_w - key_px).max(12.0), mono(FAINT()));
                 let adding_here = self.core.new_field.as_ref().is_some_and(|n| n.parent == *path);
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
@@ -433,9 +433,9 @@ impl App {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
                 }
                 if forced.is_some_and(|o| r.openness != if o { 1.0 } else { 0.0 }) {
-                    self.core.fold_busy = true;
+                    self.ui.fold_busy = true;
                 }
-                self.core.fold_seen = Some(self.core.fold_seen.unwrap_or(false) || r.openness < 1.0);
+                self.ui.fold_seen = Some(self.ui.fold_seen.unwrap_or(false) || r.openness < 1.0);
                 let p = path.clone();
                 let hl = highlighted(&self.core.prefs, &self.col_key(false), &p);
                 let in_coll = self.in_coll();
@@ -447,13 +447,13 @@ impl App {
             }
             leaf => {
                 let hl = highlighted(&self.core.prefs, &self.col_key(false), path);
-                let edited = !self.core.changed.is_empty() && self.core.changed.contains(&path.join("."));
+                let edited = !self.ui.changed.is_empty() && self.ui.changed.contains(&path.join("."));
                 let band = ui.painter().add(egui::Shape::Noop);
                 let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(R_SM).show(ui, |ui| ui.horizontal(|ui| {
                     // Same offsets as a collapsing header so keys and values line up across both.
                     let x0 = ui.cursor().left();
                     ui.add_space(ui.spacing().indent);
-                    let key_w = self.core.key_w;
+                    let key_w = self.ui.key_w;
                     let ix = self.index_mark(path);
                     let key_r = ui.scope(|ui| {
                         ui.set_max_width(key_w - 8.0 - if ix.is_some() { BOLT_ROOM } else { 0.0 });
@@ -466,7 +466,7 @@ impl App {
                     }
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
-                        let inl = self.core.inline.as_mut().unwrap();
+                        let inl = self.core.inline_edit().as_mut().unwrap();
                         inline_editor(ui, inl, acts);
                     } else {
                         // A one-line label never shows more than this; laying out a megabyte string on

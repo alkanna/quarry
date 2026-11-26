@@ -123,8 +123,7 @@ impl App {
         let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Agent activity");
         if r.clicked() {
             // The waiting call is already in front in its dialog; the list shows what else is waiting.
-            self.core.agents.filter = if waiting > 0 { Filter::Waiting } else { Filter::All };
-            self.core.agents.activity_open = true;
+            self.exec(Action::Agents(AgentsA::Activity { open: true, filter: Some(if waiting > 0 { Filter::Waiting } else { Filter::All }) }));
         }
     }
 
@@ -134,6 +133,8 @@ impl App {
         }
         let mut keep = true;
         let (mut clear, mut undo, mut reveal) = (false, None, false);
+        let mut pick: Option<Option<u64>> = None;
+        let mut filter = self.core.agents.filter;
         let width = fit_width(ctx, 800.0) - 40.0;
         let names: HashMap<u64, String> = self.core.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
         let connected = match self.core.agents.sessions.as_slice() {
@@ -157,7 +158,7 @@ impl App {
             let outer = ui;
             let ui = &mut b.content_ui;
             ui.horizontal(|ui| {
-                segmented(ui, &mut self.core.agents.filter, &FILTERS);
+                segmented(ui, &mut filter, &FILTERS);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     clear = ui.add_enabled(!self.core.agents.activity.is_empty(), egui::Button::new("Clear")).on_hover_text("Empties this list. The audit log keeps every call.").clicked();
                 });
@@ -174,7 +175,7 @@ impl App {
                         caption(ui, "RESULT");
                     });
                 });
-                let rows: Vec<&Activity> = self.core.agents.activity.iter().rev().filter(|a| shows(a, self.core.agents.filter)).collect();
+                let rows: Vec<&Activity> = self.core.agents.activity.iter().rev().filter(|a| shows(a, filter)).collect();
                 egui::ScrollArea::vertical().id_salt("agents-activity").max_height(300.0).min_scrolled_height(120.0).auto_shrink([false, true]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     if rows.is_empty() {
@@ -210,7 +211,7 @@ impl App {
                         child.add(egui::Label::new(RichText::new(detail).size(TXT_SMALL).color(TEXT())).truncate());
                         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Row, true, on, format!("{} {} at {}", a.tool, a.ns, a.time)));
                         if resp.clicked() {
-                            self.core.agents.picked = if on { None } else { Some(a.id) };
+                            pick = Some(if on { None } else { Some(a.id) });
                         }
                     }
                 });
@@ -254,6 +255,12 @@ impl App {
                 foot_note(ui, note);
             });
         });
+        if filter != self.core.agents.filter {
+            self.exec(Action::Agents(AgentsA::ActivityFilter(filter)));
+        }
+        if let Some(p) = pick {
+            self.exec(Action::Agents(AgentsA::Pick(p)));
+        }
         if clear {
             self.exec(Action::Agents(AgentsA::Clear));
         }
@@ -264,7 +271,7 @@ impl App {
             self.agents_reveal();
         }
         if !keep || r.should_close() {
-            self.core.agents.activity_open = false;
+            self.exec(Action::Agents(AgentsA::Activity { open: false, filter: None }));
         }
     }
 }

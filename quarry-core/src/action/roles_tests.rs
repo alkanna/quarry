@@ -245,6 +245,8 @@ fn all_actions() -> Vec<Action> {
         MongoUsersA::Drop { user: "u".into(), db: "admin".into() },
         MongoUsersA::DropRun { conn: 1, user: "u".into(), db: "admin".into() },
         MongoUsersA::Close,
+        MongoUsersA::Text(crate::action::users::MongoUsersText::NewName, "u".into()),
+        MongoUsersA::Password { edit: false, password: Secret::new("pw".into()) },
     ];
     let s = [
         MongoServerA::Open { conn: 1 },
@@ -310,6 +312,9 @@ fn all_actions() -> Vec<Action> {
         ShellA::Page { tab: 1, page: 2 },
         ShellA::Filled { tab: 1, on: true },
         ShellA::Packages(vec!["zod".into()]),
+        ShellA::Edit { tab: 1, code: "x".into() },
+        ShellA::PgSchemas { conn: 2, db: "d".into() },
+        ShellA::OpenIn { code: "x".into() },
     ];
     all.extend(sh.into_iter().map(Action::Shell));
     all.extend([WatchA::Start { tab: 1 }, WatchA::Stop { tab: 1 }, WatchA::Clear { tab: 1 }].into_iter().map(Action::Watch));
@@ -451,6 +456,8 @@ fn tab_and_docs_actions() -> Vec<Action> {
         DocsA::Delete { tab: 1, docs: d() },
         DocsA::Filter { tab: 1, docs: d() },
         DocsA::DeleteRun { at: sel, docs: d() },
+        DocsA::Bar { tab: 1, field: crate::action::BarField::Limit, text: "5".into() },
+        DocsA::TypedValues { key: "k".into(), field: Some("a".into()), prefix: Some("ab".into()) },
         DocsA::Step { tab: 1, agg: false, row: 2 },
         DocsA::Escape,
         DocsA::RunShell { tab: 1, text: "db.c.find({})".into() },
@@ -461,11 +468,12 @@ fn tab_and_docs_actions() -> Vec<Action> {
     all.extend(k.into_iter().map(Action::Docs));
     all.push(Action::Undo(UndoA::Apply { at: 7, confirmed: false }));
     let g = [
-        AggA::Stages { tab: 1, acts: vec![StageA::Edited(0), StageA::Toggled(1), StageA::Move(0, 1), StageA::Remove(0), StageA::Add("$match".into()), StageA::Op(0, "$sort".into()), StageA::More(usize::MAX), StageA::Preview(0)] },
+        AggA::Stages { tab: 1, acts: vec![StageA::Edited(0), StageA::Toggled(1), StageA::Move(0, 1), StageA::Remove(0), StageA::Add("$match".into()), StageA::Op(0, "$sort".into()), StageA::More(usize::MAX), StageA::Preview(0), StageA::Flip(0), StageA::Text(0, "{}".into()), StageA::OpenSample(0, 1)] },
         AggA::TextMode { tab: 1, on: true },
         AggA::AutoPreview(false),
         AggA::Run { tab: 1 },
         AggA::RunTo { tab: 1, stage: 2 },
+        AggA::Text { tab: 1, text: "[]".into() },
     ];
     all.extend(g.into_iter().map(Action::Aggregate));
     let x = [IdxA::Create { tab: 1, spec: mongodb::bson::doc! { "key": { "a": 1 }, "name": "a_1" } }, IdxA::Hide { tab: 1, name: "a_1".into(), hidden: true }, IdxA::Profile { tab: 1 }];
@@ -485,7 +493,7 @@ fn variant(a: &Action) -> String {
             SqlUsersA::Open { .. } | SqlUsersA::Pick { .. } | SqlUsersA::Tab(_) | SqlUsersA::Apply | SqlUsersA::Close | SqlUsersA::Refresh | SqlUsersA::Unlock | SqlUsersA::NewUser | SqlUsersA::Drop { .. } | SqlUsersA::DropRun { .. } | SqlUsersA::Password { .. } | SqlUsersA::Create { .. } | SqlUsersA::SetPassword { .. } | SqlUsersA::Lock(_) | SqlUsersA::Expire(_) | SqlUsersA::Tls(_) | SqlUsersA::Role { .. } | SqlUsersA::RoleAdd(_) | SqlUsersA::RoleAddDone | SqlUsersA::Global { .. } | SqlUsersA::PrivAdd(_) | SqlUsersA::PrivAddDone | SqlUsersA::DbPriv { .. } | SqlUsersA::DbAdd(_) | SqlUsersA::DbAddDone | SqlUsersA::Text(..) => {}
         },
         Action::Users(UsersA::Mongo(m)) => match m {
-            MongoUsersA::Open { .. } | MongoUsersA::Refresh | MongoUsersA::Unlock | MongoUsersA::Edit { .. } | MongoUsersA::CloseEdit | MongoUsersA::Save | MongoUsersA::Add | MongoUsersA::Drop { .. } | MongoUsersA::DropRun { .. } | MongoUsersA::Close => {}
+            MongoUsersA::Open { .. } | MongoUsersA::Refresh | MongoUsersA::Unlock | MongoUsersA::Edit { .. } | MongoUsersA::CloseEdit | MongoUsersA::Save | MongoUsersA::Add | MongoUsersA::Drop { .. } | MongoUsersA::DropRun { .. } | MongoUsersA::Close | MongoUsersA::Text(..) | MongoUsersA::Password { .. } => {}
         },
         Action::Server(ServerA::Mongo(s)) => match s {
             MongoServerA::Open { .. } | MongoServerA::Ops(_) | MongoServerA::Refresh | MongoServerA::AutoOps(_) | MongoServerA::ArmKill { .. } | MongoServerA::Disarm | MongoServerA::Kill { .. } | MongoServerA::Unlock | MongoServerA::Close => {}
@@ -497,7 +505,7 @@ fn variant(a: &Action) -> String {
             PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Text(..) | PgServerA::Unlock | PgServerA::Close => {}
         },
         Action::Shell(s) => match s {
-            ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) => {}
+            ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) | ShellA::Edit { .. } | ShellA::PgSchemas { .. } | ShellA::OpenIn { .. } => {}
         },
         Action::Watch(w) => match w {
             WatchA::Start { .. } | WatchA::Stop { .. } | WatchA::Clear { .. } => {}
@@ -536,13 +544,13 @@ fn variant(a: &Action) -> String {
             DocsA::Edit { act, .. } => match act {
                 EditA::Start { .. } | EditA::Commit | EditA::Expand | EditA::Cancel | EditA::Remove { .. } | EditA::AddField { .. } | EditA::CommitNew | EditA::EditDoc => {}
             },
-            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } | DocsA::Step { .. } | DocsA::Escape | DocsA::RunShell { .. } | DocsA::RunPipeline { .. } | DocsA::WantValues { .. } => {}
+            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } | DocsA::Step { .. } | DocsA::Escape | DocsA::RunShell { .. } | DocsA::RunPipeline { .. } | DocsA::WantValues { .. } | DocsA::Bar { .. } | DocsA::TypedValues { .. } => {}
         },
         Action::Undo(u) => match u {
             UndoA::Apply { .. } => {}
         },
         Action::Aggregate(g) => match g {
-            AggA::Stages { .. } | AggA::TextMode { .. } | AggA::AutoPreview(_) | AggA::Run { .. } | AggA::RunTo { .. } => {}
+            AggA::Stages { .. } | AggA::TextMode { .. } | AggA::AutoPreview(_) | AggA::Run { .. } | AggA::RunTo { .. } | AggA::Text { .. } => {}
         },
         Action::Indexes(x) => match x {
             IdxA::Create { .. } | IdxA::Hide { .. } | IdxA::Profile { .. } => {}

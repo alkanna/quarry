@@ -9,7 +9,7 @@ pub(super) use quarry_core::action::aggregate::StageA as StageAct;
 
 /// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
 /// on the left and what comes out of the stage on the right.
-pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &Stage, auto: bool, acts: &mut Vec<StageAct>) {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
@@ -26,8 +26,9 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
             })
             .response
             .on_hover_text("Change the stage operator");
-            if ui.checkbox(&mut s.on, "").on_hover_text("Include this stage in the pipeline").changed() {
-                acts.push(StageAct::Toggled(i));
+            let mut on = s.on;
+            if ui.checkbox(&mut on, "").on_hover_text("Include this stage in the pipeline").changed() {
+                acts.push(StageAct::Flip(i));
             }
             ui.hyperlink_to(RichText::new("Docs").size(TXT_SMALL), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -49,17 +50,16 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                 ui.set_width(w);
                 let id = egui::Id::unique(("stage-editor", s.uid));
                 let rows = s.text.lines().count().clamp(2, 16);
-                // A formatted stage goes back into the pipeline text, as an edit does.
-                if crate::ui::editor::format_on_key(ui, id, &mut s.text) {
-                    acts.push(StageAct::Edited(i));
-                }
-                let out = crate::ui::vim::wrap(ui, id, &mut s.text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
+                // Edited on a copy and sent back as one action, which also puts it into the pipeline text.
+                let mut text = s.text.clone();
+                crate::ui::editor::format_on_key(ui, id, &mut text);
+                let out = crate::ui::vim::wrap(ui, id, &mut text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, format!("Stage {} editor", i + 1)));
-                if out.response.changed() {
-                    acts.push(StageAct::Edited(i));
-                }
-                if let Err(e) = db::parse_value(&s.text) {
+                if let Err(e) = db::parse_value(&text) {
                     ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
+                }
+                if text != s.text {
+                    acts.push(StageAct::Text(i, text));
                 }
             });
             // A gap, not ui.separator(): in a row a separator takes all the height left and
@@ -109,7 +109,7 @@ fn lifted_stage(ui: &mut egui::Ui, i: usize, s: &Stage) -> egui::Response {
 
 /// The first documents out of a stage, one line each. The whole row toggles the document open
 /// or closed, and several can be open at once.
-pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_samples(ui: &mut egui::Ui, s: &Stage, i: usize, acts: &mut Vec<StageAct>) {
     if s.sample.is_empty() {
         if s.count == Some(0) {
             ui.label(RichText::new("No documents come out of this stage.").color(FAINT()));
@@ -128,8 +128,8 @@ pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
             let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
             let clip = ui.painter().with_clip_rect(rect.shrink2(egui::vec2(2.0, 0.0)));
             clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT());
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() && !s.open.remove(&k) {
-                s.open.insert(k);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() {
+                acts.push(StageAct::OpenSample(i, k));
             }
             if open {
                 let text = db::to_edit_json(d);
@@ -160,10 +160,10 @@ impl App {
         let mut code_lang = None;
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
-        self.core.sync_stages();
         let auto = self.core.prefs.auto_preview;
         let mut auto_now = auto;
-        let t = self.tm().unwrap();
+        let t = self.t().unwrap();
+        let mut agg_txt = t.agg_txt.clone();
         let (tab, builder) = (t.uid, !t.agg_text_mode);
         let mut text_mode = t.agg_text_mode;
         let labels: Vec<String> = if builder || db::is_shell(&t.agg_txt) {
@@ -200,7 +200,7 @@ impl App {
                                 let n = t.agg_input.count.map_or(String::new(), |n| format!("  ·  about {} documents", group(&n.to_string())));
                                 // Closed at first, like the original's collection sample (isOpen: false, renderer line 111386).
                                 egui::CollapsingHeader::new(RichText::new(format!("Collection input{n}")).color(MUTED())).id_salt("agg-input").default_open(false).show(ui, |ui| {
-                                    stage_samples(ui, &mut t.agg_input, usize::MAX, &mut sacts);
+                                    stage_samples(ui, &t.agg_input, usize::MAX, &mut sacts);
                                 });
                             });
                             let n = t.stages.len();
@@ -213,7 +213,7 @@ impl App {
                             let keys: Vec<egui::Id> = t.stages.iter().map(|s| egui::Id::unique(("stage", s.uid))).collect();
                             let mut grew = false;
                             let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
-                                let s = &mut t.stages[i];
+                                let s = &t.stages[i];
                                 if st.lifted {
                                     return lifted_stage(ui, i, s);
                                 }
@@ -268,8 +268,8 @@ impl App {
             } else {
                 let id = ui.make_persistent_id("agg-editor");
                 text_id = Some(id);
-                crate::ui::editor::format_on_key(ui, id, &mut t.agg_txt);
-                crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
+                crate::ui::editor::format_on_key(ui, id, &mut agg_txt);
+                crate::ui::vim::wrap(ui, id, &mut agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
                 let (main, tip) = run_split(ui, "Run", "⌘↵", true, "Choose what to run");
@@ -284,7 +284,7 @@ impl App {
                     if let Some(id) = text_id
                         && ui.button("Format").on_hover_text("Indent the pipeline by its brackets and break long lines (Shift+Alt+F)").clicked()
                     {
-                        crate::ui::editor::format_in(ui.ctx(), id, &mut t.agg_txt);
+                        crate::ui::editor::format_in(ui.ctx(), id, &mut agg_txt);
                         ui.close();
                     }
                     code_menu(ui, &mut code_lang);
@@ -308,6 +308,9 @@ impl App {
                 });
             }
         });
+        if agg_txt != self.core.tabs[self.core.cur].agg_txt {
+            self.exec(Action::Aggregate(AggA::Text { tab, text: agg_txt }));
+        }
         if text_mode != !builder {
             self.exec(Action::Aggregate(AggA::TextMode { tab, on: text_mode }));
         }
@@ -317,9 +320,7 @@ impl App {
         if !sacts.is_empty() {
             self.exec(Action::Aggregate(AggA::Stages { tab, acts: sacts }));
         }
-        if builder && unsynced.is_none() && let Some(at) = self.core.pump_previews() {
-            ui.ctx().request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
-        }
+        self.take_repaint(ui.ctx());
         if let Some(l) = code_lang {
             self.show_code(l, false);
         }

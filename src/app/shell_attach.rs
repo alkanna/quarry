@@ -128,15 +128,15 @@ impl App {
     pub(super) fn attach_demo(&mut self) {
         let colls = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { dbs, masked_uri: "mongodb://app:****@travels.internal:27017".into(), server: ServerInfo { version: version.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, status) };
-        self.core.conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
+        self.core.setup().conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
         for (id, name, tag, product, version) in [(6, "shop-staging", "Staging", "MySQL", "8.0.36"), (7, "analytics", "Internal", "MariaDB", "11.4.2")] {
-            self.core.conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
+            self.core.setup().conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("attach") {
             self.modal = Some(Modal::Attach(Box::new(AttachForm { conn: Some(5), db: "app".into(), name: "travels".into(), name_set: true, focused: true, ..Default::default() })));
             return;
         }
-        let t = &mut self.core.tabs[0];
+        let t = &mut self.core.setup().tabs[0];
         t.shell.attached = vec![Attached { conn: 5, db: "app".into(), name: "travels".into(), ..Default::default() }];
         t.shell.code = "// Paid orders this week, with the traveller tier stored in Mongo
 async function run() {
@@ -263,6 +263,7 @@ async function run() {
                 self.connect(id);
             }
         }
+        let mut ask_schemas = None;
         let chosen = f.conn.and_then(|id| self.conn(id));
         let (status, dbs): (Option<&Status>, Vec<String>) = chosen.map_or((None, Vec::new()), |c| (Some(&c.status), c.dbs.iter().map(|d| d.0.clone()).collect()));
         let ready = status == Some(&Status::Ready);
@@ -280,8 +281,8 @@ async function run() {
             f.asked = f.conn.map(|c| (c, f.db.clone()));
             f.schemas = None;
             f.schema.clear();
-            match (f.conn, chosen.and_then(|c| c.sql.clone())) {
-                (Some(conn), Some(sql)) => self.core.worker.pg_shell_list(conn, sql, f.db.clone(), String::new()),
+            match (f.conn, chosen.is_some_and(|c| c.sql.is_some())) {
+                (Some(conn), true) => ask_schemas = Some((conn, f.db.clone())),
                 _ => f.schemas = Some(Err("not connected".into())),
             }
         }
@@ -382,6 +383,9 @@ async function run() {
                 *keep = false;
             }
         });
+        if let Some((conn, db)) = ask_schemas {
+            self.exec(Action::Shell(ShellA::PgSchemas { conn, db }));
+        }
         if attach {
             if let (Some(conn), Some(tab)) = (f.conn, self.t().map(|t| t.uid)) {
                 self.exec(Action::Shell(ShellA::Attach { tab, conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes, schema: f.schema.clone() }));

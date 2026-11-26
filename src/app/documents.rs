@@ -255,8 +255,6 @@ impl App {
     }
 
     pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
-        // Loaded with another page size, set from another tab: its page numbers no longer line up.
-        self.core.follow_page_size();
         self.snippet_strip(ui, crate::app::library::snippet_strip::Src::Bar);
         let mut run = false;
         let (mut explain, mut help) = (false, false);
@@ -267,7 +265,7 @@ impl App {
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Query);
         let (mut qacts, mut pick_acts) = (Vec::new(), Vec::new());
-        let (t, ac) = (&mut self.core.tabs[self.core.cur], &mut self.core.ac);
+        let (t, ac) = (&self.core.tabs[self.core.cur], &mut self.ui.ac);
         // Not asked yet (it is, right after this frame) or asked and not back.
         let (asked, waiting, notes) = (&self.core.values_asked, &self.core.values_pending, &self.core.values_note);
         let lookup = |p: &str| {
@@ -278,10 +276,10 @@ impl App {
                 notes.get(&k).map_or(Lookup::Done, |n| Lookup::Skipped(n))
             }
         };
-        let paths = std::mem::take(&mut t.paths);
-        let fields = std::mem::take(&mut t.field_info);
-        // A filter the Cmd+K form filled reads its braces as placeholders again once the person edits it.
-        let was_filled = t.snip.off.then(|| [t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone()]);
+        let (paths, fields) = (&t.paths, &t.field_info);
+        // The boxes are edited on copies and sent back as actions when they changed.
+        let mut txt = [t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone()];
+        let [filter_txt, sort_txt, proj_txt, limit_txt, skip_txt, hint_txt, collation_txt] = &mut txt;
         let mut typed = Typed::default();
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
@@ -331,9 +329,9 @@ impl App {
                     ui.spacing_mut().item_spacing = LINE_GAP;
                     // As wide as its longest line, up to most of the line, so the options can follow it on the same row.
                     let hint = "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])";
-                    let longest = if t.filter_txt.is_empty() { hint } else { t.filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
+                    let longest = if filter_txt.is_empty() { hint } else { filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
                     let w = (text_w(ui, longest, mono.clone()) + 24.0).clamp(220.0, (left_w * 0.6).max(220.0)).min(left_w);
-                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, hint, w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                    run |= Self::query_field(ui, "QUERY", filter_txt, hint, w, FieldKind::Query, paths, fields, ac, &mut typed, &lookup);
                     // A pasted shell query carries its own sort, projection, limit and skip.
                     if shell {
                         return;
@@ -346,12 +344,12 @@ impl App {
                     // keys are written like a sort. None is a plain one-line box. An option shows as a chip while it is set
                     // or its editor has focus, which is how the "+" menu starts an empty one.
                     for (name, label, kind, text, hint) in [
-                        ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
-                        ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
-                        ("limit", "limit", None, &mut t.limit_txt, "0"),
-                        ("skip", "skip", None, &mut t.skip_txt, "0"),
-                        ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
-                        ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
+                        ("sort", "SORT", Some(FieldKind::Sort), &mut *sort_txt, "{ _id: -1 }"),
+                        ("project", "PROJECT", Some(FieldKind::Project), &mut *proj_txt, "{ name: 1 }"),
+                        ("limit", "limit", None, &mut *limit_txt, "0"),
+                        ("skip", "skip", None, &mut *skip_txt, "0"),
+                        ("hint", "HINT", Some(FieldKind::Sort), &mut *hint_txt, "{ field: 1 } or index name"),
+                        ("collation", "COLLATION", None, &mut *collation_txt, "{ locale: 'fr', strength: 2 }"),
                     ] {
                         let id = query_id(label);
                         if text.is_empty() && !ui.memory(|m| m.has_focus(id)) {
@@ -360,7 +358,7 @@ impl App {
                         run |= opt_chip(ui, name, id, text, |ui, text| {
                             let w = fit(ui, text, hint);
                             if let Some(kind) = kind {
-                                return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                                return Self::query_field(ui, label, text, hint, w, kind, paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
                             }
                             let r = crate::ui::editor::show_paired(ui, egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout)).response;
                             if r.changed() && matches!(name, "limit" | "skip") {
@@ -394,10 +392,15 @@ impl App {
             ui.add_space(8.0);
             run |= super::sql::bar::stale_note(ui);
         }
-        t.paths = paths;
-        t.field_info = fields;
-        if was_filled.is_some_and(|w| w != [t.filter_txt.as_str(), t.sort_txt.as_str(), t.proj_txt.as_str()]) {
-            t.snip.off = false;
+        let tab = t.uid;
+        let bar_acts: Vec<DocsA> = [(BarField::Filter, &t.filter_txt), (BarField::Sort, &t.sort_txt), (BarField::Project, &t.proj_txt), (BarField::Limit, &t.limit_txt), (BarField::Skip, &t.skip_txt), (BarField::Hint, &t.hint_txt), (BarField::Collation, &t.collation_txt)]
+            .into_iter()
+            .zip(txt)
+            .filter(|((_, old), new)| *old != new)
+            .map(|((field, _), text)| DocsA::Bar { tab, field, text })
+            .collect();
+        for a in bar_acts {
+            self.exec(Action::Docs(a));
         }
         // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
         // otherwise the next frame comes only with the answer.
@@ -405,21 +408,13 @@ impl App {
         if let Some(f) = &typed.field {
             sent |= self.want_values(key.clone(), f.clone(), None);
         }
-        // Typing in a string asks for the values starting with it, once typing pauses.
-        let now = std::time::Instant::now();
+        // Typing in a string asks for the values starting with it, once typing pauses (Core's tick waits it out).
         if let Some(prefix) = typed.edit {
-            let due = now + std::time::Duration::from_millis(400);
-            self.core.values_typed = typed.field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key.clone(), f, p));
-        }
-        if let Some((_, k, f, p)) = self.core.values_typed.take_if(|(due, ..)| *due <= now) {
-            sent |= self.want_values(k, f, Some(p));
-        } else if let Some((due, ..)) = &self.core.values_typed {
-            ui.ctx().request_repaint_after(*due - now);
+            self.exec(Action::Docs(DocsA::TypedValues { key: key.clone(), field: typed.field.clone(), prefix }));
         }
         if sent {
             ui.ctx().request_repaint();
         }
-        let tab = self.core.tabs[self.core.cur].uid;
         for a in qacts {
             let (field, text) = match a {
                 QAct::Filter(v) => (BarField::Filter, v),
@@ -518,6 +513,7 @@ impl App {
         ui.add_space(4.0);
         self.results(ui, false);
         // Last, since opening a script may change the tab this frame was drawn for.
+        self.take_repaint(ui.ctx());
         self.pick_acts(pick_acts);
     }
 
@@ -526,39 +522,20 @@ impl App {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
         let cur = self.core.cur;
         let size = self.page_size();
-        let t = self.tm().unwrap();
-        // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
+        let Some(t) = self.t() else { return };
         let view = t.view;
-        let (mut all, mut raw) = (Vec::new(), Vec::new());
-        let (fields, base, range, is_raw) = if agg {
-            let (_, fields, page, _) = t.agg_source();
-            let fields = fields.to_vec();
-            let is_raw = match t.agg_store(view) {
-                Some(Store::Docs(v)) => {
-                    all = std::mem::take(v);
-                    false
-                }
-                Some(Store::Raw(v)) => {
-                    raw = std::mem::take(v);
-                    true
-                }
-                None => false,
-            };
-            let (range, base) = page_window(page, if is_raw { raw.len() } else { all.len() });
-            (fields, base, range, is_raw)
-        } else {
-            raw = std::mem::take(&mut t.docs);
-            (t.fields.clone(), t.page * size, 0..raw.len(), true)
-        };
-        // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
-        if is_raw {
-            for (i, r) in raw[range.clone()].iter_mut().enumerate() {
-                if t.selected != Some((agg, i)) && !t.expanded.contains(&(agg, i)) {
-                    r.forget();
-                }
+        // The window on screen is held for the frame, so the open document can be edited through `self`. Rows share their
+        // bytes, so holding them copies none.
+        let (all, raw, fields, base, is_raw): (Vec<Document>, Vec<db::Row>, Vec<String>, u64, bool) = if agg {
+            let (rows, fields, base) = t.agg_page();
+            match rows {
+                Rows::Docs(d) => (d.to_vec(), Vec::new(), fields.to_vec(), base, false),
+                Rows::Raw(r) => (Vec::new(), r.to_vec(), fields.to_vec(), base, true),
             }
-        }
-        let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
+        } else {
+            (Vec::new(), t.docs.clone(), t.fields.clone(), t.page * size, true)
+        };
+        let docs = if is_raw { Rows::Raw(&raw[..]) } else { Rows::Docs(&all[..]) };
         let mut after = None;
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.core.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
@@ -577,7 +554,7 @@ impl App {
                 }
                 ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED()));
                 if primary(ui, "Connect", PRIMARY()).clicked() {
-                    self.core.active = Some(id);
+                    self.exec(Action::Conn(ConnA::Switch { conn: id }));
                     self.connect(id);
                 }
             });
@@ -600,16 +577,7 @@ impl App {
                 }
             });
         }
-        if let Some(t) = self.core.tabs.get_mut(cur) {
-            match (agg, t.agg_store(view)) {
-                (false, _) => t.docs = raw,
-                (true, Some(Store::Docs(v))) => *v = all,
-                (true, Some(Store::Raw(v))) => *v = raw,
-                (true, None) => {}
-            }
-        }
-        // Only now does the tab hold its page again, and SQL cell work finds its rows there. A link followed while
-        // drawing may have moved to another tab, whose rows these indexes are not.
+        // A link followed while drawing may have moved to another tab, whose rows these indexes are not.
         if let Some(a) = after.filter(|_| self.core.cur == cur) {
             self.sql_after(ui.ctx(), a);
         }
@@ -620,10 +588,6 @@ impl App {
         let m = ui.input(|i| i.modifiers);
         let Some(tab) = self.t().map(|t| t.uid) else { return };
         self.exec(Action::Docs(DocsA::Click { tab, agg, row: i, cmd: m.command, shift: m.shift }));
-    }
-
-    pub(super) fn close_row(&mut self, key: (bool, usize)) {
-        self.core.close_row(key)
     }
 
     pub(super) fn checks(&self) -> &BTreeSet<usize> {
@@ -706,8 +670,10 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn select(&mut self, agg: bool, i: usize, toggle: bool) {
-        self.core.select(agg, i, toggle)
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle }));
     }
 
     pub(super) fn export(&mut self) {

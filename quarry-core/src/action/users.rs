@@ -93,6 +93,20 @@ pub enum MongoUsersA {
     /// The typed confirmation's Drop.
     DropRun { conn: u64, user: String, db: String },
     Close,
+    /// A text field of the window changed to this text.
+    Text(MongoUsersText, String),
+    /// The password field of the Add user form, or of the open editor, changed.
+    Password { edit: bool, password: Secret },
+}
+
+/// The text fields of the Users and roles window of MongoDB, but for the passwords.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MongoUsersText {
+    NewName,
+    NewDb,
+    NewRoles,
+    /// The roles of the open editor.
+    EditRoles,
 }
 
 /// Whether `rows` has one for `pattern` already. Where the server folds case, `Shop` is the row `shop`, and a second
@@ -526,6 +540,30 @@ impl Core {
             }
             MongoUsersA::Close => {
                 self.users = None;
+                return Ok(Reply::Done);
+            }
+            MongoUsersA::Text(f, t) => {
+                match f {
+                    MongoUsersText::NewName => u.new_name = t,
+                    MongoUsersText::NewDb => u.new_db = t,
+                    MongoUsersText::NewRoles => u.new_roles = t,
+                    MongoUsersText::EditRoles => {
+                        if let Some(e) = u.edit.as_mut() {
+                            e.3 = t;
+                        }
+                    }
+                }
+                return Ok(Reply::Done);
+            }
+            MongoUsersA::Password { edit, mut password } => {
+                let text = password.take().unwrap_or_default();
+                if edit {
+                    if let Some(e) = u.edit.as_mut() {
+                        e.2 = text;
+                    }
+                } else {
+                    u.new_pwd = text;
+                }
                 return Ok(Reply::Done);
             }
             MongoUsersA::Open { .. } | MongoUsersA::DropRun { .. } => return Ok(Reply::Done),

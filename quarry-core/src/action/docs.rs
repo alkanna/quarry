@@ -75,6 +75,10 @@ pub enum DocsA {
     Filter { tab: u64, docs: Vec<Document> },
     /// The delete confirmation's Delete, on the tab showing `at`.
     DeleteRun { at: Sel, docs: Vec<Document> },
+    /// A box of the query bar after a frame of typing.
+    Bar { tab: u64, field: BarField, text: String },
+    /// The bar's autocomplete saw a string being typed in `field`: once typing pauses it asks for the values starting with `prefix`.
+    TypedValues { key: String, field: Option<String>, prefix: Option<String> },
 }
 
 /// The box of the query bar a history pick fills.
@@ -83,6 +87,10 @@ pub enum BarField {
     Filter,
     Sort,
     Project,
+    Limit,
+    Skip,
+    Hint,
+    Collation,
 }
 
 /// A field edit in the document tree.
@@ -161,11 +169,18 @@ impl Core {
             DocsA::History { tab, field, text } => {
                 self.cur_tab(tab)?;
                 let t = &mut self.tabs[self.cur];
-                match field {
-                    BarField::Filter => t.filter_txt = text,
-                    BarField::Sort => t.sort_txt = text,
-                    BarField::Project => t.proj_txt = text,
-                }
+                set_bar(t, field, text);
+            }
+            DocsA::Bar { tab, field, text } => {
+                self.cur_tab(tab)?;
+                let t = &mut self.tabs[self.cur];
+                // A filter, sort or projection the Cmd+K form filled reads its braces as placeholders again once edited.
+                t.snip.off = t.snip.off && !matches!(field, BarField::Filter | BarField::Sort | BarField::Project);
+                set_bar(t, field, text);
+            }
+            DocsA::TypedValues { key, field, prefix } => {
+                let due = std::time::Instant::now() + std::time::Duration::from_millis(400);
+                self.values_typed = field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key, f, p));
             }
             DocsA::Layout { table } => {
                 if table != self.prefs.table {
@@ -471,6 +486,28 @@ impl Core {
     }
 
     /// Asks for the preview of every relation of the tab that read request `req`.
+    /// Typing in a string asks for the values starting with it, once typing pauses. Run each frame.
+    pub(crate) fn values_typed_tick(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some((_, k, f, p)) = self.values_typed.take_if(|(due, ..)| *due <= now) {
+            self.want_values(k, f, Some(p));
+            self.ui_fx.push(super::UiFx::RepaintAfter(0.0));
+        } else if let Some((due, ..)) = &self.values_typed {
+            self.ui_fx.push(super::UiFx::RepaintAfter((*due - now).as_secs_f64()));
+        }
+    }
+
+    /// Closed rows of the Documents view drop their decoded copy, so only the ones that are open keep it (see `db::Row`).
+    pub(crate) fn forget_closed_rows(&mut self) {
+        let Some(t) = self.tabs.get_mut(self.cur) else { return };
+        let (sel, open) = (t.selected, &t.expanded);
+        for (i, r) in t.docs.iter_mut().enumerate() {
+            if sel != Some((false, i)) && !open.contains(&(false, i)) {
+                r.forget();
+            }
+        }
+    }
+
     pub fn load_related(&mut self, req: u64) {
         let Some(t) = self.tabs.iter().find(|t| t.req == req) else { return };
         let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
@@ -899,5 +936,17 @@ impl Core {
         } else {
             self.inline = Some(Inline { text, kind, path, focus: true, pick: None, local: false });
         }
+    }
+}
+
+fn set_bar(t: &mut Tab, field: BarField, text: String) {
+    match field {
+        BarField::Filter => t.filter_txt = text,
+        BarField::Sort => t.sort_txt = text,
+        BarField::Project => t.proj_txt = text,
+        BarField::Limit => t.limit_txt = text,
+        BarField::Skip => t.skip_txt = text,
+        BarField::Hint => t.hint_txt = text,
+        BarField::Collation => t.collation_txt = text,
     }
 }

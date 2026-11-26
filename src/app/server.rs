@@ -3,7 +3,6 @@
 
 use super::*;
 pub(crate) use quarry_core::state::server::*;
-use quarry_core::state::server::POLL;
 
 /// What a role without the needed privilege sees in place of a section.
 const NEEDS_MONITOR: &str = "Not available for this user: it needs the clusterMonitor role (on Atlas, atlasAdmin or a custom role that includes clusterMonitor).";
@@ -88,10 +87,7 @@ pub(super) fn member_rows(rs: Option<&db::Res<Document>>, hello: Option<&db::Res
 
 impl App {
     pub(super) fn server_window(&mut self, ctx: &egui::Context) {
-        if self.core.server.is_some() && ctx.input(|i| i.focused) && self.core.server_poll() {
-            ctx.request_repaint_after(POLL);
-        }
-        let Some(s) = self.core.server.take() else { return };
+        let Some(s) = self.core.server.as_ref() else { return };
         let conn = s.conn;
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -113,9 +109,9 @@ impl App {
             dialog_pane(ui, |ui| {
                 egui::ScrollArea::both().max_height(screen.height() - 300.0).auto_shrink([false, true]).show(ui, |ui| {
                     if s.ops_tab {
-                        self.ops_section(ui, &s, writable, &mut acts);
+                        self.ops_section(ui, s, writable, &mut acts);
                     } else {
-                        overview_section(ui, &s);
+                        overview_section(ui, s);
                     }
                 });
             });
@@ -132,7 +128,6 @@ impl App {
                 done
             });
         });
-        self.core.server = Some(s);
         for a in acts {
             self.exec(Action::Server(ServerA::Mongo(a)));
         }

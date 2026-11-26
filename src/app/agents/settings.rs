@@ -80,12 +80,6 @@ pub(super) fn summary(p: Option<&ConnPolicy>) -> String {
     parts.join(", ")
 }
 
-/// Whether this frame brought any input. Settings widgets change only on input, so the windows that save on change
-/// copy and compare their config only then.
-pub(super) fn had_input(ctx: &egui::Context) -> bool {
-    ctx.input(|i| !i.events.is_empty() || i.pointer.any_pressed() || i.pointer.any_released())
-}
-
 /// A small tinted label painted in its own color, for engine marks and environment tags.
 pub(super) fn chip(ui: &mut egui::Ui, text: &str, color: Color32, mono: bool) {
     let g = chip_text(ui, text, color, mono);
@@ -191,7 +185,7 @@ impl App {
             if self.conn(id).is_some() && self.core.agents.cfg.enabled {
                 return self.agents_conn_page(ui, id);
             }
-            self.core.agents.page = None;
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Page(None)));
         }
         if let Some(t) = self.core.agents.distrust {
             self.agents_tampered_banner(ui, t);
@@ -215,8 +209,12 @@ impl App {
             return;
         }
         settings_section(ui, "CONNECT A CLIENT", |ui| {
-            segmented(ui, &mut self.core.agents.client, &CLIENTS);
-            let (how, text) = snippet(self.core.agents.client, &bridge_path(self.core.demo), cfg!(windows));
+            let mut client = self.core.agents.client;
+            segmented(ui, &mut client, &CLIENTS);
+            if client != self.core.agents.client {
+                self.exec(quarry_core::action::Action::Agents(AgentsA::Client(client)));
+            }
+            let (how, text) = snippet(client, &bridge_path(self.core.demo), cfg!(windows));
             ui.add(egui::Label::new(RichText::new(how).size(TXT_SMALL).color(MUTED())).wrap());
             let w = ui.available_width();
             egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
@@ -307,7 +305,7 @@ impl App {
             });
         });
         if open {
-            self.core.agents.activity_open = true;
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Activity { open: true, filter: None }));
         }
     }
 
@@ -380,13 +378,13 @@ impl App {
     }
 
     fn agents_protection(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| (self.core.agents.cfg.presets.clone(), self.core.agents.cfg.binary_as_size));
+        let mut cfg = self.core.agents.cfg.clone();
         let mut edit = false;
         let (n_secrets, n_pii) = (crate::agents::presets::secrets().len(), crate::agents::presets::pii().len());
         let custom = self.core.agents.cfg.rules.len();
         let own: Vec<(String, usize)> = self.core.conns.iter().filter_map(|c| self.core.agents.cfg.conns.get(&c.meta.id).filter(|p| !p.rules.is_empty()).map(|p| (c.meta.name.clone(), p.rules.len()))).collect();
         settings_section(ui, "DATA PROTECTION", |ui| {
-            let presets = &mut self.core.agents.cfg.presets;
+            let presets = &mut cfg.presets;
             for (i, (title, what, n, p)) in [("Secrets", "Passwords, tokens, API and cloud keys, private keys, and passwords inside connection strings.", n_secrets, &mut presets.secrets), ("Personal data", "Names, emails, phones, addresses, birth dates, national and tax IDs, cards and bank accounts.", n_pii, &mut presets.pii)].into_iter().enumerate() {
                 if i > 0 {
                     ui.separator();
@@ -414,22 +412,22 @@ impl App {
             });
             ui.separator();
             setting_row(ui, "Binary values", "Sent as their size only, like <binary 2,048 bytes>.", |ui| {
-                named_toggle(ui, &mut self.core.agents.cfg.binary_as_size, "Binary values");
+                named_toggle(ui, &mut cfg.binary_as_size, "Binary values");
             });
         });
         ui.add(egui::Label::new(RichText::new("Checked on everything that leaves Quarry: rows, schema samples, plans and error messages. The tester in Edit rules shows what an agent would get.").size(TXT_SMALL).color(FAINT())).wrap());
         ui.add_space(10.0);
-        if before.is_some_and(|b| b != (self.core.agents.cfg.presets.clone(), self.core.agents.cfg.binary_as_size)) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if edit {
-            self.core.agents.rules = Some(RulesWin::default());
+            self.exec(quarry_core::action::Action::Agents(AgentsA::EditRules));
         }
     }
 
     fn agents_limits(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| self.core.agents.cfg.limits.clone());
-        let l = &mut self.core.agents.cfg.limits;
+        let mut cfg = self.core.agents.cfg.clone();
+        let l = &mut cfg.limits;
         settings_section(ui, "LIMITS", |ui| {
             setting_row(ui, "Rows per answer", "Longer results are cut, and the agent is told how many were left out.", |ui| {
                 pick(ui, "agent-rows", "Rows per answer", 90.0, &mut l.rows, &ROWS);
@@ -452,15 +450,15 @@ impl App {
                 }
             });
         });
-        if before.is_some_and(|b| b != self.core.agents.cfg.limits) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
     }
 
     fn agents_audit(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| self.core.agents.cfg.audit.clone());
+        let mut cfg = self.core.agents.cfg.clone();
         let mut reveal = false;
-        let a = &mut self.core.agents.cfg.audit;
+        let a = &mut cfg.audit;
         settings_section(ui, "AUDIT LOG", |ui| {
             setting_row(ui, "Keep an audit log", "Every call, its decision and a summary of the answer, never the data itself.", |ui| {
                 named_toggle(ui, &mut a.on, "Keep an audit log");
@@ -479,8 +477,8 @@ impl App {
                 });
             });
         });
-        if before.is_some_and(|b| b != self.core.agents.cfg.audit) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if reveal {
             self.agents_reveal();

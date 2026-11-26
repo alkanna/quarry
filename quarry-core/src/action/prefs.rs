@@ -111,6 +111,8 @@ prefs! {
     SidePanel side_panel: String,
     LibPreviewH lib_preview_h: f32,
     QueryEditorH query_editor_h: f32,
+    ShellEditorH shell_editor_h: f32,
+    PageSize page_size: u64,
 }
 
 impl Pref {
@@ -187,7 +189,7 @@ impl Core {
                 if p.apply(&mut self.prefs) {
                     // Column widths were measured in the old font and number display.
                     if look {
-                        self.width_cache.clear();
+                        self.ui_fx.push(UiFx::WidthsStale);
                     }
                     // The pref unlocks every connection each frame, so turning it off has to lock them back.
                     if unlocks {

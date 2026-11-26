@@ -9,7 +9,7 @@ pub use front::{Front, TextRef};
 
 use crate::db::{self, Msg, UndoAction, Worker};
 use crate::state::cloud_sql;
-use crate::state::complete::{Ac, Fields};
+use crate::state::complete::Fields;
 use crate::state::config::UiPrefs;
 use crate::state::errors::{ErrEntry, Toast};
 use crate::state::groups::Groups;
@@ -49,21 +49,12 @@ pub struct Core {
     pub json_edit: Option<JsonEdit>,
     pub drafts: HashMap<String, Draft>,
     pub saving: HashMap<String, Draft>,
-    /// Paths changed in the document being drawn, for tinting.
-    pub changed: HashSet<String>,
     pub inline: Option<Inline>,
     /// The SQL grid cell being edited in place.
     pub sql_cell: Option<CellEdit>,
     /// A MySQL duplicate-key toast's Show the other row, waiting for the table's indexes: (req, table, index, value).
     pub dup_wait: Option<(u64, Sel, String, String)>,
     pub new_field: Option<NewField>,
-    pub fold_busy: bool,
-    /// Set while drawing a document: whether any object or array section is closed, None when it
-    /// has none. The document's Expand all button reads last frame's answer to pick its label.
-    pub fold_seen: Option<bool>,
-    /// Key column width and full row span of the tree being drawn, so values line up and hover bands cover the whole card.
-    pub key_w: f32,
-    pub char_w: f32,
     pub insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
@@ -75,10 +66,8 @@ pub struct Core {
     /// A CSV import or a script file running, shown in the status bar with a Cancel.
     pub sql_job: Option<sql::dump::SqlJob>,
     pub prefs: UiPrefs,
-    pub col_filter: String,
     /// Column data actions cover the whole query instead of the loaded page.
     pub col_scope_query: bool,
-    pub new_pkg: String,
     /// Views per namespace, shown differently in the sidebar.
     pub views: Views,
     /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
@@ -123,7 +112,6 @@ pub struct Core {
     /// Errors since the list was last opened, the count the status bar shows.
     pub errors_unseen: usize,
     pub err_seq: u64,
-    pub ac: Ac,
     /// Field values fetched from the server for suggestions, per collection key then path. Kept on
     /// disk, so a new session suggests them before its own fetch comes back.
     pub values: HashMap<String, HashMap<String, Vec<Bson>>>,
@@ -161,8 +149,6 @@ pub struct Core {
     pub tool: Option<ToolRun>,
     /// AI agents: saved settings, the link listener and connected sessions.
     pub agents: agents::AgentsState,
-    /// Measured column widths per result set and column.
-    pub width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
     pub closed: Vec<Tab>,
     /// Uids of tabs left and tabs gone back from, for Cmd+[ and Cmd+], newest last.
@@ -204,24 +190,17 @@ impl Core {
             json_edit: None,
             drafts: HashMap::new(),
             saving: HashMap::new(),
-            changed: HashSet::new(),
             inline: None,
             sql_cell: None,
             dup_wait: None,
             new_field: None,
-            fold_busy: false,
-            fold_seen: None,
-            key_w: 0.0,
-            char_w: 0.0,
             insert: None,
             copying: Default::default(),
             open_after: None,
             export_job: None,
             sql_job: None,
             prefs: UiPrefs::default(),
-            col_filter: String::new(),
             col_scope_query: false,
-            new_pkg: String::new(),
             views: Views::default(),
             sql_schema: HashMap::new(),
             sql_rows: HashMap::new(),
@@ -250,7 +229,6 @@ impl Core {
             errors: Vec::new(),
             errors_unseen: 0,
             err_seq: 0,
-            ac: Ac::default(),
             values: HashMap::new(),
             values_asked: HashSet::new(),
             values_pending: HashSet::new(),
@@ -271,7 +249,6 @@ impl Core {
             ephemeral: demo,
             tool: None,
             agents: Default::default(),
-            width_cache: HashMap::new(),
             closed: Vec::new(),
             nav_back: Vec::new(),
             nav_fwd: Vec::new(),

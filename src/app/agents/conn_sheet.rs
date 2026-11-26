@@ -47,8 +47,7 @@ fn wide_row(ui: &mut egui::Ui, title: &str, desc: &str, reserve: f32, control: i
 
 impl App {
     pub(super) fn agents_open_page(&mut self, id: u64) {
-        self.core.agents.page = Some(id);
-        self.core.agents.globs = self.core.agents.cfg.conns.get(&id).map(|p| p.scope.globs.join(", ")).unwrap_or_default();
+        self.exec(Action::Agents(AgentsA::Page(Some(id))));
     }
 
     pub(super) fn agents_conn_page(&mut self, ui: &mut egui::Ui, id: u64) {
@@ -150,12 +149,13 @@ impl App {
             self.agents_open_rules(Some(id), tab);
         }
         let mut globs_changed = false;
+        let mut globs = self.core.agents.globs.clone();
         let pg = self.is_pg(id);
         settings_section(ui, "DATABASES AND COLLECTIONS", |ui| {
             segmented(ui, &mut p.scope.mode, &SCOPES);
             if p.scope.mode != ScopeMode::All {
                 let w = ui.available_width();
-                let r = ui.add(egui::TextEdit::singleline(&mut self.core.agents.globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text(if pg { "public.orders_*, reporting, sales.public.*" } else { "shop.audit_*, *.sessions, billing" }).desired_width(w));
+                let r = ui.add(egui::TextEdit::singleline(&mut globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text(if pg { "public.orders_*, reporting, sales.public.*" } else { "shop.audit_*, *.sessions, billing" }).desired_width(w));
                 globs_changed = r.changed();
             }
             let help = if pg {
@@ -166,7 +166,8 @@ impl App {
             ui.add(egui::Label::new(RichText::new(help).size(TXT_SMALL).color(FAINT())).wrap());
         });
         if globs_changed {
-            p.scope.globs = self.core.agents.globs.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
+            self.exec(Action::Agents(AgentsA::Globs(globs.clone())));
+            p.scope.globs = globs.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
         }
         let mut flip: Option<usize> = None;
         let mut drop: Option<usize> = None;
@@ -220,11 +221,12 @@ impl App {
         // A connection never shared stays out of the file until the user shares it, so "missing means Not shared" holds.
         let keep = shared.is_some() || p != self.core.agents.cfg.defaults;
         if keep && shared.as_ref() != Some(&p) {
-            self.core.agents.cfg.conns.insert(id, p);
-            self.save_agents();
+            let mut cfg = self.core.agents.cfg.clone();
+            cfg.conns.insert(id, p);
+            self.exec(Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if back {
-            self.core.agents.page = None;
+            self.exec(Action::Agents(AgentsA::Page(None)));
         }
         if let Some(rule) = edit_rule {
             self.agents_rules_for(Some(id), rule);

@@ -51,11 +51,33 @@ pub(crate) struct UiState {
     pub bar_ui: HashMap<u64, crate::app::sql::bar::BarUi>,
     /// The last plan of each statement the Explain dialog showed, for its Compare tab. Forgotten per connection by `UiFx::ForgetPlans`.
     pub explain_prev: crate::db::sql::plan::compare::History,
+    /// When the approval dialog first showed the call with this Activity id, for the one-second delay before Allow works.
+    pub ask_shown: Option<(u64, std::time::Instant)>,
+    /// The suggestion list of the field being typed in, shared by the page's one-line editors.
+    pub ac: quarry_core::state::complete::Ac,
+    /// The Shell's Packages popover add field.
+    pub new_pkg: String,
+    /// The Shell editor's height while its bar is being dragged, saved as the setting when the drag ends.
+    pub shell_h: Option<f32>,
+    /// Paths changed in the document being drawn, for tinting.
+    pub changed: HashSet<String>,
+    /// Set while drawing a tree: whether it is still folding, so the forced fold stays until every animation settles.
+    pub fold_busy: bool,
+    /// Set while drawing a document: whether any object or array section is closed, None when it has none. The document's
+    /// Expand all button reads last frame's answer to pick its label.
+    pub fold_seen: Option<bool>,
+    /// Key column width and one character's width of the tree being drawn, so values line up.
+    pub key_w: f32,
+    pub char_w: f32,
+    /// The Columns popover's filter field.
+    pub col_filter: String,
+    /// Column widths measured per result set, so measuring runs once and not on every frame; dropped when the font changes.
+    pub width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new(), explain_prev: Default::default() }
+        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new(), explain_prev: Default::default(), ask_shown: None, ac: Default::default(), new_pkg: String::new(), shell_h: None, changed: HashSet::new(), fold_busy: false, fold_seen: None, key_w: 0.0, char_w: 0.0, col_filter: String::new(), width_cache: HashMap::new() }
     }
 }
 

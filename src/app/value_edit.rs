@@ -2,7 +2,7 @@
 //! as a panel docked beside the page (docs/long-values.figcraft, options A and C).
 
 use super::*;
-use quarry_core::action::{Action, DocsA, ValueA};
+use quarry_core::action::{Action, DocsA, SqlA, ValueA};
 
 #[derive(PartialEq, Clone, Copy)]
 pub(super) enum ValueAct {
@@ -122,7 +122,7 @@ impl App {
         let screen = ctx.content_rect();
         let max_h = screen.height() * 0.62;
         let width = (screen.width() * 0.72).clamp(480.0, 1200.0);
-        if let Some(mut je) = self.core.json_edit.take() {
+        if let Some(mut je) = self.core.json_edit().take() {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
                 ui.set_width(width);
@@ -130,14 +130,15 @@ impl App {
             });
             self.json_edit_act(je, close(&r, act));
         }
-        if let Some(mut e) = self.core.sql_cell.take_if(|e| e.big) {
+        if let Some(before) = self.core.sql_cell.clone().filter(|e| e.big) {
+            let mut e = before.clone();
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "sqlcell"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.sql_cell_body(ui, &mut e, None, max_h);
             });
             sql_cell_act(&mut e, close(&r, act));
-            self.core.sql_cell = Some(e);
+            self.sql_cell_keep(before, e);
         }
     }
 
@@ -149,13 +150,14 @@ impl App {
         egui::Panel::right("value-panel").default_size(380.0).size_range(280.0..=900.0).resizable(true).frame(egui::Frame::new().fill(PANEL()).inner_margin(12)).show(ui, |ui| {
             let max_h = (ui.available_height() - 120.0).max(80.0);
             let rows = (max_h / ui.text_style_height(&egui::TextStyle::Monospace)) as usize;
-            if let Some(mut je) = self.core.json_edit.take() {
+            if let Some(mut je) = self.core.json_edit().take() {
                 let act = self.json_edit_body(ui, &mut je, Some(rows), max_h);
                 self.json_edit_act(je, act);
-            } else if let Some(mut e) = self.core.sql_cell.take() {
+            } else if let Some(before) = self.core.sql_cell.clone() {
+                let mut e = before.clone();
                 let act = self.sql_cell_body(ui, &mut e, Some(rows), max_h);
                 sql_cell_act(&mut e, act);
-                self.core.sql_cell = Some(e);
+                self.sql_cell_keep(before, e);
             }
         });
     }
@@ -200,9 +202,18 @@ impl App {
         value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, !matches!(je.kind, "string" | "binary"), &mut je.focus, &mut je.dirty, None, null, rows, max_h)
     }
 
+    /// Hands the cell editor as a frame left it to Core, when it changed.
+    fn sql_cell_keep(&mut self, before: CellEdit, e: CellEdit) {
+        if e == before {
+            return;
+        }
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Sql(SqlA::CellEdit { tab, edit: Some(Box::new(e)) }));
+    }
+
     /// Puts the editor back, then runs its button through Core.
     fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
-        self.core.json_edit = Some(je);
+        *self.core.json_edit() = Some(je);
         let act = match act {
             ValueAct::None => return,
             ValueAct::Apply => ValueA::Apply,

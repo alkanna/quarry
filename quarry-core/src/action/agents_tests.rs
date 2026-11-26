@@ -26,12 +26,24 @@ pub(super) fn agents_actions() -> Vec<AgentsA> {
         AgentsA::SetEnabled(true),
         AgentsA::SetAccess { conn: 1, access: Access::Read },
         AgentsA::Save,
+        AgentsA::Config(Box::default()),
+        AgentsA::Rules(None),
+        AgentsA::OpenRules { scope: None, tab: Default::default() },
+        AgentsA::RulesFor { scope: None, rule: None },
+        AgentsA::ImportRules { scope: None, text: "[]".into() },
+        AgentsA::Activity { open: true, filter: None },
+        AgentsA::ActivityFilter(Default::default()),
+        AgentsA::Pick(None),
+        AgentsA::Page(None),
+        AgentsA::Globs(String::new()),
+        AgentsA::Client(Default::default()),
+        AgentsA::EditRules,
     ]
 }
 
 pub(super) fn agents_variant(a: &AgentsA) {
     match a {
-        AgentsA::Answer { .. } | AgentsA::Undo { .. } | AgentsA::Clear | AgentsA::SetEnabled(_) | AgentsA::SetAccess { .. } | AgentsA::Save => {}
+        AgentsA::Answer { .. } | AgentsA::Undo { .. } | AgentsA::Clear | AgentsA::SetEnabled(_) | AgentsA::SetAccess { .. } | AgentsA::Save | AgentsA::Config(_) | AgentsA::Rules(_) | AgentsA::OpenRules { .. } | AgentsA::RulesFor { .. } | AgentsA::ImportRules { .. } | AgentsA::Activity { .. } | AgentsA::ActivityFilter(_) | AgentsA::Pick(_) | AgentsA::Page(_) | AgentsA::Globs(_) | AgentsA::Client(_) | AgentsA::EditRules => {}
     }
 }
 

@@ -111,7 +111,7 @@ impl App {
         if self.t().is_none() {
             return false;
         }
-        let mut ac = std::mem::take(&mut self.core.ac);
+        let mut ac = std::mem::take(&mut self.ui.ac);
         let t = self.t().unwrap();
         let coll = t.sel.coll.clone();
         dialog_head(ui, &Head::new(format!("New index on {coll}")).glyph(glyphs::list));
@@ -123,7 +123,7 @@ impl App {
         ac_field(ui, id, &mut f.keys, &mut ac, &|b, _| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
             egui::TextEdit::singleline(text).id(id).font(egui::TextStyle::Monospace).hint_text("{ email: 1, createdAt: -1 }").desired_width(440.0).show(ui)
         });
-        self.core.ac = ac;
+        self.ui.ac = ac;
         ui.label(RichText::new("1 ascending, -1 descending, or \"text\", \"2dsphere\", \"hashed\".").size(TXT_SMALL).color(MUTED()));
         ui.add_space(6.0);
         egui::Grid::new("index-options").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
@@ -223,18 +223,6 @@ impl App {
                 });
             }
         }
-    }
-
-    pub(super) fn refresh_idx_rows(&mut self, key: &str) {
-        self.core.refresh_idx_rows(key)
-    }
-
-    pub(super) fn load_indexes(&mut self) {
-        self.core.load_indexes()
-    }
-
-    pub(super) fn load_indexes_of(&mut self, i: usize) {
-        self.core.load_indexes_of(i)
     }
 }
 
