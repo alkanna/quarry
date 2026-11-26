@@ -224,28 +224,7 @@ pub(crate) fn ts_type(fields: &Fields) -> String {
     obj(fields, &kids, "").unwrap_or_else(|| "import(\"mongodb\").Document".into())
 }
 
-/// Whether a value is worth suggesting: short text, numbers and booleans, as `field_info` keeps.
-pub(crate) fn suggestible(v: &Bson) -> bool {
-    match v {
-        Bson::String(s) => s.chars().count() <= 80,
-        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Boolean(_) => true,
-        _ => false,
-    }
-}
-
-/// Adds values fetched from the server after the page's own, which come first because they are
-/// counted. A field missing from the page gets an entry typed by its first value.
-pub(crate) fn merge_values(fields: &mut Fields, server: &HashMap<String, Vec<Bson>>) {
-    for (p, vals) in server {
-        let Some(first) = vals.first() else { continue };
-        let f = fields.entry(p.clone()).or_insert_with(|| FieldInfo { kind: db::type_name(first), values: Vec::new(), freq: Vec::new() });
-        for v in vals {
-            if !f.values.contains(v) {
-                f.values.push(v.clone());
-            }
-        }
-    }
-}
+pub(crate) use quarry_core::action::replies::{merge_values, suggestible};
 
 /// The field whose value starts at the end of `before`: `status` in `{ status: "dr`. Operators
 /// like `$in` are left out, their field is further back.

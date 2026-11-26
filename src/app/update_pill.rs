@@ -42,7 +42,7 @@ impl App {
 
     pub(super) fn update_pill(&mut self, ui: &mut egui::Ui) {
         // Taken even when the pill is hidden, so a stale request never opens the popover later on its own.
-        let open = std::mem::take(&mut self.core.upd_popup);
+        let open = std::mem::take(&mut self.ui.upd_popup);
         let Some((label, look)) = self.pill_state() else { return };
         let (fill, edge, ink) = match look {
             Look::Ready => (SUCCESS(), Color32::TRANSPARENT, ON_PRIMARY()),

@@ -2,6 +2,7 @@
 
 use super::*;
 pub(crate) use quarry_core::state::config::*;
+use quarry_core::action::{Action, DocsA};
 
 /// Applying a theme or a size goes through egui, so these stay with the drawing.
 pub(crate) trait AppearanceUi {
@@ -45,66 +46,13 @@ impl PrefsLook for UiPrefs {
 }
 
 impl App {
-    pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
-        self.core.write_config(file, bytes)
-    }
-
-    pub(super) fn save_conns(&mut self) {
-        self.core.save_conns();
-    }
-
-    pub(super) fn save_values(&mut self) {
-        // The demo must not touch the keychain, and without a key nothing is written in plain text.
-        if self.core.ephemeral {
-            return;
-        }
-        if let Some(b) = cache_key().and_then(|k| seal(k, &mongodb::bson::to_vec(&self.core.values).ok()?)) {
-            self.write_config("values.bson", b);
-        }
-    }
-
-    /// Asks the server for a field's values once per session: a sample (the copy kept on disk shows
-    /// meanwhile), or with `prefix` the values starting with the text being typed. `key` is the
-    /// collection the request was made in, which a tab switch may have left.
-    /// Returns whether a lookup was sent, so the caller redraws to show it running.
+    /// Asks for a field's values; true when the core will look them up, so the caller redraws to show it running.
     pub(super) fn want_values(&mut self, key: String, path: String, prefix: Option<String>) -> bool {
-        if key != self.col_key(false) || !self.core.values_asked.insert((key.clone(), path.clone(), prefix.clone())) {
+        if key != self.col_key(false) || self.core.values_asked.contains(&(key.clone(), path.clone(), prefix.clone())) {
             return false;
         }
-        let Some(t) = self.target() else { return false };
-        self.core.values_pending.insert((key.clone(), path.clone()));
-        self.core.worker.field_values(key, t, path, prefix);
-        true
-    }
-
-    pub(super) fn values_done(&mut self, key: String, path: String, prefix: Option<String>, res: db::Res<Option<Vec<Bson>>>) {
-        self.core.values_pending.remove(&(key.clone(), path.clone()));
-        // Suggestions are best effort: a refused or slow lookup keeps what the page offers. A typed
-        // lookup that did not run says why under the list.
-        let note = match &res {
-            Ok(None) => Some("Field not indexed: only sampled values are suggested"),
-            Err(_) if prefix.is_some() => Some("Lookup too slow: only sampled values are suggested"),
-            _ => None,
-        };
-        if let Some(n) = note {
-            self.core.values_note.insert((key.clone(), path.clone()), n);
-        }
-        let Ok(Some(mut vals)) = res else { return };
-        vals.retain(suggestible);
-        vals.truncate(db::FIELD_VALUES_MAX);
-        let found = HashMap::from([(path, vals)]);
-        for t in self.core.tabs.iter_mut().filter(|t| t.coll_key() == key) {
-            merge_values(Arc::make_mut(&mut t.field_info), &found);
-        }
-        // Values found by what was typed are kept for the session only, so the file holds samples.
-        if prefix.is_none() {
-            self.core.values.entry(key).or_default().extend(found);
-            self.save_values();
-        }
-    }
-
-    pub(super) fn save_prefs(&mut self) {
-        self.core.save_prefs()
+        self.exec(Action::Docs(DocsA::WantValues { key, path, prefix }));
+        self.target().is_some()
     }
 }
 

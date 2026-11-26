@@ -36,13 +36,15 @@ pub(super) fn sql_actions() -> Vec<SqlA> {
         SqlA::NewRow { tab, from: Some(mongodb::bson::doc! { "id": 1 }) },
         SqlA::Insert { tab, rows: vec![vec![("note".into(), mongodb::bson::Bson::Null)]] },
         SqlA::DeleteRows { tab, rows: vec![mongodb::bson::doc! { "_id": { "id": 1 } }] },
+        SqlA::CrumbDb { tab, db: "shop".into(), schema: String::new() },
+        SqlA::CrumbSchema { tab, schema: "public".into() },
     ]
 }
 
 /// No wildcard, so a variant missing from `sql_actions` fails to compile here first.
 pub(super) fn sql_variant(a: &SqlA) {
     match a {
-        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } => {}
+        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } | SqlA::CrumbDb { .. } | SqlA::CrumbSchema { .. } => {}
     }
 }
 

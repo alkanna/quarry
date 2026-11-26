@@ -630,7 +630,7 @@ impl App {
             st.sel = None;
         }
         // Cmd+Shift+L: the tree takes the keys, on its first row when none is selected.
-        if std::mem::take(&mut self.core.lib_ui.focus_tree) {
+        if std::mem::take(&mut self.ui.lib_focus_tree) {
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);

@@ -175,7 +175,7 @@ pub fn collation_of(d: Option<Document>) -> Option<mongodb::options::Collation> 
 
 /// The documents an action works on: the shown query's filter and collation, so the action
 /// matches the same documents as the table.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Scope {
     pub filter: Document,
     pub collation: Option<Document>,

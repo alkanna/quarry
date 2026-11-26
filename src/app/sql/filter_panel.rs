@@ -46,13 +46,9 @@ impl PanelFold for Panel {
     }
 }
 
-/// Cmd+F in Rules mode: the filter panel, with a new row when it has none.
-pub(in crate::app) fn open_filters(bar: &mut Bar, ctx: &egui::Context, cols: &[Col], d: Dialect) {
-    if bar.tree.root.kids.is_empty() {
-        add(&mut bar.tree, &mut bar.panel, 0, false, cols, d);
-    }
-    let at = bar.panel.sel;
-    bar.panel.show(ctx, at);
+/// Starts the fold of the panel, for an open the core already made.
+pub(in crate::app) fn start_fold(ctx: &egui::Context, open: bool) {
+    fold::start(ctx, fold_id(), open);
 }
 
 /// A count with its thousands separated.

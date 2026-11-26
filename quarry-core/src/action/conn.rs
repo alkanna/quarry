@@ -23,6 +23,12 @@ pub enum ConnA {
     Lock { conn: u64 },
     /// Makes `conn` the active connection and nothing else, for a pick of a connection that is open already.
     Switch { conn: u64 },
+    /// Removes the connection, its Keychain entries and icon, once the Remove dialog is accepted.
+    Remove { conn: u64 },
+    /// Drops every SSH tunnel and Cloud SQL proxy, which stops them, before the process restarts.
+    DropWays,
+    /// A Test still showing when the connection form opens or closes must not show in the next form.
+    ForgetTest,
     Group(GroupA),
     /// The connection form's Save and connect: the address and the form's secrets go to the Keychain, `meta` to
     /// connections.json, and a new connection joins `group`. Each secret is empty for one the form does not use.
@@ -130,6 +136,9 @@ impl Core {
                 }
             }
             ConnA::Switch { conn } => self.active = Some(conn),
+            ConnA::Remove { conn } => self.remove_conn(conn),
+            ConnA::ForgetTest => (self.conn_test, self.test_info) = (None, None),
+            ConnA::DropWays => self.conns.iter_mut().for_each(|c| c.tunnel = None),
             ConnA::Group(a) => self.group_act(a),
             ConnA::Save { meta, uri, secrets, group } => return self.save_conn(meta, uri, secrets, group),
             ConnA::Test { sql, mut uri, ssh, mut ssh_pwd, mut ssh_pass, proxy, mut proxy_pwd, cloud_sql, mut key_pass, advanced } => {
@@ -362,6 +371,36 @@ impl Core {
         self.groups.v = 1;
         let b = serde_json::to_vec_pretty(&self.groups).unwrap_or_default();
         self.write_config("groups.json", b);
+    }
+
+    /// Removes a connection. Demo ids overlap real ones, so a demo connection must not touch the Keychain.
+    fn remove_conn(&mut self, id: u64) {
+        if !self.ephemeral {
+            let _ = store_uri(id, "");
+            // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
+            for what in crate::state::config::SECRETS {
+                let _ = set_secret(id, what, "");
+            }
+            let _ = std::fs::remove_file(crate::paths::config_dir().join("icons").join(format!("{id}.png")));
+        }
+        self.conns.retain(|c| c.meta.id != id);
+        self.explain_prev.forget(id);
+        self.remove_tabs(|t| t.sel.conn == id);
+        if self.active == Some(id) {
+            self.active = self.conns.first().map(|c| c.meta.id);
+        }
+        self.save_conns();
+        // A removed connection must not linger in a group, where the panel and the rail would count it.
+        let alive = self.conn_ids();
+        if self.groups.prune(&alive) {
+            self.save_groups();
+        }
+        // Its agent access goes with it. Settings that failed their signature are left for the user to review,
+        // since saving here would sign them.
+        if self.agents.cfg.conns.remove(&id).is_some() && self.agents.distrust.is_none() {
+            self.save_agents();
+        }
+        self.ok("Connection removed");
     }
 
     pub fn conn_ids(&self) -> Vec<u64> {

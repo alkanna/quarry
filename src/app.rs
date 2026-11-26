@@ -118,6 +118,8 @@ pub(crate) fn shortcut(c: &Chord) -> egui::KeyboardShortcut {
 pub struct App {
     /// Everything that is not drawing: connections, tabs, windows, preferences and the worker.
     core: Front,
+    /// Drawing-only state that Core has no use for.
+    ui: UiState,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
     tree_x: egui::Rangef,
@@ -159,6 +161,7 @@ impl App {
         let worker = Worker::new(tx, { let ctx = cc.egui_ctx.clone(); std::sync::Arc::new(move || ctx.request_repaint()) });
         Self {
             core: Front::new(Core::new(worker, rx, demo)),
+            ui: Default::default(),
             fold: None,
             tree_x: egui::Rangef::NOTHING,
             #[cfg(target_os = "macos")]
@@ -181,9 +184,9 @@ impl App {
     pub fn for_test(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx, Look::default());
         let mut app = Self::blank(cc, false, false, None);
-        app.core.ephemeral = true;
+        app.core.setup().ephemeral = true;
         // A save runs on the click alone, and no timer-driven save can change the draft under a test.
-        (app.core.prefs.confirm_save, app.core.prefs.auto_save) = (false, false);
+        (app.core.setup().prefs.confirm_save, app.core.setup().prefs.auto_save) = (false, false);
         app
     }
 
@@ -193,13 +196,13 @@ impl App {
         let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
         // Screenshot runs stay off the real menu bar.
         let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
-        app.core.win_buttons = window_buttons::install(cc);
+        app.ui.win_buttons = window_buttons::install(cc);
         // shortcut: the window opens decorated and loses them on the first frame when opted in, so it may flash; build the viewport from ui.json to avoid that.
         #[cfg(target_os = "linux")]
         app.set_titlebar(&cc.egui_ctx);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
-            (app.core.prefs.show_fps, app.core.prefs.show_mem, app.core.prefs.show_cpu) = (true, true, true);
+            (app.core.setup().prefs.show_fps, app.core.setup().prefs.show_mem, app.core.setup().prefs.show_cpu) = (true, true, true);
         }
         // Test fixture: QUARRY_TEST_JSON=<file of Extended JSON documents> makes screenshot mode
         // show those documents through the same message path real query results take. A .jsonl
@@ -207,7 +210,7 @@ impl App {
         // benchmarks measure what a query leaves behind rather than the parse of one big array.
         let fixture = std::env::var("QUARRY_TEST_JSON").ok().filter(|_| demo);
         if let Some(path) = fixture {
-            app.core.demo = false;
+            app.core.setup().demo = false;
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let rows: Vec<db::Row> = if path.ends_with(".jsonl") {
                 text.lines().filter_map(|l| db::parse_doc(l).ok()).filter_map(|d| db::Row::from_doc(&d).ok()).collect()
@@ -219,14 +222,15 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into(), ..Default::default() };
-            app.core.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
-            app.core.active = Some(1);
-            app.core.open_dbs.insert((1, "fixture".into()));
+            app.core.setup().conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
+            app.core.setup().active = Some(1);
+            app.core.setup().open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, Open::Here);
-            app.core.req += 1;
-            app.core.tabs[0].req = app.core.req;
+            app.core.setup().req += 1;
+            app.core.setup().tabs[0].req = app.core.setup().req;
             let n = rows.len() as u64;
-            app.core.worker.send(Msg::Docs { req: app.core.req, res: Ok((rows, n, 3)), approx: false });
+            let req = app.core.req;
+            app.core.setup().loopback(Msg::Docs { req, res: Ok((rows, n, 3)), approx: false });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in either theme regardless of the system, and with
@@ -237,27 +241,27 @@ impl App {
                 Appearance::Dark.apply(&cc.egui_ctx);
             }
             if std::env::var("QUARRY_TEST_READING").is_ok() {
-                let p = &mut app.core.prefs;
+                let p = &mut app.core.setup().prefs;
                 (p.ui_scale, p.soft, p.reading_line, p.group_digits, p.keep_toasts) = (1.25, true, true, true, true);
                 p.ui_font = "OpenDyslexic".into();
             }
             // QUARRY_TEST_THEME=<name> shows that theme in its own mode; the font switches take a name from the Settings lists.
             if let Ok(name) = std::env::var("QUARRY_TEST_THEME") {
                 let light = LIGHT_THEMES.iter().any(|t| t.name == name);
-                *(if light { &mut app.core.prefs.light_theme } else { &mut app.core.prefs.dark_theme }) = name;
-                app.core.prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
-                app.core.prefs.appearance.apply(&cc.egui_ctx);
+                *(if light { &mut app.core.setup().prefs.light_theme } else { &mut app.core.setup().prefs.dark_theme }) = name;
+                app.core.setup().prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
+                app.core.setup().prefs.appearance.apply(&cc.egui_ctx);
             }
             if let Ok(a) = std::env::var("QUARRY_TEST_ACCENT") {
-                app.core.prefs.accent = a;
+                app.core.setup().prefs.accent = a;
             }
             if let Ok(f) = std::env::var("QUARRY_TEST_UI_FONT") {
-                app.core.prefs.ui_font = f;
+                app.core.setup().prefs.ui_font = f;
             }
             if let Ok(f) = std::env::var("QUARRY_TEST_DATA_FONT") {
-                app.core.prefs.data_font = f;
+                app.core.setup().prefs.data_font = f;
             }
-            style(&cc.egui_ctx, app.core.prefs.look());
+            style(&cc.egui_ctx, app.core.setup().prefs.look());
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
                 cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
@@ -267,41 +271,42 @@ impl App {
             let (metas, broken_conns) = parse_config_list::<ConnMeta>(&config_dir().join("connections.json"));
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
-            app.core.prefs = prefs;
-            app.core.prefs.migrate();
-            app.core.values = load_values();
-            app.core.prefs.appearance.apply(&cc.egui_ctx);
+            app.core.setup().prefs = prefs;
+            app.core.setup().prefs.migrate();
+            app.core.setup().values = load_values();
+            app.core.setup().prefs.appearance.apply(&cc.egui_ctx);
             // A hand-edited size that is not offered shows and applies as 100 %.
-            app.core.prefs.ui_scale = app.core.prefs.look().scale;
-            if app.core.prefs.look() != Look::default() {
-                style(&cc.egui_ctx, app.core.prefs.look());
+            app.core.setup().prefs.ui_scale = app.core.setup().prefs.look().scale;
+            if app.core.setup().prefs.look() != Look::default() {
+                style(&cc.egui_ctx, app.core.setup().prefs.look());
             }
             let alive: Vec<u64> = metas.iter().map(|m| m.id).collect();
             let (groups, broken_groups) = groups::load_groups();
             let library_existed = config_dir().join("library.json").exists();
             let (library, broken_library) = library::load_library();
-            app.core.groups = groups;
-            app.core.library = library;
+            app.core.setup().groups = groups;
+            app.core.setup().library = library;
             // The first run with a library: the queries saved in ui.json move over, once. ui.json keeps them as they were.
             // A library.json that could not be read at all was moved aside and left an empty library; the old queries are
             // still in ui.json, so they come over again rather than staying lost.
-            if library::should_migrate(library_existed, broken_library.is_some(), &app.core.library) {
+            if library::should_migrate(library_existed, broken_library.is_some(), &app.core.setup().library) {
                 app.migrate_library();
             }
             // Connections removed since the last run leave their groups, but their scripts stay.
-            if app.core.groups.prune(&alive) {
+            if app.core.setup().groups.prune(&alive) {
                 app.save_groups();
             }
             crate::vault::migrate(&secret_names(metas.iter().map(|m| m.id)));
             for meta in metas {
                 let masked = stored_uri(meta.id).ok().map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.core.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
+                app.core.setup().conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
             }
-            app.core.active = app.core.conns.first().map(|c| c.meta.id);
+            app.core.setup().active = app.core.setup().conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.
-            app.core.values.retain(|k, _| app.core.conns.iter().any(|c| k.starts_with(&format!("{}/", c.meta.id))));
+            let ids: Vec<u64> = app.core.conns.iter().map(|c| c.meta.id).collect();
+            app.core.setup().values.retain(|k, _| ids.iter().any(|id| k.starts_with(&format!("{id}/"))));
             // Reopen the tabs of the last session; they load once their connection is connected.
-            for st in app.core.prefs.open_tabs.clone() {
+            for st in app.core.setup().prefs.open_tabs.clone() {
                 if app.conn(st.conn).is_none() {
                     continue;
                 }
@@ -350,27 +355,27 @@ impl App {
                     t.script = app.rebind(&t, r);
                 }
                 t.seed_ran();
-                app.core.tabs.push(t);
+                app.core.setup().tabs.push(t);
             }
-            app.core.cur = app.core.prefs.cur_tab.min(app.core.tabs.len().saturating_sub(1));
-            if let Some(id) = app.core.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
-                app.core.active = Some(id);
+            app.core.setup().cur = app.core.setup().prefs.cur_tab.min(app.core.setup().tabs.len().saturating_sub(1));
+            if let Some(id) = app.core.setup().prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
+                app.core.setup().active = Some(id);
             }
             // The active tab wins over the saved connection, so the sidebar starts on the tab's connection like after a tab switch.
-            if let Some(t) = app.core.tabs.get(app.core.cur) {
-                app.core.active = Some(t.sel.conn);
+            if let Some(conn) = app.core.tabs.get(app.core.cur).map(|t| t.sel.conn) {
+                app.core.setup().active = Some(conn);
             }
             // Every connection open last time comes back open, in its rail order. The connections of reopened tabs
             // count too, for settings saved before open_conns existed.
             let mut seen = std::collections::HashSet::new();
             let open: Vec<u64> = app.core.prefs.open_conns.iter().copied().chain(app.core.active).chain(app.core.tabs.iter().map(|t| t.sel.conn)).filter(|id| app.conn(*id).is_some() && seen.insert(*id)).collect();
-            app.core.rail_order = open.clone();
+            app.core.setup().rail_order = open.clone();
             for id in open {
                 app.connect(id);
             }
-            app.core.agents_start();
+            app.core.setup().agents_start();
             // A fresh install has no ui.json, so it skips the notes. Run now, so the broken-settings note below still wins.
-            app.core.whats_new_seen(ui_json.is_some());
+            app.core.setup().whats_new_seen(ui_json.is_some());
             app.run_fx();
             let broken: Vec<String> = [broken_conns, broken_prefs, broken_groups, broken_library].into_iter().flatten().collect();
             if !broken.is_empty() {
@@ -511,30 +516,24 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.library_tick(ctx);
-        // Set every frame so connections added or reconnected later need no extra handling.
-        if self.core.prefs.always_writable {
-            self.core.conns.iter_mut().for_each(|c| c.writable = true);
-        }
         self.core.flush_prefs();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.core.frame_ms = frame.info().cpu_usage.unwrap_or(0.0) * 1000.0;
+        self.ui.frame_ms = frame.info().cpu_usage.unwrap_or(0.0) * 1000.0;
         // QUARRY_FRAME_LOG prints each frame's CPU time, for measuring with a fixture.
         if std::env::var("QUARRY_FRAME_LOG").is_ok() {
-            eprintln!("frame_ms {:.3}", self.core.frame_ms);
+            eprintln!("frame_ms {:.3}", self.ui.frame_ms);
         }
         let ctx = ui.ctx().clone();
         self.lock_scroll_axis(&ctx);
         self.vim_begin(&ctx);
         self.record_key(&ctx);
-        self.core.stop_hidden_watches();
-        self.remember_tabs();
         set_window_over_page(&ctx, self.window_open());
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         #[cfg(target_os = "linux")]
-        if self.core.win_buttons {
+        if self.ui.win_buttons {
             window_buttons::resize_edges(&ctx);
         }
         self.top_bar(ui);

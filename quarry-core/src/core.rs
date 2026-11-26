@@ -5,7 +5,7 @@ pub mod notify;
 pub mod drafts;
 pub mod front;
 
-pub use front::Front;
+pub use front::{Front, TextRef};
 
 use crate::db::{self, Msg, UndoAction, Worker};
 use crate::state::cloud_sql;
@@ -24,7 +24,6 @@ use mongodb::bson::Bson;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
 
 pub struct Core {
     pub(crate) worker: Worker,
@@ -117,15 +116,12 @@ pub struct Core {
     pub undo_bytes: std::cell::RefCell<HashMap<std::time::Instant, usize>>,
     pub explain_req: u64,
     pub status: String,
-    pub log: LogUi,
     pub toasts: Vec<Toast>,
     /// This session's errors, oldest first, for the status bar list.
     pub errors: Vec<ErrEntry>,
     /// Errors since the list was last opened, the count the status bar shows.
     pub errors_unseen: usize,
     pub err_seq: u64,
-    /// Opens the error list on its first frame, for the demo picture.
-    pub errors_open: bool,
     pub ac: Ac,
     /// Field values fetched from the server for suggestions, per collection key then path. Kept on
     /// disk, so a new session suggests them before its own fetch comes back.
@@ -159,25 +155,12 @@ pub struct Core {
     pub lib_ui: library::LibUi,
     /// What the Undo of a toast puts back, by toast id, for changes that are not database edits.
     pub restores: Vec<(u64, Restore)>,
-    /// Scroll the selected document row into view on its next draw, after keyboard selection.
-    pub scroll_sel: bool,
-    /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
-    pub tab_seen: Option<usize>,
     pub demo: bool,
     /// Nothing is read from or written to disk or the keychain. True in the demo and in tests; `demo` alone means fake offline data.
     pub ephemeral: bool,
-    /// Whether the header draws the window buttons: on Windows once the native title bar is gone, and in the demo's
-    /// QUARRY_TEST_WINFRAME switch.
-    pub win_buttons: bool,
     pub tool: Option<ToolRun>,
     /// AI agents: saved settings, the link listener and connected sessions.
     pub agents: agents::AgentsState,
-    /// CPU time of the last frame in milliseconds, for the frame rate readout.
-    pub frame_ms: f32,
-    /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
-    pub usage: (std::time::Instant, Duration, f32, Option<u64>),
-    /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
-    pub fps: (f32, u32, f32),
     /// Measured column widths per result set and column.
     pub width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
@@ -189,8 +172,6 @@ pub struct Core {
     /// Why the last automatic check failed, shown in Settings; those failures stay quiet otherwise.
     pub update_note: String,
     pub update_checked: Option<std::time::Instant>,
-    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
-    pub upd_popup: bool,
     pub started: std::time::Instant,
     /// What the last actions left for the UI to do, drained by the app.
     pub ui_fx: Vec<crate::action::UiFx>,
@@ -199,6 +180,11 @@ pub struct Core {
 }
 
 impl Core {
+    /// Queues an answer as if the worker had sent it; the startup fixture shows its documents through it.
+    pub fn loopback(&self, m: Msg) {
+        self.worker.send(m)
+    }
+
     /// The empty state the app and the tests start from; `demo` means fake offline data, and nothing touches disk.
     pub fn new(worker: Worker, rx: Receiver<Msg>, demo: bool) -> Self {
         Self {
@@ -260,12 +246,10 @@ impl Core {
             undo_bytes: Default::default(),
             explain_req: 0,
             status: "Ready. All connections start read-only.".into(),
-            log: LogUi::default(),
             toasts: Vec::new(),
             errors: Vec::new(),
             errors_unseen: 0,
             err_seq: 0,
-            errors_open: false,
             ac: Ac::default(),
             values: HashMap::new(),
             values_asked: HashSet::new(),
@@ -284,16 +268,10 @@ impl Core {
             conns_ui: Default::default(),
             lib_ui: Default::default(),
             restores: Vec::new(),
-            scroll_sel: false,
-            tab_seen: None,
             demo,
             ephemeral: demo,
-            win_buttons: false,
             tool: None,
             agents: Default::default(),
-            frame_ms: 0.0,
-            usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
-            fps: (0.0, 0, 0.0),
             width_cache: HashMap::new(),
             closed: Vec::new(),
             nav_back: Vec::new(),
@@ -301,7 +279,6 @@ impl Core {
             upd: Upd::Idle,
             update_note: String::new(),
             update_checked: None,
-            upd_popup: false,
             started: std::time::Instant::now(),
             ui_fx: Vec::new(),
             prefs_dirty: false,

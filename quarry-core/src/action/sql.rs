@@ -65,13 +65,18 @@ pub enum SqlA {
     Insert { tab: u64, rows: Vec<crate::db::sql::write::NewRow> },
     /// Content: deletes these rows of the page, by the key in their `_id`, once confirmed.
     DeleteRows { tab: u64, rows: Vec<mongodb::bson::Document> },
+    /// The crumb's database pick on a Query view. A free Query tab moves to it and a table's Query view runs there; `schema`
+    /// is the one the sidebar shows for that database.
+    CrumbDb { tab: u64, db: String, schema: String },
+    /// The crumb's schema pick on a PostgreSQL Query view.
+    CrumbSchema { tab: u64, schema: String },
 }
 
 impl SqlA {
     /// The uid of the tab the action was drawn for.
     fn tab(&self) -> u64 {
         match self {
-            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } => *tab,
+            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } | SqlA::CrumbDb { tab, .. } | SqlA::CrumbSchema { tab, .. } => *tab,
         }
     }
 }
@@ -130,6 +135,34 @@ impl Core {
             SqlA::NewRow { from, .. } => return self.sql_new_row(from),
             SqlA::Insert { rows, .. } => self.sql_insert_rows(rows),
             SqlA::DeleteRows { rows, .. } => self.sql_delete(rows),
+            SqlA::CrumbDb { db, schema, .. } => {
+                let t = &mut self.tabs[self.cur];
+                let (free, own) = (t.sel.coll.is_empty(), db == t.sel.db);
+                if free {
+                    (t.sel.db, t.sel.schema) = (db, schema);
+                    // The tab's own database and schema are now the whole target, so a run target left by a script goes.
+                    if let Some(q) = t.sql.as_mut() {
+                        (q.run_db, q.run_schema) = (String::new(), String::new());
+                    }
+                } else if let Some(q) = t.sql.as_mut() {
+                    // A table's Query view keeps its table and only runs elsewhere. Its own database runs in the table's schema.
+                    q.run_schema = if own { String::new() } else { schema };
+                    q.run_db = db;
+                }
+            }
+            SqlA::CrumbSchema { schema, .. } => {
+                let t = &mut self.tabs[self.cur];
+                let free = t.sel.coll.is_empty();
+                let Some(q) = t.sql.as_mut() else { return Ok(Reply::Done) };
+                // A run target in another database is where the statements run, so the tab's own schema would not reach them.
+                if free && (q.run_db.is_empty() || q.run_db == t.sel.db) {
+                    // A schema left from a script or a saved tab would win over the pick.
+                    q.run_schema.clear();
+                    t.sel.schema = schema;
+                } else {
+                    q.run_schema = schema;
+                }
+            }
         }
         Ok(Reply::Done)
     }

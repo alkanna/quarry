@@ -23,11 +23,22 @@ pub enum DocsA {
     Page { tab: u64, page: u64 },
     /// A pick from the query history menu fills one box of the bar.
     History { tab: u64, field: BarField, text: String },
+    /// A shell query pasted into the bar, or any pipeline the app parsed, run on the tab.
+    RunShell { tab: u64, text: String },
+    RunPipeline { tab: u64, pipeline: Vec<Document> },
     /// Table or JSON.
     Layout { table: bool },
     /// A click on row `row` of the Documents rows (`agg` false) or of another view's results: Cmd checks it, Shift
     /// checks a range, a plain click opens it.
     Click { tab: u64, agg: bool, row: usize, cmd: bool, shift: bool },
+    /// An arrow key on the grid: the open card moves to row `row` with the selection instead of staying on the one left.
+    Step { tab: u64, agg: bool, row: usize },
+    /// The query bar's autocomplete asks the server for the values of `path` once per session, in collection `key`: a
+    /// sample, or with `prefix` the values starting with the text being typed.
+    WantValues { key: String, path: String, prefix: Option<String> },
+    /// Esc on the page: closes the innermost thing open, from a calendar or an editor to the row, the record and the
+    /// explorer's filter.
+    Escape,
     /// Opens or closes row `row` without the modifiers of a click, as the keyboard does.
     Select { tab: u64, agg: bool, row: usize, toggle: bool },
     CloseRow { tab: u64, agg: bool, row: usize },
@@ -170,6 +181,23 @@ impl Core {
                 self.cur_tab(tab)?;
                 self.select(agg, row, toggle);
             }
+            DocsA::Step { tab, agg, row } => {
+                self.cur_tab(tab)?;
+                if let Some(prev) = self.t().and_then(|t| t.selected) {
+                    self.tm().unwrap().expanded.remove(&prev);
+                }
+                self.select(agg, row, false);
+            }
+            DocsA::RunShell { tab, text } => {
+                self.cur_tab(tab)?;
+                self.run_shell(&text);
+            }
+            DocsA::RunPipeline { tab, pipeline } => {
+                self.cur_tab(tab)?;
+                self.run_pipeline(pipeline);
+            }
+            DocsA::Escape => self.escape(),
+            DocsA::WantValues { key, path, prefix } => self.want_values(key, path, prefix),
             DocsA::CloseRow { tab, agg, row } => {
                 self.cur_tab(tab)?;
                 self.close_row((agg, row));
@@ -627,6 +655,36 @@ impl Core {
         } else {
             self.select(agg, i, true);
         }
+    }
+
+    /// Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
+    fn escape(&mut self) {
+        // The calendar of a date closes before the editor under it.
+        if let Some(i) = &mut self.inline && let Some(o) = i.pick.take() {
+            i.text = o;
+            return;
+        }
+        if self.inline.take().is_some() || self.new_field.take().is_some() {
+            return;
+        }
+        if let Some(t) = self.tm() {
+            // A SQL row's record closes before the row is let go.
+            if t.record && t.record_row() {
+                t.record = false;
+                return;
+            }
+            if t.view == View::Sql && let Some(s) = &mut t.sql && s.qsel.take().is_some() {
+                return;
+            }
+            if let Some(key) = t.selected {
+                return self.close_row(key);
+            }
+            if !t.expanded.is_empty() {
+                t.expanded.clear();
+                return;
+            }
+        }
+        self.tree_filter.clear();
     }
 
     pub fn close_row(&mut self, key: (bool, usize)) {

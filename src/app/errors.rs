@@ -3,7 +3,7 @@
 
 use super::*;
 use db::{ErrKind, Fix};
-use quarry_core::action::{Action, AppA, LibA, PrefsA};
+use quarry_core::action::{Action, AppA, BarField, ConnA, DocsA, LibA, PrefsA, TabA};
 use quarry_core::core::notify::fix_label;
 use std::time::Instant;
 pub(crate) use quarry_core::state::errors::*;
@@ -279,9 +279,9 @@ impl App {
                     return self.sql_show_dup(sel, index, v);
                 }
                 self.open_collection(sel, Open::Here);
-                if let Some(t) = self.tm() {
-                    t.view = View::Documents;
-                    t.filter_txt = format!("{{ {f}: {v} }}");
+                self.set_view(View::Documents);
+                if let Some(tab) = self.t().map(|t| t.uid) {
+                    self.exec(Action::Docs(DocsA::History { tab, field: BarField::Filter, text: format!("{{ {f}: {v} }}") }));
                 }
                 self.run_query();
             }
@@ -289,34 +289,14 @@ impl App {
     }
 
     fn connect_active(&mut self, c: u64) {
-        self.core.active = Some(c);
+        self.exec(Action::Conn(ConnA::Switch { conn: c }));
         self.connect(c);
     }
 
     /// Asks again for what the failed view shows.
     fn retry_view(&mut self, i: usize, view: View) {
-        if i >= self.core.tabs.len() {
-            return;
-        }
-        self.core.tabs[i].clear_failed(view);
-        match view {
-            View::Indexes => self.load_indexes_of(i),
-            View::Schema => {
-                // The view analyzes again by itself once nothing says it ran.
-                let s = &mut self.core.tabs[i].schema;
-                (s.err, s.ms) = (None, None);
-            }
-            View::Aggregate => {
-                let here = self.core.cur;
-                self.core.cur = i;
-                let text = self.core.tabs[i].agg_txt.clone();
-                match db::parse_pipeline(&text) {
-                    Ok(p) => self.run_pipeline(p),
-                    Err(e) => self.err(e),
-                }
-                self.core.cur = here;
-            }
-            _ => self.reload_of(i),
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Retry { tab, view }));
         }
     }
 
@@ -600,7 +580,7 @@ impl App {
         let mut pick = None;
         let mut clear = false;
         let mut log = false;
-        popover(&r, 440.0, std::mem::take(&mut self.core.errors_open), |ui| {
+        popover(&r, 440.0, std::mem::take(&mut self.ui.errors_open), |ui| {
             menu_look(ui);
             popover_body(ui, 440.0, |ui| {
                 popover_head(ui, "Errors this session", &format!("{n}"), "Newest first. Server errors are also in the Query log.");
@@ -642,7 +622,7 @@ impl App {
             self.exec(Action::App(AppA::ClearErrors));
         }
         if log {
-            self.core.log.open = true;
+            self.ui.log.open = true;
         }
         // Picking a row or clearing closes the list, as a menu would.
         if pick.is_some() || clear || log {

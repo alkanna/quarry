@@ -381,7 +381,7 @@ impl App {
         let record = sql && self.t().is_some_and(|t| t.record);
         // The Vim cursor's column, scrolled into view after a Vim key moved it. With the record open it walks the record.
         let vim = self.core.prefs.vim && !cols.is_empty();
-        let vk = self.t().map_or(0, |t| t.vcol).min(cols.len().saturating_sub(1));
+        let vk = self.vcol().min(cols.len().saturating_sub(1));
         let vscroll = vim && !record && std::mem::take(&mut self.vnav.scroll);
         if !record {
             self.vnav.cols = cols.len();
@@ -519,7 +519,7 @@ impl App {
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.core.scroll_sel) {
+                    if active && std::mem::take(&mut self.ui.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     // After the row's own scroll, so the cell's wins sideways.
@@ -718,10 +718,8 @@ impl App {
                 }
             });
         });
-        if let Some(c) = click_col
-            && let Some(t) = self.tm()
-        {
-            t.vcol = c;
+        if let Some(c) = click_col {
+            self.set_vcol(c);
         }
         // What a Vim key asked of the cell under the cursor, or of the record's line, as a click on it would do.
         if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.core.prefs.vim)
@@ -729,7 +727,7 @@ impl App {
         {
             self.vnav.act = None;
             let names = if record { record_names(&cols, fields) } else { cols.clone() };
-            let at = self.t().map_or(0, |t| if record { t.vline } else { t.vcol }).min(names.len().saturating_sub(1));
+            let at = (if record { self.vline() } else { self.vcol() }).min(names.len().saturating_sub(1));
             let row = self.shown_row(docs, i, agg).or_else(|| docs.owned(i));
             if let (Some(c), Some(d)) = (names.get(at).cloned(), row) {
                 let b = if sql { d.get(&c).cloned() } else { db::get_path(&d, &c).cloned() }.unwrap_or(Bson::Null);
@@ -829,7 +827,7 @@ impl App {
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.core.scroll_sel) {
+                    if active && std::mem::take(&mut self.ui.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     paint_row(ui, rect, active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);

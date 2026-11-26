@@ -26,6 +26,27 @@ pub enum TabA {
     Nav { back: bool },
     /// The view tabs over the collection: Documents, Aggregate, Indexes and the rest.
     View { tab: u64, view: View },
+    /// Opens a collection in a tab without the first read, for a caller that sets the query before reading.
+    OpenTab { sel: Sel, how: Open },
+    /// Makes the tab current without closing the editors open on the one left (`go_tab` does both).
+    Select { tab: u64 },
+    /// Makes the tab the one the next actions work on, with no history, explorer or editor change: for a confirmation
+    /// that runs on the tab it was raised for and then puts the current one back.
+    Focus { tab: u64 },
+    /// Reads the tab again.
+    Reload { tab: u64 },
+    /// Asks again for what the failed `view` of the tab shows, from an error panel or toast.
+    Retry { tab: u64, view: View },
+    /// Closes these tabs without asking; the app lists them from what it reads, a dropped database or table for one.
+    CloseTabs { tabs: Vec<u64> },
+    /// Closes open rows of the result table that is not the Documents one, after its rows changed under them.
+    DropAggRow,
+    /// Closes the editors open on a document or a cell.
+    ResetDoc,
+    /// A new Query tab on `db`, starting in `schema` when that is not empty (the sidebar's one otherwise).
+    NewQuery { conn: u64, db: String, schema: String },
+    /// A connection opened: reloads its tabs that hold no rows, Mongo ones through their query bar.
+    Connected { conn: u64, sql: bool },
 }
 
 /// What a refusal says when the tab an action names closed in between.
@@ -62,8 +83,78 @@ impl Core {
                 self.cur_tab(tab)?;
                 self.set_view(view);
             }
+            TabA::OpenTab { sel, how } => {
+                self.open_tab(sel, how);
+            }
+            TabA::Select { tab } => {
+                let i = self.tab_ix(tab)?;
+                self.set_cur(i);
+            }
+            TabA::Focus { tab } => self.cur = self.tab_ix(tab)?,
+            TabA::Retry { tab, view } => {
+                let i = self.tab_ix(tab)?;
+                self.retry_view(i, view);
+            }
+            TabA::Reload { tab } => {
+                let i = self.tab_ix(tab)?;
+                self.reload_of(i);
+            }
+            TabA::CloseTabs { tabs } => self.remove_tabs(|t| tabs.contains(&t.uid)),
+            TabA::DropAggRow => self.drop_agg_row(),
+            TabA::ResetDoc => self.reset_doc_state(),
+            TabA::NewQuery { conn, db, schema } => {
+                self.sql_new_query(conn, db);
+                if !schema.is_empty() && let Some(t) = self.tm() {
+                    t.sel.schema = schema;
+                }
+            }
+            TabA::Connected { conn, sql } => self.connected_tabs(conn, sql),
         }
         Ok(Reply::Done)
+    }
+
+    /// Asks again for what the failed view shows.
+    fn retry_view(&mut self, i: usize, view: View) {
+        self.tabs[i].clear_failed(view);
+        match view {
+            View::Indexes => self.load_indexes_of(i),
+            View::Schema => {
+                // The view analyzes again by itself once nothing says it ran.
+                let s = &mut self.tabs[i].schema;
+                (s.err, s.ms) = (None, None);
+            }
+            View::Aggregate => {
+                let here = self.cur;
+                self.cur = i;
+                let text = self.tabs[i].agg_txt.clone();
+                match crate::db::parse_pipeline(&text) {
+                    Ok(p) => self.run_pipeline(p),
+                    Err(e) => self.err(e),
+                }
+                self.cur = here;
+            }
+            _ => self.reload_of(i),
+        }
+    }
+
+    /// What a new connection does for the tabs waiting on it.
+    fn connected_tabs(&mut self, conn: u64, sql: bool) {
+        if sql {
+            for i in 0..self.tabs.len() {
+                if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                    self.reload_of(i);
+                }
+            }
+            return;
+        }
+        let here = self.cur;
+        for i in 0..self.tabs.len() {
+            if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                self.cur = i;
+                self.run_query();
+            }
+        }
+        self.cur = here;
     }
 
     /// The index of tab `uid`, refused when it closed.
@@ -296,7 +387,6 @@ impl Core {
             let x = self.tabs.remove(from);
             self.tabs.insert(to, x);
         }
-        self.tab_seen = Some(self.cur);
     }
 
     pub fn go_tab(&mut self, i: usize) {

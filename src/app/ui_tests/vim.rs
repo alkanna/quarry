@@ -134,11 +134,11 @@ fn sel(ui: &UiApp) -> Option<usize> {
 }
 
 fn vline(ui: &UiApp) -> usize {
-    ui.app().t().map_or(0, |t| t.vline)
+    ui.app().vline()
 }
 
 fn vcol(ui: &UiApp) -> usize {
-    ui.app().t().map_or(0, |t| t.vcol)
+    ui.app().vcol()
 }
 
 #[test]

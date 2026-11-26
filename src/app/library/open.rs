@@ -428,7 +428,7 @@ impl App {
             self.core.prefs.sidebar_hidden = false;
             self.save_prefs();
         }
-        self.core.lib_ui.focus_tree = true;
+        self.ui.lib_focus_tree = true;
     }
 
     /// The chip's Show in library: the panel on screen with the script selected and the folders above it open.

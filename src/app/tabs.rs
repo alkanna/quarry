@@ -1,8 +1,9 @@
 //! Tabs: what the app keeps of them. Opening, closing and reopening run in Core (`quarry_core::action::tabs`); these
-//! forward for the other areas' call sites.
+//! push the action for the other areas' call sites. A tab is named by its uid, because an index moves when tabs close.
 
 use super::*;
 use quarry_core::action::tabs::tab_for;
+use quarry_core::action::{Action, TabA};
 
 impl App {
     pub(super) fn col_key(&self, agg: bool) -> String {
@@ -14,47 +15,65 @@ impl App {
     }
 
     pub(super) fn drop_agg_row(&mut self) {
-        self.core.drop_agg_row()
+        self.exec(Action::Tab(TabA::DropAggRow));
     }
 
     pub(super) fn reset_doc_state(&mut self) {
-        self.core.reset_doc_state()
+        self.exec(Action::Tab(TabA::ResetDoc));
+    }
+
+    pub(super) fn uid_of(&self, i: usize) -> Option<u64> {
+        self.core.tabs.get(i).map(|t| t.uid)
     }
 
     pub(super) fn set_cur(&mut self, i: usize) {
-        self.core.set_cur(i)
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Select { tab }));
+        }
     }
 
     pub(super) fn open_collection(&mut self, sel: Sel, how: Open) {
-        self.core.open_collection(sel, how)
+        self.exec(Action::Tab(TabA::Open { sel, how }));
     }
 
-    pub(super) fn open_tab(&mut self, sel: Sel, how: Open) -> bool {
-        self.core.open_tab(sel, how)
+    pub(super) fn open_tab(&mut self, sel: Sel, how: Open) {
+        self.exec(Action::Tab(TabA::OpenTab { sel, how }));
     }
 
     pub(super) fn close_tab(&mut self, i: usize) {
-        self.core.close_tab(i)
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Close { tab }));
+        }
     }
 
+    /// Closes the tabs `gone` picks. The app reads the tabs to choose; closing them is the action's.
     pub(super) fn remove_tabs(&mut self, gone: impl Fn(&Tab) -> bool) {
-        self.core.remove_tabs(gone)
+        let tabs: Vec<u64> = self.core.tabs.iter().filter(|t| gone(t)).map(|t| t.uid).collect();
+        if !tabs.is_empty() {
+            self.exec(Action::Tab(TabA::CloseTabs { tabs }));
+        }
     }
 
     pub(super) fn go_tab(&mut self, i: usize) {
-        self.core.go_tab(i)
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Pick { tab }));
+        }
     }
 
-    pub(super) fn set_view(&mut self, v: View) {
-        self.core.set_view(v)
+    pub(super) fn set_view(&mut self, view: View) {
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Tab(TabA::View { tab, view }));
+        }
     }
 
     pub(super) fn reload(&mut self) {
-        self.core.reload()
+        self.reload_of(self.core.cur);
     }
 
     pub(super) fn reload_of(&mut self, i: usize) {
-        self.core.reload_of(i)
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Reload { tab }));
+        }
     }
 
     /// Runs `f` with the tab a confirmation was raised for as the current one, then puts the current tab back. A
@@ -63,16 +82,14 @@ impl App {
         let Some(i) = tab_for(self.core.tabs.iter().map(|t| &t.sel), self.core.cur, sel) else {
             return self.warn(format!("Nothing ran: {} is no longer open in a tab.", sel.coll));
         };
-        let back = self.core.cur;
-        self.core.cur = i;
-        f(self);
-        if back < self.core.tabs.len() {
-            self.core.cur = back;
+        let back = self.uid_of(self.core.cur);
+        if let Some(tab) = self.uid_of(i) {
+            self.exec(Action::Tab(TabA::Focus { tab }));
         }
-    }
-
-    pub(super) fn tab_by_req(&mut self, req: u64) -> Option<&mut Tab> {
-        self.core.tab_by_req(req)
+        f(self);
+        if let Some(tab) = back.filter(|b| self.core.tabs.iter().any(|t| t.uid == *b)) {
+            self.exec(Action::Tab(TabA::Focus { tab }));
+        }
     }
 }
 

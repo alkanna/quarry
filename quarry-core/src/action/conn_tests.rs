@@ -49,6 +49,9 @@ pub(super) fn conn_actions() -> Vec<Action> {
         GroupA::RailOrder { order: vec![2, 1] },
     ];
     all.push(Action::Conn(ConnA::Switch { conn: 1 }));
+    all.push(Action::Conn(ConnA::Remove { conn: 1 }));
+    all.push(Action::Conn(ConnA::DropWays));
+    all.push(Action::Conn(ConnA::ForgetTest));
     all.push(Action::Conn(ConnA::Save { meta: ConnMeta { id: 1, name: "local".into(), ..Default::default() }, uri: Secret::new("mongodb://ada:pw@localhost".into()), secrets: vec![("ssh-password".into(), Secret::new("pw".into()))], group: Some(2) }));
     all.extend(groups.into_iter().map(|g| Action::Conn(ConnA::Group(g))));
     all.push(Action::Conn(super::conn::test_of(&crate::state::ConnForm::default())));

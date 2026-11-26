@@ -49,6 +49,8 @@ pub mod mongo;
 pub mod grid;
 pub mod routines;
 pub mod agents;
+pub mod replies;
+pub mod confirm;
 #[cfg(test)]
 mod roles_tests;
 #[cfg(test)]
@@ -100,6 +102,7 @@ pub use routines::RoutineA;
 pub use sql::ddl::{DdlA, SqlForm};
 pub use sql::ops::SqlOpsA;
 pub use agents::{AgentCall, AgentsA, Origin};
+pub use confirm::ConfirmA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -128,6 +131,7 @@ pub enum Action {
     Ddl(DdlA),
     SqlOps(SqlOpsA),
     Agents(AgentsA),
+    Confirm(ConfirmA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -173,6 +177,8 @@ pub enum UiFx {
     CopyText(String),
     /// An approval is waiting while the window has no focus: ask the system for the user's attention.
     Attention,
+    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
+    UpdPopup,
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -293,6 +299,7 @@ impl Core {
             Action::Sql(a) => self.sql(a),
             Action::Structure(a) => self.structure_act(a),
             Action::Tab(a) => self.tab(a),
+            Action::Confirm(a) => self.confirm(a),
             Action::Docs(a) => self.docs(a),
             Action::Undo(a) => self.undo(a),
             Action::Aggregate(a) => self.aggregate(a),
@@ -353,6 +360,8 @@ impl Core {
             Msg::PgRoles { ans: Answer::DropInfo(_), .. } => false,
             Msg::PgRoles { .. } | Msg::SqlUsers { .. } | Msg::SqlUserGrants { .. } | Msg::SqlUserDone { .. } => true,
             Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => true,
+            Msg::Command { tag, res } if Self::takes_command(tag, res.is_ok()) => true,
+            Msg::DbChanged { .. } | Msg::FieldValues { .. } => true,
             Msg::Command { tag, .. } if tag.starts_with("srv-") => true,
             Msg::Command { tag, .. } => matches!(tag.as_str(), "users" | "users-self" | "roles") || tag.starts_with("server:"),
             Msg::SqlServer { .. } | Msg::PgServer { .. } => true,
@@ -383,6 +392,9 @@ impl Core {
             Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
             Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
             Msg::Command { tag, res } if tag.starts_with("server:") => self.server_reply(&tag, res),
+            Msg::Command { tag, res: Ok(d) } if Self::takes_command(&tag, true) => self.command_reply(&tag, d),
+            Msg::DbChanged { conn, db, copied, dropped, res } => self.db_changed(conn, db, copied, dropped, res),
+            Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
             Msg::Connected { conn, attempt, res } => self.on_connected(conn, attempt, res),
             Msg::SqlConnected { conn, attempt, res } => self.on_sql_connected(conn, attempt, res),
             Msg::Tested { req, res, info } => self.tested(req, res, info),
@@ -445,6 +457,14 @@ impl Core {
                 rest.push(m);
             }
         }
+        // Set every frame so connections added or reconnected later need no extra handling.
+        if self.prefs.always_writable {
+            self.conns.iter_mut().for_each(|c| c.writable = true);
+        }
+        self.stop_hidden_watches();
+        // Once per frame: the list the header counts drops what a day made too old, and the next launch reopens these tabs.
+        crate::core::notify::trim_undo(&mut self.undo, std::time::Instant::now());
+        self.remember_tabs();
         rest
     }
 

@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) use quarry_core::action::update::HELD;
 pub(super) use quarry_core::action::UpdBtn;
-use quarry_core::action::{Action, UpdateA};
+use quarry_core::action::{Action, ConnA, UpdateA};
 
 impl App {
     /// The update timers live in Core; this asks for the repaint they need.
@@ -29,9 +29,7 @@ impl App {
 
     /// Drops every SSH tunnel and Cloud SQL proxy, which stops them.
     pub(super) fn close_ways(&mut self) {
-        for c in &mut self.core.conns {
-            c.tunnel = None;
-        }
+        self.exec(Action::Conn(ConnA::DropWays));
     }
 
     /// Restart from Core, once its own work is clear: the app's dialogs can still hold it.

@@ -9,6 +9,7 @@
 
 use super::*;
 use egui::{Event, FocusDirection, Modifiers};
+use quarry_core::action::{Action, DocsA, LibA, Pref, PrefsA, SqlA};
 
 /// The record's tree for line `c` is folded by `sql_record`, which knows its id.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -64,6 +65,8 @@ pub(super) struct VimNav {
     /// An Alt pane or screen key went by and its letter has not come as text yet. Kept across passes, since the text can
     /// come a pass after the key; the next key press clears it, so a key that sends no text never eats a later letter.
     alt_text: bool,
+    /// The Vim cursor of each tab by uid: its line in an open record and its column in the grid. Only drawing reads it.
+    cursor: std::collections::HashMap<u64, (usize, usize)>,
 }
 
 /// The sidebar row that should take the keys, asked for by Ctrl+h and given by the rows as they draw.
@@ -157,6 +160,28 @@ fn arrow(dir: FocusDirection) -> Key {
 }
 
 impl App {
+    /// The Vim cursor's line in the open record of the current tab.
+    pub(super) fn vline(&self) -> usize {
+        self.t().and_then(|t| self.vnav.cursor.get(&t.uid)).map_or(0, |c| c.0)
+    }
+
+    /// The Vim cursor's column in the grid of the current tab.
+    pub(super) fn vcol(&self) -> usize {
+        self.t().and_then(|t| self.vnav.cursor.get(&t.uid)).map_or(0, |c| c.1)
+    }
+
+    pub(super) fn set_vline(&mut self, v: usize) {
+        if let Some(uid) = self.t().map(|t| t.uid) {
+            self.vnav.cursor.entry(uid).or_default().0 = v;
+        }
+    }
+
+    pub(super) fn set_vcol(&mut self, v: usize) {
+        if let Some(uid) = self.t().map(|t| t.uid) {
+            self.vnav.cursor.entry(uid).or_default().1 = v;
+        }
+    }
+
     /// The grid that has the keys, as `keys` gives them: the Documents or Aggregate grid of `selected`, or the Query view's.
     fn vim_grid(&self, ctx: &egui::Context) -> Option<View> {
         let t = self.t()?;
@@ -186,12 +211,11 @@ impl App {
 
     /// Selects row `i` of that grid as Up and Down do.
     fn vim_select(&mut self, view: View, i: usize) {
-        self.core.scroll_sel = true;
+        self.ui.scroll_sel = true;
         self.vnav.scroll = true;
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
         if view == View::Sql {
-            if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                s.qsel = Some(i);
-            }
+            self.exec(Action::Sql(SqlA::SelectRow { tab, row: i }));
             return;
         }
         let agg = view == View::Aggregate;
@@ -199,10 +223,7 @@ impl App {
             return;
         }
         // The open card moves with the cursor instead of leaving the previous one open.
-        if let Some(prev) = self.t().and_then(|t| t.selected) {
-            self.tm().unwrap().expanded.remove(&prev);
-        }
-        self.select(agg, i, false);
+        self.exec(Action::Docs(DocsA::Step { tab, agg, row: i }));
     }
 
     /// Reads this pass's Vim keys before anything draws, so no widget acts on them too.
@@ -376,7 +397,7 @@ impl App {
         let at = sel.map_or(0, |s| s as i64);
         // In the record the rows stay put and the cursor walks its lines; h and l fold and unfold a JSON value.
         if record {
-            let line = self.t().map_or(0, |t| t.vline) as i64;
+            let line = self.vline() as i64;
             let to = match c {
                 Cmd::Move(r, 0) => line + r,
                 Cmd::Move(0, c) => {
@@ -394,9 +415,7 @@ impl App {
                 }
                 _ => return,
             };
-            if let Some(t) = self.tm() {
-                t.vline = to.clamp(0, lines as i64 - 1) as usize;
-            }
+            self.set_vline(to.clamp(0, lines as i64 - 1) as usize);
             self.vnav.scroll = true;
             return;
         }
@@ -405,9 +424,7 @@ impl App {
         }
         let to = match c {
             Cmd::Move(r, c) => {
-                if let Some(t) = self.tm() {
-                    t.vcol = (t.vcol.min(cols - 1) as i64 + c).clamp(0, cols as i64 - 1) as usize;
-                }
+                self.set_vcol((self.vcol().min(cols - 1) as i64 + c).clamp(0, cols as i64 - 1) as usize);
                 self.vnav.scroll = true;
                 // With no row picked the cursor stands just above the first one, so j picks it and a count still counts.
                 match sel {
@@ -419,9 +436,7 @@ impl App {
             Cmd::Row(n) => row(n.map_or(0, |n| n as i64 - 1)),
             Cmd::Last => len - 1,
             Cmd::Col(end) => {
-                if let Some(t) = self.tm() {
-                    t.vcol = if end { cols - 1 } else { 0 };
-                }
+                self.set_vcol(if end { cols - 1 } else { 0 });
                 self.vnav.scroll = true;
                 if sel.is_some() {
                     return;
@@ -449,11 +464,10 @@ impl App {
             Pane::Left => {
                 surrender();
                 if self.core.prefs.sidebar_hidden {
-                    self.core.prefs.sidebar_hidden = false;
-                    self.save_prefs();
+                    self.exec(Action::Prefs(PrefsA::Set(Pref::SidebarHidden(false))));
                 }
                 if self.core.prefs.side_mode() == SideMode::Library {
-                    self.core.lib_ui.focus_tree = true;
+                    self.ui.lib_focus_tree = true;
                 } else {
                     ctx.data_mut(|d| {
                         d.insert_temp(side_id(), true);
@@ -462,7 +476,7 @@ impl App {
                 }
             }
             Pane::Up => {
-                self.core.lib_ui.panel.focus = false;
+                self.exec(Action::Library(LibA::TreeKeys(false)));
                 if self.t().is_some_and(|t| t.view == View::Documents) {
                     self.focus_query(ctx);
                 } else if let Some(id) = crate::ui::vim::page_editor(ctx) {
@@ -475,7 +489,7 @@ impl App {
                     return;
                 }
                 surrender();
-                self.core.lib_ui.panel.focus = false;
+                self.exec(Action::Library(LibA::TreeKeys(false)));
                 if let Some(v) = self.vim_grid(ctx) {
                     let (sel, len) = self.vim_rows(v);
                     if sel.is_none() && len > 0 {

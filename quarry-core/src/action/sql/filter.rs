@@ -30,6 +30,8 @@ pub enum FilterA {
     Clear,
     /// The word of group `id` (0 the root).
     Mode(u32, Match),
+    /// Cmd+F in Rules mode: the panel opens, with a new row when it has none. The WHERE text is not rewritten.
+    Open,
 }
 
 /// The word a new group takes inside `parent`: the other one than its parent's, so wrapping says something.
@@ -62,6 +64,16 @@ impl Core {
         let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
         let (tree, p) = (&mut s.bar.tree, &mut s.bar.panel);
         match a {
+            FilterA::Open => {
+                if tree.root.kids.is_empty() {
+                    add(tree, p, 0, false, &cols, d);
+                }
+                if !p.open {
+                    p.open = true;
+                    p.forget_counts();
+                }
+                return;
+            }
             FilterA::Remove(id) => {
                 // The selection moves on to the next row, so Cmd+Backspace can be pressed again.
                 let order = tree.rows_in_order();

@@ -62,7 +62,7 @@ pub fn index_rows(indexes: &[Document], info: Option<&db::IndexInfo>, now: i64) 
 }
 
 /// The app's byte sizes, as the status bar writes them.
-fn human_bytes(n: usize) -> String {
+pub(super) fn human_bytes(n: usize) -> String {
     match n {
         n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
         n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),

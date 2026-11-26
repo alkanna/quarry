@@ -122,7 +122,7 @@ pub(super) fn window_buttons(ui: &mut egui::Ui, full: egui::Rect) {
 impl App {
     /// Applies `prefs.own_titlebar`: no window decorations and the header's own buttons, or the window manager's.
     pub(super) fn set_titlebar(&mut self, ctx: &egui::Context) {
-        self.core.win_buttons = self.core.prefs.own_titlebar;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!self.core.win_buttons));
+        self.ui.win_buttons = self.core.prefs.own_titlebar;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!self.ui.win_buttons));
     }
 }

@@ -3,7 +3,8 @@
 
 use super::{Dialog, Reply, Refusal, UiFx};
 use crate::core::Core;
-use crate::state::config::{Appearance, UiPrefs};
+use crate::state::config::{Appearance, SavedStage, SavedTab, UiPrefs};
+use crate::state::View;
 use crate::state::settings::SettingsCat;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,8 @@ pub enum PrefsA {
     Set(Pref),
     /// Cmd+=, Cmd+- or Cmd+0 picked this interface size.
     Zoom(f32),
+    /// A database jumped to without opening a tab, which is what would otherwise record it as recent.
+    RecentDb { conn: u64, db: String },
 }
 
 /// Declares the settings of the Settings window once: `Pref` holds one with its new value, `PrefVals` all of them for a
@@ -104,6 +107,7 @@ prefs! {
     ShowMem show_mem: bool,
     ShowCpu show_cpu: bool,
     AutoUpdate auto_update: bool,
+    SidebarHidden sidebar_hidden: bool,
 }
 
 impl Pref {
@@ -114,6 +118,60 @@ impl Pref {
 }
 
 impl Core {
+    /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
+    pub fn remember_tabs(&mut self) {
+        if self.ephemeral {
+            return;
+        }
+        let tabs: Vec<SavedTab> = self
+            .tabs
+            .iter()
+            .map(|t| SavedTab {
+                conn: t.sel.conn,
+                db: t.sel.db.clone(),
+                schema: t.sel.schema.clone(),
+                coll: t.sel.coll.clone(),
+                view: match t.view {
+                    View::Documents => "Documents",
+                    View::Aggregate => "Aggregate",
+                    View::Indexes => "Indexes",
+                    View::Shell => "Shell",
+                    View::Schema => "Schema",
+                    View::Import => "Import",
+                    View::Compare => "Compare",
+                    View::Watch => "Watch",
+                    View::Structure => "Structure",
+                    View::Relations => "Relations",
+                    View::Triggers => "Triggers",
+                    View::Info => "Info",
+                    View::Sql => "Sql",
+                }
+                .into(),
+                filter: t.filter_txt.clone(),
+                sort: t.sort_txt.clone(),
+                project: t.proj_txt.clone(),
+                agg: t.agg_txt.clone(),
+                shell: t.shell.code.clone(),
+                attached: t.shell.attached.clone(),
+                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&crate::state::sql::bar::Clauses { tree: s.bar.tree_json.clone(), ..s.bar.c.clone() }).ok()).unwrap_or_default(),
+                query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
+                run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
+                run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
+                stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
+                agg_text_mode: t.agg_text_mode,
+                script: t.script.as_ref().map(|b| b.r.clone()),
+            })
+            .collect();
+        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
+        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
+            self.prefs.open_tabs = tabs;
+            self.prefs.cur_tab = self.cur;
+            self.prefs.last_conn = self.active;
+            self.prefs.open_conns = open;
+            self.save_prefs();
+        }
+    }
+
     pub(super) fn prefs_act(&mut self, a: PrefsA) -> Result<Reply, Refusal> {
         match a {
             PrefsA::Open(cat) => {
@@ -132,6 +190,11 @@ impl Core {
                     if unlocks {
                         self.conns.iter_mut().for_each(|c| c.writable = false);
                     }
+                    self.save_prefs();
+                }
+            }
+            PrefsA::RecentDb { conn, db } => {
+                if self.prefs.note_recent_db(conn, &db) {
                     self.save_prefs();
                 }
             }

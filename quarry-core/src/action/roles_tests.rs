@@ -310,7 +310,7 @@ fn all_actions() -> Vec<Action> {
     ];
     all.extend(sh.into_iter().map(Action::Shell));
     all.extend([WatchA::Start { tab: 1 }, WatchA::Stop { tab: 1 }, WatchA::Clear { tab: 1 }].into_iter().map(Action::Watch));
-    let tools = [ToolsA::Install, ToolsA::Dump { conn: 1, db: "d".into(), coll: None, path: "/tmp/a".into(), gzip: true }, ToolsA::Stop, ToolsA::Close];
+    let tools = [ToolsA::Install, ToolsA::Dump { conn: 1, db: "d".into(), coll: None, path: "/tmp/a".into(), gzip: true }, ToolsA::Restore { conn: 1, archive: "/tmp/a".into(), from_db: "d".into(), coll: None, to_db: "e".into(), drop: false, gzip: true }, ToolsA::Stop, ToolsA::Close];
     all.extend(tools.into_iter().map(Action::Tools));
     all.extend(super::conn_tests::conn_actions());
     use crate::library::ops::DropAt;
@@ -318,11 +318,12 @@ fn all_actions() -> Vec<Action> {
     use crate::state::settings::SettingsCat;
     all.extend([UpdateA::CheckNow, UpdateA::Press(UpdBtn::Restart), UpdateA::ShowNotes, UpdateA::OfferedNotes].map(Action::Update));
     all.extend([AppA::Dismiss(1), AppA::Details(1), AppA::ErrorsSeen, AppA::ClearErrors, AppA::RaiseLimit].map(Action::App));
-    all.extend([PrefsA::Open(SettingsCat::Tools), PrefsA::Cat(SettingsCat::Reading), PrefsA::Zoom(1.25)].map(Action::Prefs));
+    all.extend([PrefsA::Open(SettingsCat::Tools), PrefsA::Cat(SettingsCat::Reading), PrefsA::Zoom(1.25), PrefsA::RecentDb { conn: 1, db: "shop".into() }].map(Action::Prefs));
     all.extend(Pref::samples().into_iter().map(|p| Action::Prefs(PrefsA::Set(p))));
     let rel = || std::path::PathBuf::from("reports/a.sql");
     let l = [
         LibA::CancelPending,
+        LibA::TreeKeys(true),
         LibA::ConflictReload { tab: 1 },
         LibA::ConflictKeep { tab: 1 },
         LibA::ConflictCompare { tab: 1 },
@@ -354,6 +355,20 @@ fn all_actions() -> Vec<Action> {
     all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
     all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
     all.extend(super::agents_tests::agents_actions().into_iter().map(Action::Agents));
+    let (scope, sel, one) = (crate::db::Scope::default(), crate::state::Sel::default(), || vec![mongodb::bson::doc! { "$match": { "a": 1 } }]);
+    let confirm = [
+        ConfirmA::DeleteMatching { tab: 1, scope: scope.clone() },
+        ConfirmA::DropIndex { tab: 1, name: "a_1".into() },
+        ConfirmA::Validator { tab: 1, cmd: mongodb::bson::doc! { "collMod": "c" } },
+        ConfirmA::RenameMany { tab: 1, scope: scope.clone(), from: "a".into(), to: "b".into() },
+        ConfirmA::UpdateMany { tab: 1, scope: scope.clone(), stages: one() },
+        ConfirmA::UpdatePreview { tab: 1, scope, stages: one() },
+        ConfirmA::Upsert { tab: 1, key: "_id".into() },
+        ConfirmA::AggWrite { tab: 1, pipeline: one() },
+        ConfirmA::Sync { conn: 1 },
+        ConfirmA::OpenGrouped { sel, pipeline: one() },
+    ];
+    all.extend(confirm.into_iter().map(Action::Confirm));
     all
 }
 
@@ -372,6 +387,16 @@ fn tab_and_docs_actions() -> Vec<Action> {
         TabA::Reopen,
         TabA::Nav { back: true },
         TabA::View { tab: 1, view: View::Indexes },
+        TabA::OpenTab { sel: sel.clone(), how: Open::NewTab },
+        TabA::Select { tab: 1 },
+        TabA::Focus { tab: 1 },
+        TabA::Reload { tab: 1 },
+        TabA::NewQuery { conn: 1, db: "shop".into(), schema: "public".into() },
+        TabA::Retry { tab: 1, view: View::Schema },
+        TabA::CloseTabs { tabs: vec![1, 2] },
+        TabA::DropAggRow,
+        TabA::ResetDoc,
+        TabA::Connected { conn: 1, sql: true },
     ];
     let k = [
         DocsA::Run { tab: 1 },
@@ -400,6 +425,11 @@ fn tab_and_docs_actions() -> Vec<Action> {
         DocsA::Delete { tab: 1, docs: d() },
         DocsA::Filter { tab: 1, docs: d() },
         DocsA::DeleteRun { at: sel, docs: d() },
+        DocsA::Step { tab: 1, agg: false, row: 2 },
+        DocsA::Escape,
+        DocsA::RunShell { tab: 1, text: "db.c.find({})".into() },
+        DocsA::RunPipeline { tab: 1, pipeline: vec![mongodb::bson::doc! { "$match": { "a": 1 } }] },
+        DocsA::WantValues { key: "1/shop/orders".into(), path: "status".into(), prefix: Some("pa".into()) },
     ];
     let mut all: Vec<Action> = t.into_iter().map(Action::Tab).collect();
     all.extend(k.into_iter().map(Action::Docs));
@@ -447,10 +477,10 @@ fn variant(a: &Action) -> String {
             WatchA::Start { .. } | WatchA::Stop { .. } | WatchA::Clear { .. } => {}
         },
         Action::Tools(t) => match t {
-            ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Stop | ToolsA::Close => {}
+            ToolsA::Install | ToolsA::Dump { .. } | ToolsA::Restore { .. } | ToolsA::Stop | ToolsA::Close => {}
         },
         Action::Conn(c) => match c {
-            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Save { .. } | ConnA::Test { .. } => {}
+            ConnA::Connect { .. } | ConnA::Disconnect { .. } | ConnA::Activate { .. } | ConnA::Unlock { .. } | ConnA::Lock { .. } | ConnA::Switch { .. } | ConnA::Remove { .. } | ConnA::DropWays | ConnA::ForgetTest | ConnA::Save { .. } | ConnA::Test { .. } => {}
             ConnA::Group(g) => match g {
                 GroupA::Toggle { .. } | GroupA::FoldAll | GroupA::Move { .. } | GroupA::New { .. } | GroupA::Rename { .. } | GroupA::Color { .. } | GroupA::ConnectAll { .. } | GroupA::DisconnectAll { .. } | GroupA::RailOpen { .. } | GroupA::Unfold { .. } | GroupA::Save { .. } | GroupA::Delete { .. } | GroupA::Drop(_) | GroupA::RailOrder { .. } => {}
             },
@@ -466,21 +496,21 @@ fn variant(a: &Action) -> String {
         },
         // `Pref::samples` lists each setting, from the same macro that declares them.
         Action::Prefs(p) => match p {
-            PrefsA::Open(_) | PrefsA::Cat(_) | PrefsA::Set(_) | PrefsA::Zoom(_) => {}
+            PrefsA::Open(_) | PrefsA::Cat(_) | PrefsA::Set(_) | PrefsA::Zoom(_) | PrefsA::RecentDb { .. } => {}
         },
         Action::Library(l) => match l {
-            LibA::CancelPending | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } | LibA::Save(_) | LibA::SaveLink { .. } | LibA::SnippetValues { .. } | LibA::SnippetDefault { .. } | LibA::MakeValue { .. } => {}
+            LibA::CancelPending | LibA::TreeKeys(_) | LibA::ConflictReload { .. } | LibA::ConflictKeep { .. } | LibA::ConflictCompare { .. } | LibA::Commit { .. } | LibA::Duplicate(_) | LibA::Move { .. } | LibA::MoveToNew(_) | LibA::Delete(_) | LibA::NewFolder(_) | LibA::Scope(_) | LibA::NewScript { .. } | LibA::NewDir { .. } | LibA::Reload(_) | LibA::Unlink(_) | LibA::ScriptToLink { .. } | LibA::MoveFile { .. } | LibA::FileToQuarry { .. } | LibA::Save(_) | LibA::SaveLink { .. } | LibA::SnippetValues { .. } | LibA::SnippetDefault { .. } | LibA::MakeValue { .. } => {}
         },
         Action::Sql(a) => super::sql_tests::sql_variant(a),
         Action::Structure(a) => super::sql_tests::struct_variant(a),
         Action::Tab(t) => match t {
-            TabA::Open { .. } | TabA::Pick { .. } | TabA::Close { .. } | TabA::CloseMany { .. } | TabA::Duplicate { .. } | TabA::Move { .. } | TabA::Reopen | TabA::Nav { .. } | TabA::View { .. } => {}
+            TabA::Open { .. } | TabA::Pick { .. } | TabA::Close { .. } | TabA::CloseMany { .. } | TabA::Duplicate { .. } | TabA::Move { .. } | TabA::Reopen | TabA::Nav { .. } | TabA::View { .. } | TabA::OpenTab { .. } | TabA::Select { .. } | TabA::Focus { .. } | TabA::NewQuery { .. } | TabA::Retry { .. } | TabA::Reload { .. } | TabA::CloseTabs { .. } | TabA::DropAggRow | TabA::ResetDoc | TabA::Connected { .. } => {}
         },
         Action::Docs(k) => match k {
             DocsA::Edit { act, .. } => match act {
                 EditA::Start { .. } | EditA::Commit | EditA::Expand | EditA::Cancel | EditA::Remove { .. } | EditA::AddField { .. } | EditA::CommitNew | EditA::EditDoc => {}
             },
-            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } => {}
+            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } | DocsA::Step { .. } | DocsA::Escape | DocsA::RunShell { .. } | DocsA::RunPipeline { .. } | DocsA::WantValues { .. } => {}
         },
         Action::Undo(u) => match u {
             UndoA::Apply { .. } => {}
@@ -499,6 +529,9 @@ fn variant(a: &Action) -> String {
         Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
         Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
         Action::Agents(a) => super::agents_tests::agents_variant(a),
+        Action::Confirm(c) => match c {
+            ConfirmA::DeleteMatching { .. } | ConfirmA::DropIndex { .. } | ConfirmA::Validator { .. } | ConfirmA::RenameMany { .. } | ConfirmA::UpdateMany { .. } | ConfirmA::UpdatePreview { .. } | ConfirmA::Upsert { .. } | ConfirmA::AggWrite { .. } | ConfirmA::Sync { .. } | ConfirmA::OpenGrouped { .. } => {}
+        },
     }
     d.split(|c: char| c == '(' || c == ' ' || c == '{').take(3).collect::<Vec<_>>().join(" ")
 }

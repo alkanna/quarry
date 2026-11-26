@@ -1,6 +1,7 @@
 //! Runs the destructive actions once their confirmation dialog is accepted.
 
 use super::*;
+use quarry_core::action::{ConfirmA, ToolsA};
 
 impl App {
     /// Ties a tab-scoped action to the current tab, so a tab switch before Confirm cannot redirect it.
@@ -15,34 +16,8 @@ impl App {
         if let Danger::At(sel, d) = action {
             return self.on_tab(&sel, |a| a.danger(*d));
         }
-        if let Danger::RemoveConnection(id) = action {
-            // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
-            if !self.core.ephemeral {
-                let _ = store_uri(id, "");
-                // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
-                for what in SECRETS {
-                    let _ = set_secret(id, what, "");
-                }
-                let _ = std::fs::remove_file(super::conn_icon::path(id));
-            }
-            self.core.conns.retain(|c| c.meta.id != id);
-            self.core.explain_prev.forget(id);
-            self.remove_tabs(|t| t.sel.conn == id);
-            if self.core.active == Some(id) {
-                self.core.active = self.core.conns.first().map(|c| c.meta.id);
-            }
-            self.save_conns();
-            // A removed connection must not linger in a group, where the panel and the rail would count it.
-            let alive = self.conn_ids();
-            if self.core.groups.prune(&alive) {
-                self.save_groups();
-            }
-            // Its agent access goes with it. Settings that failed their signature are left for the user to review,
-            // since saving here would sign them.
-            if self.core.agents.cfg.conns.remove(&id).is_some() && self.core.agents.distrust.is_none() {
-                self.save_agents();
-            }
-            return self.ok("Connection removed");
+        if let Danger::RemoveConnection(conn) = action {
+            return self.exec(Action::Conn(ConnA::Remove { conn }));
         }
         if let Danger::DeleteRows(sel, rows) = action {
             return self.on_tab(&sel, |a| a.sql_delete(rows));
@@ -75,47 +50,22 @@ impl App {
         if let Danger::DropCollAt { conn, db, coll } = action {
             return self.exec(Action::Side(SideA::DropColl { conn, db, coll }));
         }
-        let conn_specific = match &action {
-            Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
-            _ => None,
+        if let Danger::Sync { conn } = action {
+            return self.exec(Action::Confirm(ConfirmA::Sync { conn }));
+        }
+        if let Danger::Restore { conn, archive, from_db, coll, to_db, drop, gzip } = action {
+            return self.exec(Action::Tools(ToolsA::Restore { conn, archive, from_db, coll, to_db, drop, gzip }));
+        }
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let a = match action {
+            Danger::DeleteMatching(scope) => ConfirmA::DeleteMatching { tab, scope },
+            Danger::DropIndex(name) => ConfirmA::DropIndex { tab, name },
+            Danger::Validator(cmd) => ConfirmA::Validator { tab, cmd },
+            Danger::RenameMany { scope, from, to } => ConfirmA::RenameMany { tab, scope, from, to },
+            Danger::UpdateMany { scope, stages } => ConfirmA::UpdateMany { tab, scope, stages },
+            Danger::Upsert { key } => ConfirmA::Upsert { tab, key },
+            _ => unreachable!(),
         };
-        if let Some(conn) = conn_specific {
-            let Some(client) = self.conn(conn).filter(|c| c.writable).and_then(|c| c.client.clone()) else {
-                return self.modal = Some(Modal::Unlock(conn, None));
-            };
-            match action {
-                Danger::Sync { .. } => {
-                    let timeout = self.timeout();
-                    self.drop_agg_row();
-                    let c = &mut self.core.tabs[self.core.cur].compare;
-                    let r = c.result.take();
-                    c.set_result(None);
-                    let Some(r) = r else { return };
-                    let insert = if c.insert { r.only_src } else { Vec::new() };
-                    let replace = if c.replace { r.changed } else { Vec::new() };
-                    let delete = if c.delete { r.only_dst.iter().filter_map(|d| d.get("_id").cloned()).collect() } else { Vec::new() };
-                    self.core.worker.sync(Target { client, db: c.db.clone(), coll: c.coll.clone(), timeout }, insert, replace, delete);
-                    self.ok("Syncing… Run Compare again afterwards to check.");
-                }
-                Danger::Restore { args, .. } => self.start_tool(true, "Restore".into(), args),
-                _ => unreachable!(),
-            }
-            return;
-        }
-        let Some((conn, target)) = self.writable_target() else { return };
-        match action {
-            Danger::DeleteMatching(s) => self.core.worker.delete_many(target, s),
-            Danger::DropIndex(name) => self.core.worker.drop_index(target, name),
-            Danger::Validator(cmd) => self.core.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
-            Danger::RenameMany { scope, from, to } => self.core.worker.rename_many(target, scope, from, to),
-            Danger::UpdateMany { scope, stages } => self.core.worker.update_many(target, scope, stages),
-            Danger::Upsert { key } => {
-                let conn = self.t().unwrap().sel.conn;
-                if let Some(Ok(docs)) = self.core.tabs[self.core.cur].import.parsed.clone() {
-                    self.core.worker.import(conn, target, docs, Some(key));
-                }
-            }
-            Danger::At(..) | Danger::DropCollection | Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
-        }
+        self.exec(Action::Confirm(a));
     }
 }

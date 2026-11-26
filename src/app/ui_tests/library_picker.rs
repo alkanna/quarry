@@ -93,7 +93,7 @@ fn cmd_o_opens_the_picker_of_the_view() {
     ui.key(CMD, egui::Key::O);
     ui.show("Search library");
     ui.show("Script Late shipments");
-    assert!(!ui.app().core.lib_ui.open_picker);
+    assert!(!ui.app().ui.open_picker);
 }
 
 #[test]

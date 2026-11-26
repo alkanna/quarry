@@ -512,10 +512,6 @@ pub struct Tab {
     pub expanded: BTreeSet<(bool, usize)>,
     /// A SQL grid shows its selected row as a record under it, toggled by Tab.
     pub record: bool,
-    /// The Vim cursor's column in the grid, an index into the columns on screen.
-    pub vcol: usize,
-    /// The Vim cursor's line in the open record, kept apart so walking the record leaves the grid's cursor where it was.
-    pub vline: usize,
     pub agg_txt: String,
     pub agg_docs: Vec<db::Row>,
     pub agg_fields: Vec<String>,
@@ -996,8 +992,6 @@ impl Tab {
             shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
             record: false,
-            vcol: 0,
-            vline: 0,
             agg_txt: NEW_PIPELINE.into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
@@ -1042,7 +1036,7 @@ pub enum Danger {
     UpdateMany { scope: db::Scope, stages: Vec<Document> },
     Upsert { key: String },
     Sync { conn: u64 },
-    Restore { conn: u64, args: Vec<String> },
+    Restore { conn: u64, archive: String, from_db: String, coll: Option<String>, to_db: String, drop: bool, gzip: bool },
     Validator(Document),
     /// Rows of a SQL table, by key, with the table they were picked in.
     DeleteRows(Sel, Vec<Document>),

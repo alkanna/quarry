@@ -81,7 +81,7 @@ impl App {
         let rid = ui.scope_id().with(("sql-record", i));
         let key = docs.id(i);
         // The Vim cursor's line, scrolled into view after a Vim key moved it.
-        let cur = self.core.prefs.vim.then(|| self.t().map_or(0, |t| t.vline).min(names.len().saturating_sub(1)));
+        let cur = self.core.prefs.vim.then(|| self.vline().min(names.len().saturating_sub(1)));
         let scroll = cur.is_some() && std::mem::take(&mut self.vnav.scroll);
         self.vnav.lines = names.len();
         for (li, (c, col)) in names.iter().zip(&cols).enumerate() {
@@ -253,7 +253,8 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
             t.record = !t.record;
             // The record's cursor starts on the field of the grid's cursor.
-            t.vline = t.vcol;
+            let col = self.vcol();
+            self.set_vline(col);
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         }
     }

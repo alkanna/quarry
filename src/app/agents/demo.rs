@@ -22,10 +22,10 @@ impl App {
                 let product = if engine == db::sql::Engine::MySql { "MySQL" } else { "PostgreSQL" };
                 let mut c = Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine, ..Default::default() }, Status::Idle);
                 c.server.product = product.into();
-                self.core.conns.push(c);
+                self.core.setup().conns.push(c);
             }
         }
-        let cfg = &mut self.core.agents.cfg;
+        let cfg = &mut self.core.setup().agents.cfg;
         cfg.enabled = true;
         let local = ConnPolicy {
             access: Access::ReadWrite,
@@ -44,8 +44,8 @@ impl App {
             RuleSpec { mode: PresetMode::MaskOutput, ..rule(Matcher::FieldName("^card_".into()), &["shop.*"], Action::Mask(4)) },
         ];
         cfg.presets.pii.off = vec!["pii.ip".into()];
-        self.core.agents.link = LinkState::Listening;
-        self.core.agents.sessions = vec![AgentSession { id: 1, client: "Claude Code".into(), calls: 14 }];
+        self.core.setup().agents.link = LinkState::Listening;
+        self.core.setup().agents.sessions = vec![AgentSession { id: 1, client: "Claude Code".into(), calls: 14 }];
         let mut a = vec![
             act(1, "22:38:02", "list_connections", None, "", Outcome::Allowed, "3 shared"),
             act(2, "22:38:40", "describe", Some(1), "shop.orders", Outcome::Allowed, "24 fields from 1,000 documents"),
@@ -59,7 +59,7 @@ impl App {
         a[7].args = "{\n  \"connection\": \"1\",\n  \"database\": \"shop\",\n  \"collection\": \"orders\",\n  \"filter\": { \"status\": \"pending\", \"createdAt\": { \"$lt\": \"2026-10-01\" } },\n  \"update\": { \"$set\": { \"status\": \"expired\" } },\n  \"many\": true\n}".into();
         a[7].answer = "{ \"matched\": 412, \"modified\": 412 }".into();
         a[7].undo = Some(8);
-        self.core.agents.activity = a.into();
+        self.core.setup().agents.activity = a.into();
         let base = |id: u64, tool: &str, conn: u64, ns: &str, op: &str, code: &str| Ask {
             id,
             client: "Claude Code".into(),
@@ -92,26 +92,26 @@ impl App {
             }
             "rules" => {
                 self.agents_demo_settings();
-                self.core.agents.rules = Some(RulesWin::default());
+                self.core.setup().agents.rules = Some(RulesWin::default());
             }
             "activity" => {
-                self.core.agents.activity_open = true;
-                self.core.agents.picked = Some(8);
+                self.core.setup().agents.activity_open = true;
+                self.core.setup().agents.picked = Some(8);
             }
-            "approval" => self.core.agents.asks = vec![update()].into(),
+            "approval" => self.core.setup().agents.asks = vec![update()].into(),
             "approval-big" => {
                 let mut k = base(10, "delete", 1, "shop.orders", "DELETE MANY", "filter { status: \"cancelled\" }");
                 k.facts = vec!["Matches 4,812 documents, counted just now.".into()];
                 k.no_undo = Some(String::new());
                 k.why.session_ok = false;
                 k.reason = Some("Clean up cancelled orders before the migration.".into());
-                self.core.agents.asks = vec![k].into();
+                self.core.setup().agents.asks = vec![k].into();
             }
             "approval-shell" => {
                 let mut k = base(11, "run_shell", 1, "", "RUN SHELL", "const rows = await db.orders.find({ total: { $gt: 500 } })\n  .toArray();\nfor (const r of rows) print(r.customer, r.total);");
                 k.why = AskWhy { setting: false, always: true, unlock: true, session_ok: false, ..k.why };
                 k.reason = Some("List big orders to find the top customers.".into());
-                self.core.agents.asks = vec![k].into();
+                self.core.setup().agents.asks = vec![k].into();
             }
             "approval-locked" => {
                 let mut k = base(12, "sql_update_rows", 3, "shop.customers", "UPDATE ROWS", "set   { tier: \"gold\" }\nwhere { id: [1042, 1043, 1077] }");
@@ -120,18 +120,18 @@ impl App {
                 k.reason = Some("Promote the three customers you named.".into());
                 // Shown just now, so Allow is still asleep when the picture is taken.
                 k.shown = Some(Instant::now() + Duration::from_secs(60));
-                self.core.agents.asks = vec![k].into();
+                self.core.setup().agents.asks = vec![k].into();
             }
             "approval-gone" => {
                 let mut k = update();
                 k.gone = true;
-                self.core.agents.asks = vec![k].into();
+                self.core.setup().agents.asks = vec![k].into();
             }
             "queue" => {
                 let mut second = base(13, "insert", 1, "shop.orders", "INSERT", "[{ number: 10501, status: \"paid\" }]");
                 second.facts = vec!["1 document.".into()];
                 let third = base(14, "create_index", 1, "shop.orders", "CREATE INDEX", "{ createdAt: -1 }");
-                self.core.agents.asks = vec![update(), second, third].into();
+                self.core.setup().agents.asks = vec![update(), second, third].into();
             }
             // "pill" and anything else: the status bar pill over the documents.
             _ => {}
@@ -140,6 +140,6 @@ impl App {
 
     fn agents_demo_settings(&mut self) {
         self.modal = Some(Modal::Settings);
-        self.core.settings_cat = super::super::settings::SettingsCat::Agents;
+        self.core.setup().settings_cat = super::super::settings::SettingsCat::Agents;
     }
 }

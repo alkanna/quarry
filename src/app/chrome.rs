@@ -2,65 +2,12 @@
 
 use super::*;
 use crate::ui::dnd;
-use quarry_core::action::{Action, TabA};
+use quarry_core::action::sql::FilterA;
+use quarry_core::action::{Action, ConnA, DocsA, Pref, PrefsA, SqlA, TabA};
 use quarry_core::cmd::{KEY_ORDER, Layer, Scope};
 
 
 impl App {
-    /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
-    pub(super) fn remember_tabs(&mut self) {
-        if self.core.ephemeral || self.shot.is_some() {
-            return;
-        }
-        let tabs: Vec<SavedTab> = self
-            .core.tabs
-            .iter()
-            .map(|t| SavedTab {
-                conn: t.sel.conn,
-                db: t.sel.db.clone(),
-                schema: t.sel.schema.clone(),
-                coll: t.sel.coll.clone(),
-                view: match t.view {
-                    View::Documents => "Documents",
-                    View::Aggregate => "Aggregate",
-                    View::Indexes => "Indexes",
-                    View::Shell => "Shell",
-                    View::Schema => "Schema",
-                    View::Import => "Import",
-                    View::Compare => "Compare",
-                    View::Watch => "Watch",
-                    View::Structure => "Structure",
-                    View::Relations => "Relations",
-                    View::Triggers => "Triggers",
-                    View::Info => "Info",
-                    View::Sql => "Sql",
-                }
-                .into(),
-                filter: t.filter_txt.clone(),
-                sort: t.sort_txt.clone(),
-                project: t.proj_txt.clone(),
-                agg: t.agg_txt.clone(),
-                shell: t.shell.code.clone(),
-                attached: t.shell.attached.clone(),
-                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&crate::app::sql::bar::Clauses { tree: s.bar.tree_json.clone(), ..s.bar.c.clone() }).ok()).unwrap_or_default(),
-                query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
-                run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
-                run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
-                stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
-                agg_text_mode: t.agg_text_mode,
-                script: t.script.as_ref().map(|b| b.r.clone()),
-            })
-            .collect();
-        let open: Vec<u64> = self.core.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
-        if tabs != self.core.prefs.open_tabs || self.core.cur != self.core.prefs.cur_tab || self.core.active != self.core.prefs.last_conn || open != self.core.prefs.open_conns {
-            self.core.prefs.open_tabs = tabs;
-            self.core.prefs.cur_tab = self.core.cur;
-            self.core.prefs.last_conn = self.core.active;
-            self.core.prefs.open_conns = open;
-            self.save_prefs();
-        }
-    }
-
     /// What is over the page: Core's windows, or the app's modal. Each takes its own keys, Esc included, so page
     /// shortcuts stay off while one is open; a new kind of window belongs in `quarry_core::cmd::WINDOWS`.
     pub(super) fn layer(&self) -> Layer {
@@ -108,26 +55,23 @@ impl App {
                 let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
                 (agg, row, go)
             });
+            let tab = self.t().map(|t| t.uid).unwrap_or_default();
             if let Some((agg, row, go)) = nav {
-                if let Some(i) = row {
-                    // The open card moves with the keys instead of leaving the previous one open.
-                    if let Some(prev) = self.t().and_then(|t| t.selected) {
-                        self.tm().unwrap().expanded.remove(&prev);
-                    }
-                    self.select(agg, i, false);
-                    self.core.scroll_sel = true;
+                if let Some(row) = row {
+                    self.exec(Action::Docs(DocsA::Step { tab, agg, row }));
+                    self.ui.scroll_sel = true;
                 }
-                if let Some(p) = go {
-                    self.tm().unwrap().page = p;
-                    self.reload();
+                if let Some(page) = go {
+                    self.exec(Action::Docs(DocsA::Page { tab, page }));
                 }
             }
             // The Query grid keeps its own selection, so the arrows move that one.
-            if (up || down) && let Some(s) = self.tm().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_mut()).filter(|s| !s.text_mode) {
+            if (up || down) && let Some(s) = self.t().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_ref()).filter(|s| !s.text_mode) {
                 let len = s.cur_set().map_or(0, |x| x.rows.len());
                 if len > 0 {
-                    s.qsel = Some(step(s.qsel, down, len));
-                    self.core.scroll_sel = true;
+                    let row = step(s.qsel, down, len);
+                    self.exec(Action::Sql(SqlA::SelectRow { tab, row }));
+                    self.ui.scroll_sel = true;
                 }
             }
         }
@@ -135,41 +79,19 @@ impl App {
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
             return;
         }
-        // The calendar of a date closes before the editor under it.
-        if let Some(i) = &mut self.core.inline && let Some(o) = i.pick.take() {
-            i.text = o;
-            return;
-        }
-        if self.core.inline.take().is_some() || self.core.new_field.take().is_some() {
-            return;
-        }
-        if let Some(t) = self.tm() {
-            // A SQL row's record closes before the row is let go.
-            if t.record && t.record_row() {
-                t.record = false;
-                return;
-            }
-            if t.view == View::Sql && let Some(s) = &mut t.sql && s.qsel.take().is_some() {
-                return;
-            }
-            if let Some(key) = t.selected {
-                return self.close_row(key);
-            }
-            if !t.expanded.is_empty() {
-                t.expanded.clear();
-                return;
-            }
-        }
-        self.core.tree_filter.clear();
+        self.exec(Action::Docs(DocsA::Escape));
     }
 
     /// The Documents view's query: rules mode opens the filter panel, SQL mode focuses its WHERE field, and Mongo its query.
     pub(super) fn focus_query(&mut self, ctx: &egui::Context) {
-        let d = self.sql_dialect();
-        match self.tm().and_then(|t| t.sql.as_mut()) {
-            Some(s) if !s.bar.c.sql => {
-                let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-                sql::filter_panel::open_filters(&mut s.bar, ctx, &cols, d);
+        let sql = self.t().and_then(|t| t.sql.as_ref().map(|s| (t.uid, s.bar.c.sql, s.bar.panel.open)));
+        match sql {
+            Some((tab, false, was_open)) => {
+                self.exec(Action::Sql(SqlA::Filter { tab, a: FilterA::Open }));
+                // Opening the panel folds it out, which lives in egui's memory.
+                if !was_open {
+                    sql::filter_panel::start_fold(ctx, true);
+                }
             }
             Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
             None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),
@@ -232,11 +154,11 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            let win = self.core.win_buttons;
+            let win = self.ui.win_buttons;
             ui.horizontal_centered(|ui| {
                 if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), glyphs::sidebar, "Toggle sidebar", "Show or hide the sidebar").clicked() {
-                    self.core.prefs.sidebar_hidden = !self.core.prefs.sidebar_hidden;
-                    self.save_prefs();
+                    let hidden = self.core.prefs.sidebar_hidden;
+                    self.exec(Action::Prefs(PrefsA::Set(Pref::SidebarHidden(!hidden))));
                 }
                 ui.add_space(4.0);
                 app_mark(ui);
@@ -250,7 +172,6 @@ impl App {
                     if win {
                         ui.add_space(window_buttons::BUTTONS_W - 4.0);
                     }
-                    self.core.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
                     let n = self.core.undo.len();
                     let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
                     if quiet_enabled(ui, n > 0, undo).on_hover_text("Recent writes you can take back").clicked() {
@@ -272,13 +193,13 @@ impl App {
 
     /// Refreshes the memory and CPU readouts once a second, and asks for the repaint that shows them.
     fn sample_usage(&mut self, ctx: &egui::Context) {
-        let (at, cpu_then, pct, _) = self.core.usage;
+        let (at, cpu_then, pct, _) = self.ui.usage;
         let wall = at.elapsed();
         if wall >= Duration::from_secs(1) || cpu_then.is_zero() {
             let (mem, cpu_now) = process_usage();
             // A sample older than 2 s is from before the readouts were hidden, so it only starts a new second.
             let pct = if cpu_then.is_zero() || wall > Duration::from_secs(2) { pct } else { cpu_now.saturating_sub(cpu_then).as_secs_f32() / wall.as_secs_f32() * 100.0 };
-            self.core.usage = (std::time::Instant::now(), cpu_now, pct, mem);
+            self.ui.usage = (std::time::Instant::now(), cpu_now, pct, mem);
         }
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -308,7 +229,7 @@ impl App {
                     // rate when an input event lands just after a vsync. Idle gaps are left out, but
                     // not the Shell's 100 ms repaints while a script runs.
                     let dt = ui.input(|i| i.unstable_dt);
-                    let (sum, n, shown) = &mut self.core.fps;
+                    let (sum, n, shown) = &mut self.ui.fps;
                     if dt < 0.25 {
                         *sum += dt;
                         *n += 1;
@@ -317,13 +238,13 @@ impl App {
                         *shown = *n as f32 / sum.max(0.000_1);
                         (*sum, *n) = (0.0, 0);
                     }
-                    let rate = self.core.fps.2.max(1.0);
-                    let color = if self.core.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
-                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.core.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                    let rate = self.ui.fps.2.max(1.0);
+                    let color = if self.ui.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
+                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.ui.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
                 }
                 if self.core.prefs.show_mem || self.core.prefs.show_cpu {
                     self.sample_usage(ui.ctx());
-                    let (_, _, cpu, mem) = self.core.usage;
+                    let (_, _, cpu, mem) = self.ui.usage;
                     if self.core.prefs.show_mem {
                         let text = mem.map_or("mem n/a".into(), |b| format!("mem {:>9}", human_bytes(b as usize)));
                         // Built only while hovered: it walks every row of every tab.
@@ -337,8 +258,8 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.agents_pill(ui);
                     let log = RichText::new("Query log").size(TXT_CAPTION);
-                    if quiet(ui, if self.core.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
-                        self.core.log.open = !self.core.log.open;
+                    if quiet(ui, if self.ui.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                        self.ui.log.open = !self.ui.log.open;
                     }
                     let connected = self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
                     let tip = if connected { "Server status" } else { "Server status (connect first)" };
@@ -423,8 +344,8 @@ impl App {
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
-        let moved = self.core.tab_seen != Some(self.core.cur);
-        self.core.tab_seen = Some(self.core.cur);
+        let moved = self.ui.tab_seen != Some(self.core.cur);
+        self.ui.tab_seen = Some(self.core.cur);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // egui's own edge fades, opaque, show there are more tabs now that the scrollbar is hidden.
@@ -575,7 +496,7 @@ impl App {
         }
         if pick.is_some() {
             // Scroll even when the picked tab was already active but scrolled out of view.
-            self.core.tab_seen = None;
+            self.ui.tab_seen = None;
         }
         if reopen {
             return self.exec(Action::Tab(TabA::Reopen));
@@ -615,8 +536,7 @@ impl App {
     }
 
     pub(super) fn new_conn_modal(&mut self) {
-        self.core.conn_test = None;
-        self.core.test_info = None;
+        self.exec(Action::Conn(ConnA::ForgetTest));
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }
 }

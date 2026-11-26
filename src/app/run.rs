@@ -2,12 +2,14 @@
 //! code snippets of a query open here.
 
 use super::*;
+use quarry_core::action::{Action, DocsA};
 pub(super) use quarry_core::state::run::{bar_filled, find_query, query_dirty};
 
 impl App {
     pub(super) fn run_query(&mut self) {
-        self.core.run_query();
-        self.run_fx();
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Docs(DocsA::Run { tab }));
+        }
     }
 
     /// Opens the current query or pipeline as a snippet for one language.
@@ -34,12 +36,14 @@ impl App {
     }
 
     pub(super) fn run_shell(&mut self, text: &str) {
-        self.core.run_shell(text);
-        self.run_fx();
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Docs(DocsA::RunShell { tab, text: text.to_string() }));
+        }
     }
 
-    pub(super) fn run_pipeline(&mut self, p: Vec<Document>) {
-        self.core.run_pipeline(p);
-        self.run_fx();
+    pub(super) fn run_pipeline(&mut self, pipeline: Vec<Document>) {
+        if let Some(tab) = self.t().map(|t| t.uid) {
+            self.exec(Action::Docs(DocsA::RunPipeline { tab, pipeline }));
+        }
     }
 }

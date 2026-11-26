@@ -43,10 +43,6 @@ pub struct LibUi {
 
     /// Tabs, by uid, that Run opened instead of running because their script can write: they show "This script writes".
     pub writes: HashSet<u64>,
-    /// Cmd+O asked for the current view's picker; the picker button opens it when it draws and `pick_acts` clears it.
-    pub open_picker: bool,
-    /// Cmd+Shift+L asked for the tree: the panel selects its first row if none is selected and takes the keys.
-    pub focus_tree: bool,
     /// The values each snippet last ran with, by script id, offered first the next time. Not saved.
     pub snippet_values: HashMap<u64, HashMap<String, String>>,
 }

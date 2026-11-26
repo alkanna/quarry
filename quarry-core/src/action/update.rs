@@ -154,7 +154,7 @@ impl Core {
             Upd::Checking { manual: false } => self.upd = Upd::Checking { manual: true },
             _ => {}
         }
-        self.upd_popup = true;
+        self.ui_fx.push(UiFx::UpdPopup);
     }
 
     pub fn start_download(&mut self, info: crate::update::Available) {

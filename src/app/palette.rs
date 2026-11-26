@@ -8,6 +8,7 @@ const PAL_W: f32 = 640.0;
 pub(in crate::app) const LIST_MAX_H: f32 = 440.0;
 
 pub(super) use quarry_core::cmd::{MONGO_VIEWS, SQL_VIEWS};
+use quarry_core::action::{ConnA, DocsA, GroupA, TabA};
 use quarry_core::cmd::{Cmd, Pal};
 
 #[derive(Clone)]
@@ -281,11 +282,8 @@ impl App {
             Cmd::CloseTab => self.ask_close_tab(self.core.cur),
             Cmd::NewQuery => {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                    self.sql_new_query(s.conn, s.db);
                     // The new tab starts in the schema of the one it was opened from, not the sidebar's.
-                    if !s.schema.is_empty() && let Some(t) = self.tm() {
-                        t.sel.schema = s.schema;
-                    }
+                    self.exec(Action::Tab(TabA::NewQuery { conn: s.conn, db: s.db, schema: s.schema }));
                 }
             }
             Cmd::FindQuery if tabs => {
@@ -304,24 +302,29 @@ impl App {
             }
             Cmd::SaveToLibrary => self.save_script(),
             Cmd::SaveAs => self.save_script_as(),
-            Cmd::OpenPicker => self.core.lib_ui.open_picker = true,
+            Cmd::OpenPicker => self.ui.open_picker = true,
             Cmd::ShowLibrary => self.focus_library(),
             Cmd::LinkFolder => self.open_link_dialog(None),
             Cmd::NewGroup => {
-                let id = self.core.groups.new_group("New group");
-                self.save_groups();
-                self.edit_group(id);
+                self.exec(Action::Conn(ConnA::Group(GroupA::New { name: "New group".into() })));
+                if let Some(id) = self.core.groups.groups.last().map(|g| g.id) {
+                    self.edit_group(id);
+                }
             }
             Cmd::NewConn => self.new_conn_modal(),
             Cmd::NewTab => self.open_new_tab(),
             Cmd::Palette => self.open_palette(),
             Cmd::CloudSql => self.open_cloud_browser(false),
             Cmd::Undo => self.modal = Some(Modal::Undo),
-            Cmd::Log => self.core.log.open = !self.core.log.open,
+            Cmd::Log => self.ui.log.open = !self.ui.log.open,
             Cmd::Settings => self.modal = Some(Modal::Settings),
             Cmd::Shortcuts => self.shortcuts_modal(),
             Cmd::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
-            Cmd::Insert if tabs => self.core.insert = Some("{\n  \n}".into()),
+            Cmd::Insert if tabs => {
+                if let Some(tab) = self.t().map(|t| t.uid) {
+                    self.exec(Action::Docs(DocsA::Insert { tab }));
+                }
+            }
             Cmd::Export if tabs => self.export(),
             Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset => self.zoom(c, ctx),
             Cmd::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),

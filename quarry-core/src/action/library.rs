@@ -30,6 +30,8 @@ type Meta = Option<(SystemTime, u64)>;
 pub enum LibA {
     /// The toast's Cancel on a script waiting for its connection.
     CancelPending,
+    /// Keys act on the library tree after a row was clicked, and stop doing so when something else takes the keyboard.
+    TreeKeys(bool),
     /// The conflict banner of the tab with this uid: take the file's text, keep the tab's, or compare them.
     ConflictReload { tab: u64 },
     ConflictKeep { tab: u64 },
@@ -75,6 +77,7 @@ impl Core {
     pub(super) fn library_act(&mut self, a: LibA) -> Result<Reply, Refusal> {
         match a {
             LibA::CancelPending => self.lib_ui.pending = None,
+            LibA::TreeKeys(on) => self.lib_ui.panel.focus = on,
             LibA::ConflictReload { tab } => self.conflict_reload(tab),
             LibA::ConflictKeep { tab } => self.conflict_keep(tab),
             LibA::ConflictCompare { tab } => self.conflict_compare(tab),

@@ -9,6 +9,39 @@ pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 /// The core's dialogs, carrying the app closure an unlock reruns.
 pub(crate) type Modal = quarry_core::state::Modal<Retry>;
 
+/// What only drawing cares about: it lives in the app, not in Core, so a frame can change it without an action.
+pub(crate) struct UiState {
+    /// Scroll the selected document row into view on its next draw, after keyboard selection.
+    pub scroll_sel: bool,
+    /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
+    pub tab_seen: Option<usize>,
+    /// Whether the header draws the window buttons: on Windows once the native title bar is gone, and in the demo's
+    /// QUARRY_TEST_WINFRAME switch.
+    pub win_buttons: bool,
+    /// CPU time of the last frame in milliseconds, for the frame rate readout.
+    pub frame_ms: f32,
+    /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
+    pub usage: (std::time::Instant, Duration, f32, Option<u64>),
+    /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
+    pub fps: (f32, u32, f32),
+    /// Opens the error list on its first frame, for the demo picture.
+    pub errors_open: bool,
+    /// Opens the update popover on the next frame, after a check started from the menu or the palette.
+    pub upd_popup: bool,
+    /// The query log panel: open, detached, its filter and the errors-only switch.
+    pub log: LogUi,
+    /// Cmd+O asked for the quick picker of the view; the view that draws one clears it.
+    pub open_picker: bool,
+    /// Cmd+Shift+L asked for the library tree: the panel selects its first row if none is selected and takes the keys.
+    pub lib_focus_tree: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false }
+    }
+}
+
 impl App {
     pub(super) fn ok(&mut self, s: impl Into<String>) {
         self.core.ok(s)
@@ -20,10 +53,6 @@ impl App {
 
     pub(super) fn t(&self) -> Option<&Tab> {
         self.core.tabs.get(self.core.cur)
-    }
-
-    pub(super) fn tm(&mut self) -> Option<&mut Tab> {
-        self.core.tm()
     }
 
     pub(super) fn sel_is_view(&self) -> bool {

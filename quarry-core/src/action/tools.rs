@@ -1,6 +1,6 @@
 //! mongodump and mongorestore: finding, installing and running them (src/app/tools.rs draws the dialogs).
 
-use super::{Reply, Refusal, RefusalKind};
+use super::{Dialog, Reply, Refusal, RefusalKind, UiFx};
 use crate::core::Core;
 use crate::db::{self, Msg};
 use crate::paths::tools_dir;
@@ -15,6 +15,8 @@ pub enum ToolsA {
     Install,
     /// mongodump of database `db`, or only its collection `coll`, to the archive at `path`.
     Dump { conn: u64, db: String, coll: Option<String>, path: String, gzip: bool },
+    /// mongorestore of `from_db` (only `coll` when set) from the archive at `archive` into `to_db`, after its confirmation.
+    Restore { conn: u64, archive: String, from_db: String, coll: Option<String>, to_db: String, drop: bool, gzip: bool },
     /// Stop the running tool.
     Stop,
     /// Close the finished tool's window.
@@ -55,6 +57,21 @@ impl Core {
                     None => db.clone(),
                 };
                 self.start_tool(false, format!("Dump {name}"), db::dump_args(&uri, &db, coll.as_deref(), &path, gzip))?;
+            }
+            ToolsA::Restore { conn, archive, from_db, coll, to_db, drop, gzip } => {
+                if !self.conn(conn).is_some_and(|c| c.writable && c.client.is_some()) {
+                    self.ui_fx.push(UiFx::Open(Dialog::Unlock(conn)));
+                    return Ok(Reply::Done);
+                }
+                let uri = match stored_uri(conn) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let msg = uri_err(e);
+                        self.err(msg.clone());
+                        return Err(Refusal { kind: RefusalKind::Invalid, msg });
+                    }
+                };
+                self.start_tool(true, "Restore".into(), db::restore_args(&uri, &archive, &from_db, coll.as_deref(), &to_db, drop, gzip))?;
             }
             ToolsA::Stop => {
                 if let Some(c) = self.tool.as_mut().and_then(|t| t.cancel.take()) {

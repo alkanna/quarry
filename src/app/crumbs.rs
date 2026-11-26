@@ -1,6 +1,7 @@
 //! The title bar's path: connection, database and table as crumbs, the connection's tag and the write lock chip.
 
 use super::*;
+use quarry_core::action::{PrefsA, SqlA};
 
 /// The faint second line of a tab. The connection comes first so a narrow tab cuts the database, and two tabs on the
 /// same table of different connections never read alike.
@@ -174,10 +175,8 @@ impl App {
     /// any other view reveals it in the explorer.
     fn pick_crumb_db(&mut self, conn: u64, db: String) {
         // A jump opens no tab, so opening one is not what records the database as recent.
-        if self.core.prefs.note_recent_db(conn, &db) {
-            self.save_prefs();
-        }
-        let Some(free) = self.t().filter(|t| t.view == View::Sql && (t.sel.coll.is_empty() || t.sql.is_some())).map(|t| t.sel.coll.is_empty()) else {
+        self.exec(Action::Prefs(PrefsA::RecentDb { conn, db: db.clone() }));
+        let Some(tab) = self.t().filter(|t| t.view == View::Sql && (t.sel.coll.is_empty() || t.sql.is_some())).map(|t| t.uid) else {
             return self.jump(Jump::Db(conn, db), Open::Here);
         };
         // Another PostgreSQL database has its own schemas, so the tab moves to the one its sidebar shows.
@@ -185,35 +184,14 @@ impl App {
         if self.is_pg(conn) && !self.core.sql_asked.contains(&(conn, db.clone())) {
             self.pg_ask_schemas(conn, &db);
         }
-        let Some(t) = self.tm() else { return };
-        let own = db == t.sel.db;
-        if free {
-            (t.sel.db, t.sel.schema) = (db, schema);
-            // The tab's own database and schema are now the whole target, so a run target left by a script goes.
-            if let Some(q) = t.sql.as_mut() {
-                (q.run_db, q.run_schema) = (String::new(), String::new());
-            }
-        } else if let Some(q) = t.sql.as_mut() {
-            // A table's Query view keeps its table and only runs elsewhere. Its own database runs in the table's schema.
-            q.run_schema = if own { String::new() } else { schema };
-            q.run_db = db;
-        }
+        self.exec(Action::Sql(SqlA::CrumbDb { tab, db, schema }));
     }
 
     /// A schema picked in the crumb of a PostgreSQL Query view. Its tables load for the editor's suggestions.
     fn pick_crumb_schema(&mut self, conn: u64, run: &str, schema: String) {
         self.pg_load_tables(conn, run, &schema);
-        let Some(t) = self.tm() else { return };
-        let free = t.sel.coll.is_empty();
-        let Some(q) = t.sql.as_mut() else { return };
-        // A run target in another database is where the statements run, so the tab's own schema would not reach them.
-        if free && (q.run_db.is_empty() || q.run_db == t.sel.db) {
-            // A schema left from a script or a saved tab would win over the pick.
-            q.run_schema.clear();
-            t.sel.schema = schema;
-        } else {
-            q.run_schema = schema;
-        }
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Sql(SqlA::CrumbSchema { tab, schema }));
     }
 }
 

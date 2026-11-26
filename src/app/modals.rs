@@ -2,13 +2,14 @@
 //! Larger dialogs live with their feature and are called from here.
 
 use super::*;
-use quarry_core::action::{Action, DocsA, ShellA};
+use quarry_core::action::{Action, ConfirmA, ConnA, DocsA, ShellA};
+use quarry_core::core::TextRef;
 
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
         self.value_dialog(ctx);
         let into = self.t().map(|t| format!("into {}", t.sel.ns())).unwrap_or_default();
-        if let Some(text) = &mut self.core.insert {
+        if let Some(text) = self.core.text_mut(TextRef::Insert) {
             let mut close = false;
             let mut submit = false;
             let r = banded(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
@@ -244,11 +245,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run it").clicked() {
-                            if let Some((_, target)) = self.writable_target() {
-                                self.core.req += 1;
-                                let req = self.core.req;
-                                self.tm().unwrap().agg_req = req;
-                                self.core.worker.aggregate(req, target, p.clone());
+                            if let Some(tab) = self.t().map(|t| t.uid) {
+                                self.exec(Action::Confirm(ConfirmA::AggWrite { tab, pipeline: p.clone() }));
                             }
                             keep = false;
                         }
@@ -336,8 +334,7 @@ impl App {
             super::sql::pg_roles::forget_pg_secrets(ctx, &m);
         } else if matches!(m, Modal::Conn(_)) {
             // A Test still running when the form closes must not show in the next form.
-            self.core.conn_test = None;
-            self.core.test_info = None;
+            self.exec(Action::Conn(ConnA::ForgetTest));
         }
     }
 
@@ -525,15 +522,7 @@ impl App {
             // Values counted from pipeline or script results have no pipeline to reopen.
             // A SQL table has no pipeline to open.
             if !sql && ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
-                let mut t = Tab::new(sel.clone());
-                t.view = View::Aggregate;
-                t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
-                // Next to the current tab, like the original's nextToActive.
-                let at = (self.core.cur + 1).min(self.core.tabs.len());
-                self.core.tabs.insert(at, t);
-                self.set_cur(at);
-                self.reset_doc_state();
-                self.run_pipeline(pipeline.to_vec());
+                self.exec(Action::Confirm(ConfirmA::OpenGrouped { sel: sel.clone(), pipeline: pipeline.to_vec() }));
                 *keep = false;
             }
             if ui.button("Close").on_hover_text("Esc").clicked() {
@@ -645,8 +634,8 @@ impl App {
                 });
                 *keep = false;
             }
-            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(t)) = (&stages, self.target()) {
-                self.core.worker.update_preview(t, scope.clone(), st.clone());
+            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(tab)) = (&stages, self.t().map(|t| t.uid)) {
+                self.exec(Action::Confirm(ConfirmA::UpdatePreview { tab, scope: scope.clone(), stages: st.clone() }));
             }
             if ui.button("Cancel").clicked() {
                 *keep = false;

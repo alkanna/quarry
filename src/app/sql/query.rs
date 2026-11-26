@@ -1098,8 +1098,8 @@ impl App {
                 // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
                 let filter = sets[sel].kind == "SELECT" && sets[sel].stmt.len() < 20_000 && db::sql::source::single_table(&sets[sel].stmt, dialect).is_some();
                 let vim = self.core.prefs.vim && !record_open;
-                let cursor = self.core.prefs.vim.then_some((self.core.tabs[cur].vcol, record_open));
-                let scroll = std::mem::take(&mut self.core.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
+                let cursor = self.core.prefs.vim.then_some((self.vcol(), record_open));
+                let scroll = std::mem::take(&mut self.ui.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
                 self.vnav.page = (ui.available_height() / ROW_H) as usize;
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
@@ -1109,10 +1109,10 @@ impl App {
                 }
                 // The record walks every column, the grid only those shown.
                 let shown = if record_open { &names } else { &out.shown };
-                let at = if record_open { self.core.tabs[cur].vline } else { self.core.tabs[cur].vcol };
+                let at = if record_open { self.vline() } else { self.vcol() };
                 let vim_act = self.vim_cell_act(ui.ctx(), qsel, at, shown, Rows::Raw(&sets[sel].rows));
                 if let Some(c) = out.col {
-                    self.core.tabs[cur].vcol = c;
+                    self.set_vcol(c);
                 }
                 let Some(s) = self.core.tabs[cur].sql.as_mut() else { return };
                 (s.sets, s.qchecked) = (sets, checked);

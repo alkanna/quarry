@@ -150,10 +150,9 @@ impl App {
                 if f.restore {
                     match stored_uri(f.conn) {
                         Err(e) => self.err(uri_err(e)),
-                        Ok(uri) => {
-                            let args = db::restore_args(&uri, path, f.from_db.trim(), coll, &f.db, f.drop, f.gzip);
+                        Ok(_) => {
                             let what = if f.drop { "Existing collections with the same names are dropped first. " } else { "" };
-                            self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, args } });
+                            self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, archive: path.to_string(), from_db: f.from_db.trim().to_string(), coll: coll.map(str::to_string), to_db: f.db.clone(), drop: f.drop, gzip: f.gzip } });
                             *keep = false;
                         }
                     }

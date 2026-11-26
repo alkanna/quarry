@@ -134,7 +134,7 @@ impl App {
         let bound = self.t().and_then(|t| t.script.as_ref().filter(|b| b.view == t.view).map(|b| (b.r.clone(), super::linked::bound_text(t).is_some_and(|x| x != b.base))));
         let bound = bound.map(|(r, edited)| (self.chip_text(&r), edited));
         if !picker_open(ctx) {
-            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), linked: Vec::new(), sidebar: panel::READY, open: self.core.lib_ui.open_picker, bound };
+            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), linked: Vec::new(), sidebar: panel::READY, open: self.ui.open_picker, bound };
         }
         let mut rows = Vec::new();
         let mut index = std::collections::HashMap::new();
@@ -194,7 +194,7 @@ impl App {
                 folders.push(PickFolder { id, depth, name, count, own: own.remove(&id).unwrap_or_default() });
             }
         }
-        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.core.lib_ui.open_picker, bound }
+        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.ui.open_picker, bound }
     }
 
     /// The chip of a bound tab: "monthly-revenue.sql  ·  shop-queries / reports", the script and where it is kept.
@@ -218,7 +218,7 @@ impl App {
     /// Does what the picker asked for.
     pub(in crate::app) fn pick_acts(&mut self, acts: Vec<PickAct>) {
         // The view drew its picker this frame, so a Cmd+O for it has been seen.
-        self.core.lib_ui.open_picker = false;
+        self.ui.open_picker = false;
         for a in acts {
             match a {
                 PickAct::Open(r, how) => self.open_script(&r, how),
