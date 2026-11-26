@@ -39,7 +39,7 @@ fn a_rename_waits_for_staged_changes_in_a_tab_on_the_table() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     {
         let app = ui.h.state_mut();
-        let s = app.core.tabs[0].sql.as_mut().expect("the orders tab");
+        let s = app.core.test_mut().tabs[0].sql.as_mut().expect("the orders tab");
         s.st.staged.push(db::sql::ddl::Change::Drop("note".into()));
     }
     right_click_row(&mut ui, "orders");

@@ -39,7 +39,7 @@ fn wait_listed(ui: &mut UiApp, rx: &mpsc::Receiver<Result<(), String>>, tag: &st
     loop {
         if asked.elapsed() > Duration::from_millis(500) {
             asked = std::time::Instant::now();
-            if let Some(s) = ui.h.state_mut().core.pg_server.as_mut() {
+            if let Some(s) = ui.h.state_mut().core.test_mut().pg_server.as_mut() {
                 s.refresh_now();
             }
         }

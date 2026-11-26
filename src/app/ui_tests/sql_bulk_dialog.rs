@@ -122,7 +122,7 @@ fn cancel_closes_the_dialog_without_acting() {
 #[test]
 fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     let Some(mut ui) = demo() else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.h.state_mut().open_bulk(false);
     assert!(!matches!(ui.app().modal, Some(Modal::SqlBulk(_))), "the offline demo has no server to count on");
     assert!(ui.app().core.status.contains("Offline demo"), "nothing says why nothing opened: {}", ui.app().core.status);
@@ -130,7 +130,7 @@ fn opening_it_is_refused_on_grouped_rows_and_asks_to_unlock_when_locked() {
     ui.h.state_mut().open_bulk(true);
     assert!(matches!(ui.app().modal, Some(Modal::Unlock(..))), "a locked connection did not ask to unlock");
     let Some(mut ui) = demo() else { return };
-    ui.h.state_mut().core.tabs[0].sql.as_mut().expect("the orders tab").matched = Some(148);
+    ui.h.state_mut().core.test_mut().tabs[0].sql.as_mut().expect("the orders tab").matched = Some(148);
     ui.h.state_mut().open_bulk(false);
     assert!(ui.app().modal.is_none(), "grouped rows opened the dialog");
     assert!(ui.app().last_problem().contains("Grouped rows are summaries"), "no notice says why: {}", ui.app().last_problem());

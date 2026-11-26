@@ -4,11 +4,11 @@ use super::*;
 
 fn shell(a: &mut App) {
     a.load_demo();
-    a.core.prefs.vim = true;
-    let t = &mut a.core.tabs[1];
+    a.core.test_mut().prefs.vim = true;
+    let t = &mut a.core.test_mut().tabs[1];
     t.view = View::Shell;
     t.shell.code = "let a = foo;".into();
-    a.core.cur = 1;
+    a.core.test_mut().cur = 1;
 }
 
 fn code(ui: &UiApp) -> String {
@@ -42,7 +42,7 @@ fn vim_keys_edit_the_shell_and_esc_leaves_insert_before_the_editor() {
 fn with_vim_off_the_shell_types_as_before() {
     let Some(mut ui) = demo_ui(|a| {
         shell(a);
-        a.core.prefs.vim = false;
+        a.core.test_mut().prefs.vim = false;
     }) else {
         return;
     };
@@ -67,10 +67,10 @@ fn esc_into_normal_mode_closes_the_suggestions() {
     ui.mouse_hold("Shell editor", 0);
     ui.type_text("A");
     ui.type_text(" orders.");
-    assert!(ui.app().core.ac.id.is_some() && !ui.app().core.ac.items.is_empty(), "typing orders. opened no suggestions");
+    assert!(ui.app().ui.ac.id.is_some() && !ui.app().ui.ac.items.is_empty(), "typing orders. opened no suggestions");
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
-    assert!(ui.app().core.ac.id.is_none() || ui.app().core.ac.items.is_empty(), "the suggestions stayed open in Normal mode");
+    assert!(ui.app().ui.ac.id.is_none() || ui.app().ui.ac.items.is_empty(), "the suggestions stayed open in Normal mode");
     assert!(ui.h.ctx.memory(|m| m.focused().is_some()), "Esc with suggestions open left the editor");
 }
 
@@ -107,13 +107,13 @@ fn ctrl_r_redoes_only_where_ctrl_is_not_the_command_key() {
 fn a_vim_edit_counts_as_an_edit_of_the_stage() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
-        a.core.prefs.vim = true;
-        let t = &mut a.core.tabs[1];
+        a.core.test_mut().prefs.vim = true;
+        let t = &mut a.core.test_mut().tabs[1];
         t.view = View::Aggregate;
         t.stages = vec![Stage::new("$sort", "{ a: 1 }", true)];
         t.agg_txt = text_from_stages(&t.stages);
         t.stages_src = t.agg_txt.clone();
-        a.core.cur = 1;
+        a.core.test_mut().cur = 1;
     }) else {
         return;
     };
@@ -126,7 +126,7 @@ fn a_vim_edit_counts_as_an_edit_of_the_stage() {
 
 fn sql_vim(a: &mut App) {
     a.load_sql_demo();
-    a.core.prefs.vim = true;
+    a.core.test_mut().prefs.vim = true;
 }
 
 fn sel(ui: &UiApp) -> Option<usize> {
@@ -247,7 +247,7 @@ fn ctrl_k_focuses_the_views_editor_and_ctrl_j_leaves_it() {
 fn ctrl_k_focuses_the_mongo_query() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
-        a.core.prefs.vim = true;
+        a.core.test_mut().prefs.vim = true;
     }) else {
         return;
     };
@@ -291,10 +291,12 @@ fn the_query_record_opens_on_the_pinned_column_the_grid_cursor_is_on() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
         a.sql_query_demo();
-        a.core.prefs.vim = true;
-        let s = a.tm().and_then(|t| t.sql.as_mut()).unwrap();
+        a.core.test_mut().prefs.vim = true;
+        let cur = a.core.cur;
+        let uid = a.uid_of(cur).unwrap();
+        let s = a.core.tabs[cur].sql.as_ref().unwrap();
         let keys = crate::app::sql::query::result_keys(&s.sets[0].cols);
-        s.qprefs.insert(keys, ColPrefs { pinned: vec!["email".into()], ..Default::default() });
+        a.ui.qprefs.entry(uid).or_default().insert(keys, ColPrefs { pinned: vec!["email".into()], ..Default::default() });
     }) else {
         return;
     };

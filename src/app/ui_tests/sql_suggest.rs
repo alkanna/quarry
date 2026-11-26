@@ -11,9 +11,9 @@ fn query_editor() -> Option<UiApp> {
     })?;
     let app = ui.h.state_mut();
     // Already in memory, so the editor never asks the worker, which has no server here.
-    app.core.sql_schema_asked.insert((3, "shop".into()));
+    app.core.test_mut().sql_schema_asked.insert((3, "shop".into()));
     let cur = app.core.cur;
-    if let Some(s) = app.core.tabs[cur].sql.as_mut() {
+    if let Some(s) = app.core.test_mut().tabs[cur].sql.as_mut() {
         (s.query, s.caret) = (String::new(), 0);
     }
     ui.h.ctx.memory_mut(|m| m.request_focus(App::sql_editor_id(cur)));
@@ -22,7 +22,7 @@ fn query_editor() -> Option<UiApp> {
 }
 
 fn listed(ui: &UiApp) -> Vec<String> {
-    ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.bar.ac.items.iter().map(|x| x.text.clone()).collect()).unwrap_or_default()
+    ui.app().t().and_then(|t| ui.app().ui.sql_ac.get(&t.uid)).map(|ac| ac.items.iter().map(|x| x.text.clone()).collect()).unwrap_or_default()
 }
 
 #[test]

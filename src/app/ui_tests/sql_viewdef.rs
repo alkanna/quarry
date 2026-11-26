@@ -62,7 +62,7 @@ fn query_with(script: &str, at: usize) -> Option<UiApp> {
     })?;
     let app = ui.h.state_mut();
     let cur = app.core.cur;
-    if let Some(s) = app.core.tabs[cur].sql.as_mut() {
+    if let Some(s) = app.core.test_mut().tabs[cur].sql.as_mut() {
         s.query = script.into();
         s.caret = at;
     }

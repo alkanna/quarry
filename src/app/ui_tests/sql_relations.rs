@@ -168,7 +168,7 @@ fn a_locked_connection_asks_to_unlock_before_a_relation_is_applied() {
         point_at(ui, &parent, "id");
         see(ui, "Every existing row has a match");
         // locked while the dialog is open: Apply now still works and asks
-        ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.h.run_steps(2);
         assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now is disabled on a locked connection");
         apply_now(ui);

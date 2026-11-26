@@ -381,7 +381,7 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
         // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection. An edit clears the check too.
         let put = |ui: &mut UiApp, s: &str| {
-            let e = ui.h.state_mut().core.sql_cell.as_mut().unwrap();
+            let e = ui.h.state_mut().core.test_mut().sql_cell.as_mut().unwrap();
             (e.text, e.json_err) = (s.into(), None);
         };
         put(ui, "{\"a\": ");
@@ -457,14 +457,14 @@ fn set_null_in_the_dialog_writes_null() {
 fn the_side_panel_follows_the_double_clicked_cell() {
     every_engine("the side panel follows the cell", |fx, ui| {
         let t = open_unlocked(fx, ui);
-        ui.h.state_mut().core.prefs.value_panel = true;
+        ui.h.state_mut().core.test_mut().prefs.value_panel = true;
         ui.open_cell("name", 1);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
         ui.wait("the panel", |a| a.value_in_panel());
         assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");
         ui.double_click_cell("name", 3);
         ui.wait("the panel to load row 3", |a| a.value_in_panel() && a.core.sql_cell.as_ref().is_some_and(|e| e.text == "gamma"));
-        ui.h.state_mut().core.sql_cell.as_mut().unwrap().focus = true;
+        ui.h.state_mut().core.test_mut().sql_cell.as_mut().unwrap().focus = true;
         ui.settle();
         apply_in_editor(ui, "omega");
         ui.save();
@@ -476,7 +476,7 @@ fn the_side_panel_follows_the_double_clicked_cell() {
 fn the_side_panel_keeps_text_not_applied_yet() {
     every_engine("the side panel keeps unapplied text", |fx, ui| {
         let t = open_unlocked(fx, ui);
-        ui.h.state_mut().core.prefs.value_panel = true;
+        ui.h.state_mut().core.test_mut().prefs.value_panel = true;
         ui.open_cell("name", 1);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
         ui.wait("the panel", |a| a.value_in_panel());

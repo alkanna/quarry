@@ -21,7 +21,7 @@ fn animated(load: fn(&mut App)) -> Option<UiApp> {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
     h.ctx.all_styles_mut(|s| s.animation_time = 0.2);
     let app = h.state_mut();
-    app.core.demo = true;
+    app.core.test_mut().demo = true;
     load(app);
     let mut ui = UiApp { h };
     ui.h.run_steps(10);
@@ -91,9 +91,9 @@ fn a_group_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_there() {
 #[test]
 fn a_library_folder_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_there() {
     let Some(mut ui) = animated(|a| {
-        a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
         a.demo_library("panel");
-        a.core.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else {
         return;
     };
@@ -126,14 +126,14 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     let Some(mut ui) = animated(|a| {
         a.load_demo();
         for (id, name) in [(5, "alpha"), (6, "beta"), (7, "gamma")] {
-            a.core.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+            a.core.test_mut().conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
         }
-        let gid = a.core.groups.new_group("Fleet");
+        let gid = a.core.test_mut().groups.new_group("Fleet");
         let all = a.conn_ids();
-        a.core.groups.place(6, Place::Into(gid, None), &all);
-        a.core.groups.place(7, Place::Into(gid, None), &all);
+        a.core.test_mut().groups.place(6, Place::Into(gid, None), &all);
+        a.core.test_mut().groups.place(7, Place::Into(gid, None), &all);
         // The folder first, so a tile sits right below it.
-        a.core.rail_order = vec![6, 7, 5];
+        a.core.test_mut().rail_order = vec![6, 7, 5];
     }) else {
         return;
     };
@@ -195,14 +195,14 @@ fn a_press_made_while_a_group_folds_still_clicks_when_let_go_after_it_settled() 
 #[test]
 fn a_folder_of_thousands_of_scripts_draws_only_the_rows_in_view_while_it_moves() {
     let Some(mut ui) = animated(|a| {
-        a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
         a.demo_library("panel");
-        a.core.library.folders.push(crate::library::Folder { id: 5, name: "Bulk".into(), parent: None });
+        a.core.test_mut().library.folders.push(crate::library::Folder { id: 5, name: "Bulk".into(), parent: None });
         for i in 0..3000u64 {
-            a.core.library.scripts.push(crate::library::Script { id: 1000 + i, name: format!("bulk-{i:04}"), kind: "sql".into(), conn: 3, folder: Some(5), ..Default::default() });
+            a.core.test_mut().library.scripts.push(crate::library::Script { id: 1000 + i, name: format!("bulk-{i:04}"), kind: "sql".into(), conn: 3, folder: Some(5), ..Default::default() });
         }
-        a.core.lib_ui.panel.open.insert(Node::Folder(5));
-        a.core.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.open.insert(Node::Folder(5));
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else {
         return;
     };

@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 fn shell_demo() -> Option<UiApp> {
     demo_ui(|a| {
         a.load_demo();
-        a.core.cur = 1;
-        a.core.tabs[1].view = View::Shell;
+        a.core.test_mut().cur = 1;
+        a.core.test_mut().tabs[1].view = View::Shell;
     })
 }
 
 /// Marks the demo tab's script as running since `at`, with a cancel channel Stop can fire.
 fn running_since(ui: &mut UiApp, at: Instant) {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let sh = &mut ui.h.state_mut().core.tabs[1].shell;
+    let sh = &mut ui.h.state_mut().core.test_mut().tabs[1].shell;
     (sh.cancel, sh.started) = (Some(tx), Some(at));
     ui.h.run_steps(2);
 }

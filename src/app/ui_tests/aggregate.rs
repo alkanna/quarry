@@ -4,12 +4,12 @@ use super::*;
 
 fn three_stages(a: &mut App) {
     a.load_demo();
-    let t = &mut a.core.tabs[1];
+    let t = &mut a.core.test_mut().tabs[1];
     t.view = View::Aggregate;
     t.stages = vec![Stage::new("$match", "{ a: 1 }", true), Stage::new("$group", "{ _id: '$a' }", true), Stage::new("$sort", "{ _id: 1 }", true)];
     t.agg_txt = text_from_stages(&t.stages);
     t.stages_src = t.agg_txt.clone();
-    a.core.cur = 1;
+    a.core.test_mut().cur = 1;
 }
 
 fn ops(ui: &UiApp) -> Vec<String> {

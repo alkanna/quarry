@@ -88,7 +88,7 @@ fn an_edit_previews_what_it_sends_and_refuses_what_cannot_save() {
     assert!(ui.disabled("Save routine"));
 
     replace(&mut ui, "Routine definition", "CREATE FUNCTION add_tax(amount DECIMAL(10,2), rate DECIMAL(4,2)) RETURNS decimal(10,2) DETERMINISTIC RETURN amount * rate");
-    ui.h.state_mut().core.status.clear();
+    ui.h.state_mut().core.test_mut().status.clear();
     ui.click("Save routine");
     assert!(ui.said("Offline demo"), "Save did not reach the demo's stop: {}", ui.app().last_problem());
     ui.click("Revert");
@@ -105,7 +105,7 @@ fn dropping_needs_the_exact_name_typed() {
     assert!(ui.disabled("Drop"), "the name is case sensitive");
     replace(&mut ui, "Confirmation", "add_tax");
     assert!(!ui.disabled("Drop"), "Drop stays off with the exact name typed");
-    ui.h.state_mut().core.status.clear();
+    ui.h.state_mut().core.test_mut().status.clear();
     ui.click("Drop");
     assert!(ui.said("Offline demo"), "Drop did not reach the demo's stop: {}", ui.app().last_problem());
 }

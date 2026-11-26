@@ -38,7 +38,7 @@ fn a_selected_row_follows_its_row_through_a_sort() {
     let Some(mut ui) = query_demo() else { return };
     let cur = ui.app().core.cur;
     // Ada, the first row, goes to the end of an ascending sort on orders.
-    if let Some(s) = ui.h.state_mut().core.tabs[cur].sql.as_mut() {
+    if let Some(s) = ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut() {
         s.qsel = Some(0);
         s.qchecked.insert(0);
     }
@@ -63,8 +63,9 @@ fn hidden_columns_can_be_shown_again_and_a_pinned_one_comes_first() {
     ui.click("Result column spent");
     ui.click("Pin to the left");
     ui.settle();
+    let uid = ui.app().t().expect("a tab").uid;
     let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("a SQL tab");
     let names: Vec<String> = s.sets[0].cols.iter().map(|c| c.name.clone()).collect();
-    let shown = crate::app::table::visible_cols(s.qprefs.get(&names), &names, usize::MAX);
+    let shown = crate::app::table::visible_cols(ui.app().ui.qprefs.get(&uid).and_then(|m| m.get(&names)), &names, usize::MAX);
     assert_eq!(shown.first().map(String::as_str), Some("spent"));
 }

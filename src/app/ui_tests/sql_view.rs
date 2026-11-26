@@ -18,7 +18,8 @@ fn a_json_value_opens_in_full_laid_out() {
 /// Row 2's note set to `note`, as if the table held it.
 pub(super) fn set_note(ui: &mut UiApp, note: &str) {
     let app = ui.h.state_mut();
-    let t = &mut app.core.tabs[app.core.cur];
+    let cur = app.core.cur;
+    let t = &mut app.core.test_mut().tabs[cur];
     let mut d = Rows::Raw(&t.docs).owned(1).expect("row 2");
     d.insert("note", note);
     t.docs[1] = db::Row::from_doc(&d).unwrap();
@@ -151,8 +152,8 @@ fn query_headers_with_one_name_twice_reorder_without_losing_a_column() {
         a.load_sql_demo();
         a.sql_query_demo();
         // A join returns two columns of one name.
-        if let Some(s) = a.core.tabs.last_mut().and_then(|t| t.sql.as_mut()) {
-            s.sets[0].cols[1].name = "name".into();
+        if let Some(s) = a.core.test_mut().tabs.last_mut().and_then(|t| t.sql.as_mut()) {
+            std::sync::Arc::make_mut(&mut s.sets[0]).cols[1].name = "name".into();
         }
     }) else { return };
     ui.show("Result row 1");

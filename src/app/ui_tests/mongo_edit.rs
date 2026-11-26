@@ -130,7 +130,7 @@ impl UiApp {
 
     /// Closes Recent changes once the undo has answered. Its toast goes first, since an error toast stays and has a Close of its own.
     pub(super) fn close_recent_changes(&mut self) {
-        self.h.state_mut().core.toasts.clear();
+        self.h.state_mut().core.test_mut().toasts.clear();
         self.settle();
         self.click("Close");
         self.wait("Recent changes to close", |a| a.modal.is_none());
@@ -395,7 +395,7 @@ fn a_long_string_opens_the_side_panel_directly() {
     let Some(f) = Fixture::new("panel", vec![doc! { "_id": 1, "note": &long }]) else { return };
     let mut ui = open(&f);
     ui.unlock();
-    ui.h.state_mut().core.prefs.value_panel = true;
+    ui.h.state_mut().core.test_mut().prefs.value_panel = true;
     ui.double_click_cell("note", 1);
     ui.wait("the panel", |a| a.core.inline.is_none() && a.value_in_panel());
     assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");

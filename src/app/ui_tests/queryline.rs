@@ -34,7 +34,7 @@ fn sql_text_typed_without_enter_is_edited() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
     let cur = app.core.cur;
-    app.core.tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = true;
+    app.core.test_mut().tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = true;
     ui.h.run_steps(3);
     assert!(!dirty(&ui), "an untouched SQL bar is out of date");
     focus(&mut ui, "SQL-WHERE");

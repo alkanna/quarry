@@ -5,7 +5,7 @@ use super::*;
 
 fn locks_window(a: &mut App) {
     a.load_sql_demo();
-    a.core.sql_server = Some(SqlServerWin::demo(3, "processes"));
+    a.core.test_mut().sql_server = Some(SqlServerWin::demo(3, "processes"));
 }
 
 #[test]

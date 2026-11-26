@@ -16,7 +16,7 @@ fn format_keeps_a_dollar_quoted_body_and_undo_restores_the_text() {
         let (db, _) = fx.place();
         ui.h.state_mut().side_act(CONN, SideAct::NewQuery(db.to_string()));
         ui.wait("the Query tab", |a| a.t().is_some_and(|t| t.sql.is_some()));
-        ui.h.state_mut().core.tabs.iter_mut().filter_map(|t| t.sql.as_mut()).for_each(|s| s.query = SRC.into());
+        ui.h.state_mut().core.test_mut().tabs.iter_mut().filter_map(|t| t.sql.as_mut()).for_each(|s| s.query = SRC.into());
         ui.settle();
         ui.click("Format");
         let new = ui.query_text();

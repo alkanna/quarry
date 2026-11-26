@@ -12,7 +12,7 @@ fn query_demo() -> Option<UiApp> {
 #[test]
 fn a_gutter_marker_runs_its_statement() {
     let Some(mut ui) = query_demo() else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.click("Run statement 3 from the gutter");
     assert!(ui.said("Offline demo"), "the gutter marker did not reach the run path: {}", ui.app().last_problem());
 }
@@ -23,7 +23,7 @@ fn stop_replaces_run_statement_only_while_a_run_is_in_flight() {
     ui.show("Choose what to run");
     assert!(ui.h.query_all_by_label("Stop").next().is_none(), "Stop shows with nothing running");
     let cur = ui.app().core.cur;
-    if let Some(s) = ui.h.state_mut().core.tabs[cur].sql.as_mut() {
+    if let Some(s) = ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut() {
         s.run_req = u64::MAX;
     }
     ui.settle();
@@ -67,7 +67,7 @@ fn lint_of_the_statement_under_the_caret_shows_in_the_footer() {
     assert!(!ui.shows("doesn't exist"), "another statement's mark showed in the footer");
     let cur = ui.app().core.cur;
     let at = ui.query_text().find("SELECT").unwrap() + 3;
-    if let Some(s) = ui.h.state_mut().core.tabs[cur].sql.as_mut() {
+    if let Some(s) = ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut() {
         s.caret = at;
     }
     ui.settle();

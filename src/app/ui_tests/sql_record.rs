@@ -143,7 +143,7 @@ fn the_run_tip_lists_every_statement_of_the_script() {
 fn tab_leaves_the_record_closed_while_the_result_shows_as_text() {
     let Some(mut ui) = query_with_editor_focused() else { return };
     let cur = ui.app().core.cur;
-    if let Some(s) = ui.h.state_mut().core.tabs[cur].sql.as_mut() {
+    if let Some(s) = ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut() {
         (s.qsel, s.text_mode) = (Some(1), true);
     }
     ui.h.ctx.memory_mut(|m| m.surrender_focus(App::sql_editor_id(cur)));

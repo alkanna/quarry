@@ -157,7 +157,7 @@ fn a_drop_that_slips_past_the_dialog_on_a_locked_connection_is_refused_by_the_wo
         ui.quiet();
         assert!(!ui.app().conn(CONN).unwrap().writable);
         let sql = ui.app().core.pg_session(CONN).expect("a session");
-        ui.h.state_mut().core.pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
+        ui.h.state_mut().core.test_mut().pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
         ui.wait("the refusal", |a| !a.core.errors.is_empty());
         assert!(table_exists(fx, &table), "the worker dropped a table on a locked connection");
     });
@@ -274,7 +274,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         // A Query tab with text that was never run, and another session of someone else, which makes the server refuse the drop.
         ui.h.state_mut().side_act(CONN, SideAct::NewQuery(db.clone()));
         ui.wait("the Query tab", |a| a.core.tabs.iter().any(|t| t.sel.db == db));
-        ui.h.state_mut().core.tabs.iter_mut().filter(|t| t.sel.db == db).for_each(|t| {
+        ui.h.state_mut().core.test_mut().tabs.iter_mut().filter(|t| t.sel.db == db).for_each(|t| {
             if let Some(s) = t.sql.as_mut() {
                 s.query = "select 'unsaved work'".into();
             }

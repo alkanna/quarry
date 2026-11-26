@@ -25,7 +25,7 @@ fn pg_shell(unlock: bool) -> Option<(Fx, UiApp, String)> {
     ui.quiet();
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].view = View::Shell;
+    a.core.test_mut().tabs[c].view = View::Shell;
     ui.settle();
     ui.show("Shell editor");
     Some((fx, ui, table))
@@ -40,7 +40,7 @@ fn shell(a: &App) -> &ShellTab {
 fn run(ui: &mut UiApp, code: &str) {
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].shell.code = code.into();
+    a.core.test_mut().tabs[c].shell.code = code.into();
     let before = shell(ui.app()).req;
     ui.click("Run");
     if matches!(ui.app().modal, Some(Modal::ShellWrite { .. })) {
@@ -145,13 +145,13 @@ fn shell_fix_disconnect_stops_the_scripts_of_tabs_that_attached_it() {
     let Some((fx, mut ui, t)) = pg_shell(true) else { return };
     let uri = std::env::var(PG).unwrap();
     let a = ui.h.state_mut();
-    a.core.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: 2, name: "other".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Idle) });
-    a.core.rail_order.push(2);
+    a.core.test_mut().conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: 2, name: "other".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Idle) });
+    a.core.test_mut().rail_order.push(2);
     ui.connect(2, &uri);
     ui.assert_ready(2);
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].shell.attached.push(crate::app::shell_attach::Attached { conn: 2, db: "quarry_test".into(), name: "other".into(), allow_writes: false, schema: "public".into(), tables: Vec::new() });
+    a.core.test_mut().tabs[c].shell.attached.push(crate::app::shell_attach::Attached { conn: 2, db: "quarry_test".into(), name: "other".into(), allow_writes: false, schema: "public".into(), tables: Vec::new() });
     // The writes go through the tab's own connection, which stays open, so only the stop on Disconnect can end them.
     run(&mut ui, &looping(&t, "sql", "await other.sql`SELECT 1`;"));
     wait_writing(&mut ui, &fx, &t);
@@ -211,8 +211,8 @@ fn shell_fix_a_mongo_run_is_refused_after_disconnect() {
     ui.quiet();
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].view = View::Shell;
-    a.core.tabs[c].shell.code = "async function run() { return 1; }".into();
+    a.core.test_mut().tabs[c].view = View::Shell;
+    a.core.test_mut().tabs[c].shell.code = "async function run() { return 1; }".into();
     disconnect(&mut ui, CONN, "test");
     ui.click("Run");
     let sh = shell(ui.app());

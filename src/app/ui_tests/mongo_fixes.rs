@@ -72,7 +72,8 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
     ui.open_table(DB, "", &f.names[0]);
     ui.unlock();
     let a = ui.h.state_mut();
-    a.tm().unwrap().proj_txt = "{ name: 1 }".into();
+    let cur = a.core.cur;
+    a.core.test_mut().tabs[cur].proj_txt = "{ name: 1 }".into();
     a.run_query();
     ui.wait("the projected rows", |a| a.t().is_some_and(|t| !t.loading && t.query.projection.is_some() && t.docs.len() == 3));
     let refused = "only the projected fields";
@@ -89,7 +90,7 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
     ui.settle();
 
     // Delete opens no dialog. Toasts are cleared between steps, since a second warning with the same title replaces the first.
-    ui.h.state_mut().core.toasts.clear();
+    ui.h.state_mut().core.test_mut().toasts.clear();
     ui.click("Select row 1");
     ui.click("Delete…");
     assert!(!matches!(ui.app().modal, Some(Modal::Delete(..))), "Delete opened its dialog on projected rows");
@@ -97,7 +98,7 @@ fn projected_rows_refuse_edits_duplicates_and_deletes() {
 
     // Duplicate opens no insert editor, which would hold only the projected fields. The document open under its row has a
     // Duplicate of its own; the selection bar floats above it, so its button is the last one.
-    ui.h.state_mut().core.toasts.clear();
+    ui.h.state_mut().core.test_mut().toasts.clear();
     ui.click_last("Duplicate");
     assert!(ui.app().core.insert.is_none(), "Duplicate opened the insert editor on a projected row");
     assert!(ui.said(refused), "no warning for Duplicate: {}", ui.app().last_problem());
@@ -113,10 +114,11 @@ fn a_count_past_the_time_limit_still_shows_the_page() {
     let Some(f) = Fixture::new("slowcount", docs) else { return };
     let mut ui = ui_app(VAR).unwrap();
     // Set once connected, since the query timeout also bounds the connect.
-    ui.h.state_mut().core.prefs.timeout_ms = 1500;
+    ui.h.state_mut().core.test_mut().prefs.timeout_ms = 1500;
     ui.open_table(DB, "", &f.names[0]);
     let a = ui.h.state_mut();
-    a.tm().unwrap().filter_txt = r#"{ $expr: { $function: { body: "function(id) { if (id < 60) return true; var end = Date.now() + 10; while (Date.now() < end) {} return true; }", args: ["$_id"], lang: "js" } } }"#.into();
+    let cur = a.core.cur;
+    a.core.test_mut().tabs[cur].filter_txt = r#"{ $expr: { $function: { body: "function(id) { if (id < 60) return true; var end = Date.now() + 10; while (Date.now() < end) {} return true; }", args: ["$_id"], lang: "js" } } }"#.into();
     a.run_query();
     let size = ui.app().page_size();
     ui.wait("the slow filter's page", |a| a.t().is_some_and(|t| !t.loading && t.query.filter.contains_key("$expr")));
@@ -180,7 +182,9 @@ fn duplicate_tab_keeps_a_typed_filter_marked_unrun() {
     let coll = f.names[0].clone();
     let mut ui = ui_app(VAR).unwrap();
     ui.open_table(DB, "", &coll);
-    ui.h.state_mut().tm().unwrap().filter_txt = "{ qty: 2 }".into();
+    let a = ui.h.state_mut();
+    let cur = a.core.cur;
+    a.core.test_mut().tabs[cur].filter_txt = "{ qty: 2 }".into();
     ui.settle();
     assert!(crate::app::run::query_dirty(ui.app().t().unwrap()));
     ui.h.get_by_label(&format!("Tab {coll}")).click_secondary();
@@ -202,13 +206,15 @@ fn a_pasted_query_for_another_collection_keeps_that_tabs_work() {
     // The second tab holds a query of its own.
     go_tab(&mut ui, &b);
     let app = ui.h.state_mut();
-    app.tm().unwrap().filter_txt = "{ qty: 2 }".into();
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].filter_txt = "{ qty: 2 }".into();
     app.run_query();
     ui.wait("the second tab's filtered rows", |x| x.t().is_some_and(|t| !t.loading && t.docs.len() == 1));
     go_tab(&mut ui, &a);
     let pasted = format!("db.{b}.find({{ qty: 3 }})");
     let app = ui.h.state_mut();
-    app.tm().unwrap().filter_txt = pasted.clone();
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].filter_txt = pasted.clone();
     app.run_query();
     ui.wait("the pasted query in a tab", |x| x.t().is_some_and(|t| t.sel.coll == b && t.filter_txt == pasted && !t.loading && t.docs.len() == 1));
     let tabs = &ui.app().core.tabs;
@@ -253,7 +259,7 @@ fn a_reconnect_locks_writes_again() {
     ui.click("Stay read-only");
     assert!(ui.app().core.inline.is_none() && ui.app().core.drafts.is_empty());
     // Always allow writes turns them back on after a reconnect.
-    ui.h.state_mut().core.prefs.always_writable = true;
+    ui.h.state_mut().core.test_mut().prefs.always_writable = true;
     ui.connect(CONN, &uri);
     ui.assert_ready(CONN);
     ui.settle();

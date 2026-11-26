@@ -108,7 +108,7 @@ fn query_with(script: &str) -> Option<UiApp> {
     })?;
     let app = ui.h.state_mut();
     let cur = app.core.cur;
-    if let Some(s) = app.core.tabs[cur].sql.as_mut() {
+    if let Some(s) = app.core.test_mut().tabs[cur].sql.as_mut() {
         s.query = script.into();
         s.caret = 0;
     }
@@ -125,21 +125,21 @@ fn reached_server_call(ui: &UiApp) -> bool {
 fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     // The Content view: the bar's button and the shortcut explain the SELECT of the last page.
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.click("Run options");
     ui.click("Explain");
     assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
     assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Content view");
     // The Query view: the button and the shortcut explain the statement under the caret.
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.click("Explain");
     assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
     assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Query view");
 }
@@ -179,7 +179,7 @@ fn analyze_columns_compare_the_estimate_with_what_ran() {
 #[test]
 fn a_fix_opens_as_a_draft_and_nothing_runs() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SPILL) else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     // The title is on the card and in the panel; the card is the first.
     ui.click_nth("Sort spilled to disk", 0);
     let before = ui.app().core.tabs.len();
@@ -196,7 +196,7 @@ fn a_fix_opens_as_a_draft_and_nothing_runs() {
 fn pick_db(ui: &mut UiApp, database: &str) {
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].sql.as_mut().unwrap().run_db = database.into();
+    a.core.test_mut().tabs[c].sql.as_mut().unwrap().run_db = database.into();
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn a_draft_runs_in_the_database_the_plan_was_made_in() {
     pick_db(&mut ui, "billing");
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, PG_SPILL);
     ui.settle();
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     let schema = explain_state(&ui).schema.clone();
     ui.click_nth("Sort spilled to disk", 0);
     ui.click("Open in Query tab");
@@ -276,7 +276,7 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     // Plans of a connection that closed are forgotten.
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
     let conn = ui.app().t().map(|t| t.sel.conn).unwrap();
-    ui.h.state_mut().core.drop_session(conn);
+    ui.h.state_mut().core.test_mut().drop_session(conn);
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
     ui.settle();
     ui.show("Flame");
@@ -357,7 +357,7 @@ fn a_filtered_full_scan_shows_its_candidate_index_and_the_evidence() {
 #[test]
 fn the_candidate_index_opens_as_a_draft_and_nothing_runs() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.show("CANDIDATE INDEX");
     let before = ui.app().core.tabs.len();
     ui.click("Open in Query tab");
@@ -394,7 +394,7 @@ fn trial(plan: &str) -> crate::db::sql::pg::hypo::Trial {
 #[test]
 fn the_hypopg_trial_is_off_in_the_demo_and_says_why() {
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.show("CANDIDATE INDEX");
     assert!(ui.disabled("Try it (nothing is created)"), "the trial is offered in the offline demo");
     assert!(ui.shows("The offline demo has no server to try the index on."), "the reason the trial is off is not given");
@@ -488,7 +488,7 @@ fn a_filter_that_defeats_an_index_shows_it_rewritten_and_drafts_the_statement() 
     ui.show("REWRITTEN FILTER");
     assert!(ui.shows("Same rows, and o_created_at_idx can serve it."), "the rewrite does not say why it helps");
     assert!(ui.shows("Fix: Rewritten filter"), "the finding card does not name its fix");
-    ui.h.state_mut().core.status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     let before = ui.app().core.tabs.len();
     ui.click("Open in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");

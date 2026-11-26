@@ -119,7 +119,7 @@ fn a_locked_connection_asks_to_unlock_before_applying() {
         stage_new_column(ui, "extra");
         assert_eq!(ui.app().staged().len(), 1);
         // locked again with a change staged: Apply asks, and staying read-only runs nothing
-        ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.click("Apply");
         ui.show("Stay read-only");
         ui.click("Stay read-only");
@@ -159,7 +159,7 @@ fn apply_now_on_a_connection_locked_after_the_dialog_opened_asks_to_unlock() {
         ui.click("+ Column");
         replace(ui, "Column name", "extra");
         // locked while the dialog is open: the button must still work, and ask, as the Apply bar does
-        ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.h.run_steps(2);
         assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now is disabled on a locked connection");
         ui.click("Apply now");

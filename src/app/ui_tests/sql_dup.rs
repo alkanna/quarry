@@ -8,7 +8,7 @@ fn dup_toast(ui: &mut UiApp, raw: &str) -> Sel {
     let app = ui.h.state_mut();
     let sel = app.core.tabs[app.core.cur].sel.clone();
     let e = app.log_err(raw, Some(sel.conn), Some(sel.clone()), "Content".into(), "");
-    app.core.err_toast(e);
+    app.core.test_mut().err_toast(e);
     ui.settle();
     sel
 }

@@ -10,7 +10,8 @@ fn my_structure() -> Option<UiApp> {
     demo_ui(|a| {
         a.load_sql_demo();
         a.sql_structure_demo("structure");
-        a.core.tabs[0].sql.as_mut().expect("the orders tab").st.sel = [None; 6];
+        let uid = a.core.tabs[0].uid;
+        a.ui.struct_sel.insert(uid, [None; 6]);
     })
 }
 
@@ -19,13 +20,14 @@ fn pg_structure() -> Option<UiApp> {
     demo_ui(|a| {
         a.load_pg_demo();
         a.pg_structure_demo("structure");
-        a.core.tabs[0].sql.as_mut().expect("the orders tab").st.sel = [None; 6];
+        let uid = a.core.tabs[0].uid;
+        a.ui.struct_sel.insert(uid, [None; 6]);
     })
 }
 
 /// Changes the structure the tab holds, as if the server had read it so.
 fn touch(ui: &mut UiApp, f: impl FnOnce(&mut db::sql::structure::Structure)) {
-    f(ui.h.state_mut().core.tabs[0].sql.as_mut().and_then(|s| s.st.data.as_mut()).expect("the structure"));
+    f(ui.h.state_mut().core.test_mut().tabs[0].sql.as_mut().and_then(|s| s.st.data.as_mut()).expect("the structure"));
     ui.settle();
 }
 
@@ -48,7 +50,7 @@ fn the_checks_of_the_table_are_listed_in_their_section() {
     ui.show("checks row 1");
     ui.show("checks row 2");
     assert!(!ui.shows("This table has no CHECK constraints."), "a table with checks says it has none");
-    ui.h.state_mut().core.tabs[0].sql.as_mut().and_then(|s| s.st.data.as_mut()).expect("the structure").checks.clear();
+    ui.h.state_mut().core.test_mut().tabs[0].sql.as_mut().and_then(|s| s.st.data.as_mut()).expect("the structure").checks.clear();
     ui.settle();
     ui.show("This table has no CHECK constraints.");
     assert!(ui.h.query_by_label("checks row 1").is_none(), "a row is drawn for a check that is gone");

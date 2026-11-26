@@ -10,7 +10,7 @@ fn approval_over_settings(a: &mut App) {
     a.load_demo();
     a.agents_demo_view("approval");
     a.modal = Some(Modal::Settings);
-    a.core.settings_cat = settings::SettingsCat::Agents;
+    a.core.test_mut().settings_cat = settings::SettingsCat::Agents;
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn approval_stacks_over_settings_and_takes_no_enter() {
     assert_eq!(ui.app().core.agents.asks.len(), 1);
     assert!(ui.app().core.agents.answered.is_empty());
     // Within the first second after it shows, Allow does nothing.
-    ui.h.state_mut().core.agents.asks[0].shown = Some(Instant::now());
+    ui.h.state_mut().core.test_mut().agents.asks[0].shown = Some(Instant::now());
     ui.h.get_by_label("Allow once").click();
     ui.settle();
     assert!(ui.app().core.agents.answered.is_empty(), "Allow worked in the first second");
@@ -42,7 +42,7 @@ fn approval_stacks_over_settings_and_takes_no_enter() {
 fn allow_works_once_awake() {
     let Some(mut ui) = demo_ui(approval_over_settings) else { return };
     ui.show("Allow once");
-    ui.h.state_mut().core.agents.asks[0].shown = Some(Instant::now() - Duration::from_secs(2));
+    ui.h.state_mut().core.test_mut().agents.asks[0].shown = Some(Instant::now() - Duration::from_secs(2));
     ui.settle();
     ui.h.get_by_label("Allow once").click();
     ui.settle();
@@ -111,7 +111,7 @@ fn three_rules(a: &mut App) {
     use crate::agents::config::{Action, Matcher, RuleSpec};
     a.load_demo();
     a.agents_demo_view("rules");
-    a.core.agents.cfg.rules = ["a", "b", "c"].iter().map(|n| RuleSpec { on: true, matcher: Matcher::FieldName((*n).into()), scope: Vec::new(), action: Action::Redact, mode: Default::default() }).collect();
+    a.core.test_mut().agents.cfg.rules = ["a", "b", "c"].iter().map(|n| RuleSpec { on: true, matcher: Matcher::FieldName((*n).into()), scope: Vec::new(), action: Action::Redact, mode: Default::default() }).collect();
 }
 
 fn rule_names(ui: &UiApp) -> Vec<String> {
