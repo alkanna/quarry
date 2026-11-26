@@ -66,6 +66,7 @@ impl App {
                 UiFx::UpdPopup => self.ui.upd_popup = true,
                 // A debounce waiting out its pause; the drawing code that asked reads it back with `take_repaint`.
                 UiFx::RepaintAfter(s) => self.repaint = Some(self.repaint.map_or(s, |r| r.min(s))),
+                UiFx::ForgetPlans(conn) => self.ui.explain_prev.forget(conn),
             }
         }
     }

@@ -26,7 +26,7 @@ impl Core {
 
     /// Starts the Run SQL file dialog's script on `conn`, which `src` was read from. False, with the offline notice, when
     /// there is no session. The source is a loaded file, which no action can carry, so the dialog hands it in here.
-    pub fn start_run_file(&mut self, conn: u64, db: &str, schema: &str, src: crate::db::sql::csv::Source, name: &str) -> bool {
+    pub(in crate::action) fn start_run_file(&mut self, conn: u64, db: &str, schema: &str, src: crate::db::sql::csv::Source, name: &str) -> bool {
         let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else {
             self.warn_offline();
             return false;
@@ -42,7 +42,7 @@ impl Core {
     }
 
     /// Starts the Import dialog's import of `plan` into `table`; `rows` and `size` are what the file's report counted.
-    pub fn start_import(&mut self, sel: Sel, plan: crate::db::sql::import::ImportPlan, rows: u64, size: u64) {
+    pub(in crate::action) fn start_import(&mut self, sel: Sel, plan: crate::db::sql::import::ImportPlan, rows: u64, size: u64) {
         let Some(writable) = self.conn(sel.conn).map(|c| c.writable) else { return self.warn_offline() };
         let Some((sql, ns)) = self.sql_target(&sel) else { return self.warn_offline() };
         self.req += 1;

@@ -467,7 +467,7 @@ impl Worker {
                 Err(e) => (spec.def.name.clone(), None, Err(e)),
             };
             let kind = if spec.replace { ViewDone::Replaced } else { ViewDone::Created };
-            Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode: seen }
+            Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode: seen, waiting: false }
         });
     }
 
@@ -477,13 +477,13 @@ impl Worker {
         self.spawn_sql(db.conn, &scope, async move {
             let UndoAction { at, conn, db: schema, coll: name, kind, .. } = a;
             let UndoKind::Sql { database, cols, undo: SqlUndo::View(u), ids } = kind else {
-                return Msg::SqlViewSaved { conn, database: String::new(), schema, name, kind: ViewDone::Restored, res: Err("Not a view change".into()), undo: None, need_drop: false, sql_mode: None };
+                return Msg::SqlViewSaved { conn, database: String::new(), schema, name, kind: ViewDone::Restored, res: Err("Not a view change".into()), undo: None, need_drop: false, sql_mode: None, waiting: false };
             };
             let res = if db.dialect == Dialect::Postgres { undo_pg(&db, &schema, &name, &u, read_only).await } else { undo_my(&db, &schema, &name, &u, read_only).await };
             let done = if u.created { ViewDone::Removed } else { ViewDone::Restored };
             let said = if u.created { format!("Removed view {name}") } else { format!("Put back the old definition of {name}") };
             let kept = res.is_err().then(|| UndoAction { agent: None, at, conn, db: schema.clone(), coll: name.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo: SqlUndo::View(u), ids } });
-            Msg::SqlViewSaved { conn, database, schema, name, kind: done, res: res.map(|_| said), undo: kept, need_drop: false, sql_mode: None }
+            Msg::SqlViewSaved { conn, database, schema, name, kind: done, res: res.map(|_| said), undo: kept, need_drop: false, sql_mode: None, waiting: false }
         });
     }
 }

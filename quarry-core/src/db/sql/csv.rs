@@ -43,10 +43,45 @@ impl Read for Open {
 }
 
 /// Where the bytes come from. The demo and the tests use memory, the dialog a file.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "SourceWire", into = "SourceWire")]
 pub enum Source {
     File(PathBuf),
     Mem(Arc<Vec<u8>>),
+}
+
+/// `Source` as an action carries it: an in-memory file is its bytes, which only the demo and the tests send.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum SourceWire {
+    File(PathBuf),
+    Mem(Vec<u8>),
+}
+
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::File(p) => write!(f, "File({})", p.display()),
+            Source::Mem(b) => write!(f, "Mem({} bytes)", b.len()),
+        }
+    }
+}
+
+impl From<SourceWire> for Source {
+    fn from(w: SourceWire) -> Source {
+        match w {
+            SourceWire::File(p) => Source::File(p),
+            SourceWire::Mem(b) => Source::Mem(Arc::new(b)),
+        }
+    }
+}
+
+impl From<Source> for SourceWire {
+    fn from(s: Source) -> SourceWire {
+        match s {
+            Source::File(p) => SourceWire::File(p),
+            Source::Mem(b) => SourceWire::Mem(b.to_vec()),
+        }
+    }
 }
 
 impl Source {
@@ -107,7 +142,7 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Enc {
     Utf8,
     Utf16Le,
@@ -124,7 +159,7 @@ impl Enc {
 }
 
 /// How a file is read. The same options drive the preview, the check and the import.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Opts {
     pub delim: char,
     /// None reads every quote character as plain text.
@@ -439,7 +474,7 @@ pub fn sniff(src: &Source) -> Result<(Opts, bool), String> {
 }
 
 /// One column of the table as the check needs it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TCol {
     pub name: String,
     pub full_type: String,
@@ -504,7 +539,7 @@ impl TCol {
 }
 
 /// What the import dialog needs to know about a table.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TableInfo {
     pub cols: Vec<TCol>,
     pub pk: Vec<String>,
@@ -568,7 +603,7 @@ pub fn auto_map(names: &[String], cols: &[TCol]) -> Vec<Option<usize>> {
 }
 
 /// How a date written with slashes or dots is read: 09/11/2026 is the 9th of November or the 11th of September.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DateFmt {
     DayFirst,
     MonthFirst,
@@ -770,7 +805,7 @@ fn pg_bool(word: &str) -> Option<bool> {
 }
 
 /// How the columns of a file go into the table.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mapping {
     /// For each CSV column the table column it fills.
     pub map: Vec<Option<usize>>,

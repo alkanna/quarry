@@ -38,7 +38,8 @@ pub struct Core {
     /// PostgreSQL: (connection, database, schema) whose table list was asked for.
     pub pg_tables_asked: Asked,
     /// The last plan of each statement explained this session, for the explain dialog's Compare tab.
-    pub explain_prev: db::sql::plan::compare::History,
+    /// The Explain dialog's latest run: its connection and the handle Stop ends it by.
+    pub explain_run: Option<(db::sql::Db, db::sql::RunHandle)>,
     /// Sidebar lists that failed to load, by connection and namespace key (a database, or a PostgreSQL database and
     /// schema), so the sidebar shows the failure with a retry instead of an empty list that never fills.
     pub side_err: HashMap<(u64, String), String>,
@@ -195,7 +196,7 @@ impl Core {
             side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
             pg_tables_asked: Asked::default(),
-            explain_prev: Default::default(),
+            explain_run: None,
             side_err: HashMap::new(),
             tabs: Vec::new(),
             cur: 0,

@@ -187,6 +187,8 @@ pub enum UiFx {
     UpdPopup,
     /// Draw again after this many seconds, for a debounce that is waiting out a pause.
     RepaintAfter(f64),
+    /// A connection's session ended or it was removed: its Explain plans kept for Compare go.
+    ForgetPlans(u64),
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -389,8 +391,8 @@ impl Core {
             Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
             Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => true,
             Msg::SqlRoutine { .. } => true,
-            // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved does too, and hands the rest to `sql_view_saved`.
-            Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => true,
+            // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved is taken here after the app has told it whether its dialog waits.
+            Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } | Msg::SqlViewSaved { .. } => true,
             Msg::Agent(_) => true,
             Msg::CloudSql { .. } => true,
             _ => false,
@@ -458,6 +460,9 @@ impl Core {
             Msg::SqlRoutine { conn, req, ans } => self.routine_done(conn, req, ans),
             Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
             Msg::SqlRenamed { conn, database, schema, from, to, whole, res, undo } => self.sql_renamed(conn, database, schema, from, to, whole, res, undo),
+            Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, sql_mode, waiting, .. } => {
+                self.sql_view_saved(conn, database, schema, name, kind, res, undo, sql_mode, waiting);
+            }
             Msg::Agent(ev) => self.on_agent(ev),
             Msg::CloudSql { req, found } => self.cloud_found(req, found),
             _ => {}

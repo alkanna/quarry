@@ -68,12 +68,6 @@ impl Front {
         }
     }
 
-    /// The cell editor over a grid cell, which the app edits every frame while it is open (its text, helpers and keys). Opening
-    /// it, committing it and closing it are actions.
-    pub fn cell_edit(&mut self) -> &mut Option<crate::state::sql::edit::CellEdit> {
-        &mut self.0.sql_cell
-    }
-
     // Answers the app tries on its own dialogs first, and hands to Core when none of them took it. Core applies them as
     // `on_msg` does the rest.
     pub fn docs_loaded(&mut self, req: u64, res: crate::db::Res<(Vec<crate::db::Row>, u64, u128)>, approx: bool, info: &dyn Fn(&[crate::db::Row], Option<&std::collections::HashMap<String, Vec<mongodb::bson::Bson>>>) -> (Vec<String>, crate::state::complete::Fields)) {
@@ -84,36 +78,9 @@ impl Front {
         self.0.structure_loaded(req, res)
     }
 
-    /// A save or an undo of a view finished: what Core does about it, and the failure the view dialog that waits (`waiting`) takes
-    /// itself. The dialog is the app's Modal, so this is not an action.
-    #[allow(clippy::too_many_arguments)]
-    pub fn view_saved(&mut self, conn: u64, database: String, schema: String, name: String, kind: crate::db::sql::view::ViewDone, res: crate::db::Res<String>, undo: Option<crate::db::UndoAction>, sql_mode: Option<String>, waiting: bool) -> Option<String> {
-        self.0.sql_view_saved(conn, database, schema, name, kind, res, undo, sql_mode, waiting)
-    }
-
-    /// The Explain dialog's requests and answers. The dialog's form is the app's Modal, so these cannot be actions.
-    pub fn explain(&mut self) -> ExplainDoor<'_> {
-        ExplainDoor(&mut self.0)
-    }
-
-    /// Ends the run in flight of an Explain dialog the app holds, when it closes.
-    pub fn sql_explain_stop(&mut self, x: &mut crate::state::sql::explain::SqlExplain) {
-        self.0.sql_explain_stop(x)
-    }
-
     /// The duplicate-key toast's wait for the table's indexes, when `req` is the one it waits on.
     pub fn take_dup_wait(&mut self, req: u64) -> Option<(u64, Sel, String, String)> {
         self.0.dup_wait.take_if(|w| w.0 == req)
-    }
-
-    /// Starts the Run SQL file dialog's script. The file source lives in the dialog, so this is not an action.
-    pub fn start_run_file(&mut self, conn: u64, db: &str, schema: &str, src: crate::db::sql::csv::Source, name: &str) -> bool {
-        self.0.start_run_file(conn, db, schema, src, name)
-    }
-
-    /// Starts the Import dialog's import, whose plan holds the loaded file. The dialog keeps the file, so this is not an action.
-    pub fn start_import(&mut self, sel: Sel, plan: crate::db::sql::import::ImportPlan, rows: u64, size: u64) {
-        self.0.start_import(sel, plan, rows, size)
     }
 
     // Notes for the user (toasts and the error list) are feedback, not state a click decides, so drawing code may raise
@@ -184,11 +151,6 @@ impl Front {
         self.0.agents.ui = ui;
     }
 
-    /// The gate a write passes: the target, or the read-only or offline toast and None.
-    pub fn writable_target(&mut self) -> Option<(u64, crate::db::Target)> {
-        self.0.writable_target()
-    }
-
     /// The update timers' clock: what they decide is Core's, the answer is when to look again.
     pub fn update_tick(&mut self) -> Option<std::time::Duration> {
         self.0.update_tick()
@@ -214,41 +176,5 @@ impl Front {
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_mut(&mut self) -> &mut Core {
         &mut self.0
-    }
-}
-
-/// What the app asks of Core for the Explain dialog it holds. Each works on the dialog's form and, for a request, hands the
-/// worker the call; none of them changes anything else.
-pub struct ExplainDoor<'a>(&'a mut Core);
-
-impl ExplainDoor<'_> {
-    /// The dialog for the plan of `text`, with its first request sent.
-    pub fn open(&mut self, text: String) -> Option<crate::state::sql::explain::SqlExplain> {
-        self.0.sql_explain_new(text)
-    }
-
-    /// Plans the dialog's statement again, or runs it with `analyze`.
-    pub fn send(&mut self, x: &mut crate::state::sql::explain::SqlExplain, analyze: Option<crate::db::sql::plan::Analyze>) {
-        self.0.sql_explain_send(x, analyze)
-    }
-
-    /// The answer of a request of the dialog; false when the dialog should close.
-    pub fn explained(&mut self, x: &mut crate::state::sql::explain::SqlExplain, req: u64, sets: Vec<crate::db::sql::ResultSet>) -> bool {
-        self.0.sql_explained(x, req, sets)
-    }
-
-    /// The catalog's answer.
-    pub fn evidence(&mut self, x: &mut crate::state::sql::explain::SqlExplain, req: u64, ev: crate::db::sql::plan::Evidence) {
-        self.0.sql_explain_evidence(x, req, ev)
-    }
-
-    /// Tries a candidate index with HypoPG.
-    pub fn hypo_try(&mut self, x: &mut crate::state::sql::explain::SqlExplain, fix: crate::db::sql::plan::findings::Fix) {
-        self.0.sql_explain_hypo_try(x, fix)
-    }
-
-    /// The answer of a trial.
-    pub fn hypo(&mut self, x: &mut crate::state::sql::explain::SqlExplain, req: u64, res: crate::db::Res<crate::db::sql::pg::hypo::Trial>) {
-        self.0.sql_explain_hypo(x, req, res)
     }
 }

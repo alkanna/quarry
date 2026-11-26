@@ -211,7 +211,7 @@ pub struct Jit {
 }
 
 /// How an ANALYZE run is made safe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Analyze {
     /// The statement is a read and runs as it is.
     Direct,

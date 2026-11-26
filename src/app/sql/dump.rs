@@ -338,7 +338,7 @@ impl App {
             }
         });
         if go {
-            if self.core.start_run_file(f.conn, &f.db, &f.schema, f.src.clone(), &f.name) {
+            if self.exec_req(Action::SqlAsk(SqlAskA::RunFile { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), src: f.src.clone(), name: f.name.clone() })).is_some() {
                 *keep = false;
             }
         } else if unlock {

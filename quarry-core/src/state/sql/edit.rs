@@ -5,7 +5,7 @@ use crate::db;
 use mongodb::bson::{Bson, Document};
 
 /// A cell being edited in place. `done` is set by the editor: Some(true) to commit, Some(false) to cancel.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CellEdit {
     /// The row's key, because a reload while the editor is open moves rows around.
     pub id: Option<Bson>,
@@ -35,7 +35,7 @@ pub struct CellEdit {
 }
 
 /// Rows of the table a foreign key column points at, looked up as the key is typed.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KeyLook {
     /// The single-column foreign key of the edited column, found once the table structure is loaded.
     pub fk: Option<db::sql::structure::ForeignKey>,

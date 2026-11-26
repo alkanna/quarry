@@ -42,7 +42,7 @@ impl App {
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
                 Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
-                Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
+                Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode, .. } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
                 Msg::PgRoles { conn, req, ans: db::sql::pg::roles::Answer::DropInfo(res) } => {
                     if let Some(Modal::PgDropRole(f)) = &mut self.modal && f.conn == conn && f.req == req {
                         f.info = Some(res);

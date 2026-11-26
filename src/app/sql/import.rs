@@ -426,7 +426,7 @@ impl App {
     fn start_sql_import(&mut self, f: &ImportForm, info: &TableInfo, want_undo: bool) {
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
         let sel = Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() };
-        self.core.start_import(sel, plan, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        self.exec(Action::SqlAsk(SqlAskA::StartImport { sel, plan, rows: f.file.report.as_ref().map_or(0, |r| r.rows), size: f.file.size }));
     }
 
     /// QUARRY_TEST_SQL=import: the dialog over the orders table with a file that has one bad value, built offline.

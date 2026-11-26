@@ -406,7 +406,7 @@ impl Core {
             let _ = std::fs::remove_file(crate::paths::config_dir().join("icons").join(format!("{id}.png")));
         }
         self.conns.retain(|c| c.meta.id != id);
-        self.explain_prev.forget(id);
+        self.ui_fx.push(crate::action::UiFx::ForgetPlans(id));
         self.remove_tabs(|t| t.sel.conn == id);
         if self.active == Some(id) {
             self.active = self.conns.first().map(|c| c.meta.id);
@@ -495,7 +495,7 @@ impl Core {
         c.sql = None;
         c.tunnel = None;
         // A new session may see other indexes and statistics, so its plans start fresh.
-        self.explain_prev.forget(id);
+        self.ui_fx.push(crate::action::UiFx::ForgetPlans(id));
         // Every connection starts read-only, a reconnect included; Always allow writes sets it back each frame.
         c.writable = false;
         // Asked again once connected, so a changed or failed server never shows the old one.
@@ -536,7 +536,7 @@ impl Core {
         let name = c.meta.name.clone();
         self.stop_conn_work(id);
         self.pg_tables_asked.forget(id, None, None);
-        self.explain_prev.forget(id);
+        self.ui_fx.push(crate::action::UiFx::ForgetPlans(id));
         Some(name)
     }
 

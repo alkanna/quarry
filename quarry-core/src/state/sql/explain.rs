@@ -7,7 +7,6 @@ use super::explain_tree::TreeRow;
 use crate::db::sql::plan::{self, compare, Analyze, Plan};
 use crate::db::sql::{Db, Dialect};
 use std::sync::Arc;
-use crate::db;
 
 /// The state of one open SQL explain dialog.
 pub struct SqlExplain {
@@ -45,8 +44,6 @@ pub struct SqlExplain {
     pub analyze: Result<Analyze, String>,
     /// What the request in flight asked for.
     pub asked: Option<Analyze>,
-    /// The handle Stop and closing the dialog use to end the run on the server.
-    pub run: db::sql::RunHandle,
     /// Stop was pressed, so the answer that follows is no error to show.
     pub stopped: bool,
     /// The head tab.
@@ -97,7 +94,7 @@ impl SqlExplain {
     #[allow(clippy::too_many_arguments)]
     pub fn new(stmt: String, conn: u64, tab_db: String, database: String, dialect: Dialect, db: Db, schema: String, analyze: Result<Analyze, String>) -> Self {
         let key_stmt = compare::normalize(&stmt, dialect);
-        SqlExplain { req: 0, busy: false, stmt, key_stmt, conn, tab_db, database, dialect, db, schema, plan: None, tree_rows: None, flame: None, hypo_refused: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, run: Default::default(), stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
+        SqlExplain { req: 0, busy: false, stmt, key_stmt, conn, tab_db, database, dialect, db, schema, plan: None, tree_rows: None, flame: None, hypo_refused: None, unread: None, raw: String::new(), sel: None, scroll_to: None, more: false, analyzed: false, rolled_back: false, analyze, asked: None, stopped: false, pane: Pane::Tree, flame_time: false, prev: None, ev: None, ev_req: None, demo: false, locked: true, hypo_wait: None, hypo: None, hypo_cmp: false }
     }
 
     /// Drops what was worked out from the plan or its findings, so the next frame works it out again.

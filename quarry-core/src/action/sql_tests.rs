@@ -47,13 +47,14 @@ pub(super) fn sql_actions() -> Vec<SqlA> {
         SqlA::BuildText { tab },
         SqlA::BarSync { tab },
         SqlA::BarEdit { tab, edit: Box::new(Default::default()) },
+        SqlA::CellEdit { tab, edit: Some(Box::new(Default::default())) },
     ]
 }
 
 /// No wildcard, so a variant missing from `sql_actions` fails to compile here first.
 pub(super) fn sql_variant(a: &SqlA) {
     match a {
-        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } | SqlA::CrumbDb { .. } | SqlA::CrumbSchema { .. } | SqlA::SetQuery { .. } | SqlA::Record { .. } | SqlA::PageSize { .. } | SqlA::BuildText { .. } | SqlA::SetCell { .. } | SqlA::StageValue { .. } | SqlA::WriteDrafts { .. } | SqlA::BarSync { .. } | SqlA::BarEdit { .. } => {}
+        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } | SqlA::CrumbDb { .. } | SqlA::CrumbSchema { .. } | SqlA::SetQuery { .. } | SqlA::Record { .. } | SqlA::PageSize { .. } | SqlA::BuildText { .. } | SqlA::SetCell { .. } | SqlA::StageValue { .. } | SqlA::WriteDrafts { .. } | SqlA::BarSync { .. } | SqlA::BarEdit { .. } | SqlA::CellEdit { .. } => {}
     }
 }
 

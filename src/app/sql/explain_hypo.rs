@@ -65,8 +65,21 @@ fn result_line(h: &HypoRun, before: Option<&Plan>) -> String {
 impl App {
     /// The answer of a trial of the open dialog.
     pub(in crate::app) fn sql_explain_hypo(&mut self, req: u64, res: db::Res<hypo::Trial>) {
-        if let Some(Modal::SqlExplain(x)) = &mut self.modal {
-            self.core.explain().hypo(x, req, res);
+        let failed = match &mut self.modal {
+            Some(Modal::SqlExplain(x)) => x.hypo_in(req, res),
+            _ => None,
+        };
+        if let Some(e) = failed {
+            self.err(e);
+        }
+    }
+
+    /// Asks the server for the plan with the candidate `fix` as a hypothetical index. Only a click gets here.
+    pub(super) fn explain_hypo_try(&mut self, x: &mut SqlExplain, fix: Fix) {
+        let Some(create) = x.hypo_create(&fix) else { return };
+        let a = SqlAskA::ExplainHypo { conn: x.conn, database: x.database.clone(), schema: x.schema.clone(), create, stmt: x.stmt.clone(), locked: x.locked };
+        if let Some(req) = self.exec_req(Action::SqlAsk(a)) {
+            x.hypo_asked(req, fix);
         }
     }
 
@@ -82,9 +95,10 @@ impl App {
     pub(in crate::app) fn demo_explain_hypo(&mut self, trial: hypo::Trial) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
         let fix = x.plan.as_ref().and_then(|p| p.findings.iter().find_map(|f| f.fix.as_ref().filter(|fx| fx.kind == plan::FixKind::Index))).map(|fx| fx.sql.clone()).expect("a candidate index");
-        self.core.req += 1;
-        x.hypo_wait = Some((self.core.req, fix));
-        let req = self.core.req;
+        let c = self.core.test_mut();
+        c.req += 1;
+        x.hypo_wait = Some((c.req, fix));
+        let req = c.req;
         self.sql_explain_hypo(req, Ok(trial));
     }
 }

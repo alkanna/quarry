@@ -91,13 +91,16 @@ pub enum SqlA {
     BarSync { tab: u64 },
     /// Content: what a frame of the bar changed.
     BarEdit { tab: u64, edit: Box<crate::state::sql::bar::BarEdit> },
+    /// The cell editor as a frame of drawing left it (its text, helpers and keys), or None when it closes. Dropped when the
+    /// editor is no longer the one for that cell, so a late frame never brings back a closed one.
+    CellEdit { tab: u64, edit: Option<Box<crate::state::sql::edit::CellEdit>> },
 }
 
 impl SqlA {
     /// The uid of the tab the action was drawn for.
     fn tab(&self) -> u64 {
         match self {
-            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } | SqlA::CrumbDb { tab, .. } | SqlA::CrumbSchema { tab, .. } | SqlA::SetQuery { tab, .. } | SqlA::Record { tab } | SqlA::PageSize { tab } | SqlA::BuildText { tab } | SqlA::SetCell { tab, .. } | SqlA::StageValue { tab, .. } | SqlA::WriteDrafts { tab, .. } | SqlA::BarSync { tab } | SqlA::BarEdit { tab, .. } => *tab,
+            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } | SqlA::CrumbDb { tab, .. } | SqlA::CrumbSchema { tab, .. } | SqlA::SetQuery { tab, .. } | SqlA::Record { tab } | SqlA::PageSize { tab } | SqlA::BuildText { tab } | SqlA::SetCell { tab, .. } | SqlA::StageValue { tab, .. } | SqlA::WriteDrafts { tab, .. } | SqlA::BarSync { tab } | SqlA::BarEdit { tab, .. } | SqlA::CellEdit { tab, .. } => *tab,
         }
     }
 }
@@ -148,6 +151,12 @@ impl Core {
             SqlA::Filter { a, .. } => self.sql_filter(a),
             SqlA::BarSync { .. } => self.sql_bar_sync(),
             SqlA::BarEdit { edit, .. } => self.sql_bar_edit(*edit),
+            SqlA::CellEdit { edit: None, .. } => self.sql_cell = None,
+            SqlA::CellEdit { edit: Some(e), .. } => {
+                if self.sql_cell.as_ref().is_some_and(|c| c.id == e.id && c.col == e.col) {
+                    self.sql_cell = Some(*e);
+                }
+            }
             SqlA::OpenCell { row, col, .. } => return self.sql_open_cell(row, col),
             SqlA::SetNull { row, col, .. } => return self.sql_set_null(row, col),
             SqlA::Save { .. } => {

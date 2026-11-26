@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// What to do with a row whose key is already in the table.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Dup {
     /// The import fails and nothing is imported.
     Stop,
@@ -34,7 +34,7 @@ const MAX_PLACEHOLDERS: usize = 60_000;
 /// A batch is sent early once its text is this big, so a table of large cells stays under max_allowed_packet.
 const BATCH_BYTES: usize = 4 << 20;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImportPlan {
     pub source: Source,
     pub opts: Opts,

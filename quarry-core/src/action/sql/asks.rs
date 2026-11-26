@@ -55,6 +55,19 @@ pub enum SqlAskA {
     Dump { conn: u64, db: String, plan: crate::db::sql::dump::DumpPlan, path: String, total: u64 },
     /// The status bar's Cancel of the running import or script.
     CancelJob,
+    /// The Explain dialog plans its statement again, or runs it with `analyze`. Pending: the answer is `Msg::SqlExplained` on this request.
+    ExplainSend { conn: u64, database: String, schema: String, stmt: String, analyze: Option<crate::db::sql::plan::Analyze> },
+    /// The Explain dialog's Stop, or its closing: ends the run in flight on the server.
+    ExplainStop,
+    /// The catalog read for the tables the Explain dialog's plan scans. Pending.
+    ExplainEvidence { conn: u64, database: String, schema: String, wants: Vec<crate::db::sql::plan::evidence::Want> },
+    /// A HypoPG trial of the candidate index `create` against `stmt`. Pending.
+    ExplainHypo { conn: u64, database: String, schema: String, create: String, stmt: String, locked: bool },
+    /// The Run SQL file dialog's Run file: starts the script `src` on `conn`. The dialog holds the file, so it is carried here.
+    /// Pending when it started, which is when the dialog closes.
+    RunFile { conn: u64, db: String, schema: String, src: crate::db::sql::csv::Source, name: String },
+    /// The Import dialog's Import, whose plan holds the loaded file; `rows` and `size` are what the file's report counted.
+    StartImport { sel: Sel, plan: crate::db::sql::import::ImportPlan, rows: u64, size: u64 },
 }
 
 impl Core {
@@ -143,6 +156,16 @@ impl Core {
                     self.worker.sql_kill(j.db.clone(), j.id.load(std::sync::atomic::Ordering::SeqCst), j.cancel.clone());
                 }
             }
+            SqlAskA::ExplainSend { conn, database, schema, stmt, analyze } => return Ok(self.sql_explain_send(conn, database, schema, stmt, analyze)),
+            SqlAskA::ExplainStop => self.sql_explain_stop(),
+            SqlAskA::ExplainEvidence { conn, database, schema, wants } => return Ok(self.sql_explain_evidence_ask(conn, database, schema, wants)),
+            SqlAskA::ExplainHypo { conn, database, schema, create, stmt, locked } => return Ok(self.sql_explain_hypo_ask(conn, database, schema, create, stmt, locked)),
+            SqlAskA::RunFile { conn, db, schema, src, name } => {
+                if self.start_run_file(conn, &db, &schema, src, &name) {
+                    return Ok(Reply::Pending(self.req));
+                }
+            }
+            SqlAskA::StartImport { sel, plan, rows, size } => self.start_import(sel, plan, rows, size),
         }
         Ok(Reply::Done)
     }

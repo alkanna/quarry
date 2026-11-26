@@ -78,12 +78,23 @@ pub(super) fn ask_actions() -> Vec<SqlAskA> {
         SqlAskA::ShowDup { sel, index: "PRIMARY".into(), value: "1".into() },
         SqlAskA::Dump { conn: 1, db: "shop".into(), plan: crate::db::sql::dump::DumpPlan { schema: "shop".into(), tables: Vec::new(), create_db: false, extras: false, rows_per_insert: 1, snapshot: false, filter: None, grants: false, owners: false }, path: "a.sql".into(), total: 0 },
         SqlAskA::CancelJob,
+        SqlAskA::ExplainSend { conn: 1, database: "shop".into(), schema: "shop".into(), stmt: "SELECT 1".into(), analyze: Some(crate::db::sql::plan::Analyze::Direct) },
+        SqlAskA::ExplainStop,
+        SqlAskA::ExplainEvidence { conn: 1, database: "shop".into(), schema: "shop".into(), wants: vec![crate::db::sql::plan::evidence::Want { schema: None, table: "orders".into(), names: vec![("o".into(), "orders".into())], cols: vec!["id".into()] }] },
+        SqlAskA::ExplainHypo { conn: 1, database: "shop".into(), schema: "public".into(), create: "CREATE INDEX ON orders (id)".into(), stmt: "SELECT 1".into(), locked: true },
+        SqlAskA::RunFile { conn: 1, db: "shop".into(), schema: String::new(), src: crate::db::sql::csv::Source::Mem(std::sync::Arc::new(b"SELECT 1;".to_vec())), name: "a.sql".into() },
+        SqlAskA::StartImport {
+            sel: crate::state::Sel { conn: 1, db: "shop".into(), coll: "orders".into(), ..Default::default() },
+            plan: crate::db::sql::import::ImportPlan { source: crate::db::sql::csv::Source::File("a.csv".into()), opts: crate::db::sql::csv::Opts { delim: ',', quote: Some('"'), enc: crate::db::sql::csv::Enc::Utf8 }, header: true, info: Default::default(), map: crate::db::sql::csv::Mapping { map: vec![Some(0)], fmts: vec![crate::db::sql::csv::DateFmt::DayFirst], empty_null: true }, dup: crate::db::sql::import::Dup::Stop, want_undo: false },
+            rows: 3,
+            size: 40,
+        },
     ]
 }
 
 pub(super) fn ask_variant(a: &SqlAskA) {
     match a {
-        SqlAskA::AskSchemas { .. } | SqlAskA::LoadTables { .. } | SqlAskA::Refresh { .. } | SqlAskA::Serve { .. } | SqlAskA::ServeFacts { .. } | SqlAskA::ForgetSchema { .. } | SqlAskA::Tables { .. } | SqlAskA::TableSizes { .. } | SqlAskA::TableInfo { .. } | SqlAskA::Structure { .. } | SqlAskA::PgStructure { .. } | SqlAskA::Orphans { .. } | SqlAskA::FilterTick { .. } | SqlAskA::LintTick { .. } | SqlAskA::KeySearch { .. } | SqlAskA::ShowDup { .. } | SqlAskA::Dump { .. } | SqlAskA::CancelJob => {}
+        SqlAskA::AskSchemas { .. } | SqlAskA::LoadTables { .. } | SqlAskA::Refresh { .. } | SqlAskA::Serve { .. } | SqlAskA::ServeFacts { .. } | SqlAskA::ForgetSchema { .. } | SqlAskA::Tables { .. } | SqlAskA::TableSizes { .. } | SqlAskA::TableInfo { .. } | SqlAskA::Structure { .. } | SqlAskA::PgStructure { .. } | SqlAskA::Orphans { .. } | SqlAskA::FilterTick { .. } | SqlAskA::LintTick { .. } | SqlAskA::KeySearch { .. } | SqlAskA::ShowDup { .. } | SqlAskA::Dump { .. } | SqlAskA::CancelJob | SqlAskA::ExplainSend { .. } | SqlAskA::ExplainStop | SqlAskA::ExplainEvidence { .. } | SqlAskA::ExplainHypo { .. } | SqlAskA::RunFile { .. } | SqlAskA::StartImport { .. } => {}
     }
 }
 
@@ -293,6 +304,10 @@ fn explain(core: &mut Core, req: u64) -> SqlExplain {
     x
 }
 
+fn explained(x: &mut SqlExplain, req: u64, sets: Vec<ResultSet>) -> crate::action::sql::explain::Answered {
+    x.explained(&mut Default::default(), req, sets)
+}
+
 fn plan_set(plan: &str) -> ResultSet {
     let col = crate::db::sql::Col::plain("EXPLAIN", "TEXT", crate::db::sql::value::Kind::Text, false);
     ResultSet { cols: vec![col], rows: crate::db::Row::from_doc(&mongodb::bson::doc! { "EXPLAIN": plan }).into_iter().collect(), ..ResultSet::new("EXPLAIN") }
@@ -302,7 +317,7 @@ fn plan_set(plan: &str) -> ResultSet {
 fn an_explain_answer_for_another_request_changes_nothing() {
     let mut core = core_on(Engine::MySql, true, false);
     let mut x = explain(&mut core, 5);
-    assert!(core.sql_explained(&mut x, 4, vec![plan_set("{}")]));
+    assert!(explained(&mut x, 4, vec![plan_set("{}")]).keep);
     assert!(x.busy && x.raw.is_empty(), "a stale answer is dropped");
 }
 
@@ -310,12 +325,13 @@ fn an_explain_answer_for_another_request_changes_nothing() {
 fn a_first_explain_that_fails_closes_the_dialog_and_says_why_unless_stopped() {
     let mut core = core_on(Engine::MySql, true, false);
     let mut x = explain(&mut core, 5);
-    assert!(!core.sql_explained(&mut x, 5, vec![ResultSet { error: Some("syntax".into()), ..ResultSet::new("EXPLAIN") }]), "nothing to show");
-    assert_eq!(core.errors.len(), 1);
+    let a = explained(&mut x, 5, vec![ResultSet { error: Some("syntax".into()), ..ResultSet::new("EXPLAIN") }]);
+    assert!(!a.keep, "nothing to show");
+    assert!(a.err.is_some());
     let mut x = explain(&mut core, 6);
     x.stopped = true;
-    assert!(!core.sql_explained(&mut x, 6, vec![ResultSet { error: Some("cancelled".into()), ..ResultSet::new("EXPLAIN") }]));
-    assert_eq!(core.errors.len(), 1, "after Stop the error is the cancel itself");
+    let a = explained(&mut x, 6, vec![ResultSet { error: Some("cancelled".into()), ..ResultSet::new("EXPLAIN") }]);
+    assert!(!a.keep && a.err.is_none(), "after Stop the error is the cancel itself");
 }
 
 #[test]
@@ -325,12 +341,12 @@ fn an_explain_answer_fills_the_dialog_and_a_stale_catalog_answer_is_dropped() {
     let plan = include_str!("../db/sql/plan/fixtures/pg18-fix-before.json");
     x.dialect = Dialect::Postgres;
     x.demo = true;
-    assert!(core.sql_explained(&mut x, 5, vec![plan_set(plan)]));
+    assert!(explained(&mut x, 5, vec![plan_set(plan)]).keep);
     assert!(!x.busy && x.plan.is_some(), "the plan is read: {:?}", x.unread);
     x.ev_req = Some(9);
     let ev = x.ev.clone().expect("the demo's evidence");
-    core.sql_explain_evidence(&mut x, 8, ev.clone());
+    x.evidence_in(&mut Default::default(), 8, ev.clone());
     assert_eq!(x.ev_req, Some(9), "another request's catalog is dropped");
-    core.sql_explain_evidence(&mut x, 9, ev);
+    x.evidence_in(&mut Default::default(), 9, ev);
     assert_eq!(x.ev_req, None);
 }

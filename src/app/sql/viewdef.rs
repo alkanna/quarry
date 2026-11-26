@@ -81,7 +81,10 @@ impl App {
         if ok && waiting {
             self.modal = None;
         }
-        if let Some(e) = self.core.view_saved(conn, database, schema, name, kind, res, undo, sql_mode, waiting) && let Some(Modal::SqlView(f)) = self.modal.as_mut() {
+        // The dialog that waits takes a failure itself; Core keeps what it did before (the SQL mode, the undo entry).
+        let failed = res.as_ref().err().cloned().filter(|_| waiting);
+        self.core.on_msg(db::Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode, waiting });
+        if let Some(e) = failed && let Some(Modal::SqlView(f)) = self.modal.as_mut() {
             f.busy = false;
             if need_drop {
                 f.ask_drop = true;

@@ -191,7 +191,21 @@ impl App {
     /// type wants: the calendar for dates, a list for ENUM, SET and foreign key columns, a switch for booleans, and
     /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
-        let Some(mut e) = self.core.cell_edit().take() else { return };
+        let Some(before) = self.core.sql_cell.clone() else { return };
+        let e = self.sql_cell_draw(ui, cell, before.clone());
+        if e != before {
+            self.sql_cell_set(Some(e));
+        }
+    }
+
+    /// Hands the editor as a frame left it, or its close, to Core.
+    fn sql_cell_set(&mut self, edit: Option<CellEdit>) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::CellEdit { tab, edit: edit.map(Box::new) }));
+    }
+
+    /// Draws the editor on its own copy of the state, which is handed back for Core to keep.
+    fn sql_cell_draw(&mut self, ui: &mut egui::Ui, cell: egui::Rect, mut e: CellEdit) -> CellEdit {
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
         let d = self.sql_dialect();
@@ -203,8 +217,7 @@ impl App {
         ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if bad { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
         // The large editor has the text, so the cell only keeps its outline.
         if e.big {
-            *self.core.cell_edit() = Some(e);
-            return;
+            return e;
         }
         let ctx = ui.ctx().clone();
         let below = rect.left_bottom() + egui::vec2(0.0, 4.0);
@@ -215,8 +228,7 @@ impl App {
         let nullable = col.nullable || col.auto_increment;
         if check::is_bool(d, &col) {
             sql_bool_cell(ui, &mut e, &col, rect, below, click_out);
-            *self.core.cell_edit() = Some(e);
-            return;
+            return e;
         }
         let date = matches!(col.kind, Kind::Date | Kind::DateTime);
         let choices = if matches!(col.kind, Kind::Enum | Kind::Set) { db::sql::schema::enum_values(&col.ty) } else { Vec::new() };
@@ -353,7 +365,7 @@ impl App {
         }
         e.pop = pop.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
         e.grabs_keys = e.pick.is_some() || list_n > 0;
-        *self.core.cell_edit() = Some(e);
+        e
     }
 
     /// The clock in the zone `col` is read in, as milliseconds of that wall clock. None for a TIMESTAMP column under
@@ -399,19 +411,26 @@ impl App {
 
     /// After the table is drawn: stage the edit, or keep the editor open with its error.
     pub(in crate::app) fn sql_cell_finish(&mut self) {
-        let Some(mut e) = self.core.cell_edit().take() else { return };
+        let Some(mut e) = self.core.sql_cell.clone() else { return };
         match e.done {
-            None => *self.core.cell_edit() = Some(e),
-            Some(false) => {}
+            None => {}
+            Some(false) => self.sql_cell_set(None),
             Some(true) => {
                 let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
                 match check::check(self.sql_dialect(), &col, &e.text, self.sql_clock(&col)).value {
-                    Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
-                    Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
+                    Ok(_) if row.is_none() => {
+                        self.sql_cell_set(None);
+                        self.warn("That row is no longer in the table, so the edit was cancelled.");
+                    }
+                    Ok(v) => {
+                        // Closed before the stage, as the editor was taken out before.
+                        self.sql_cell_set(None);
+                        self.sql_set_cell(row.unwrap_or_default(), &e.col, v);
+                    }
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
-                        *self.core.cell_edit() = Some(e);
+                        self.sql_cell_set(Some(e));
                     }
                 }
             }

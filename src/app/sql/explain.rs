@@ -28,8 +28,56 @@ impl App {
     /// Shows the plan of `text` in a dialog. `text` is the statement under the caret of a Query view or the last page's
     /// SELECT of a Content grid.
     pub(in crate::app) fn sql_explain(&mut self, text: String) {
-        if let Some(x) = self.core.explain().open(text) {
-            self.modal = Some(Modal::SqlExplain(Box::new(x)));
+        let Some(t) = self.t() else { return };
+        let conn = t.sel.conn;
+        let d = self.dialect_of(conn);
+        if text.trim().is_empty() {
+            self.warn("Nothing to explain.");
+            return;
+        }
+        if let Err(e) = plan::explainable(&text, d) {
+            self.warn(e);
+            return;
+        }
+        let db = if self.core.demo {
+            self.core.ok("Offline demo: no database is connected.");
+            None
+        } else {
+            let db = self.core.conn(conn).and_then(|c| c.sql.clone());
+            if db.is_none() {
+                self.warn("Connect first.");
+            }
+            db
+        };
+        let Some(db) = db else { return };
+        let t = &self.core.tabs[self.core.cur];
+        let (tab_db, database) = (t.sel.db.clone(), run_db(t));
+        let (db, schema) = quarry_core::state::sql::query::run_target(t, db);
+        let writable = self.conn_writable(conn);
+        let analyze = plan::analyze_needs(d, &db.version).map(str::to_string).map_or_else(|| plan::analyze_mode(&text, d, db.pooler()), Err).and_then(|a| match (d, writable) {
+            // The read-only guard refuses ANALYZE on these engines, so it needs the unlock the user would otherwise be asked for.
+            (Dialect::Postgres, false) => Err("ANALYZE on PostgreSQL runs the statement inside a transaction it rolls back, which needs writes unlocked on this connection.".into()),
+            (Dialect::MariaDb, false) => Err("ANALYZE on MariaDB is a statement the read-only guard refuses. Unlock writes on this connection to use it.".into()),
+            _ => Ok(a),
+        });
+        let mut x = SqlExplain::new(text, conn, tab_db, database, d, db, schema, analyze);
+        self.explain_send(&mut x, None);
+        self.modal = Some(Modal::SqlExplain(Box::new(x)));
+    }
+
+    /// Plans the dialog's statement again, or runs it with `analyze`.
+    pub(in crate::app) fn explain_send(&mut self, x: &mut SqlExplain, analyze: Option<Analyze>) {
+        let a = Action::SqlAsk(SqlAskA::ExplainSend { conn: x.conn, database: x.database.clone(), schema: x.schema.clone(), stmt: x.stmt.clone(), analyze });
+        if let Some(req) = self.exec_req(a) {
+            x.asked(req, analyze);
+        }
+    }
+
+    /// Ends the run in flight of the dialog, which holds the locks of an ANALYZE of a write, when it closes or Stop is pressed.
+    pub(in crate::app) fn explain_stop(&mut self, x: &mut SqlExplain) {
+        if x.busy {
+            x.stopped = true;
+            self.exec(Action::SqlAsk(SqlAskA::ExplainStop));
         }
     }
 
@@ -63,15 +111,25 @@ impl App {
     /// The answer of a request of the open dialog.
     pub(in crate::app) fn sql_explained(&mut self, req: u64, sets: Vec<db::sql::ResultSet>) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if !self.core.explain().explained(x, req, sets) {
+        let o = x.explained(&mut self.ui.explain_prev, req, sets);
+        if let Some(e) = o.err {
+            self.err(e);
+        }
+        if !o.keep {
             self.modal = None;
+        } else if !o.wants.is_empty() && let Some(Modal::SqlExplain(x)) = &self.modal {
+            let a = SqlAskA::ExplainEvidence { conn: x.conn, database: x.database.clone(), schema: x.schema.clone(), wants: o.wants };
+            let req = self.exec_req(Action::SqlAsk(a));
+            if let Some(Modal::SqlExplain(x)) = &mut self.modal {
+                x.ev_req = req;
+            }
         }
     }
 
     /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
     pub(in crate::app) fn sql_explain_evidence(&mut self, req: u64, ev: plan::Evidence) {
         if let Some(Modal::SqlExplain(x)) = &mut self.modal {
-            self.core.explain().evidence(x, req, ev);
+            x.evidence_in(&mut self.ui.explain_prev, req, ev);
         }
     }
 
@@ -79,9 +137,10 @@ impl App {
     #[cfg(test)]
     pub(in crate::app) fn demo_explain_evidence(&mut self, ev: plan::Evidence) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        self.core.req += 1;
-        x.ev_req = Some(self.core.req);
-        let req = self.core.req;
+        let c = self.core.test_mut();
+        c.req += 1;
+        x.ev_req = Some(c.req);
+        let req = c.req;
         self.sql_explain_evidence(req, ev);
     }
 
@@ -207,11 +266,11 @@ impl App {
                     ctx.copy_text(text);
                     self.toast_ok("Copied.".into(), None);
                 }
-                XAct::Hypo(fix) => self.core.explain().hypo_try(x, fix),
+                XAct::Hypo(fix) => self.explain_hypo_try(x, fix),
                 XAct::HypoCompare => self.sql_explain_hypo_compare(x),
                 XAct::Draft(sql) => {
                     *keep = false;
-                    self.core.sql_explain_stop(x);
+                    self.explain_stop(x);
                     self.sql_new_query(x.conn, x.tab_db.clone());
                     // The draft runs where the plan was made, not where the sidebar happens to be. On PostgreSQL the database is
                     // left empty for the tab's own, as the picker leaves it.
@@ -224,14 +283,14 @@ impl App {
             }
         }
         if stop {
-            self.core.sql_explain_stop(x);
+            self.explain_stop(x);
         }
         if let Some(a) = again {
-            self.core.explain().send(x, Some(a));
+            self.explain_send(x, Some(a));
         }
         if rows {
             *keep = false;
-            self.core.sql_explain_stop(x);
+            self.explain_stop(x);
             self.sql_explain_rows(x);
         }
     }

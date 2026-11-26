@@ -143,7 +143,7 @@ impl TableEv {
 }
 
 /// A table to read the catalog for: where the statement says it is, and the plan's names for it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Want {
     /// The schema the statement writes before the table, when it writes one; else the run's search_path or database.
     pub schema: Option<String>,

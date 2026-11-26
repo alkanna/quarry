@@ -49,11 +49,13 @@ pub(crate) struct UiState {
     pub sql_ac: HashMap<u64, quarry_core::state::complete::Ac>,
     /// What the Content bar of each SQL tab keeps between frames, by tab uid.
     pub bar_ui: HashMap<u64, crate::app::sql::bar::BarUi>,
+    /// The last plan of each statement the Explain dialog showed, for its Compare tab. Forgotten per connection by `UiFx::ForgetPlans`.
+    pub explain_prev: crate::db::sql::plan::compare::History,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new() }
+        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new(), explain_prev: Default::default() }
     }
 }
 
@@ -84,10 +86,6 @@ impl App {
 
     pub(super) fn target(&self) -> Option<Target> {
         self.core.target()
-    }
-
-    pub(super) fn writable_target(&mut self) -> Option<(u64, Target)> {
-        self.core.writable_target()
     }
 
     /// Asks to allow writes, then runs `then` if they were allowed.
