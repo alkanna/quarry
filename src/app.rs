@@ -1,6 +1,6 @@
 use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Target, UndoAction, UndoKind, Worker};
-use quarry_core::core::Core;
+use quarry_core::core::{Core, Front};
 use quarry_core::action::{Action, ConnA, GroupA, Secret, SideA};
 use quarry_core::cmd::{Chord, Cmd};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
@@ -117,7 +117,7 @@ pub(crate) fn shortcut(c: &Chord) -> egui::KeyboardShortcut {
 }
 pub struct App {
     /// Everything that is not drawing: connections, tabs, windows, preferences and the worker.
-    core: Core,
+    core: Front,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
     tree_x: egui::Rangef,
@@ -158,7 +158,7 @@ impl App {
         let (tx, rx) = channel();
         let worker = Worker::new(tx, { let ctx = cc.egui_ctx.clone(); std::sync::Arc::new(move || ctx.request_repaint()) });
         Self {
-            core: Core::new(worker, rx, demo),
+            core: Front::new(Core::new(worker, rx, demo)),
             fold: None,
             tree_x: egui::Rangef::NOTHING,
             #[cfg(target_os = "macos")]

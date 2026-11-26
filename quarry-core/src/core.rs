@@ -3,6 +3,9 @@
 
 pub mod notify;
 pub mod drafts;
+pub mod front;
+
+pub use front::Front;
 
 use crate::db::{self, Msg, UndoAction, Worker};
 use crate::state::cloud_sql;
@@ -24,8 +27,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 pub struct Core {
-    pub worker: Worker,
-    pub rx: Receiver<Msg>,
+    pub(crate) worker: Worker,
+    pub(crate) rx: Receiver<Msg>,
     pub conns: Vec<Conn>,
     pub active: Option<u64>,
     pub open_dbs: HashSet<(u64, String)>,
