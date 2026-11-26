@@ -54,10 +54,11 @@ impl App {
     pub(in crate::app) fn agents_approval(&mut self, ctx: &egui::Context) {
         let Some(ask) = self.core.agents.asks.front().cloned() else { return };
         let now = std::time::Instant::now();
-        let shown = match self.ui.ask_shown {
-            Some((id, at)) if id == ask.id => at,
-            // A demo may say when the call was shown, to picture Allow still asleep.
-            _ => self.ui.ask_shown.insert((ask.id, ask.shown.unwrap_or(now))).1,
+        let shown = match (ask.shown, self.ui.ask_shown) {
+            // Only demos and tests set it, to picture or check Allow asleep or awake.
+            (Some(at), _) => at,
+            (None, Some((id, at))) if id == ask.id => at,
+            _ => self.ui.ask_shown.insert((ask.id, now)).1,
         };
         let total = self.core.agents.asks.len();
         let awake = now.saturating_duration_since(shown) >= WAKE;
