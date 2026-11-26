@@ -48,7 +48,7 @@ fn the_memory_tooltip_moves_a_closed_tabs_rows_to_the_reopen_line() {
     t.docs = (0..100).filter_map(|i| db::Row::from_doc(&mongodb::bson::doc! { "_id": i, "pad": &pad }).ok()).collect();
     let bytes = t.mem();
     assert!(bytes > 100_000);
-    a.core.tabs.push(t);
+    a.core.test_mut().tabs.push(t);
     let (open, closed) = (part(a, "Other open tabs"), part(a, "Closed tabs kept to reopen"));
     let last = a.core.tabs.len() - 1;
     a.close_tab(last);
@@ -64,7 +64,7 @@ fn pipeline_samples_have_their_own_line_until_the_tab_closes() {
     let (samples, closed) = (part(a, "Pipeline samples"), part(a, "Closed tabs kept to reopen"));
     let mut t = Tab::new(a.core.tabs[0].sel.clone());
     t.agg_input.sample = (0..10).map(|i| mongodb::bson::doc! { "_id": i }).collect();
-    a.core.tabs.push(t);
+    a.core.test_mut().tabs.push(t);
     let grew = part(a, "Pipeline samples") - samples;
     assert!(grew > 0, "an open tab's samples are not on their line");
     let last = a.core.tabs.len() - 1;

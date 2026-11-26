@@ -30,7 +30,7 @@ fn right_click(ui: &mut UiApp, label: &str) {
 #[test]
 fn manage_in_connect_opens_the_panel_and_the_switch_leads_back() {
     let Some(mut ui) = panel() else { return };
-    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Explorer);
+    ui.h.state_mut().core.test_mut().prefs.set_side_mode(SideMode::Explorer);
     ui.settle();
     assert!(ui.h.query_by_label("Group Production").is_none());
     ui.click("Connect");
@@ -45,7 +45,7 @@ fn manage_in_connect_opens_the_panel_and_the_switch_leads_back() {
 #[test]
 fn the_tables_and_scripts_switch_sets_the_side_mode() {
     let Some(mut ui) = panel() else { return };
-    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Explorer);
+    ui.h.state_mut().core.test_mut().prefs.set_side_mode(SideMode::Explorer);
     ui.settle();
     ui.click("Scripts");
     assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Library);
@@ -107,7 +107,7 @@ fn the_filter_opens_groups_with_a_match_and_leaves_the_folding_alone() {
     ui.show("Group Local");
     assert!(!ui.app().core.groups.group(LOCAL).unwrap().open);
     ui.show("MATCHES");
-    ui.h.state_mut().core.conns_ui.filter.clear();
+    ui.h.state_mut().ui.conns.filter.clear();
     ui.settle();
     assert!(ui.h.query_by_label("scratch").is_none() && ui.h.query_by_label("MATCHES").is_none());
     ui.show("Group Staging");
@@ -278,7 +278,7 @@ fn a_hovered_row_shows_its_menu_button_with_browse_databases() {
     ui.click("Browse databases");
     assert_eq!((ui.app().core.active, ui.app().core.prefs.side_mode()), (Some(12), SideMode::Explorer));
     // A group row has one too, with the group's menu.
-    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Connections);
+    ui.h.state_mut().core.test_mut().prefs.set_side_mode(SideMode::Connections);
     ui.show("Group Staging");
     let at = ui.h.get_by_label("Group Staging").rect().center();
     ui.h.hover_at(at);

@@ -26,15 +26,15 @@ mod tests {
     fn undoing_a_deleted_group_puts_it_and_its_members_back() {
         let mut h = app();
         let a = h.state_mut();
-        a.core.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        let (first, second) = (a.core.groups.new_group("Prod"), a.core.groups.new_group("Dev"));
+        a.core.test_mut().conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        let (first, second) = (a.core.test_mut().groups.new_group("Prod"), a.core.test_mut().groups.new_group("Dev"));
         let all = a.conn_ids();
-        a.core.groups.place(1, Place::Into(first, None), &all);
-        a.core.groups.place(2, Place::Into(first, None), &all);
-        a.core.groups.place(3, Place::Into(second, None), &all);
+        a.core.test_mut().groups.place(1, Place::Into(first, None), &all);
+        a.core.test_mut().groups.place(2, Place::Into(first, None), &all);
+        a.core.test_mut().groups.place(3, Place::Into(second, None), &all);
         // What deleting the first group does: it goes, and its members are loose again.
-        let gone = a.core.groups.groups.remove(0);
-        a.core.groups.loose = vec![1, 2];
+        let gone = a.core.test_mut().groups.groups.remove(0);
+        a.core.test_mut().groups.loose = vec![1, 2];
         a.toast_restore("Group Prod deleted.".into(), Restore::Group { g: gone, at: 0 });
         let id = a.core.restores[0].0;
         a.apply_restore(id);
@@ -61,8 +61,8 @@ mod tests {
     fn a_group_put_back_past_the_end_goes_last() {
         let mut h = app();
         let a = h.state_mut();
-        a.core.conns.extend([1, 2].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        a.core.groups.new_group("Dev");
+        a.core.test_mut().conns.extend([1, 2].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        a.core.test_mut().groups.new_group("Dev");
         let g = Group { id: 9, name: "Prod".into(), members: vec![1, 7], ..Default::default() };
         a.toast_restore("Deleted.".into(), Restore::Group { g, at: 99 });
         undo_last(a);
@@ -74,23 +74,23 @@ mod tests {
     fn undoing_a_rail_drop_skips_a_removed_connection_and_keeps_later_group_edits() {
         let mut h = app();
         let a = h.state_mut();
-        a.core.conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
-        a.core.rail_order = vec![1, 2, 3];
+        a.core.test_mut().conns.extend([1, 2, 3].map(|id| Conn::new(ConnMeta { id, ..Default::default() }, Status::Idle)));
+        a.core.test_mut().rail_order = vec![1, 2, 3];
         let all = a.conn_ids();
         // A drop of 2 onto 1 made a group of them.
         let moved = vec![(2, None, a.core.groups.spot(2, &all).1), (1, None, a.core.groups.spot(1, &all).1)];
-        let g = a.core.groups.new_group("New group");
-        a.core.groups.place(1, Place::Into(g, None), &all);
-        a.core.groups.place(2, Place::Into(g, None), &all);
+        let g = a.core.test_mut().groups.new_group("New group");
+        a.core.test_mut().groups.place(1, Place::Into(g, None), &all);
+        a.core.test_mut().groups.place(2, Place::Into(g, None), &all);
         a.toast_restore("Grouped.".into(), Restore::Placed { moved, created: Some(g), tile: 2, prev: Some(1), at: 1 });
         // Since then: the group was renamed, 3 joined it, and 2 was removed from the app.
-        a.core.groups.group_mut(g).unwrap().name = "Prod".into();
-        a.core.groups.place(3, Place::Into(g, None), &all);
+        a.core.test_mut().groups.group_mut(g).unwrap().name = "Prod".into();
+        a.core.test_mut().groups.place(3, Place::Into(g, None), &all);
         // Removing a connection prunes it from the groups, as Danger::RemoveConnection does.
-        a.core.conns.retain(|c| c.meta.id != 2);
-        a.core.rail_order.retain(|c| *c != 2);
+        a.core.test_mut().conns.retain(|c| c.meta.id != 2);
+        a.core.test_mut().rail_order.retain(|c| *c != 2);
         let alive = a.conn_ids();
-        a.core.groups.prune(&alive);
+        a.core.test_mut().groups.prune(&alive);
         undo_last(a);
         let alive = a.conn_ids();
         assert_eq!(a.core.groups.group(g).map(|x| (x.name.as_str(), x.members.clone())), Some(("Prod", vec![3])));
@@ -119,7 +119,7 @@ mod tests {
         let d = temp("stuck");
         let f = d.join("R.sql");
         std::fs::write(&f, "select 1").unwrap();
-        a.core.library.links.push(crate::library::Link { id: 7, path: d.clone(), ..Default::default() });
+        a.core.test_mut().library.links.push(crate::library::Link { id: 7, path: d.clone(), ..Default::default() });
         // A read-only file cannot be removed on Windows, and a read-only folder keeps its files on unix.
         let lock = |on: bool| {
             #[cfg(unix)]

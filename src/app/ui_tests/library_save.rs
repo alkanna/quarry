@@ -20,7 +20,7 @@ fn sql_query_with_scripts(a: &mut App) {
 fn set_query(ui: &mut UiApp, text: &str) {
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    a.core.tabs[c].sql.as_mut().unwrap().query = text.into();
+    a.core.test_mut().tabs[c].sql.as_mut().unwrap().query = text.into();
 }
 
 fn dialog_name(ui: &UiApp) -> Option<String> {
@@ -125,7 +125,7 @@ fn cmd_s_in_a_view_without_a_script_does_nothing() {
     // missing script.
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
-        if let Some(t) = a.tm() {
+        if let Some(t) = a.core.test_mut().tm() {
             t.view = View::Structure;
         }
     }) else { return };
@@ -146,7 +146,7 @@ fn cmd_s_with_a_document_draft_saves_only_the_draft() {
         new.insert("status", "refunded");
         let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
         let sel = t.sel.clone();
-        crate::app::drafts::stage_draft(&mut a.core.drafts, &key, &sel, &old, new);
+        crate::app::drafts::stage_draft(&mut a.core.test_mut().drafts, &key, &sel, &old, new);
     }
     ui.settle();
     ui.key(CMD, egui::Key::S);
@@ -186,8 +186,8 @@ fn saving_from_the_shell_makes_a_shell_script() {
     {
         let a = ui.h.state_mut();
         let c = a.core.cur;
-        a.core.tabs[c].view = View::Shell;
-        a.core.tabs[c].shell.code = "async function run() {\n  return await orders.count();\n}".into();
+        a.core.test_mut().tabs[c].view = View::Shell;
+        a.core.test_mut().tabs[c].shell.code = "async function run() {\n  return await orders.count();\n}".into();
     }
     ui.settle();
     ui.key(CMD, egui::Key::S);
@@ -246,8 +246,8 @@ fn a_filter_script_opens_its_collection_with_the_query_set() {
 fn the_old_saved_queries_move_into_the_library_once() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let a = ui.h.state_mut();
-    a.core.prefs.library.insert("3/#sql".into(), vec![SavedQuery { name: "Old".into(), sql: Some("SELECT 1".into()), ..Default::default() }]);
-    a.core.prefs.library.insert("1/shop/orders".into(), vec![SavedQuery { name: "Paid".into(), filter: "{ status: 'paid' }".into(), ..Default::default() }]);
+    a.core.test_mut().prefs.library.insert("3/#sql".into(), vec![SavedQuery { name: "Old".into(), sql: Some("SELECT 1".into()), ..Default::default() }]);
+    a.core.test_mut().prefs.library.insert("1/shop/orders".into(), vec![SavedQuery { name: "Paid".into(), filter: "{ status: 'paid' }".into(), ..Default::default() }]);
     a.migrate_library();
     a.migrate_library();
     let lib = &a.core.library;
@@ -263,10 +263,10 @@ fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_pick
     let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
     let lost = {
         let a = ui.h.state_mut();
-        let lost = a.core.library.next_id();
-        a.core.library.folders.push(Folder { id: lost, name: "Lost folder".into(), parent: Some(9_999) });
-        let id = a.core.library.next_id();
-        a.core.library.scripts.push(Script { id, name: "Lost script".into(), kind: "sql".into(), body: "SELECT 2;".into(), conn: 3, folder: Some(9_998), ..Default::default() });
+        let lost = a.core.test_mut().library.next_id();
+        a.core.test_mut().library.folders.push(Folder { id: lost, name: "Lost folder".into(), parent: Some(9_999) });
+        let id = a.core.test_mut().library.next_id();
+        a.core.test_mut().library.scripts.push(Script { id, name: "Lost script".into(), kind: "sql".into(), body: "SELECT 2;".into(), conn: 3, folder: Some(9_998), ..Default::default() });
         lost
     };
     // The panel puts both at the top level; the Save dialog's folder list and the picker must too.
@@ -337,7 +337,7 @@ fn a_sql_content_filter_saves_to_the_library_lists_in_its_picker_and_opens_again
     assert_eq!(ui.app().pick_data(&ctx, PickKind::Sql).count, 0);
     let a = ui.h.state_mut();
     let c = a.core.cur;
-    (a.core.tabs[c].filter_txt, a.core.tabs[c].sort_txt) = (String::new(), String::new());
+    (a.core.test_mut().tabs[c].filter_txt, a.core.test_mut().tabs[c].sort_txt) = (String::new(), String::new());
     a.open_script(&ScriptRef::Saved(s.id), crate::app::library::open::How::Here);
     ui.settle();
     let t = ui.app().t().unwrap();
@@ -351,7 +351,7 @@ fn saving_a_query_from_a_table_tab_turns_it_into_a_query_tab() {
     {
         let a = ui.h.state_mut();
         let c = a.core.cur;
-        a.core.tabs[c].view = View::Sql;
+        a.core.test_mut().tabs[c].view = View::Sql;
     }
     set_query(&mut ui, "SELECT 1");
     ui.key(CMD, egui::Key::S);

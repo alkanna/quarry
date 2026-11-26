@@ -17,7 +17,7 @@ fn draw(then: impl FnOnce(&mut App)) -> Option<UiApp> {
     }
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
     let a = h.state_mut();
-    a.core.demo = true;
+    a.core.test_mut().demo = true;
     a.load_demo();
     then(a);
     h.run_steps(4);

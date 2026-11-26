@@ -78,7 +78,7 @@ impl UiApp {
     /// Puts `text` in the current tab's Query editor, as typing it would.
     fn set_query(&mut self, text: &str) {
         let a = self.h.state_mut();
-        if let Some(s) = a.tm().and_then(|t| t.sql.as_mut()) {
+        if let Some(s) = a.core.test_mut().tm().and_then(|t| t.sql.as_mut()) {
             s.query = text.to_string();
             s.caret = 0;
         }
@@ -173,7 +173,7 @@ fn mysql_a_linked_file_is_edited_saved_and_reloaded_after_a_change_on_disk() {
     let theirs = format!("SELECT name, qty FROM quarry_test.{table} WHERE id = 3 -- from the team");
     std::fs::write(&file, &theirs).unwrap();
     // As the window getting the focus back would, so the journey does not wait on the 2 s poll.
-    ui.h.state_mut().rescan_link(link);
+    ui.h.state_mut().core.test_mut().rescan_link(link);
     ui.wait("the conflict", |a| a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.conflict.as_deref() == Some(theirs.as_str())));
     if ui.h.query_all_by_label("Reload").next().is_some() {
         ui.click_last("Reload");
@@ -194,8 +194,8 @@ fn mysql_a_write_run_from_the_library_on_a_locked_connection_changes_nothing() {
     let mut ui = ui_app(MY).unwrap();
     assert!(!ui.app().conn(CONN).unwrap().writable, "the connection starts read-only");
     let a = ui.h.state_mut();
-    let id = a.core.library.next_id();
-    a.core.library.scripts.push(Script { id, name: "Raise qty".into(), kind: "sql".into(), body: format!("UPDATE quarry_test.{table} SET qty = 99 WHERE id = 1"), conn: CONN, db: "quarry_test".into(), ..Default::default() });
+    let id = a.core.test_mut().library.next_id();
+    a.core.test_mut().library.scripts.push(Script { id, name: "Raise qty".into(), kind: "sql".into(), body: format!("UPDATE quarry_test.{table} SET qty = 99 WHERE id = 1"), conn: CONN, db: "quarry_test".into(), ..Default::default() });
     ui.show_library();
     ui.library_row("Raise qty");
     ui.key(egui::Modifiers::COMMAND, egui::Key::Enter);
@@ -231,8 +231,8 @@ fn postgres_a_library_script_with_a_schema_runs_in_that_schema() {
     fx.sql(&format!("INSERT INTO public.{table} VALUES ('in public')"));
     let mut ui = ui_app(PG).unwrap();
     let a = ui.h.state_mut();
-    let id = a.core.library.next_id();
-    a.core.library.scripts.push(Script { id, name: "Where am I".into(), kind: "sql".into(), body: format!("SELECT v FROM {table}"), conn: CONN, db: "quarry_test".into(), schema: schema.clone(), ..Default::default() });
+    let id = a.core.test_mut().library.next_id();
+    a.core.test_mut().library.scripts.push(Script { id, name: "Where am I".into(), kind: "sql".into(), body: format!("SELECT v FROM {table}"), conn: CONN, db: "quarry_test".into(), schema: schema.clone(), ..Default::default() });
     a.open_script(&ScriptRef::Saved(id), How::Run);
     ui.wait("the script's tab", |a| a.t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.r == ScriptRef::Saved(id)));
     ui.wait_run();
@@ -264,15 +264,15 @@ fn mongo_a_filter_with_a_date_shortcut_is_saved_to_a_linked_file_and_reopens() {
     let dir = Dir::new("mongo");
     let mut ui = ui_app(MONGO).unwrap();
     let a = ui.h.state_mut();
-    let link = a.core.library.next_id();
-    a.core.library.links.push(Link { id: link, path: dir.0.clone(), name: "filters".into(), on: "conns".into(), conns: vec![CONN], exts: vec!["json".into()], follow: true, ..Default::default() });
-    a.rescan_link(link);
+    let link = a.core.test_mut().library.next_id();
+    a.core.test_mut().library.links.push(Link { id: link, path: dir.0.clone(), name: "filters".into(), on: "conns".into(), conns: vec![CONN], exts: vec!["json".into()], follow: true, ..Default::default() });
+    a.core.test_mut().rescan_link(link);
 
     // The collection, filtered with #today.
     ui.open_table(db_name, "", &coll);
     let ids = |a: &App| a.t().map(|t| t.docs.iter().filter_map(|d| d.decode().ok()?.get_i32("_id").ok()).collect::<Vec<i32>>()).unwrap_or_default();
     let a = ui.h.state_mut();
-    if let Some(t) = a.tm() {
+    if let Some(t) = a.core.test_mut().tm() {
         t.filter_txt = "{ created: #today }".into();
     }
     a.run_query();
@@ -294,7 +294,7 @@ fn mongo_a_filter_with_a_date_shortcut_is_saved_to_a_linked_file_and_reopens() {
     // The tab moves on to another filter and lets go of the file, then the file is opened again: the filter as written,
     // and today's document only.
     let a = ui.h.state_mut();
-    if let Some(t) = a.tm() {
+    if let Some(t) = a.core.test_mut().tm() {
         t.filter_txt = "{}".into();
         t.script = None;
     }

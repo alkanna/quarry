@@ -10,13 +10,13 @@ use crate::library::tree::Node;
 /// The "panel" demo state plus the Mongo connection that owns the filter, the pipeline and the shell script, and nothing
 /// selected so no preview repeats a row's name.
 fn load(a: &mut App) {
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
     a.demo_library("panel");
-    a.core.lib_ui.panel.sel = None;
+    a.core.test_mut().lib_ui.panel.sel = None;
 }
 
 fn load_empty(a: &mut App) {
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
     a.demo_library("empty");
 }
 
@@ -242,7 +242,7 @@ fn a_deleted_script_unbinds_its_tab_and_its_id_is_never_given_again() {
     // "Slow orders lookup" (14) is the highest id once the later scripts are gone, which max + 1 used to hand out again.
     let Some(mut ui) = demo_ui(|a| {
         load(a);
-        a.core.library.scripts.retain(|s| s.id <= 14);
+        a.core.test_mut().library.scripts.retain(|s| s.id <= 14);
     }) else { return };
     ui.h.state_mut().open_script(&ScriptRef::Saved(14), crate::app::library::open::How::NewTab);
     ui.settle();
@@ -252,10 +252,10 @@ fn a_deleted_script_unbinds_its_tab_and_its_id_is_never_given_again() {
     let a = ui.app();
     assert!(a.core.tabs[tab].script.is_none(), "the tab of a deleted script is unbound");
     assert!(!a.core.library.recent.contains(&ScriptRef::Saved(14)));
-    let next = ui.h.state_mut().core.library.next_id();
+    let next = ui.h.state_mut().core.test_mut().library.next_id();
     assert!(next > 14, "a new script took the deleted id {next}");
     // The old tab's Cmd+S asks where to save instead of writing into another script.
-    ui.h.state_mut().core.cur = tab;
+    ui.h.state_mut().core.test_mut().cur = tab;
     ui.settle();
     ui.key(egui::Modifiers::COMMAND, egui::Key::S);
     assert!(matches!(ui.app().modal, Some(Modal::SaveScript(_))));

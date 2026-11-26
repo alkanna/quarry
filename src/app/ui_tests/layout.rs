@@ -36,7 +36,8 @@ fn check_tab_list(size: egui::Vec2) {
     let load = |a: &mut App| {
         a.load_demo();
         for _ in 0..20 {
-            a.core.tabs.push(Tab::new(a.core.tabs[0].sel.clone()));
+            let sel = a.core.tabs[0].sel.clone();
+            a.core.test_mut().tabs.push(Tab::new(sel));
         }
     };
     let Some(mut ui) = demo_ui(load) else { return };
@@ -70,7 +71,7 @@ fn the_columns_stepper_is_one_field_high_and_steps() {
     let load = |a: &mut App| {
         a.load_demo();
         a.modal = Some(Modal::Settings);
-        a.core.settings_cat = crate::app::settings::SettingsCat::Documents;
+        a.core.test_mut().settings_cat = crate::app::settings::SettingsCat::Documents;
     };
     let Some(mut ui) = demo_ui(load) else { return };
     ui.show("Columns shown");

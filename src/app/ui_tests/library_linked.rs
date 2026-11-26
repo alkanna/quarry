@@ -27,15 +27,15 @@ fn bound_app(dir: &Path, text: &str, follow: bool) -> Harness<'static, App> {
     put(dir, "a.sql", text);
     let mut h = harness();
     let a = h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
-    a.core.library.links.push(Link { id: 1, path: dir.to_path_buf(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow, ..Default::default() });
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    a.core.test_mut().library.links.push(Link { id: 1, path: dir.to_path_buf(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow, ..Default::default() });
     let mut t = Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
     t.view = View::Sql;
     t.sql.as_mut().unwrap().query = text.to_string();
     let meta = read_script(&dir.join("a.sql")).unwrap().meta;
     t.script = Some(Bound { r: ScriptRef::File { link: 1, rel: "a.sql".into() }, view: View::Sql, base: text.to_string(), disk: meta, conflict: None });
-    a.core.tabs.push(t);
-    a.core.cur = 0;
+    a.core.test_mut().tabs.push(t);
+    a.core.test_mut().cur = 0;
     h
 }
 
@@ -46,7 +46,7 @@ fn rescan(a: &mut App, dir: &Path) {
         _ => None,
     }).collect();
     let scan = disk::scan_reading(dir, &["sql".to_string()], None, &open);
-    a.core.apply_scan(1, scan);
+    a.core.test_mut().apply_scan(1, scan);
 }
 
 /// Steps frames until the linked-file reads and writes on the worker are back.
@@ -72,8 +72,8 @@ fn linking_a_folder_through_the_dialog_saves_the_link_and_scans_it() {
     put(&dir, "notes.txt", "x");
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
-    a.core.active = Some(1);
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    a.core.test_mut().active = Some(1);
     a.open_link_dialog(None);
     ui.show("Link a folder");
     ui.fill("Folder path", &dir.to_string_lossy());
@@ -93,9 +93,9 @@ fn the_dialog_refuses_a_missing_folder_and_a_second_link_to_the_same_one() {
     let dir = temp_dir("refuse");
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), ..Default::default() }, Status::Idle));
-    a.core.active = Some(1);
-    a.core.library.links.push(Link { id: 5, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), ..Default::default() }, Status::Idle));
+    a.core.test_mut().active = Some(1);
+    a.core.test_mut().library.links.push(Link { id: 5, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
     a.open_link_dialog(None);
     ui.fill("Folder path", &dir.join("nope").to_string_lossy());
     ui.show("That folder does not exist");
@@ -143,7 +143,7 @@ fn a_clean_tab_reloads_when_the_link_follows_and_shows_the_banner_when_it_does_n
 fn an_edited_tab_gets_a_conflict_and_keep_mine_lets_cmd_s_replace_the_file() {
     let dir = temp_dir("conflict");
     let mut h = bound_app(&dir, "select 1", true);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     put(&dir, "a.sql", "select 22");
     rescan(h.state_mut(), &dir);
     let b = h.state().core.tabs[0].script.as_ref().unwrap();
@@ -153,11 +153,11 @@ fn an_edited_tab_gets_a_conflict_and_keep_mine_lets_cmd_s_replace_the_file() {
     assert!(matches!(&h.state().modal, Some(Modal::Text { body, .. }) if body.contains("- select 3") && body.contains("+ select 22")));
     h.state_mut().modal = None;
     // Saving with the conflict open writes nothing.
-    assert!(h.state_mut().core.save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 22");
     h.state_mut().conflict_keep();
     assert!(h.state().core.tabs[0].script.as_ref().unwrap().conflict.is_none());
-    assert!(h.state_mut().core.save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 3");
     let b = h.state().core.tabs[0].script.as_ref().unwrap();
@@ -169,7 +169,7 @@ fn an_edited_tab_gets_a_conflict_and_keep_mine_lets_cmd_s_replace_the_file() {
 fn reload_replaces_the_edits_with_the_file() {
     let dir = temp_dir("reload");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     put(&dir, "a.sql", "select 22");
     rescan(h.state_mut(), &dir);
     h.state_mut().conflict_reload();
@@ -183,18 +183,18 @@ fn reload_replaces_the_edits_with_the_file() {
 fn cmd_s_on_a_file_that_changed_since_it_loaded_raises_the_conflict_instead_of_writing() {
     let dir = temp_dir("race");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     // Changed behind the app's back, before any scan noticed.
     put(&dir, "a.sql", "select 22");
-    assert!(h.state_mut().core.save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 22");
     assert_eq!(h.state().core.tabs[0].script.as_ref().unwrap().conflict.as_deref(), Some("select 22"));
     // A clean tab saving an unchanged file writes it, and the file keeps nothing but the text.
     let dir2 = temp_dir("write");
     let mut h = bound_app(&dir2, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 5".into();
-    assert!(h.state_mut().core.save_linked());
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 5".into();
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir2.join("a.sql")).unwrap(), "select 5");
     assert_eq!(std::fs::read_dir(&dir2).unwrap().count(), 1);
@@ -213,14 +213,14 @@ fn panel_app(dir: &Path, files: &[(&str, &str)]) -> Harness<'static, App> {
     }
     let mut h = harness();
     let a = h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
-    a.core.active = Some(1);
-    a.core.library.links.push(Link { id: 1, path: dir.to_path_buf(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into(), "js".into(), "json".into()], follow: true, ..Default::default() });
-    a.core.prefs.set_side_mode(SideMode::Library);
-    a.core.prefs.sidebar_hidden = false;
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+    a.core.test_mut().active = Some(1);
+    a.core.test_mut().library.links.push(Link { id: 1, path: dir.to_path_buf(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into(), "js".into(), "json".into()], follow: true, ..Default::default() });
+    a.core.test_mut().prefs.set_side_mode(SideMode::Library);
+    a.core.test_mut().prefs.sidebar_hidden = false;
     // The scan is made here, so no timer decides when the rows appear.
-    a.core.lib_ui.frozen = true;
-    a.core.lib_ui.scans.insert(1, disk::scan(dir, &["sql".into(), "js".into(), "json".into()], None));
+    a.core.test_mut().lib_ui.frozen = true;
+    a.core.test_mut().lib_ui.scans.insert(1, disk::scan(dir, &["sql".into(), "js".into(), "json".into()], None));
     h.run_steps(3);
     h
 }
@@ -258,7 +258,7 @@ fn the_panel_shows_the_files_of_a_linked_folder_and_its_subfolders() {
 fn a_missing_folder_shows_not_found_and_no_files() {
     let dir = temp_dir("gone");
     let mut h = panel_app(&dir, &[("a.sql", "select 1")]);
-    h.state_mut().core.lib_ui.scans.insert(1, disk::Scan { missing: true, ..Default::default() });
+    h.state_mut().core.test_mut().lib_ui.scans.insert(1, disk::Scan { missing: true, ..Default::default() });
     h.run_steps(3);
     let ui = UiApp { h };
     assert!(ui.lk_shown("queries (not found)"));
@@ -276,18 +276,18 @@ fn opening_a_file_binds_the_tab_and_cmd_s_writes_it_back_without_adding_a_header
     assert!(matches!(&b.r, ScriptRef::File { link: 1, rel } if rel == Path::new("a.sql")) && b.disk.is_some() && b.view == View::Sql);
     assert_eq!(ui.app().core.tabs[ui.app().core.cur].sel.db, "shop");
     let cur = ui.app().core.cur;
-    ui.h.state_mut().core.tabs[cur].sql.as_mut().unwrap().query = "-- quarry: db=shop\nselect 2".into();
+    ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut().unwrap().query = "-- quarry: db=shop\nselect 2".into();
     ui.h.state_mut().save_script();
     io(&mut ui.h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "-- quarry: db=shop\nselect 2");
     assert!(ui.app().modal.is_none(), "a bound file saves without the dialog");
     // A file with no header gets none.
     put(&dir, "plain.sql", "select 1");
-    ui.h.state_mut().core.lib_ui.scans.insert(1, disk::scan(&dir, &["sql".into()], None));
+    ui.h.state_mut().core.test_mut().lib_ui.scans.insert(1, disk::scan(&dir, &["sql".into()], None));
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "plain.sql".into() }, How::NewTab);
     io(&mut ui.h);
     let cur = ui.app().core.cur;
-    ui.h.state_mut().core.tabs[cur].sql.as_mut().unwrap().query = "select 9".into();
+    ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut().unwrap().query = "select 9".into();
     ui.h.state_mut().save_script();
     io(&mut ui.h);
     assert_eq!(std::fs::read_to_string(dir.join("plain.sql")).unwrap(), "select 9");
@@ -315,7 +315,7 @@ fn copying_a_file_out_of_its_folder_leaves_the_file_and_adds_a_library_copy() {
     let dir = temp_dir("out");
     let h = panel_app(&dir, &[("a.sql", "-- quarry: db=shop\nselect 1")]);
     let mut ui = UiApp { h };
-    ui.h.state_mut().core.file_to_quarry(1, Path::new("a.sql"), crate::library::ops::DropAt::Root);
+    ui.h.state_mut().core.test_mut().file_to_quarry(1, Path::new("a.sql"), crate::library::ops::DropAt::Root);
     io(&mut ui.h);
     assert!(dir.join("a.sql").exists());
     let s = ui.app().core.library.scripts.iter().find(|s| s.name == "a").expect("a copy");
@@ -330,8 +330,8 @@ fn a_library_script_dropped_on_a_linked_folder_becomes_a_file_and_leaves_the_lib
     let h = panel_app(&dir, &[("a.sql", "select 1")]);
     let mut ui = UiApp { h };
     let a = ui.h.state_mut();
-    a.core.library.scripts.push(crate::library::Script { id: 7, name: "Revenue".into(), kind: "sql".into(), body: "select sum(1)".into(), conn: 1, ..Default::default() });
-    let rel = a.core.script_to_link(7, 1, Path::new("")).expect("a file");
+    a.core.test_mut().library.scripts.push(crate::library::Script { id: 7, name: "Revenue".into(), kind: "sql".into(), body: "select sum(1)".into(), conn: 1, ..Default::default() });
+    let rel = a.core.test_mut().script_to_link(7, 1, Path::new("")).expect("a file");
     assert_eq!(rel, Path::new("Revenue.sql"));
     assert_eq!(std::fs::read_to_string(dir.join("Revenue.sql")).unwrap(), "select sum(1)");
     assert!(a.core.library.scripts.iter().all(|s| s.id != 7));
@@ -342,16 +342,16 @@ fn a_library_script_dropped_on_a_linked_folder_becomes_a_file_and_leaves_the_lib
     assert!(!dir.join("Revenue.sql").exists(), "Undo left the file the move wrote");
     // A file edited since the move is kept by the undo.
     let s = a.core.library.scripts.iter().find(|s| s.name == "Revenue").map(|s| s.id).unwrap();
-    a.core.script_to_link(s, 1, Path::new("")).expect("a file again");
+    a.core.test_mut().script_to_link(s, 1, Path::new("")).expect("a file again");
     std::fs::write(dir.join("Revenue.sql"), "select 2").unwrap();
     let id = a.core.restores.last().map(|r| r.0).unwrap();
     a.apply_restore(id);
     assert!(dir.join("Revenue.sql").exists(), "Undo removed a file that was edited after the move");
     assert_eq!(a.core.library.scripts.iter().filter(|s| s.name == "Revenue").count(), 1);
     // A folder that does not show .js files refuses a shell script.
-    a.core.library.links[0].exts = vec!["sql".into()];
-    a.core.library.scripts.push(crate::library::Script { id: 8, name: "Job".into(), kind: "shell".into(), body: "1".into(), conn: 1, ..Default::default() });
-    assert!(a.core.script_to_link(8, 1, Path::new("")).is_none() && a.core.library.scripts.iter().any(|s| s.id == 8));
+    a.core.test_mut().library.links[0].exts = vec!["sql".into()];
+    a.core.test_mut().library.scripts.push(crate::library::Script { id: 8, name: "Job".into(), kind: "shell".into(), body: "1".into(), conn: 1, ..Default::default() });
+    assert!(a.core.test_mut().script_to_link(8, 1, Path::new("")).is_none() && a.core.library.scripts.iter().any(|s| s.id == 8));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -361,13 +361,13 @@ fn a_file_moves_between_the_folders_of_its_link_and_renames_on_disk() {
     let h = panel_app(&dir, &[("a.sql", "select 1"), ("sub/b.sql", "select 2")]);
     let mut ui = UiApp { h };
     let a = ui.h.state_mut();
-    assert_eq!(a.core.move_linked_file(1, Path::new("a.sql"), Path::new("sub")), Some(PathBuf::from("sub/a.sql")));
+    assert_eq!(a.core.test_mut().move_linked_file(1, Path::new("a.sql"), Path::new("sub")), Some(PathBuf::from("sub/a.sql")));
     assert!(!dir.join("a.sql").exists() && dir.join("sub/a.sql").exists());
     // The name in the folder is taken, so the moved one is numbered, never overwritten.
     put(&dir, "a.sql", "again");
-    assert_eq!(a.core.move_linked_file(1, Path::new("a.sql"), Path::new("sub")), Some(PathBuf::from("sub/a 2.sql")));
+    assert_eq!(a.core.test_mut().move_linked_file(1, Path::new("a.sql"), Path::new("sub")), Some(PathBuf::from("sub/a 2.sql")));
     assert_eq!(std::fs::read_to_string(dir.join("sub/a.sql")).unwrap(), "select 1");
-    assert_eq!(a.core.rename_linked(1, Path::new("sub/b.sql"), false, "renamed"), Some(PathBuf::from("sub/renamed.sql")));
+    assert_eq!(a.core.test_mut().rename_linked(1, Path::new("sub/b.sql"), false, "renamed"), Some(PathBuf::from("sub/renamed.sql")));
     assert!(dir.join("sub/renamed.sql").exists());
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -382,8 +382,8 @@ fn the_save_dialog_writes_a_new_file_into_a_linked_folder_and_binds_the_tab() {
     // The tab is unbound again and holds its own text.
     let a = ui.h.state_mut();
     let cur = a.core.cur;
-    a.core.tabs[cur].script = None;
-    a.core.tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
+    a.core.test_mut().tabs[cur].script = None;
+    a.core.test_mut().tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
     a.save_script();
     assert!(matches!(a.modal, Some(Modal::SaveScript(_))));
     if let Some(Modal::SaveScript(f)) = &mut a.modal {
@@ -406,10 +406,10 @@ fn a_new_script_and_a_new_folder_are_made_on_disk_and_listed_at_once() {
     let h = panel_app(&dir, &[("a.sql", "select 1")]);
     let mut ui = UiApp { h };
     let a = ui.h.state_mut();
-    let rel = a.core.new_linked_script(1, Path::new("")).unwrap();
+    let rel = a.core.test_mut().new_linked_script(1, Path::new("")).unwrap();
     assert_eq!(rel, Path::new("New script.sql"));
     assert!(dir.join("New script.sql").exists() && a.core.lib_ui.scans[&1].entries.iter().any(|e| e.rel == rel));
-    let d = a.core.new_linked_dir(1, Path::new("")).unwrap();
+    let d = a.core.test_mut().new_linked_dir(1, Path::new("")).unwrap();
     assert!(dir.join(&d).is_dir() && a.core.lib_ui.scans[&1].empty_dirs.contains(&d));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -420,12 +420,12 @@ fn a_file_that_changed_on_disk_gets_a_dot_until_it_is_opened() {
     let mut h = panel_app(&dir, &[("a.sql", "-- quarry: db=shop\nselect 1")]);
     // The first scan is the baseline: a link just made shows nothing changed.
     let scan = disk::scan(&dir, &["sql".into()], None);
-    h.state_mut().core.apply_scan(1, scan);
+    h.state_mut().core.test_mut().apply_scan(1, scan);
     assert!(h.state().core.lib_ui.changed.is_empty());
     std::thread::sleep(Duration::from_millis(20));
     put(&dir, "a.sql", "-- quarry: db=shop\nselect 11");
     let scan = disk::scan(&dir, &["sql".into()], None);
-    h.state_mut().core.apply_scan(1, scan);
+    h.state_mut().core.test_mut().apply_scan(1, scan);
     assert!(h.state().core.lib_ui.changed.contains(&(1, PathBuf::from("a.sql"))));
     h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::Here);
     io(&mut h);
@@ -441,7 +441,7 @@ fn a_changed_file_is_read_by_the_scan_and_not_on_the_ui_thread() {
     // A scan that found the change but read nothing (as one without the tab's file would) changes nothing: the UI
     // thread never reads the file itself.
     let scan = disk::scan(&dir, &["sql".to_string()], None);
-    h.state_mut().core.apply_scan(1, scan);
+    h.state_mut().core.test_mut().apply_scan(1, scan);
     assert_eq!(query(h.state()), "select 1");
     // The worker's scan reads the open file, and the tab follows it.
     rescan(h.state_mut(), &dir);
@@ -458,8 +458,8 @@ fn the_save_dialog_looks_for_the_file_once_per_path() {
     io(&mut ui.h);
     let a = ui.h.state_mut();
     let cur = a.core.cur;
-    a.core.tabs[cur].script = None;
-    a.core.tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
+    a.core.test_mut().tabs[cur].script = None;
+    a.core.test_mut().tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
     a.save_script();
     if let Some(Modal::SaveScript(f)) = &mut a.modal {
         (f.link, f.name) = (Some(1), "a".into());
@@ -486,16 +486,16 @@ fn the_save_dialog_looks_for_the_file_once_per_path() {
 fn a_second_cmd_s_before_the_first_is_back_raises_no_conflict() {
     let dir = temp_dir("twice");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 5".into();
-    assert!(h.state_mut().core.save_linked());
-    assert!(h.state_mut().core.save_linked());
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 5".into();
+    assert!(h.state_mut().core.test_mut().save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 5");
     let b = h.state().core.tabs[0].script.as_ref().unwrap();
     assert!(b.conflict.is_none() && b.base == "select 5", "{:?}", b.conflict);
     // A save after it is back goes through as well, from the time and text it left.
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 6".into();
-    assert!(h.state_mut().core.save_linked());
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 6".into();
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 6");
     assert!(h.state().core.tabs[0].script.as_ref().unwrap().conflict.is_none());
@@ -506,17 +506,17 @@ fn a_second_cmd_s_before_the_first_is_back_raises_no_conflict() {
 fn cmd_s_on_a_file_deleted_on_disk_writes_nothing_until_asked_again() {
     let dir = temp_dir("deleted");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     std::fs::remove_file(dir.join("a.sql")).unwrap();
     rescan(h.state_mut(), &dir);
-    assert!(h.state_mut().core.save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     // Before, the save recreated the file without a word.
     assert!(!dir.join("a.sql").exists(), "a file deleted on disk came back on Cmd+S");
     assert!(h.state().last_problem().contains("deleted on disk"), "{}", h.state().last_problem());
     assert!(h.state().core.tabs[0].script.as_ref().is_some_and(|b| b.disk.is_none()));
     // Told once, the second Cmd+S writes it back.
-    assert!(h.state_mut().core.save_linked());
+    assert!(h.state_mut().core.test_mut().save_linked());
     io(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("a.sql")).unwrap(), "select 3");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -526,7 +526,7 @@ fn cmd_s_on_a_file_deleted_on_disk_writes_nothing_until_asked_again() {
 fn a_file_changed_to_what_the_tab_holds_raises_no_conflict() {
     let dir = temp_dir("sametext");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.tabs[0].sql.as_mut().unwrap().query = "select 3".into();
+    h.state_mut().core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 3".into();
     put(&dir, "a.sql", "select 3");
     rescan(h.state_mut(), &dir);
     let b = h.state().core.tabs[0].script.as_ref().unwrap();
@@ -544,14 +544,14 @@ fn saving_over_a_linked_file_flags_the_tabs_on_it_and_undo_brings_the_old_bytes_
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
     io(&mut ui.h);
     let edited = ui.app().core.cur;
-    ui.h.state_mut().core.tabs[edited].sql.as_mut().unwrap().query = "select 7".into();
+    ui.h.state_mut().core.test_mut().tabs[edited].sql.as_mut().unwrap().query = "select 7".into();
     ui.h.state_mut().open_script(&ScriptRef::File { link: 1, rel: "a.sql".into() }, How::NewTab);
     io(&mut ui.h);
     let a = ui.h.state_mut();
     let cur = a.core.cur;
     assert_ne!(cur, edited);
-    a.core.tabs[cur].script = None;
-    a.core.tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
+    a.core.test_mut().tabs[cur].script = None;
+    a.core.test_mut().tabs[cur].sql.as_mut().unwrap().query = "select 42".into();
     a.save_script();
     if let Some(Modal::SaveScript(f)) = &mut a.modal {
         (f.link, f.name) = (Some(1), "a".into());
@@ -581,7 +581,7 @@ fn a_missing_folder_offers_locate_reload_and_unlink_and_locate_points_it_at_the_
     let moved = temp_dir("locate-new");
     put(&moved, "a.sql", "select 1");
     let mut h = panel_app(&dir, &[]);
-    h.state_mut().core.lib_ui.scans.insert(1, disk::Scan { missing: true, ..Default::default() });
+    h.state_mut().core.test_mut().lib_ui.scans.insert(1, disk::Scan { missing: true, ..Default::default() });
     h.run_steps(3);
     let mut ui = UiApp { h };
     ui.show("queries (not found)");
@@ -611,8 +611,8 @@ fn a_missing_folder_offers_locate_reload_and_unlink_and_locate_points_it_at_the_
 fn unlink_says_how_many_tabs_it_unbound_and_undo_binds_them_again() {
     let dir = temp_dir("unlink");
     let mut h = bound_app(&dir, "select 1", false);
-    h.state_mut().core.library.recent.push(ScriptRef::File { link: 1, rel: "a.sql".into() });
-    h.state_mut().core.unlink(1);
+    h.state_mut().core.test_mut().library.recent.push(ScriptRef::File { link: 1, rel: "a.sql".into() });
+    h.state_mut().core.test_mut().unlink(1);
     let a = h.state();
     assert!(a.core.library.links.is_empty() && a.core.tabs[0].script.is_none() && a.core.library.recent.is_empty());
     assert!(a.last_problem().contains("1 tab was unbound"), "{}", a.last_problem());
@@ -630,14 +630,14 @@ fn moves_and_copies_say_where_the_result_went() {
     let dir = temp_dir("where");
     let h = panel_app(&dir, &[("a.sql", "select 1"), ("sub/b.sql", "select 2")]);
     let mut ui = UiApp { h };
-    ui.h.state_mut().core.move_linked_file(1, Path::new("a.sql"), Path::new("sub"));
+    ui.h.state_mut().core.test_mut().move_linked_file(1, Path::new("a.sql"), Path::new("sub"));
     assert!(ui.app().core.status.contains("Moved a.sql to queries / sub / a.sql"), "{}", ui.app().core.status);
-    ui.h.state_mut().core.file_to_quarry(1, Path::new("sub/b.sql"), crate::library::ops::DropAt::Root);
+    ui.h.state_mut().core.test_mut().file_to_quarry(1, Path::new("sub/b.sql"), crate::library::ops::DropAt::Root);
     io(&mut ui.h);
     assert!(ui.app().core.status.contains("Copied b to the top of the library"), "{}", ui.app().core.status);
     let a = ui.h.state_mut();
-    a.core.library.scripts.push(crate::library::Script { id: 70, name: "Revenue".into(), kind: "sql".into(), body: "select 3".into(), conn: 1, ..Default::default() });
-    a.core.script_to_link(70, 1, Path::new("sub")).expect("a file");
+    a.core.test_mut().library.scripts.push(crate::library::Script { id: 70, name: "Revenue".into(), kind: "sql".into(), body: "select 3".into(), conn: 1, ..Default::default() });
+    a.core.test_mut().script_to_link(70, 1, Path::new("sub")).expect("a file");
     assert!(a.last_problem().contains("to disk as queries / sub / Revenue.sql"), "{}", a.last_problem());
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -649,15 +649,15 @@ fn the_link_dialog_warns_when_a_chosen_connection_shows_none_of_the_files_and_ad
     put(&dir, "b.sql", "select 2");
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Idle));
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Idle));
     for id in [2, 3] {
-        a.core.conns.push(Conn::new(ConnMeta { id, name: format!("shop-{id}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id, name: format!("shop-{id}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
     }
-    let g = a.core.groups.new_group("Shops");
+    let g = a.core.test_mut().groups.new_group("Shops");
     let all = a.conn_ids();
-    a.core.groups.place(2, Place::Into(g, None), &all);
-    a.core.groups.place(3, Place::Into(g, None), &all);
-    a.core.active = Some(1);
+    a.core.test_mut().groups.place(2, Place::Into(g, None), &all);
+    a.core.test_mut().groups.place(3, Place::Into(g, None), &all);
+    a.core.test_mut().active = Some(1);
     a.open_link_dialog(None);
     ui.fill("Folder path", &dir.to_string_lossy());
     ui.show("2 scripts in 1 folder");

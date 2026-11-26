@@ -119,7 +119,7 @@ fn the_dump_switches_and_radio_cards_change_the_form() {
 fn hidden_sleeping_connections_are_counted_and_can_be_shown() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
-        a.core.sql_server = Some(sql::server::SqlServerWin::demo(3, "processes"));
+        a.core.test_mut().sql_server = Some(sql::server::SqlServerWin::demo(3, "processes"));
     }) else {
         return;
     };
@@ -152,7 +152,7 @@ fn the_connections_menu_keeps_its_actions_on_screen_with_many_connections() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
         for i in 0..40u64 {
-            a.core.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
+            a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
         }
     }) else {
         return;
@@ -213,7 +213,7 @@ fn a_short_dialog_after_a_tall_one_shrinks_to_its_content() {
 fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
     let Some(ui) = demo_ui(|a| {
         a.load_demo();
-        if let Some(c) = a.core.conns.iter_mut().find(|c| c.meta.id == 1) {
+        if let Some(c) = a.core.test_mut().conns.iter_mut().find(|c| c.meta.id == 1) {
             c.writable = false;
         }
         a.exec(Action::Side(SideA::MongoNewColl { conn: 1, db: "shop".into() }));
@@ -227,14 +227,14 @@ fn a_locked_connection_asks_to_unlock_before_the_new_collection_dialog() {
 fn the_server_windows_show_database_sizes_and_postgresql_counters() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
-        a.core.sql_server = Some(sql::server::SqlServerWin::demo(3, "overview"));
+        a.core.test_mut().sql_server = Some(sql::server::SqlServerWin::demo(3, "overview"));
     }) else {
         return;
     };
     ui.show("DATABASE SIZES");
     let Some(mut ui) = demo_ui(|a| {
         a.load_pg_demo();
-        a.core.pg_server = Some(sql::pg_server::PgServerWin::demo(3, "server"));
+        a.core.test_mut().pg_server = Some(sql::pg_server::PgServerWin::demo(3, "server"));
     }) else {
         return;
     };

@@ -91,7 +91,7 @@ fn option_secrets_are_masked_in_the_saved_connection_and_its_failed_card() {
     }
     // An at sign in an option value must not move the mask onto the wrong part.
     assert!(masked.contains("127.0.0.1:1") && masked.contains("appName=a%40b"), "{masked}");
-    ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == id).unwrap().status = Status::Failed("The server did not answer".into());
+    ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == id).unwrap().status = Status::Failed("The server did not answer".into());
     ui.settle();
     ui.show_contains("The server did not answer");
     for secret in ["s3cret", "pxsecret", "keysecret", "tok%40en"] {
@@ -114,7 +114,7 @@ fn uri_timeouts_win_over_the_apps_query_timeout() {
     let uri = "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=500&connectTimeoutMS=500";
     let mut ui = open_form(uri, ConnTab::Standard);
     let id = save_form(&mut ui);
-    ui.h.state_mut().core.prefs.timeout_ms = 60_000;
+    ui.h.state_mut().core.test_mut().prefs.timeout_ms = 60_000;
     let t = std::time::Instant::now();
     ui.connect(id, uri);
     assert!(t.elapsed() < Duration::from_secs(15), "the 60 s app timeout won over the 500 ms in the address: {:?}", t.elapsed());
@@ -144,7 +144,7 @@ fn disconnect_stops_a_running_watch_of_that_connection() {
     ui.connect(CONN, &std::env::var("QUARRY_TEST_MONGO_RS").unwrap());
     ui.assert_ready(CONN);
     ui.open_table(DB, "", "watch_disconnect");
-    ui.h.state_mut().tm().unwrap().view = View::Watch;
+    ui.h.state_mut().core.test_mut().tm().unwrap().view = View::Watch;
     ui.settle();
     ui.click("\u{25b6} Start watching");
     ui.wait("the watch to run", |a| a.t().is_some_and(|t| t.watch.running()));
@@ -183,10 +183,10 @@ fn ssh_saved(conf: &crate::ssh::SshConf, far: &str) -> (UiApp, u64) {
 /// Connects through SSH with the password the test app cannot read from a keychain.
 fn ssh_connect(ui: &mut UiApp, id: u64, pass: &str, far: &str) {
     let app = ui.h.state_mut();
-    app.core.req += 1;
+    app.core.test_mut().req += 1;
     let attempt = app.core.req;
     let timeout = app.timeout();
-    let c = app.core.conns.iter_mut().find(|c| c.meta.id == id).unwrap();
+    let c = app.core.test_mut().conns.iter_mut().find(|c| c.meta.id == id).unwrap();
     c.status = Status::Connecting;
     c.attempt = attempt;
     let net = db::Net { ssh: c.meta.ssh.clone().map(|s| (s, crate::ssh::SshSecrets { password: Some(pass.into()), passphrase: None })), ..Default::default() };

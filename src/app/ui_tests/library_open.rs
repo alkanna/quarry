@@ -27,8 +27,8 @@ fn sql_query(a: &mut App) {
 }
 
 fn add(a: &mut App, kind: &str, conn: u64, name: &str, body: &str, db: &str, coll: &str) -> u64 {
-    let id = a.core.library.next_id();
-    a.core.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), ..Default::default() });
+    let id = a.core.test_mut().library.next_id();
+    a.core.test_mut().library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), ..Default::default() });
     id
 }
 
@@ -47,7 +47,7 @@ fn rescan(a: &mut App, link: u64, dir: &Path) {
         ScriptRef::File { rel, .. } => Some((rel.clone(), b.disk)),
         _ => None,
     }).collect();
-    a.core.apply_scan(link, disk::scan_reading(dir, &["sql".to_string()], None, &open));
+    a.core.test_mut().apply_scan(link, disk::scan_reading(dir, &["sql".to_string()], None, &open));
 }
 
 #[test]
@@ -58,23 +58,23 @@ fn a_restored_tab_on_a_linked_file_keeps_its_edits_when_the_file_is_read() {
     std::fs::write(dir.join("a.sql"), "select 1").unwrap();
     let mut h = harness();
     let a = h.state_mut();
-    a.core.conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
-    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow: true, ..Default::default() });
+    a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "shop".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle));
+    a.core.test_mut().library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], follow: true, ..Default::default() });
     let mut t = Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
     t.view = View::Sql;
     t.sql.as_mut().unwrap().query = "select 1 -- mine".into();
     t.script = Some(a.rebind(&t, ScriptRef::File { link: 1, rel: "a.sql".into() }).expect("bound again"));
-    a.core.tabs.push(t);
-    a.core.cur = 0;
+    a.core.test_mut().tabs.push(t);
+    a.core.test_mut().cur = 0;
     rescan(a, 1, &dir);
     let t = &a.core.tabs[0];
     assert_eq!(t.sql.as_ref().unwrap().query, "select 1 -- mine", "the edits were replaced by the file");
     assert_eq!(t.script.as_ref().unwrap().conflict.as_deref(), Some("select 1"), "the difference shows as a conflict");
     // A restored tab that holds what the file holds is simply clean.
     let a = h.state_mut();
-    a.core.tabs[0].sql.as_mut().unwrap().query = "select 1".into();
+    a.core.test_mut().tabs[0].sql.as_mut().unwrap().query = "select 1".into();
     let b = a.rebind(&a.core.tabs[0], ScriptRef::File { link: 1, rel: "a.sql".into() }).unwrap();
-    a.core.tabs[0].script = Some(b);
+    a.core.test_mut().tabs[0].script = Some(b);
     rescan(a, 1, &dir);
     assert!(a.core.tabs[0].script.as_ref().unwrap().conflict.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -100,7 +100,7 @@ fn a_reused_query_tab_runs_the_script_in_its_own_database() {
     {
         let a = ui.h.state_mut();
         let c = a.core.cur;
-        a.core.tabs[c].sql.as_mut().unwrap().run_db = "analytics".into();
+        a.core.test_mut().tabs[c].sql.as_mut().unwrap().run_db = "analytics".into();
     }
     let id = add(ui.h.state_mut(), "sql", 3, "Late", "SELECT 1", "shop", "");
     open(&mut ui, id, How::Here);
@@ -117,7 +117,7 @@ fn cmd_s_writes_back_the_database_the_tab_runs_in() {
     {
         let a = ui.h.state_mut();
         let c = a.core.cur;
-        let s = a.core.tabs[c].sql.as_mut().unwrap();
+        let s = a.core.test_mut().tabs[c].sql.as_mut().unwrap();
         (s.query, s.run_db) = ("SELECT 2".into(), "analytics".into());
     }
     ui.key(CMD, egui::Key::S);
@@ -147,7 +147,7 @@ fn a_migrated_filter_with_no_collection_says_so_and_opens_nothing() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     {
         let a = ui.h.state_mut();
-        a.core.prefs.library.insert("1/shop".into(), vec![SavedQuery { name: "Loose".into(), filter: "{ a: 1 }".into(), ..Default::default() }]);
+        a.core.test_mut().prefs.library.insert("1/shop".into(), vec![SavedQuery { name: "Loose".into(), filter: "{ a: 1 }".into(), ..Default::default() }]);
         a.migrate_library();
     }
     let s = ui.app().core.library.scripts.iter().find(|s| s.name == "Loose").cloned().expect("migrated");
@@ -165,12 +165,12 @@ fn cmd_enter_in_the_editor_runs_the_query_after_a_click_in_the_library() {
     let Some(mut ui) = demo_ui(|a| {
         sql_query(a);
         a.demo_library("panel");
-        a.core.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else { return };
     {
         let a = ui.h.state_mut();
         let c = a.core.cur;
-        a.core.tabs[c].sql.as_mut().unwrap().query = "SELECT 1".into();
+        a.core.test_mut().tabs[c].sql.as_mut().unwrap().query = "SELECT 1".into();
     }
     ui.click("Top customers");
     assert!(ui.app().core.lib_ui.panel.focus);
@@ -189,12 +189,12 @@ fn return_alt_return_and_cmd_enter_act_on_the_selected_script() {
     let Some(mut ui) = demo_ui(|a| {
         sql_query(a);
         a.demo_library("panel");
-        a.core.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else { return };
     let tabs = ui.app().core.tabs.len();
     // A script opened in a tab gives the tab its name, so the rows are picked as a click on one would pick them.
     let pick = |ui: &mut UiApp, id: u64| {
-        let st = &mut ui.h.state_mut().core.lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.test_mut().lib_ui.panel;
         (st.sel, st.focus) = (Some(crate::library::tree::Node::Script(id)), true);
         ui.settle();
     };
@@ -228,7 +228,7 @@ fn conn(id: u64, name: &str, engine: db::sql::Engine, status: Status) -> Conn {
 }
 
 fn writable(ui: &mut UiApp, id: u64, on: bool) {
-    if let Some(c) = ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == id) {
+    if let Some(c) = ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == id) {
         c.writable = on;
     }
 }
@@ -240,23 +240,23 @@ fn a_linked_file_runs_on_the_tab_or_active_connection_and_otherwise_asks() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
     use db::sql::Engine::{Mongo, MySql};
-    a.core.conns.extend([conn(1, "local", Mongo, Status::Ready), conn(2, "staging", MySql, Status::Ready), conn(3, "prod", MySql, Status::Ready)]);
-    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
-    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }));
-    a.core.cur = 0;
+    a.core.test_mut().conns.extend([conn(1, "local", Mongo, Status::Ready), conn(2, "staging", MySql, Status::Ready), conn(3, "prod", MySql, Status::Ready)]);
+    a.core.test_mut().library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
+    a.core.test_mut().tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }));
+    a.core.test_mut().cur = 0;
     let file = ScriptRef::File { link: 1, rel: "a.sql".into() };
     use crate::app::library::open::Target;
     // The tab is on MongoDB and nothing else is active: neither MySQL connection is picked for the person.
-    a.core.active = None;
+    a.core.test_mut().active = None;
     assert_eq!(a.script_target(&file), Target::Ask(vec![2, 3]));
-    a.core.active = Some(2);
+    a.core.test_mut().active = Some(2);
     assert_eq!(a.script_target(&file), Target::On(2));
-    a.core.tabs.push(Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(MySql));
-    a.core.cur = 1;
+    a.core.test_mut().tabs.push(Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(MySql));
+    a.core.test_mut().cur = 1;
     assert_eq!(a.script_target(&file), Target::On(3), "the current tab's connection comes before the active one");
     // Asked: the chooser lists both, nothing is opened until one is picked.
     let a = ui.h.state_mut();
-    (a.core.cur, a.core.active) = (0, None);
+    (a.core.test_mut().cur, a.core.test_mut().active) = (0, None);
     let tabs = a.core.tabs.len();
     a.open_script(&file, How::Here);
     ui.h.run_steps(3);
@@ -287,7 +287,7 @@ fn a_script_with_no_database_opens_in_the_connections_default_not_the_first_list
 fn a_removed_connections_scripts_never_pass_to_a_new_connection() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let a = ui.h.state_mut();
-    a.core.conns.push(conn(9, "old-prod", db::sql::Engine::MySql, Status::Idle));
+    a.core.test_mut().conns.push(conn(9, "old-prod", db::sql::Engine::MySql, Status::Idle));
     let id = add(a, "sql", 9, "Old report", "SELECT 1", "", "");
     a.danger(Danger::RemoveConnection(9));
     assert!(a.conn(9).is_none());
@@ -327,7 +327,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
 fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "SELECT 1;\nDELETE FROM carts WHERE id = 1", "shop", "");
-    ui.h.state_mut().core.status.clear();
+    ui.h.state_mut().core.test_mut().status.clear();
     open(&mut ui, id, How::Run);
     assert!(sql_of(ui.app()).query.contains("DELETE FROM carts"));
     assert!(!ui.said("Offline demo"), "it ran: {}", ui.app().last_problem());
@@ -358,7 +358,7 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
 fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     let id = add(ui.h.state_mut(), "pipeline", 1, "Totals", "[{ $group: { _id: '$status', n: { $sum: 1 } } }]", "shop", "orders");
-    ui.h.state_mut().core.status.clear();
+    ui.h.state_mut().core.test_mut().status.clear();
     open(&mut ui, id, How::Here);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$group")));
     assert!(!ui.said("nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
@@ -370,7 +370,7 @@ fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
 fn waiting(status: Status) -> (UiApp, u64) {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, status));
+    a.core.test_mut().conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, status));
     let id = add(a, "sql", 1, "Monthly revenue", "SELECT 1", "shop", "");
     a.open_script(&ScriptRef::Saved(id), How::Here);
     ui.h.run_steps(3);
@@ -378,7 +378,7 @@ fn waiting(status: Status) -> (UiApp, u64) {
 }
 
 fn set_status(ui: &mut UiApp, status: Status, attempt: u64) {
-    let c = ui.h.state_mut().core.conns.iter_mut().find(|c| c.meta.id == 1).unwrap();
+    let c = ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == 1).unwrap();
     (c.status, c.attempt) = (status, attempt);
     ui.h.run_steps(3);
 }
@@ -403,7 +403,7 @@ fn a_connection_that_never_starts_connecting_drops_the_wait() {
     let (mut ui, _) = waiting(Status::Idle);
     assert!(ui.app().core.lib_ui.pending.is_some());
     // Still idle after the time limit: the address could not be read, say, so no connect is coming.
-    if let Some(p) = ui.h.state_mut().core.lib_ui.pending.as_mut() {
+    if let Some(p) = ui.h.state_mut().core.test_mut().lib_ui.pending.as_mut() {
         p.since = Some(-1000.0);
     }
     ui.h.run_steps(3);
@@ -438,8 +438,8 @@ fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
     // the whole sidebar belongs to the rail's connection.
     {
         let a = ui.h.state_mut();
-        a.core.conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
-        a.core.active = Some(1);
+        a.core.test_mut().conns.push(conn(1, "Local sample", db::sql::Engine::Mongo, Status::Ready));
+        a.core.test_mut().active = Some(1);
     }
     ui.settle();
     assert_eq!(ui.app().lib_conn(), Some(1));
@@ -450,7 +450,7 @@ fn the_preview_says_where_a_script_runs_and_the_scope_follows_the_tab() {
 fn a_migration_that_brings_nothing_still_writes_the_library_so_it_never_runs_again() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.prefs.library.insert("junk".into(), vec![SavedQuery { name: "x".into(), ..Default::default() }]);
+    a.core.test_mut().prefs.library.insert("junk".into(), vec![SavedQuery { name: "x".into(), ..Default::default() }]);
     assert_eq!(a.core.library.v, 0);
     a.migrate_library();
     assert!(a.core.library.scripts.is_empty());
@@ -464,7 +464,7 @@ fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
         a.demo_library("panel");
     }) else { return };
     {
-        let st = &mut ui.h.state_mut().core.lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.test_mut().lib_ui.panel;
         (st.sel, st.focus) = (Some(crate::library::tree::Node::Script(11)), true);
     }
     ui.settle();
@@ -478,7 +478,7 @@ fn the_tree_keeps_its_keys_after_a_rename_and_takes_them_on_keyboard_focus() {
     assert_ne!(ui.app().core.lib_ui.panel.sel, before, "the arrows stopped walking the tree after the rename");
     // Focus reaching a row from the keyboard selects it and hands the tree the keys.
     {
-        let st = &mut ui.h.state_mut().core.lib_ui.panel;
+        let st = &mut ui.h.state_mut().core.test_mut().lib_ui.panel;
         (st.sel, st.focus) = (None, false);
     }
     ui.settle();
@@ -508,16 +508,16 @@ fn a_failed_connection_is_tried_again_and_warns_once_when_it_fails_again() {
 fn a_waiting_run_only_opens_when_another_tab_became_current() {
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, Status::Idle));
-    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(db::sql::Engine::MySql));
-    a.core.cur = 0;
+    a.core.test_mut().conns.push(conn(1, "shop-prod", db::sql::Engine::MySql, Status::Idle));
+    a.core.test_mut().tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into() }).for_engine(db::sql::Engine::MySql));
+    a.core.test_mut().cur = 0;
     let id = add(a, "sql", 1, "Monthly revenue", "SELECT 1", "shop", "");
     a.open_script(&ScriptRef::Saved(id), How::Run);
     ui.h.run_steps(2);
     // The person moved on to another tab while it connected.
     let a = ui.h.state_mut();
-    a.core.tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "users".into() }).for_engine(db::sql::Engine::MySql));
-    a.core.cur = 1;
+    a.core.test_mut().tabs.push(Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: "users".into() }).for_engine(db::sql::Engine::MySql));
+    a.core.test_mut().cur = 1;
     set_status(&mut ui, Status::Ready, 1);
     assert_eq!(ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.as_str()), Some("SELECT 1"));
     assert!(!ui.app().last_problem().contains("Connect first"), "the Run went ahead: {}", ui.app().last_problem());
@@ -533,15 +533,15 @@ fn the_conflict_banner_shows_on_a_query_tab_and_reload_can_be_undone() {
     std::fs::write(dir.join("a.sql"), "select 1").unwrap();
     let mut ui = UiApp { h: harness() };
     let a = ui.h.state_mut();
-    a.core.conns.push(conn(1, "shop", db::sql::Engine::MySql, Status::Ready));
-    a.core.library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
-    a.core.lib_ui.frozen = true;
+    a.core.test_mut().conns.push(conn(1, "shop", db::sql::Engine::MySql, Status::Ready));
+    a.core.test_mut().library.links.push(Link { id: 1, path: dir.clone(), name: "queries".into(), on: "all".into(), exts: vec!["sql".into()], ..Default::default() });
+    a.core.test_mut().lib_ui.frozen = true;
     let mut t = Tab::new(Sel { conn: 1, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
     t.view = View::Sql;
     t.sql.as_mut().unwrap().query = "select 1 -- mine".into();
     t.script = Some(Bound { r: ScriptRef::File { link: 1, rel: "a.sql".into() }, view: View::Sql, base: "select 1".into(), disk: None, conflict: Some("select 2".into()) });
-    a.core.tabs.push(t);
-    a.core.cur = 0;
+    a.core.test_mut().tabs.push(t);
+    a.core.test_mut().cur = 0;
     std::fs::write(dir.join("a.sql"), "select 2").unwrap();
     ui.show("a.sql changed on disk");
     ui.click("Reload");
@@ -555,7 +555,7 @@ fn the_conflict_banner_shows_on_a_query_tab_and_reload_can_be_undone() {
 fn panel(a: &mut App) {
     sql_query(a);
     a.demo_library("panel");
-    a.core.lib_ui.panel.sel = None;
+    a.core.test_mut().lib_ui.panel.sel = None;
 }
 
 #[test]
@@ -588,7 +588,7 @@ fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
 fn a_script_opens_on_another_connection_from_its_menu() {
     let Some(mut ui) = demo_ui(|a| {
         panel(a);
-        a.core.conns.push(Conn { writable: true, ..conn(4, "shop-staging", db::sql::Engine::MySql, Status::Ready) });
+        a.core.test_mut().conns.push(Conn { writable: true, ..conn(4, "shop-staging", db::sql::Engine::MySql, Status::Ready) });
     }) else { return };
     let tabs = ui.app().core.tabs.len();
     ui.show("Top customers");

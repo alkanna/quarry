@@ -5,17 +5,17 @@ use super::*;
 fn with_group(a: &mut App) {
     a.load_demo();
     for (id, name) in [(5, "alpha"), (6, "beta"), (7, "gamma")] {
-        a.core.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
     }
-    let gid = a.core.groups.new_group("Fleet");
+    let gid = a.core.test_mut().groups.new_group("Fleet");
     let all = a.conn_ids();
-    a.core.groups.place(6, Place::Into(gid, None), &all);
-    a.core.groups.place(7, Place::Into(gid, None), &all);
+    a.core.test_mut().groups.place(6, Place::Into(gid, None), &all);
+    a.core.test_mut().groups.place(7, Place::Into(gid, None), &all);
 }
 
 fn without_group(a: &mut App) {
     with_group(a);
-    a.core.groups = Groups::default();
+    a.core.test_mut().groups = Groups::default();
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn clicking_a_folder_opens_and_closes_it() {
 fn a_folder_with_one_open_member_shows_its_tile() {
     let Some(mut ui) = demo_ui(|a| {
         with_group(a);
-        a.core.conns.retain(|c| c.meta.id != 7);
+        a.core.test_mut().conns.retain(|c| c.meta.id != 7);
     }) else {
         return;
     };
@@ -98,10 +98,10 @@ fn undoing_a_new_group_puts_the_tiles_back_and_a_later_group_is_not_open() {
     ui.settle();
     // The next group takes the undone one's id, and must start closed like any group made elsewhere.
     let a = ui.h.state_mut();
-    let gid = a.core.groups.new_group("Later");
+    let gid = a.core.test_mut().groups.new_group("Later");
     let all = a.conn_ids();
-    a.core.groups.place(5, Place::Into(gid, None), &all);
-    a.core.groups.place(6, Place::Into(gid, None), &all);
+    a.core.test_mut().groups.place(5, Place::Into(gid, None), &all);
+    a.core.test_mut().groups.place(6, Place::Into(gid, None), &all);
     ui.settle();
     assert_eq!(gid, 1);
     assert!(!ui.app().core.groups.rail_open(gid), "a new group showed open because an undone one had its id");
@@ -114,7 +114,7 @@ fn undoing_a_drop_keeps_a_group_edit_made_since() {
     ui.drag("Switch to alpha", "Switch to Local sample", 0.5, 1);
     ui.wait("the new group", |a| a.core.groups.groups.len() == 2);
     // While the toast is up, the other group is renamed.
-    ui.h.state_mut().core.groups.group_mut(1).unwrap().name = "Renamed".into();
+    ui.h.state_mut().core.test_mut().groups.group_mut(1).unwrap().name = "Renamed".into();
     ui.click_pick("Undo", Pick::Last);
     ui.wait("the grouping to be undone", |a| a.core.groups.groups.len() == 1);
     let a = ui.app();
@@ -186,7 +186,7 @@ fn a_folder_menu_disconnects_its_members_and_stops_folding() {
     ui.show("Switch to beta");
     assert!(ui.h.query_all_by_label("Fleet folder").next().is_none());
     // Folded again, Disconnect all closes both members and the folder leaves the rail.
-    ui.h.state_mut().core.groups.groups[0].fold_rail = true;
+    ui.h.state_mut().core.test_mut().groups.groups[0].fold_rail = true;
     right_click(&mut ui, "Fleet folder");
     ui.click("Disconnect all");
     assert!([6, 7].iter().all(|id| ui.app().conn(*id).is_some_and(|c| c.status == Status::Idle)));
@@ -209,7 +209,7 @@ fn a_folder_menu_opens_the_folder_and_edits_the_group() {
 fn crowded(a: &mut App) {
     a.load_demo();
     for i in 0..40 {
-        a.core.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("c{i}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("c{i}"), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
     }
 }
 
@@ -278,7 +278,7 @@ fn the_status_bar_server_button_opens_the_server_window() {
 fn with_saved(a: &mut App) {
     a.load_demo();
     a.demo_conns("panel");
-    a.core.prefs.set_side_mode(SideMode::Explorer);
+    a.core.test_mut().prefs.set_side_mode(SideMode::Explorer);
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn a_tile_menu_opens_the_server_window_of_its_connection() {
 #[test]
 fn the_manage_tile_toggles_the_connections_panel_and_the_rail_menu_starts_a_group() {
     let Some(mut ui) = demo_ui(with_saved) else { return };
-    ui.h.state_mut().core.prefs.set_side_mode(SideMode::Explorer);
+    ui.h.state_mut().core.test_mut().prefs.set_side_mode(SideMode::Explorer);
     ui.click("Manage connections");
     assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Connections);
     ui.click("Manage connections");
@@ -327,5 +327,5 @@ fn the_manage_tile_toggles_the_connections_panel_and_the_rail_menu_starts_a_grou
     ui.show("New connection\u{2026}");
     ui.click("New group\u{2026}");
     assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Connections);
-    assert!(ui.app().core.conns_ui.adding.is_some());
+    assert!(ui.app().ui.conns.adding.is_some());
 }
