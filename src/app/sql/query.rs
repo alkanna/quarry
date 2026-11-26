@@ -750,7 +750,7 @@ impl App {
         let mut gutter_run = None;
         let mut lint_stmt = None;
         let mut make_value = None;
-        let tab = self.core.tabs.get(self.core.cur).map_or(0, |t| t.uid);
+        let tab = self.cur_uid().unwrap_or_default();
         // The editor edits copies, which are sent as one action once it is drawn: the script, and its suggestion list.
         let mut ac = self.ui.sql_ac.remove(&tab).unwrap_or_default();
         let Some(s) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()) else { return };

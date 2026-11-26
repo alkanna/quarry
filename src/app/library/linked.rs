@@ -44,21 +44,18 @@ impl App {
         }
     }
 
-    fn cur_uid(&self) -> u64 {
-        self.t().map_or(0, |t| t.uid)
-    }
 
     /// The conflict banner's Reload, Keep mine and Compare, on the current tab.
     pub(in crate::app) fn conflict_reload(&mut self) {
-        self.exec(Action::Library(LibA::ConflictReload { tab: self.cur_uid() }));
+        self.exec(Action::Library(LibA::ConflictReload { tab: self.cur_uid().unwrap_or_default() }));
     }
 
     pub(in crate::app) fn conflict_keep(&mut self) {
-        self.exec(Action::Library(LibA::ConflictKeep { tab: self.cur_uid() }));
+        self.exec(Action::Library(LibA::ConflictKeep { tab: self.cur_uid().unwrap_or_default() }));
     }
 
     pub(in crate::app) fn conflict_compare(&mut self) {
-        self.exec(Action::Library(LibA::ConflictCompare { tab: self.cur_uid() }));
+        self.exec(Action::Library(LibA::ConflictCompare { tab: self.cur_uid().unwrap_or_default() }));
     }
 }
 

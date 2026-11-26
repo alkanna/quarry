@@ -171,13 +171,13 @@ impl App {
     }
 
     pub(super) fn set_vline(&mut self, v: usize) {
-        if let Some(uid) = self.t().map(|t| t.uid) {
+        if let Some(uid) = self.cur_uid() {
             self.vnav.cursor.entry(uid).or_default().0 = v;
         }
     }
 
     pub(super) fn set_vcol(&mut self, v: usize) {
-        if let Some(uid) = self.t().map(|t| t.uid) {
+        if let Some(uid) = self.cur_uid() {
             self.vnav.cursor.entry(uid).or_default().1 = v;
         }
     }
@@ -213,7 +213,7 @@ impl App {
     fn vim_select(&mut self, view: View, i: usize) {
         self.ui.scroll_sel = true;
         self.vnav.scroll = true;
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         if view == View::Sql {
             self.exec(Action::Sql(SqlA::SelectRow { tab, row: i }));
             return;

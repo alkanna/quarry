@@ -112,7 +112,7 @@ impl App {
 
     /// A field edit of document `d` on the current tab.
     fn edit_act(&mut self, d: &Document, act: EditA) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Docs(DocsA::Edit { tab, doc: d.clone(), act }));
     }
 
@@ -329,7 +329,7 @@ impl App {
 
     /// A field menu's action on the current tab.
     fn field_act(&mut self, a: impl FnOnce(u64) -> FieldA) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Mongo(MongoA::Field(a(tab))));
     }
 
@@ -344,7 +344,7 @@ impl App {
 
     /// Hands an editor as a frame of drawing left it to Core, before the frame's own clicks run.
     fn set_editor(&mut self, edit: EditorEdit) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Docs(DocsA::SetEditor { tab, edit: Box::new(edit) }));
     }
 

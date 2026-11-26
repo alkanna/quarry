@@ -2,7 +2,6 @@
 //! cannot skip the action path that tests and agents go through.
 
 use super::Core;
-use crate::action::agents::{AgentCall, Origin};
 use crate::action::{Action, Refusal, Reply, UiFx};
 use crate::db::Msg;
 use crate::state::errors::{Act, ErrEntry};
@@ -46,9 +45,6 @@ impl Front {
         self.0.execute(a)
     }
 
-    pub fn execute_as(&mut self, origin: Origin, a: AgentCall) {
-        self.0.execute_as(origin, a)
-    }
 
     pub fn on_msg(&mut self, m: Msg) {
         self.0.on_msg(m)
@@ -63,7 +59,6 @@ impl Front {
         self.0.take_ui_fx()
     }
 
-    /// The text behind `r`, for a `TextEdit`. None when its window is not open.
     /// The big value editor is drawn in place, taken out and put back in the same frame: its document and text can be
     /// megabytes, too big to copy on every repaint as other editors are.
     pub fn take_json_edit(&mut self) -> Option<crate::state::JsonEdit> {
@@ -74,6 +69,7 @@ impl Front {
         self.0.json_edit = Some(je);
     }
 
+    /// The text behind `r`, for a `TextEdit`. None when its window is not open.
     pub fn text_mut(&mut self, r: TextRef) -> Option<&mut String> {
         match r {
             TextRef::Insert => self.0.insert.as_mut(),
@@ -110,29 +106,17 @@ impl Front {
         self.0.warn(s)
     }
 
-    pub fn warn_act(&mut self, s: impl Into<String>, act: Option<(&str, Act)>) {
-        self.0.warn_act(s, act)
-    }
 
     pub fn warn_ro(&mut self) {
         self.0.warn_ro()
     }
 
-    pub fn warn_ro_on(&mut self, conn: Option<u64>) {
-        self.0.warn_ro_on(conn)
-    }
 
     pub fn warn_offline(&mut self) {
         self.0.warn_offline()
     }
 
-    pub fn warn_offline_on(&mut self, conn: Option<u64>) {
-        self.0.warn_offline_on(conn)
-    }
 
-    pub fn warn_settings(&mut self, s: impl Into<String>) {
-        self.0.warn_settings(s)
-    }
 
     pub fn toast_ok(&mut self, s: String, undo_at: Option<std::time::Instant>) {
         self.0.toast_ok(s, undo_at)
@@ -146,9 +130,6 @@ impl Front {
         self.0.toast_restore(s, r)
     }
 
-    pub fn toast_restore_edit(&mut self, s: String, r: Restore, group: Option<u64>) {
-        self.0.toast_restore_edit(s, r, group)
-    }
 
     pub fn log_err(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String, what: &str) -> ErrEntry {
         self.0.log_err(raw, conn, sel, place, what)

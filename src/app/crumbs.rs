@@ -190,7 +190,7 @@ impl App {
     /// A schema picked in the crumb of a PostgreSQL Query view. Its tables load for the editor's suggestions.
     fn pick_crumb_schema(&mut self, conn: u64, run: &str, schema: String) {
         self.pg_load_tables(conn, run, &schema);
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Sql(SqlA::CrumbSchema { tab, schema }));
     }
 }

@@ -281,7 +281,7 @@ impl App {
                 }
                 self.open_collection(sel, Open::Here);
                 self.set_view(View::Documents);
-                if let Some(tab) = self.t().map(|t| t.uid) {
+                if let Some(tab) = self.cur_uid() {
                     self.exec(Action::Docs(DocsA::History { tab, field: BarField::Filter, text: format!("{{ {f}: {v} }}") }));
                 }
                 self.run_query();

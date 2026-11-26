@@ -387,7 +387,7 @@ async function run() {
             self.exec(Action::Shell(ShellA::PgSchemas { conn, db }));
         }
         if attach {
-            if let (Some(conn), Some(tab)) = (f.conn, self.t().map(|t| t.uid)) {
+            if let (Some(conn), Some(tab)) = (f.conn, self.cur_uid()) {
                 self.exec(Action::Shell(ShellA::Attach { tab, conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes, schema: f.schema.clone() }));
             }
             *keep = false;

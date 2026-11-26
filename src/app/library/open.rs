@@ -225,7 +225,7 @@ impl App {
             return self.warn(format!("\"{}\" names no collection. Save it again from the collection it belongs to.", s.name));
         }
         if !status_ready && !self.core.demo {
-            let uid = self.t().map(|t| t.uid);
+            let uid = self.cur_uid();
             let seen_connecting = self.conn(s.conn).is_some_and(|c| c.status == Status::Connecting);
             self.exec(Action::Library(LibA::Wait { r: r.clone(), how, conn: s.conn, uid, attempt, seen_connecting, name: s.name.clone() }));
             // activate connects only an idle connection; a failed one is tried again.
@@ -300,7 +300,7 @@ impl App {
             }
             other => return self.warn(format!("This build does not know scripts of kind \"{other}\".")),
         }
-        if writes && let Some(uid) = self.t().map(|t| t.uid) {
+        if writes && let Some(uid) = self.cur_uid() {
             self.exec(Action::Library(LibA::Writes { tab: uid, on: true }));
         }
         if let Some((link, rel, meta)) = file {
@@ -357,7 +357,7 @@ impl App {
 
     /// The chip's Unbind: the tab keeps its text but no longer writes back to the script, so Cmd+S asks again.
     pub(in crate::app) fn unbind_script(&mut self) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Library(LibA::Unbind { tab }));
         }
     }

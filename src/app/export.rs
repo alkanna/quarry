@@ -450,7 +450,7 @@ impl App {
             Format::MongoJson => db::RowsOut::MongoJson,
             Format::MongoLines => db::RowsOut::MongoLines,
         };
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Export(ExportA::Shell { tab, out, path }));
     }
 

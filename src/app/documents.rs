@@ -586,7 +586,7 @@ impl App {
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
     pub(super) fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
         let m = ui.input(|i| i.modifiers);
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Docs(DocsA::Click { tab, agg, row: i, cmd: m.command, shift: m.shift }));
     }
 
@@ -672,7 +672,7 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn select(&mut self, agg: bool, i: usize, toggle: bool) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle }));
     }
 

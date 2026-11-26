@@ -51,7 +51,7 @@ impl App {
 
     /// `col` starts the update with that column, as the column menu's Update values to does.
     pub(in crate::app) fn open_bulk_with(&mut self, update: bool, col: Option<String>) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::SqlOps(SqlOpsA::Bulk { tab, update, col }));
     }
 

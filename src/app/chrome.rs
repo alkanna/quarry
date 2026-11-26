@@ -55,7 +55,7 @@ impl App {
                 let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
                 (agg, row, go)
             });
-            let tab = self.t().map(|t| t.uid).unwrap_or_default();
+            let tab = self.cur_uid().unwrap_or_default();
             if let Some((agg, row, go)) = nav {
                 if let Some(row) = row {
                     self.exec(Action::Docs(DocsA::Step { tab, agg, row }));

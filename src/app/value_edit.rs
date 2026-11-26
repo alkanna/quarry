@@ -209,13 +209,13 @@ impl App {
         if e == before {
             return;
         }
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         self.exec(Action::Sql(SqlA::CellEdit { tab, edit: Some(Box::new(e)) }));
     }
 
     /// Hands the editor as a frame left it to Core when it changed, then runs its button.
     fn json_edit_act(&mut self, act: ValueAct) {
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         let act = match act {
             ValueAct::None => return,
             ValueAct::Apply => ValueA::Apply,

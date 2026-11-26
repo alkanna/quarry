@@ -7,7 +7,7 @@ pub(super) use quarry_core::state::run::{bar_filled, find_query, query_dirty};
 
 impl App {
     pub(super) fn run_query(&mut self) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Docs(DocsA::Run { tab }));
         }
     }
@@ -36,13 +36,13 @@ impl App {
     }
 
     pub(super) fn run_shell(&mut self, text: &str) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Docs(DocsA::RunShell { tab, text: text.to_string() }));
         }
     }
 
     pub(super) fn run_pipeline(&mut self, pipeline: Vec<Document>) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Docs(DocsA::RunPipeline { tab, pipeline }));
         }
     }

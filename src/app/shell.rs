@@ -379,14 +379,14 @@ impl App {
 
     /// Runs the current tab's script, after the write confirm when it may write.
     pub(super) fn run_shell_script(&mut self) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Shell(ShellA::Run { tab }));
         }
     }
 
     /// Runs the current tab's script without the confirm.
     pub(super) fn start_shell(&mut self) {
-        if let Some(tab) = self.t().map(|t| t.uid) {
+        if let Some(tab) = self.cur_uid() {
             self.exec(Action::Shell(ShellA::Start { tab }));
         }
     }

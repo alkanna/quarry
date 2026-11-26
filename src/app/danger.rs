@@ -56,7 +56,7 @@ impl App {
         if let Danger::Restore { conn, archive, from_db, coll, to_db, drop, gzip } = action {
             return self.exec(Action::Tools(ToolsA::Restore { conn, archive, from_db, coll, to_db, drop, gzip }));
         }
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        let Some(tab) = self.cur_uid() else { return };
         let a = match action {
             Danger::DeleteMatching(scope) => ConfirmA::DeleteMatching { tab, scope },
             Danger::DropIndex(name) => ConfirmA::DropIndex { tab, name },

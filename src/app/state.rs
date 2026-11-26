@@ -92,6 +92,11 @@ impl App {
         self.core.conn(id)
     }
 
+    /// The current tab's uid, which actions name their tab by.
+    pub(super) fn cur_uid(&self) -> Option<u64> {
+        self.t().map(|t| t.uid)
+    }
+
     pub(super) fn t(&self) -> Option<&Tab> {
         self.core.tabs.get(self.core.cur)
     }

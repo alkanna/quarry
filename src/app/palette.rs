@@ -321,7 +321,7 @@ impl App {
             Cmd::Shortcuts => self.shortcuts_modal(),
             Cmd::Insert if self.t().is_some_and(|t| t.sql.is_some()) => self.sql_insert_row_menu(),
             Cmd::Insert if tabs => {
-                if let Some(tab) = self.t().map(|t| t.uid) {
+                if let Some(tab) = self.cur_uid() {
                     self.exec(Action::Docs(DocsA::Insert { tab }));
                 }
             }

@@ -184,7 +184,7 @@ impl App {
             }
         });
         // The dialog closes once the create is sent; a refusal already said why and keeps it open.
-        if let (true, Ok(spec), Some(tab)) = (create, spec, self.t().map(|t| t.uid)) && self.core.execute(Action::Indexes(IdxA::Create { tab, spec })).is_ok() {
+        if let (true, Ok(spec), Some(tab)) = (create, spec, self.cur_uid()) && self.core.execute(Action::Indexes(IdxA::Create { tab, spec })).is_ok() {
             keep = false;
         }
         keep
@@ -210,7 +210,7 @@ impl App {
                 self.ok("Copied the createIndex command");
             }
             IdxAct::Hide(hidden) => {
-                if let Some(tab) = self.t().map(|t| t.uid) {
+                if let Some(tab) = self.cur_uid() {
                     self.exec(Action::Indexes(IdxA::Hide { tab, name, hidden }));
                 }
             }

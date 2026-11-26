@@ -29,7 +29,7 @@ impl App {
         if let Some(e) = err {
             ui.label(RichText::new(e).color(ALERT()));
         }
-        let tab = self.t().map_or(0, |t| t.uid);
+        let tab = self.cur_uid().unwrap_or_default();
         if start {
             self.exec(Action::Watch(WatchA::Start { tab }));
         }

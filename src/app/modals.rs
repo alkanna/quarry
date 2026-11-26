@@ -32,7 +32,7 @@ impl App {
                 });
             });
             if submit {
-                if let Some(tab) = self.t().map(|t| t.uid) {
+                if let Some(tab) = self.cur_uid() {
                     self.exec(Action::Docs(DocsA::InsertRun { tab }));
                 }
             } else if close || r.should_close() {
@@ -189,7 +189,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Import", PRIMARY()).clicked() {
-                            if let Some(tab) = self.t().map(|t| t.uid) {
+                            if let Some(tab) = self.cur_uid() {
                                 self.exec(Action::Mongo(quarry_core::action::MongoA::Import(quarry_core::action::ImportA::Insert { tab })));
                             }
                             keep = false;
@@ -245,7 +245,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run it").clicked() {
-                            if let Some(tab) = self.t().map(|t| t.uid) {
+                            if let Some(tab) = self.cur_uid() {
                                 self.exec(Action::Confirm(ConfirmA::AggWrite { tab, pipeline: p.clone() }));
                             }
                             keep = false;
@@ -552,7 +552,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                 let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
-                if let Some(tab) = self.t().map(|t| t.uid) {
+                if let Some(tab) = self.cur_uid() {
                     self.exec(Action::Docs(DocsA::Stage { tab, doc: d.clone(), new }));
                 }
                 *keep = false;
@@ -634,7 +634,7 @@ impl App {
                 });
                 *keep = false;
             }
-            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(tab)) = (&stages, self.t().map(|t| t.uid)) {
+            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(tab)) = (&stages, self.cur_uid()) {
                 self.exec(Action::Confirm(ConfirmA::UpdatePreview { tab, scope: scope.clone(), stages: st.clone() }));
             }
             if ui.button("Cancel").clicked() {
