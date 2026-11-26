@@ -36,39 +36,52 @@ impl App {
         r.ok()
     }
 
-    /// Carries out what actions and answers left for the UI. Also run each frame from `logic()`.
+    /// Carries out what actions and answers left for the UI, in the order they were raised. Also run each frame from
+    /// `logic()`. An effect that runs an action (Connected) queues that action's effects behind the ones already taken,
+    /// so they cannot jump ahead and replace a dialog an earlier effect is about to open.
     pub(super) fn run_fx(&mut self) {
-        for fx in self.core.take_ui_fx() {
-            match fx {
-                UiFx::Open(d) => self.open_dialog(d),
-                UiFx::Connected { conn, sql } => self.exec(Action::Tab(TabA::Connected { conn, sql })),
-                UiFx::CloseTabs { conn, db, coll } => self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && coll.as_ref().is_none_or(|c| t.sel.coll == *c)),
-                UiFx::Restart => self.restart_now(),
-                UiFx::OpenScript { r, how, conn } => self.open_script_on(&r, how, conn),
-                UiFx::OpenResolved { r, how, script, meta } => self.open_resolved(&r, how, *script, Some(meta)),
-                // Opened as usual, then swapped with the dialog that was open, which stays on top.
-                UiFx::Late(d) => {
-                    let held = self.modal.take();
-                    self.open_dialog(d);
-                    if let Some(m) = held {
-                        self.late_modals.extend(self.modal.replace(m));
-                    }
+        if self.in_fx {
+            return;
+        }
+        self.in_fx = true;
+        let mut fxs = std::collections::VecDeque::from(self.core.take_ui_fx());
+        while let Some(fx) = fxs.pop_front() {
+            self.apply_fx(fx);
+            fxs.extend(self.core.take_ui_fx());
+        }
+        self.in_fx = false;
+    }
+
+    fn apply_fx(&mut self, fx: UiFx) {
+        match fx {
+            UiFx::Open(d) => self.open_dialog(d),
+            UiFx::Connected { conn, sql } => self.exec(Action::Tab(TabA::Connected { conn, sql })),
+            UiFx::CloseTabs { conn, db, coll } => self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && coll.as_ref().is_none_or(|c| t.sel.coll == *c)),
+            UiFx::Restart => self.restart_now(),
+            UiFx::OpenScript { r, how, conn } => self.open_script_on(&r, how, conn),
+            UiFx::OpenResolved { r, how, script, meta } => self.open_resolved(&r, how, *script, Some(meta)),
+            // Opened as usual, then swapped with the dialog that was open, which stays on top.
+            UiFx::Late(d) => {
+                let held = self.modal.take();
+                self.open_dialog(d);
+                if let Some(m) = held {
+                    self.late_modals.extend(self.modal.replace(m));
                 }
-                UiFx::IfFree(d) => {
-                    if self.modal.is_none() {
-                        self.open_dialog(d);
-                    }
-                }
-                // Copied by `logic()`, which holds the egui context.
-                UiFx::CopyText(text) => self.clip = Some(text),
-                // Sent by `logic()`, which holds the egui context.
-                UiFx::Attention => self.attention = true,
-                UiFx::UpdPopup => self.ui.upd_popup = true,
-                UiFx::WidthsStale => self.ui.width_cache.clear(),
-                // A debounce waiting out its pause; the drawing code that asked reads it back with `take_repaint`.
-                UiFx::RepaintAfter(s) => self.repaint = Some(self.repaint.map_or(s, |r| r.min(s))),
-                UiFx::ForgetPlans(conn) => self.ui.explain_prev.forget(conn),
             }
+            UiFx::IfFree(d) => {
+                if self.modal.is_none() {
+                    self.open_dialog(d);
+                }
+            }
+            // Copied by `logic()`, which holds the egui context.
+            UiFx::CopyText(text) => self.clip = Some(text),
+            // Sent by `logic()`, which holds the egui context.
+            UiFx::Attention => self.attention = true,
+            UiFx::UpdPopup => self.ui.upd_popup = true,
+            UiFx::WidthsStale => self.ui.width_cache.clear(),
+            // A debounce waiting out its pause; the drawing code that asked reads it back with `take_repaint`.
+            UiFx::RepaintAfter(s) => self.repaint = Some(self.repaint.map_or(s, |r| r.min(s))),
+            UiFx::ForgetPlans(conn) => self.ui.explain_prev.forget(conn),
         }
     }
 
@@ -114,5 +127,28 @@ impl App {
             Dialog::SqlMaintain { what, stmt } => Modal::SqlMaintain { what, stmt },
             Dialog::SqlForm(f) => f.modal(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn effects_raised_while_effects_run_wait_behind_the_earlier_ones() {
+        let mut h = Harness::builder().build_eframe(|cc| App::for_test(cc));
+        let a = h.state_mut();
+        a.modal = None;
+        a.core.test_mut().ui_fx.push(UiFx::Open(Dialog::Settings));
+        // As an action run by an effect does: its own drain leaves the effects to the one already running.
+        a.in_fx = true;
+        a.run_fx();
+        assert!(a.modal.is_none());
+        a.core.test_mut().ui_fx.push(UiFx::Open(Dialog::Text { title: "later".into(), body: String::new(), code: false }));
+        a.in_fx = false;
+        a.run_fx();
+        assert!(matches!(&a.modal, Some(Modal::Text { title, .. }) if title == "later"));
+        assert!(a.core.ui_fx.is_empty());
     }
 }

@@ -142,6 +142,8 @@ pub struct App {
     clip: Option<String>,
     /// The shortest wait an action asked to be drawn again after, read back by `take_repaint`.
     repaint: Option<f64>,
+    /// `run_fx` is carrying out effects, so an action one of them runs leaves its own effects to that same drain.
+    in_fx: bool,
     /// An approval waits while the window has no focus: the next `logic()` asks for the user's attention.
     attention: bool,
 }
@@ -177,6 +179,7 @@ impl App {
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
             clip: None,
             repaint: None,
+            in_fx: false,
             attention: false,
         }
     }
