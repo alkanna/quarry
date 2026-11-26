@@ -177,7 +177,8 @@ fn live_mongo_connect() {
     assert!(c.status == Status::Ready, "{}", core.status);
     assert!(c.client.is_some() && !c.writable && !c.dbs.is_empty());
     assert_eq!(core.status, "Connected to test (read-only)");
-    assert!(matches!(core.take_ui_fx().as_slice(), [UiFx::Connected { conn: CONN, sql: false }]));
+    // A new session forgets the Explain plans of the old one, then the app reloads the tabs.
+    assert!(matches!(core.take_ui_fx().as_slice(), [UiFx::ForgetPlans(CONN), UiFx::Connected { conn: CONN, sql: false }]));
     core.step_until("the server version", |c| !c.conns[0].server.version.is_empty());
 }
 
