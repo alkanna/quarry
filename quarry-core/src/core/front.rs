@@ -35,10 +35,10 @@ impl Front {
         Front(core, false)
     }
 
-    /// Startup only: the demo builders and test switches fill the core before the first frame. Panics after that,
-    /// so drawing code cannot use it to skip the action path.
+    /// Startup only: the demo builders and test switches fill the core before the first frame. Debug builds panic
+    /// after that, so drawing code cannot use it to skip the action path; tests load demos into a running harness.
     pub fn setup(&mut self) -> &mut Core {
-        assert!(!self.1, "Front::setup after the first tick");
+        debug_assert!(cfg!(feature = "test-support") || !self.1, "Front::setup after the first tick");
         &mut self.0
     }
 
