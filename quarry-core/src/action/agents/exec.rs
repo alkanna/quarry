@@ -753,6 +753,7 @@ impl Core {
     /// so the log says what they did.
     fn agent_session_closed(&mut self, session: u64) {
         self.agents.exec.grants.retain(|k, _| k.0 != session);
+        self.agents.exec.replies.retain(|k, _| k.0 != session);
         let waiting: Vec<u64> = self.agents.exec.pending.iter().chain(self.agents.exec.preparing.iter()).filter(|(_, p)| p.session == session).map(|(id, _)| *id).collect();
         for id in waiting {
             self.agent_drop(id);
@@ -835,7 +836,7 @@ impl Core {
                     s.calls += 1;
                     s.client = client.name.clone();
                 }
-                self.execute_as(super::Origin::Agent { session, link: id, client: client.name }, super::AgentCall { tool, args, reply });
+                self.agent_tool_call(session, id, tool, args, client.name, reply);
             }
             E::Cancel { session, id } => self.agent_cancel(session, id),
             E::Done(f) => self.agent_done(f),

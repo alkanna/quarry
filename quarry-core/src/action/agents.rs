@@ -1,4 +1,4 @@
-//! AI agents on Core: their tool calls enter through `execute_as`, which runs the executor in `exec.rs` (parse,
+//! AI agents on Core: their tool calls enter through `execute` as `AgentsA::ToolCall`, which runs the executor in `exec.rs` (parse,
 //! resolve, the rules, the guard and the policy, the approval queue, the run and the answer). The app draws the
 //! approval, Activity and settings windows (src/app/agents/) and turns their clicks into `AgentsA`.
 
@@ -7,7 +7,7 @@ use crate::agents::config::{Access, AgentsConfig, Matcher, PresetMode, RuleSpec}
 use crate::state::agents::activity::Filter;
 use crate::state::agents::rules::{RulesTab, RulesWin};
 use crate::state::agents::settings::ClientKind;
-use crate::agents::link::{self, ToolErr};
+use crate::agents::link;
 use crate::agents::store;
 use crate::core::Core;
 use crate::db;
@@ -57,21 +57,19 @@ pub enum AgentsA {
     Client(ClientKind),
     /// Settings > AI agents' Edit rules: the window on its defaults.
     EditRules,
+    /// A tool call from an agent over the link; its answer goes back on the reply registered for (session, call).
+    ToolCall { session: u64, call: u64, tool: String, args: ToolArgs, client: String },
 }
 
-/// Who asks Core for something. The user's clicks go through `execute`; only agents make tool calls.
-#[derive(Debug, Clone)]
-pub enum Origin {
-    User,
-    /// A call that came over the link: its session, the call's id there and the client name it reported.
-    Agent { session: u64, link: u64, client: String },
-}
+/// An agent's tool arguments. They can hold passwords (a CREATE USER, a createUser command), so Debug shows only their size.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(transparent)]
+pub struct ToolArgs(pub Value);
 
-/// One tool call as the link hands it over, with the oneshot that answers the agent.
-pub struct AgentCall {
-    pub tool: String,
-    pub args: Value,
-    pub reply: exec::Reply,
+impl std::fmt::Debug for ToolArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ToolArgs({} bytes)", self.0.to_string().len())
+    }
 }
 
 /// Two-letter mark and product name. MariaDB shares the MySQL engine, so only the server
@@ -86,15 +84,10 @@ pub fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'s
 }
 
 impl Core {
-    /// A tool call, decided and answered under the agents' rules, guard and policy. Every agent call enters here.
-    pub fn execute_as(&mut self, origin: Origin, a: AgentCall) {
-        match origin {
-            Origin::Agent { session, link, client } => self.agent_call(session, link, a.tool, a.args, client, a.reply),
-            // Nothing in the app makes tool calls as the user, so none runs without the agent checks.
-            Origin::User => {
-                let _ = a.reply.send(Err(ToolErr::new("refused", "Tool calls come only from agents.")));
-            }
-        }
+    /// A tool call that came over the link: its reply waits under (session, call) while the call runs as an action.
+    pub(crate) fn agent_tool_call(&mut self, session: u64, call: u64, tool: String, args: Value, client: String, reply: exec::Reply) {
+        self.agents.exec.replies.insert((session, call), reply);
+        let _ = self.execute(super::Action::Agents(AgentsA::ToolCall { session, call, tool, args: ToolArgs(args), client }));
     }
 
     pub(crate) fn agents_act(&mut self, a: AgentsA) -> Result<Reply, Refusal> {
@@ -143,6 +136,13 @@ impl Core {
             AgentsA::Globs(g) => self.agents.globs = g,
             AgentsA::Client(c) => self.agents.client = c,
             AgentsA::EditRules => self.agents.rules = Some(RulesWin::default()),
+            AgentsA::ToolCall { session, call, tool, args, client } => {
+                // Only a call the link handed over has a reply waiting; any other runs nothing.
+                let Some(reply) = self.agents.exec.replies.remove(&(session, call)) else {
+                    return Err(Refusal { kind: RefusalKind::Invalid, msg: "No agent call is waiting for that answer.".into() });
+                };
+                self.agent_call(session, call, tool, args.0, client, reply);
+            }
         }
         Ok(Reply::Done)
     }

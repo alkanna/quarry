@@ -56,6 +56,8 @@ pub struct Exec {
     pub running: HashMap<u64, Running>,
     /// (link session, link call id) to Activity id, so a cancel finds its call.
     pub calls: HashMap<(u64, u64), u64>,
+    /// The reply of a call that arrived over the link, waiting while the call runs as an `AgentsA::ToolCall` action.
+    pub replies: HashMap<(u64, u64), Reply>,
     /// What the user allowed "for this session", per (link session, connection).
     pub grants: HashMap<(u64, u64), Grants>,
     /// Compiled rules per connection with the settings they came from, compiled again once those change. An error is
@@ -74,7 +76,7 @@ pub struct Exec {
 
 impl Default for Exec {
     fn default() -> Self {
-        Exec { pending: HashMap::new(), preparing: HashMap::new(), running: HashMap::new(), calls: HashMap::new(), grants: HashMap::new(), rules: HashMap::new(), keys: HashMap::new(), audit: None, next: 1, ask_wait: ASK_WAIT, hash_key: crate::agents::link::random() }
+        Exec { pending: HashMap::new(), preparing: HashMap::new(), running: HashMap::new(), calls: HashMap::new(), replies: HashMap::new(), grants: HashMap::new(), rules: HashMap::new(), keys: HashMap::new(), audit: None, next: 1, ask_wait: ASK_WAIT, hash_key: crate::agents::link::random() }
     }
 }
 

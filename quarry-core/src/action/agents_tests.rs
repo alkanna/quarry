@@ -1,7 +1,7 @@
 //! AI agent tool calls on Core, with no window: the executor's refusals, approvals, writes and undo, and open_shell.
 
 use super::agents::exec::*;
-use super::agents::{AgentCall, AgentsA, Origin};
+use super::agents::{AgentsA, ToolArgs};
 use super::{Action, Refusal, RefusalKind};
 use crate::agents::audit::{Entry, Summary};
 use crate::agents::config::{Access, ConnPolicy, Mode, OpClass};
@@ -38,12 +38,13 @@ pub(super) fn agents_actions() -> Vec<AgentsA> {
         AgentsA::Globs(String::new()),
         AgentsA::Client(Default::default()),
         AgentsA::EditRules,
+        AgentsA::ToolCall { session: 1, call: 1, tool: "count".into(), args: ToolArgs(json!({ "collection": "orders" })), client: "claude-code".into() },
     ]
 }
 
 pub(super) fn agents_variant(a: &AgentsA) {
     match a {
-        AgentsA::Answer { .. } | AgentsA::Undo { .. } | AgentsA::Clear | AgentsA::SetEnabled(_) | AgentsA::SetAccess { .. } | AgentsA::Save | AgentsA::Config(_) | AgentsA::Rules(_) | AgentsA::OpenRules { .. } | AgentsA::RulesFor { .. } | AgentsA::ImportRules { .. } | AgentsA::Activity { .. } | AgentsA::ActivityFilter(_) | AgentsA::Pick(_) | AgentsA::Page(_) | AgentsA::Globs(_) | AgentsA::Client(_) | AgentsA::EditRules => {}
+        AgentsA::Answer { .. } | AgentsA::Undo { .. } | AgentsA::Clear | AgentsA::SetEnabled(_) | AgentsA::SetAccess { .. } | AgentsA::Save | AgentsA::Config(_) | AgentsA::Rules(_) | AgentsA::OpenRules { .. } | AgentsA::RulesFor { .. } | AgentsA::ImportRules { .. } | AgentsA::Activity { .. } | AgentsA::ActivityFilter(_) | AgentsA::Pick(_) | AgentsA::Page(_) | AgentsA::Globs(_) | AgentsA::Client(_) | AgentsA::EditRules | AgentsA::ToolCall { .. } => {}
     }
 }
 
@@ -56,7 +57,7 @@ fn shared(app: &mut Core, read: Mode) {
 
 fn call(app: &mut Core, link: u64, tool: &str, args: Value) -> oneshot::Receiver<Result<Value, ToolErr>> {
     let (reply, rx) = oneshot::channel();
-    app.execute_as(Origin::Agent { session: 1, link, client: "claude-code".into() }, AgentCall { tool: tool.into(), args, reply });
+    app.agent_tool_call(1, link, tool.into(), args, "claude-code".into(), reply);
     rx
 }
 
@@ -511,11 +512,10 @@ fn refuse_ask_then_approve_and_ask_then_deny() {
     assert_eq!(rx.try_recv().unwrap().unwrap_err().message, DENIED);
     assert_eq!(app.agent_activity(id).unwrap().outcome, Outcome::Denied);
     assert!(app.agents.exec.pending.is_empty() && app.agents.exec.running.is_empty());
-    // Only agents make tool calls; one claimed for the user is answered no and runs nothing.
-    let (reply, mut rx) = oneshot::channel();
+    // Only a call the link handed over runs: an action naming no waiting call is refused and runs nothing.
     let before = app.agents.activity.len();
-    app.execute_as(Origin::User, AgentCall { tool: "count".into(), args: find(json!({})), reply });
-    assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "refused");
+    let r = app.execute(Action::Agents(AgentsA::ToolCall { session: 1, call: 99, tool: "count".into(), args: ToolArgs(find(json!({}))), client: "claude-code".into() }));
+    assert!(matches!(r, Err(Refusal { kind: RefusalKind::Invalid, .. })));
     assert_eq!(app.agents.activity.len(), before);
 }
 
@@ -613,7 +613,7 @@ mod open_shell {
 
     fn call(app: &mut Core, args: Value) -> Result<Value, ToolErr> {
         let (reply, mut rx) = oneshot::channel();
-        app.execute_as(Origin::Agent { session: 1, link: 1, client: "claude-code".into() }, AgentCall { tool: "open_shell".into(), args, reply });
+        app.agent_tool_call(1, 1, "open_shell".into(), args, "claude-code".into(), reply);
         rx.try_recv().expect("answered at once")
     }
 
@@ -693,4 +693,12 @@ mod open_shell {
         assert_eq!(refuse(app, json!({ "connection": "prod", "database": "shop", "script": SCRIPT, "tab": v["tab"] })).code, "busy");
         assert_eq!(app.agents.activity.len(), 11);
     }
+}
+
+/// Tool arguments can hold passwords; the action's Debug, which tests and panics print, shows only their size.
+#[test]
+fn a_tool_calls_arguments_never_show_in_debug() {
+    let a = Action::Agents(AgentsA::ToolCall { session: 1, call: 1, tool: "run_sql".into(), args: ToolArgs(json!({ "sql": "CREATE USER app IDENTIFIED BY 'hunter2'" })), client: "claude-code".into() });
+    let shown = format!("{a:?}");
+    assert!(!shown.contains("hunter2") && shown.contains("bytes"), "{shown}");
 }

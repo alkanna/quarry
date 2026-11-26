@@ -105,7 +105,7 @@ pub use routines::RoutineA;
 pub use sql::ddl::{DdlA, SqlForm};
 pub use sql::ops::SqlOpsA;
 pub use sql::asks::SqlAskA;
-pub use agents::{AgentCall, AgentsA, Origin};
+pub use agents::{AgentsA, ToolArgs};
 pub use confirm::ConfirmA;
 pub use cloud::CloudA;
 pub use export::ExportA;
