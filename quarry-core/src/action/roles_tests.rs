@@ -314,6 +314,7 @@ fn all_actions() -> Vec<Action> {
         ShellA::Packages(vec!["zod".into()]),
         ShellA::Edit { tab: 1, code: "x".into() },
         ShellA::PgSchemas { conn: 2, db: "d".into() },
+        ShellA::PgTables { doc: mongodb::bson::doc! { "conn": 2, "schema": "s" } },
         ShellA::OpenIn { code: "x".into() },
     ];
     all.extend(sh.into_iter().map(Action::Shell));
@@ -383,6 +384,14 @@ fn all_actions() -> Vec<Action> {
     all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
     all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
     all.extend(super::ddl_tests::ask_actions().into_iter().map(Action::SqlAsk));
+    let all_rows = || crate::state::export::AllRows { conn: 1, database: String::new(), schema: String::new(), stmt: "select 1".into(), total: None, paged: false, refused: None };
+    let plan = || crate::db::sql::export::Plan { target: crate::db::sql::export::Target::Text(crate::db::copy::Fmt::Csv), header: true, table: "t".into(), bs: true };
+    all.extend([
+        ExportA::Stream { all: all_rows(), plan: plan(), sink: crate::db::sql::export::Sink::Clipboard, copy: true },
+        ExportA::Shell { tab: 1, out: crate::db::RowsOut::MongoJson, path: "a.json".into() },
+        ExportA::Script { script: crate::state::export::Script { conn: 1, database: String::new(), schema: String::new(), stmts: Ok(vec!["select 1".into()]) }, plan: crate::db::sql::export::AllPlan { plan: plan(), single: false }, path: "a.csv".into() },
+        ExportA::Cancel,
+    ].map(Action::Export));
     all.extend(super::agents_tests::agents_actions().into_iter().map(Action::Agents));
     all.extend([CloudA::Load { force: true }, CloudA::Proxy { install: false }, CloudA::GcloudAsk, CloudA::GcloudForget, CloudA::Open { change: true }, CloudA::Close, CloudA::Set(Box::default())].map(Action::Cloud));
     let (scope, sel, one) = (crate::db::Scope::default(), crate::state::Sel::default(), || vec![mongodb::bson::doc! { "$match": { "a": 1 } }]);
@@ -444,6 +453,7 @@ fn tab_and_docs_actions() -> Vec<Action> {
         DocsA::FilterField { tab: 1, path: "a.0.b".into(), value: mongodb::bson::Bson::Int32(3), add: true },
         DocsA::Edit { tab: 1, doc: d().remove(0), act: EditA::Remove { path: vec!["a".into()] } },
         DocsA::Value { tab: 1, act: ValueA::Null },
+        DocsA::SetEditor { tab: 1, edit: Box::new(super::docs::EditorEdit::NewField(crate::state::NewField { parent: vec![], name: "a".into(), text: "1".into(), kind: "int", err: None })) },
         DocsA::Save { key: "k".into() },
         DocsA::Write { keys: vec!["k".into()] },
         DocsA::Discard { key: "k".into() },
@@ -505,7 +515,7 @@ fn variant(a: &Action) -> String {
             PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Text(..) | PgServerA::Unlock | PgServerA::Close => {}
         },
         Action::Shell(s) => match s {
-            ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) | ShellA::Edit { .. } | ShellA::PgSchemas { .. } | ShellA::OpenIn { .. } => {}
+            ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) | ShellA::Edit { .. } | ShellA::PgSchemas { .. } | ShellA::PgTables { .. } | ShellA::OpenIn { .. } => {}
         },
         Action::Watch(w) => match w {
             WatchA::Start { .. } | WatchA::Stop { .. } | WatchA::Clear { .. } => {}
@@ -544,7 +554,7 @@ fn variant(a: &Action) -> String {
             DocsA::Edit { act, .. } => match act {
                 EditA::Start { .. } | EditA::Commit | EditA::Expand | EditA::Cancel | EditA::Remove { .. } | EditA::AddField { .. } | EditA::CommitNew | EditA::EditDoc => {}
             },
-            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } | DocsA::Step { .. } | DocsA::Escape | DocsA::RunShell { .. } | DocsA::RunPipeline { .. } | DocsA::WantValues { .. } | DocsA::Bar { .. } | DocsA::TypedValues { .. } => {}
+            DocsA::Run { .. } | DocsA::Page { .. } | DocsA::History { .. } | DocsA::Layout { .. } | DocsA::Click { .. } | DocsA::Select { .. } | DocsA::CloseRow { .. } | DocsA::Check { .. } | DocsA::CheckAll { .. } | DocsA::ClearChecks { .. } | DocsA::Stage { .. } | DocsA::FilterField { .. } | DocsA::Value { .. } | DocsA::SetEditor { .. } | DocsA::Save { .. } | DocsA::Write { .. } | DocsA::Discard { .. } | DocsA::AskBeforeSave(_) | DocsA::SaveAll { .. } | DocsA::Insert { .. } | DocsA::InsertRun { .. } | DocsA::InsertClose | DocsA::Duplicate { .. } | DocsA::Delete { .. } | DocsA::Filter { .. } | DocsA::DeleteRun { .. } | DocsA::Step { .. } | DocsA::Escape | DocsA::RunShell { .. } | DocsA::RunPipeline { .. } | DocsA::WantValues { .. } | DocsA::Bar { .. } | DocsA::TypedValues { .. } => {}
         },
         Action::Undo(u) => match u {
             UndoA::Apply { .. } => {}
@@ -563,6 +573,9 @@ fn variant(a: &Action) -> String {
         Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
         Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
         Action::SqlAsk(a) => super::ddl_tests::ask_variant(a),
+        Action::Export(e) => match e {
+            ExportA::Stream { .. } | ExportA::Shell { .. } | ExportA::Script { .. } | ExportA::Cancel => {}
+        },
         Action::Agents(a) => super::agents_tests::agents_variant(a),
         Action::Cloud(c) => match c {
             CloudA::Load { .. } | CloudA::Proxy { .. } | CloudA::GcloudAsk | CloudA::GcloudForget | CloudA::Open { .. } | CloudA::Close | CloudA::Set(_) => {}

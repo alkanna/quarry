@@ -38,7 +38,6 @@ impl App {
                 Msg::SqlExplainEvidence { req, ev } => self.sql_explain_evidence(req, ev),
                 Msg::SqlExplainHypo { req, res } => self.sql_explain_hypo(req, res),
                 Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
-                Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
                 Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
@@ -55,7 +54,7 @@ impl App {
                 Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) | Msg::LibFile { .. } => {}
                 Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } | Msg::SqlSchema { .. } | Msg::SqlJob { .. } | Msg::SqlLists { .. } => {}
                 Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => {}
-                Msg::SqlAltered { .. } => {}
+                Msg::SqlAltered { .. } | Msg::SqlExport { .. } => {}
                 Msg::SqlRoutine { .. } => {}
                 Msg::Agent(_) => {}
                 Msg::SqlDropInfo { conn, database, schema, table, res } => {

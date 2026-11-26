@@ -144,11 +144,6 @@ impl App {
         unchanged && !staged
     }
 
-    /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
-    pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
-        self.exec(Action::Library(LibA::Bind { r, view, base }));
-    }
-
     /// Opens the script `r` in a tab, the way `how` says. A plain open takes the current tab only when it is a clean one
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.

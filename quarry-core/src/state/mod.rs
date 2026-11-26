@@ -1180,11 +1180,45 @@ impl<R> Modal<R> {
     }
 }
 
+/// Serde for the `&'static str` fields of the editors below: they always hold an entry of `db::KINDS` or `db::BIN_ENCODINGS`
+/// (or empty), so reading one back finds that entry again instead of leaking a copy.
+/// An alias, because serde borrows from the input every field written as a plain `&str`, which a `'static` one cannot.
+type KindStr = &'static str;
+
+mod static_str {
+    pub fn serialize<S: serde::Serializer>(v: &&'static str, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(d)?;
+        if s.is_empty() {
+            return Ok("");
+        }
+        crate::db::KINDS.iter().chain(crate::db::BIN_ENCODINGS.iter()).find(|k| **k == s).copied().ok_or_else(|| serde::de::Error::custom(format!("unknown kind {s}")))
+    }
+}
+
+/// The subtype of a binary as its byte, since bson's own type has no serde.
+mod subtype_u8 {
+    use mongodb::bson::spec::BinarySubtype;
+
+    pub fn serialize<S: serde::Serializer>(v: &BinarySubtype, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u8(u8::from(*v))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BinarySubtype, D::Error> {
+        <u8 as serde::Deserialize>::deserialize(d).map(BinarySubtype::from)
+    }
+}
+
 /// A value being edited in place in the document tree.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Inline {
     pub path: Vec<String>,
     pub text: String,
-    pub kind: &'static str,
+    #[serde(with = "static_str")]
+    pub kind: KindStr,
     pub focus: bool,
     /// The calendar of a date is open, holding the text from before it opened for Cancel.
     pub pick: Option<String>,
@@ -1193,14 +1227,18 @@ pub struct Inline {
 }
 
 /// The large JSON editor for a whole document (empty path) or one object/array field.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JsonEdit {
     pub base: Document,
     pub path: Vec<String>,
     pub text: String,
-    pub kind: &'static str,
+    #[serde(with = "static_str")]
+    pub kind: KindStr,
     /// How a binary's bytes are written in `text` (one of `db::BIN_ENCODINGS`); empty for every other value.
-    pub enc: &'static str,
+    #[serde(with = "static_str")]
+    pub enc: KindStr,
     /// The binary's subtype, kept here because a field name with a dot cannot be found again by path.
+    #[serde(with = "subtype_u8")]
     pub subtype: mongodb::bson::spec::BinarySubtype,
     pub focus: bool,
     /// Edited since it opened, so the side panel must not drop it for another value.
@@ -1226,11 +1264,13 @@ pub struct Draft {
 }
 
 /// A field being added inside an object (or appended to an array).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewField {
     pub parent: Vec<String>,
     pub name: String,
     pub text: String,
-    pub kind: &'static str,
+    #[serde(with = "static_str")]
+    pub kind: KindStr,
     /// Why Add was refused, shown under the inputs until the name changes.
     pub err: Option<String>,
 }

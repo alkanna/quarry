@@ -14,14 +14,6 @@ impl App {
         self.core.in_coll()
     }
 
-    pub(super) fn drop_agg_row(&mut self) {
-        self.exec(Action::Tab(TabA::DropAggRow));
-    }
-
-    pub(super) fn reset_doc_state(&mut self) {
-        self.exec(Action::Tab(TabA::ResetDoc));
-    }
-
     pub(super) fn uid_of(&self, i: usize) -> Option<u64> {
         self.core.tabs.get(i).map(|t| t.uid)
     }

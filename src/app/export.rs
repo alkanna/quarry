@@ -3,15 +3,10 @@
 
 use super::*;
 use db::copy::{self, CopyCol, Fmt, Sheet};
-use db::sql::export::{Done, Plan, Sink};
-use quarry_core::action::LibA;
+use db::sql::export::{Plan, Sink};
+use quarry_core::action::{Action, ExportA, LibA};
 use std::sync::atomic::Ordering;
 pub(crate) use quarry_core::state::export::*;
-
-/// "1.2M" from a million up, the exact count below.
-pub(super) fn human_rows(n: u64) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else { group(&n.to_string()) }
-}
 
 /// Keys of the rows in order of first appearance, for results that have no column list.
 fn keys_of(rows: &[Document]) -> Vec<String> {
@@ -104,7 +99,7 @@ impl App {
             let refused = db::sql::lex::read_only_check(&x.stmt, db.dialect).err();
             // The same database and schema the statement ran in, so it reads what the grid showed.
             let (db, schema) = super::sql::query::ran_target(t, db);
-            Some(AllRows { db, schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
+            Some(AllRows { conn: t.sel.conn, database: db.pg_database(), schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
         let all = if src == Src::Content { self.content_all(t) } else { all };
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
@@ -113,7 +108,7 @@ impl App {
             // A snippet exports what Run sends, its values filled in, and nothing while one does not read.
             let query = self.snippet_fill_run(s.query.clone()).ok()?;
             let stmts = db::sql::export::check_script(&query, db.dialect);
-            Some(Script { db, schema, stmts })
+            Some(Script { conn: t.sel.conn, database: db.pg_database(), schema, stmts })
         });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
@@ -130,20 +125,16 @@ impl App {
         let stmt = s.ran.select_sql(db.dialect, &schema, &t.sel.coll, pk, None);
         let refused = db::sql::lex::read_only_check(&stmt, db.dialect).err();
         let total = (!s.estimated).then_some(t.count);
-        Some(AllRows { db, schema, stmt, total, paged: true, refused })
+        Some(AllRows { conn: t.sel.conn, database: db.pg_database(), schema, stmt, total, paged: true, refused })
     }
 
     /// Demo only: gives the open dialog the editor script as a source with a pool that never connects, so the scope can be drawn offline.
     /// `text` replaces the editor's text when given, to show a script that passes the check.
     pub(super) fn demo_script_scope(&mut self, text: Option<&str>) {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
-        let _guard = rt.enter();
-        let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
-        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts: db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
         let query = text.map(str::to_string).or_else(|| self.t().and_then(|t| t.sql.as_ref().map(|s| s.query.clone()))).unwrap_or_default();
         if let Some(Modal::Export(f)) = &mut self.modal {
-            let stmts = db::sql::export::check_script(&query, db.dialect);
-            f.script = Some(Script { db, schema: "shop".into(), stmts });
+            let stmts = db::sql::export::check_script(&query, db::sql::Dialect::MySql);
+            f.script = Some(Script { conn: 0, database: String::new(), schema: "shop".into(), stmts });
             f.scope = Scope::Script;
         }
     }
@@ -380,16 +371,18 @@ impl App {
         if f.scope == Scope::All {
             let (Some(a), Some(target)) = (&f.all, target) else { return };
             let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
-            self.core.export().stream(a, plan, Sink::File(path), false);
+            self.exec(Action::Export(ExportA::Stream { all: a.clone(), plan, sink: Sink::File(path), copy: false }));
             return;
         }
         if f.scope == Scope::Script {
             let (Some(sc), Some(target)) = (&f.script, target) else { return };
-            let Ok(stmts) = &sc.stmts else { return };
+            if sc.stmts.is_err() {
+                return;
+            }
             let plan = Plan { target, header: f.header, table, bs: self.sql_bs() };
             // Only text formats with room for several results go in one file.
             let single = f.single && plan.text().is_some_and(db::sql::export::can_single);
-            return self.core.export().script(sc, stmts.clone(), db::sql::export::AllPlan { plan, single }, path);
+            return self.exec(Action::Export(ExportA::Script { script: sc.clone(), plan: db::sql::export::AllPlan { plan, single }, path }));
         }
         // Shell rows can reach a gigabyte, so they are written a batch at a time off the UI thread, in the same bytes as
         // the whole list. Markdown pads its table to the widest cell, which only the whole list knows, so a small one
@@ -457,9 +450,8 @@ impl App {
             Format::MongoJson => db::RowsOut::MongoJson,
             Format::MongoLines => db::RowsOut::MongoLines,
         };
-        let Some(t) = self.t() else { return };
-        let rows: Vec<mongodb::bson::RawDocumentBuf> = t.shell.docs.iter().map(|r| r.raw().to_owned()).collect();
-        self.core.export().shell(rows, out, path);
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Export(ExportA::Shell { tab, out, path }));
     }
 
     /// Copy as for every page of the selected Query result: the text is built in a worker task.
@@ -472,28 +464,10 @@ impl App {
         }
         let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         let (db, schema) = super::sql::query::ran_target(t, db);
-        let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
+        let a = AllRows { conn: t.sel.conn, database: db.pg_database(), schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { target: crate::db::sql::export::Target::Text(fmt), header, table, bs: self.sql_bs() };
-        self.core.export().stream(&a, plan, Sink::Clipboard, true);
-    }
-
-    /// The finished stream: a file is reported, clipboard text is copied.
-    pub(super) fn export_done(&mut self, ctx: &egui::Context, req: u64, res: db::Res<Done>) {
-        if !self.core.export().finish(req) {
-            return;
-        }
-        match res {
-            Ok(Done { rows, path: Some(p), files, .. }) if files > 1 => self.ok(format!("Exported {} rows to {files} files, from {}", human_rows(rows), p.display())),
-            Ok(Done { rows, path: Some(p), .. }) => self.ok(format!("Exported {} rows to {}", human_rows(rows), p.display())),
-            Ok(Done { rows, text: Some(t), .. }) => {
-                ctx.copy_text(t);
-                self.ok(format!("Copied {} rows", human_rows(rows)));
-            }
-            Ok(_) => {}
-            Err(e) if e == "Export cancelled" => self.ok("Export stopped"),
-            Err(e) => self.err(e),
-        }
+        self.exec(Action::Export(ExportA::Stream { all: a, plan, sink: Sink::Clipboard, copy: true }));
     }
 
     /// The status bar's readout of a running stream, with Cancel. True while one runs.
@@ -504,7 +478,7 @@ impl App {
         let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
         if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() {
-            self.core.export().cancel();
+            self.exec(Action::Export(ExportA::Cancel));
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true

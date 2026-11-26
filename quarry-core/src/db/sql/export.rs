@@ -21,7 +21,7 @@ pub const BATCH: usize = 1000;
 /// The most text a copy to the clipboard may build; past it Export to a file is the way.
 pub const CLIP_MAX: usize = 64 << 20;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     pub target: Target,
     pub header: bool,
@@ -31,7 +31,7 @@ pub struct Plan {
 }
 
 /// What a result becomes: Copy as text, or an Excel workbook.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Text(Fmt),
     Xlsx(crate::db::xlsx::Opts),
@@ -48,6 +48,7 @@ impl Plan {
 }
 
 /// Where the text goes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Sink {
     File(PathBuf),
     Clipboard,
@@ -298,6 +299,7 @@ pub async fn export_to(db: &Db, schema: &str, stmt: &str, plan: &Plan, sink: Sin
 }
 
 /// What "All statements in the editor" shares across statements.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AllPlan {
     pub plan: Plan,
     /// One file for the whole script instead of one per result. Only formats that can hold several results.

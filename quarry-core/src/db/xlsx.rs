@@ -15,7 +15,7 @@ pub struct XCol {
 }
 
 /// What a streamed export needs besides its columns, which only the result brings.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Opts {
     pub sheet: String,
     /// The About sheet's lines, when it is wanted.

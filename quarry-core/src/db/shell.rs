@@ -373,6 +373,7 @@ async fn read_frame(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>, r
 }
 
 /// What an export of Shell rows writes, decided on the UI thread.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RowsOut {
     Text { fmt: copy::Fmt, header: bool, table: String, dialect: sql::Dialect, bs: bool },
     Xlsx(xlsx::Opts),

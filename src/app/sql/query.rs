@@ -20,9 +20,6 @@ const FOOTER_H: f32 = 24.0;
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
 
-/// How long typing rests before the statement under the caret is sent to the server to be checked, in seconds.
-const LINT_PAUSE: f64 = 0.6;
-
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
 #[cfg(test)]
 fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {

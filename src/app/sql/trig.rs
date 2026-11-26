@@ -26,6 +26,7 @@ pub(in crate::app) fn same(a: &TrigDef, b: &TrigDef) -> bool {
 
 /// Drops the drafts of triggers that are gone, so a trigger made again later under the same name does not open
 /// with the edits of the dropped one. The new trigger's draft stays.
+#[cfg(test)]
 pub(in crate::app) fn prune_drafts(drafts: &mut std::collections::HashMap<String, TrigDef>, live: &[Trigger]) {
     drafts.retain(|k, _| k == NEW || live.iter().any(|t| t.name == *k));
 }

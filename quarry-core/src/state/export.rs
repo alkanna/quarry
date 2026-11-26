@@ -67,9 +67,13 @@ pub enum Src {
     Content,
 }
 
-/// What it takes to run the statement of a Query result again for every row.
+/// What it takes to run the statement of a Query result again for every row. The connection is named, never held: Core
+/// looks its handle up when the stream starts (`Core::export_db`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AllRows {
-    pub db: db::sql::Db,
+    pub conn: u64,
+    /// The PostgreSQL database the statement ran in, empty on MySQL.
+    pub database: String,
     pub schema: String,
     pub stmt: String,
     pub total: Option<u64>,
@@ -79,8 +83,10 @@ pub struct AllRows {
 }
 
 /// The Query editor's whole text as an export source.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Script {
-    pub db: db::sql::Db,
+    pub conn: u64,
+    pub database: String,
     pub schema: String,
     /// The statements, or why the script may not be exported.
     pub stmts: Result<Vec<String>, String>,
@@ -118,4 +124,9 @@ pub struct ExportJob {
     /// Progress of a script: the statement being run and how many there are. `of` is 0 for a single statement.
     pub step: Arc<AtomicU64>,
     pub of: usize,
+}
+
+/// "1.2M" from a million up, the exact count below.
+pub fn human_rows(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else { db::group(&n.to_string()) }
 }

@@ -41,6 +41,9 @@ pub enum ShellA {
     Edit { tab: u64, code: String },
     /// The Attach dialog asks for the schemas of a PostgreSQL database; the answer fills the dialog.
     PgSchemas { conn: u64, db: String },
+    /// The tables part of a `pg_shell_list` answer, for the attachments of every tab that match. The schemas part fills the
+    /// Attach dialog, which the app holds.
+    PgTables { doc: Document },
     /// Opens a Shell tab on the current tab's database with this script in it.
     OpenIn { code: String },
 }
@@ -95,6 +98,10 @@ impl Core {
                 }
                 return Ok(Reply::Done);
             }
+            ShellA::PgTables { doc } => {
+                self.shell_pg_tables(doc);
+                return Ok(Reply::Done);
+            }
             ShellA::Edit { tab, .. } | ShellA::Run { tab } | ShellA::Start { tab } | ShellA::Stop { tab } | ShellA::Code { tab, .. } | ShellA::Detach { tab, .. } | ShellA::Attach { tab, .. } | ShellA::Help { tab, .. } | ShellA::Queries { tab, .. } | ShellA::Raw { tab, .. } | ShellA::Page { tab, .. } | ShellA::Filled { tab, .. } => *tab,
         };
         let Some(i) = self.tabs.iter().position(|t| t.uid == tab) else {
@@ -134,7 +141,7 @@ impl Core {
                 }
             }
             ShellA::Filled { on, .. } => t.snip.filled = on,
-            ShellA::Packages(_) | ShellA::PgSchemas { .. } | ShellA::OpenIn { .. } => {}
+            ShellA::Packages(_) | ShellA::PgSchemas { .. } | ShellA::PgTables { .. } | ShellA::OpenIn { .. } => {}
         }
         Ok(Reply::Done)
     }
@@ -398,7 +405,13 @@ impl Core {
 
     /// The tables part of a `pg_shell_list` answer: they go to the attachments of every tab that match, so a script run
     /// after this has its table helpers. The schemas part fills the app's Attach dialog.
-    pub fn shell_pg_tables(&mut self, d: &Document) {
+    /// Starts the Shell's language server and hands its channel to the app, which keeps it with the editor's popups. A read of
+    /// the worker, not a change of Core.
+    pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<crate::db::JsLsReq> {
+        self.worker.js_ls(runtime, dir, packages)
+    }
+
+    fn shell_pg_tables(&mut self, d: &Document) {
         let (conn, database, schema) = (d.get_i64("conn").unwrap_or_default() as u64, d.get_str("database").unwrap_or_default(), d.get_str("schema").unwrap_or_default());
         if schema.is_empty() || d.contains_key("error") {
             return;

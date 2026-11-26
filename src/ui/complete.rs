@@ -224,7 +224,7 @@ pub(crate) fn ts_type(fields: &Fields) -> String {
     obj(fields, &kids, "").unwrap_or_else(|| "import(\"mongodb\").Document".into())
 }
 
-pub(crate) use quarry_core::action::replies::{merge_values, suggestible};
+pub(crate) use quarry_core::action::replies::merge_values;
 
 /// The field whose value starts at the end of `before`: `status` in `{ status: "dr`. Operators
 /// like `$in` are left out, their field is further back.

@@ -2,6 +2,7 @@
 //! as a panel docked beside the page (docs/long-values.figcraft, options A and C).
 
 use super::*;
+use quarry_core::action::docs::EditorEdit;
 use quarry_core::action::{Action, DocsA, SqlA, ValueA};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -122,13 +123,14 @@ impl App {
         let screen = ctx.content_rect();
         let max_h = screen.height() * 0.62;
         let width = (screen.width() * 0.72).clamp(480.0, 1200.0);
-        if let Some(mut je) = self.core.json_edit().take() {
+        if let Some(before) = self.core.json_edit.clone() {
+            let mut je = before.clone();
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.json_edit_body(ui, &mut je, None, max_h);
             });
-            self.json_edit_act(je, close(&r, act));
+            self.json_edit_act(before, je, close(&r, act));
         }
         if let Some(before) = self.core.sql_cell.clone().filter(|e| e.big) {
             let mut e = before.clone();
@@ -150,9 +152,10 @@ impl App {
         egui::Panel::right("value-panel").default_size(380.0).size_range(280.0..=900.0).resizable(true).frame(egui::Frame::new().fill(PANEL()).inner_margin(12)).show(ui, |ui| {
             let max_h = (ui.available_height() - 120.0).max(80.0);
             let rows = (max_h / ui.text_style_height(&egui::TextStyle::Monospace)) as usize;
-            if let Some(mut je) = self.core.json_edit().take() {
+            if let Some(before) = self.core.json_edit.clone() {
+                let mut je = before.clone();
                 let act = self.json_edit_body(ui, &mut je, Some(rows), max_h);
-                self.json_edit_act(je, act);
+                self.json_edit_act(before, je, act);
             } else if let Some(before) = self.core.sql_cell.clone() {
                 let mut e = before.clone();
                 let act = self.sql_cell_body(ui, &mut e, Some(rows), max_h);
@@ -211,16 +214,18 @@ impl App {
         self.exec(Action::Sql(SqlA::CellEdit { tab, edit: Some(Box::new(e)) }));
     }
 
-    /// Puts the editor back, then runs its button through Core.
-    fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
-        *self.core.json_edit() = Some(je);
+    /// Hands the editor as a frame left it to Core when it changed, then runs its button.
+    fn json_edit_act(&mut self, before: JsonEdit, je: JsonEdit, act: ValueAct) {
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        if je != before {
+            self.exec(Action::Docs(DocsA::SetEditor { tab, edit: Box::new(EditorEdit::Json(je)) }));
+        }
         let act = match act {
             ValueAct::None => return,
             ValueAct::Apply => ValueA::Apply,
             ValueAct::Null => ValueA::Null,
             ValueAct::Close => ValueA::Close,
         };
-        let Some(tab) = self.t().map(|t| t.uid) else { return };
         self.exec(Action::Docs(DocsA::Value { tab, act }));
     }
 

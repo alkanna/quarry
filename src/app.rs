@@ -80,7 +80,6 @@ use whats_new::WhatsNew;
 use errors::*;
 use config::*;
 use groups::{Group, Groups, Place};
-use restore::Restore;
 use library::picker::{PickKind, picker_button};
 use documents::*;
 use shell::*;

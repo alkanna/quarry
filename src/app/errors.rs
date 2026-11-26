@@ -198,7 +198,8 @@ impl App {
 
     /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
     /// read-only connection: a group, saved scripts or a file.
-    pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
+    #[cfg(test)]
+    pub(super) fn toast_restore(&mut self, s: String, r: quarry_core::state::restore::Restore) {
         self.core.toast_restore(s, r)
     }
 

@@ -2,6 +2,7 @@
 //! `apply_undo` cannot serve them, since it needs a writable connection and these never touch one.
 
 use super::*;
+#[cfg(test)]
 pub(crate) use quarry_core::state::restore::*;
 use quarry_core::action::{Action, LibA};
 

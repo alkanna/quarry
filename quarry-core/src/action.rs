@@ -108,6 +108,7 @@ pub use sql::asks::SqlAskA;
 pub use agents::{AgentCall, AgentsA, Origin};
 pub use confirm::ConfirmA;
 pub use cloud::CloudA;
+pub use export::ExportA;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Action {
@@ -139,6 +140,7 @@ pub enum Action {
     Confirm(ConfirmA),
     Cloud(CloudA),
     SqlAsk(SqlAskA),
+    Export(ExportA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -327,6 +329,7 @@ impl Core {
             Action::Agents(a) => self.agents_act(a),
             Action::Cloud(a) => self.cloud_act(a),
             Action::SqlAsk(a) => self.sql_ask(a),
+            Action::Export(a) => self.export_act(a),
         }
     }
 
@@ -398,6 +401,7 @@ impl Core {
             Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } | Msg::SqlViewSaved { .. } => true,
             Msg::Agent(_) => true,
             Msg::CloudSql { .. } => true,
+            Msg::SqlExport { .. } => true,
             _ => false,
         }
     }
@@ -468,6 +472,7 @@ impl Core {
             }
             Msg::Agent(ev) => self.on_agent(ev),
             Msg::CloudSql { req, found } => self.cloud_found(req, found),
+            Msg::SqlExport { req, res } => self.export_done(req, res),
             _ => {}
         }
     }

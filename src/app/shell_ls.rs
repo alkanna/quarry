@@ -24,6 +24,7 @@ const FUNCTION_PROTO: [&str; 9] = ["apply", "bind", "call", "caller", "arguments
 
 #[derive(Default)]
 pub(super) struct JsState {
+    seq: u64,
     tx: Option<tokio::sync::mpsc::UnboundedSender<db::JsLsReq>>,
     fails: u32,
     /// Hash of the collections and packages whose declarations the server holds.
@@ -366,7 +367,9 @@ impl App {
         // Placeholders swapped for text of their length, so {{day:date}} is no syntax error and positions still match.
         let code = crate::library::snippet::mask(&self.core.tabs[self.core.cur].shell.code, crate::library::snippet::Lang::Shell);
         let (line, col) = db::lsp_pos(&code, at);
-        let req = self.core.next_req();
+        // Only this editor's answers carry these ids, so they need not come from Core's counter.
+        self.js.seq += 1;
+        let req = self.js.seq;
         self.js.tx.as_ref()?.send(db::JsLsReq { req, ask, code, line, col, globals }).ok()?;
         Some(req)
     }

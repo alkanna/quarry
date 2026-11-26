@@ -51,6 +51,8 @@ pub enum DocsA {
     Edit { tab: u64, doc: Document, act: EditA },
     /// The large value editor's Apply, Set null or Close.
     Value { tab: u64, act: ValueA },
+    /// One of the value editors as a frame of drawing left it, dropped when that editor is no longer open on the same path.
+    SetEditor { tab: u64, edit: Box<EditorEdit> },
     /// An edit built by a dialog, such as Rename field, kept as unsaved; `new` is why it could not be built.
     Stage { tab: u64, doc: Document, new: Result<Document, String> },
     /// A field menu's Filter by this value, added to the filter or in place of it.
@@ -79,6 +81,14 @@ pub enum DocsA {
     Bar { tab: u64, field: BarField, text: String },
     /// The bar's autocomplete saw a string being typed in `field`: once typing pauses it asks for the values starting with `prefix`.
     TypedValues { key: String, field: Option<String>, prefix: Option<String> },
+}
+
+/// The value editors the Documents view opens: the large one, the tree's inline one and its New field row.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum EditorEdit {
+    Json(JsonEdit),
+    Inline(Inline),
+    NewField(NewField),
 }
 
 /// The box of the query bar a history pick fills.
@@ -252,6 +262,14 @@ impl Core {
             DocsA::Value { tab, act } => {
                 self.cur_tab(tab)?;
                 self.json_edit_act(act);
+            }
+            DocsA::SetEditor { tab, edit } => {
+                self.cur_tab(tab)?;
+                match *edit {
+                    EditorEdit::Json(e) => if self.json_edit.as_ref().is_some_and(|c| c.path == e.path) { self.json_edit = Some(e) },
+                    EditorEdit::Inline(e) => if self.inline.as_ref().is_some_and(|c| c.path == e.path) { self.inline = Some(e) },
+                    EditorEdit::NewField(e) => if self.new_field.as_ref().is_some_and(|c| c.parent == e.parent) { self.new_field = Some(e) },
+                }
             }
             DocsA::Save { key } => return self.save_draft(&key),
             DocsA::Write { keys } => {

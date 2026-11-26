@@ -1,6 +1,7 @@
 //! One document as an editable tree: inline edits, drafts, field menus and the inspector.
 
 use super::*;
+use quarry_core::action::docs::EditorEdit;
 use quarry_core::action::{Action, DocsA, EditA, FieldA, MongoA};
 
 pub(super) fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
@@ -137,7 +138,7 @@ impl App {
         let selected = self.t().and_then(|t| t.selected);
         let passive = row.is_some() && row != selected;
         // Edit state is keyed by field path only, so other open documents must not see it.
-        let parked = passive.then(|| (self.core.inline_edit().take(), self.core.new_field_edit().take()));
+        self.ui.doc_passive = passive;
         // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
         // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
         let doc_id = d.get("_id").map(db::compact);
@@ -246,14 +247,10 @@ impl App {
         if let Some(TreeAct::Fold(p, open)) = acts.iter().find(|a| matches!(a, TreeAct::Fold(..))) {
             self.fold = Some((id, p.clone(), *open));
         }
-        if self.core.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
+        if self.core.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) && !passive {
             self.new_field_row(ui, &mut acts);
         }
         self.ui.changed.clear();
-        if let Some((inline, new_field)) = parked {
-            *self.core.inline_edit() = inline;
-            *self.core.new_field_edit() = new_field;
-        }
         if let (true, Some((agg, row)), false) = (passive, row, acts.is_empty()) {
             let tab = self.t().unwrap().uid;
             self.exec(Action::Docs(DocsA::Select { tab, agg, row, toggle: false }));
@@ -345,8 +342,16 @@ impl App {
         });
     }
 
+    /// Hands an editor as a frame of drawing left it to Core, before the frame's own clicks run.
+    fn set_editor(&mut self, edit: EditorEdit) {
+        let Some(tab) = self.t().map(|t| t.uid) else { return };
+        self.exec(Action::Docs(DocsA::SetEditor { tab, edit: Box::new(edit) }));
+    }
+
     pub(super) fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
-        let Some(n) = self.core.new_field_edit().as_mut() else { return };
+        let Some(before) = self.core.new_field.clone().filter(|_| !self.ui.doc_passive) else { return };
+        let mut n = before.clone();
+        let n = &mut n;
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             let bad = n.err.is_some();
@@ -381,6 +386,9 @@ impl App {
                 ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
             });
         }
+        if *n != before {
+            self.set_editor(EditorEdit::NewField(n.clone()));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -392,7 +400,7 @@ impl App {
     }
 
     pub(super) fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
-        let editing_here = self.core.inline.as_ref().is_some_and(|i| i.path == *path);
+        let editing_here = !self.ui.doc_passive && self.core.inline.as_ref().is_some_and(|i| i.path == *path);
         match v {
             Bson::Document(_) | Bson::Array(_) if !editing_here => {
                 let items: Vec<(String, &Bson)> = match v {
@@ -466,8 +474,12 @@ impl App {
                     }
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
-                        let inl = self.core.inline_edit().as_mut().unwrap();
-                        inline_editor(ui, inl, acts);
+                        let before = self.core.inline.clone().unwrap();
+                        let mut inl = before.clone();
+                        inline_editor(ui, &mut inl, acts);
+                        if inl != before {
+                            self.set_editor(EditorEdit::Inline(inl));
+                        }
                     } else {
                         // A one-line label never shows more than this; laying out a megabyte string on
                         // every frame stalls scrolling. "Show full value" opens the whole thing.

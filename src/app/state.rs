@@ -11,6 +11,8 @@ pub(crate) type Modal = quarry_core::state::Modal<Retry>;
 
 /// What only drawing cares about: it lives in the app, not in Core, so a frame can change it without an action.
 pub(crate) struct UiState {
+    /// The document being drawn is not the selected one, so it must not show the tree's inline editors.
+    pub doc_passive: bool,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     pub scroll_sel: bool,
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
@@ -77,7 +79,7 @@ pub(crate) struct UiState {
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new(), explain_prev: Default::default(), ask_shown: None, ac: Default::default(), new_pkg: String::new(), shell_h: None, changed: HashSet::new(), fold_busy: false, fold_seen: None, key_w: 0.0, char_w: 0.0, col_filter: String::new(), width_cache: HashMap::new() }
+        Self { doc_passive: false, scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new(), bar_ui: HashMap::new(), explain_prev: Default::default(), ask_shown: None, ac: Default::default(), new_pkg: String::new(), shell_h: None, changed: HashSet::new(), fold_busy: false, fold_seen: None, key_w: 0.0, char_w: 0.0, col_filter: String::new(), width_cache: HashMap::new() }
     }
 }
 
@@ -102,6 +104,7 @@ impl App {
         self.core.sel_writable()
     }
 
+    #[cfg(test)]
     pub(super) fn timeout(&self) -> Duration {
         self.core.timeout()
     }

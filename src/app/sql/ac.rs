@@ -29,11 +29,4 @@ impl App {
         self.exec(Action::SqlAsk(SqlAskA::ServeFacts { conn, db: db.to_string(), schema: schema.to_string(), table: table.to_string(), column, kind }))
     }
 
-    /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
-    /// under that name would never get its autocomplete and shell types back. A PostgreSQL database holds one cache per
-    /// schema, all of them under keys that start with its name.
-    pub(in crate::app) fn forget_schema(&mut self, conn: u64, db: &str) {
-        self.exec(Action::SqlAsk(SqlAskA::ForgetSchema { conn, db: db.to_string() }))
-    }
-
 }

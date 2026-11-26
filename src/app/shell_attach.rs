@@ -415,7 +415,7 @@ async function run() {
                 }
             }
         }
-        self.core.shell_pg_tables(&d);
+        self.exec(Action::Shell(ShellA::PgTables { doc: d }));
     }
 }
 
