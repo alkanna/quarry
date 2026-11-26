@@ -11,8 +11,7 @@ use crate::db::sql::{
 use crate::ui::dnd::{drag_cancelled, drag_source_with, grip_dots, paint_spot, y_frac, zone_at, Spot, Zone};
 use crate::ui::fold;
 pub(crate) use quarry_core::state::sql::filter_panel::*;
-use quarry_core::state::sql::bar::Bar;
-use quarry_core::action::sql::filter::{add, FilterA as Act};
+use quarry_core::action::sql::filter::FilterA as Act;
 
 /// Opening and closing the panel animate its fold, which lives in egui's memory.
 pub(in crate::app) trait PanelFold {

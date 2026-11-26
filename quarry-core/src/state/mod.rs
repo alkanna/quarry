@@ -30,7 +30,7 @@ pub mod whats_new;
 
 use crate::db;
 use crate::db::{PAGE_SIZE, Query};
-use crate::state::config::{ColPrefs, secret};
+use crate::state::config::secret;
 use crate::state::indexes::{IDX_FIELDS, IndexForm};
 use crate::state::shell_attach::Attached;
 use crate::state::sql::alter::{ColForm, IdxForm};
