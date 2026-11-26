@@ -51,7 +51,7 @@ pub struct Block {
 }
 
 /// Id 0 names the root.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Tree {
     pub root: Block,
     next: u32,

@@ -3,6 +3,7 @@
 use crate::app::results_bar::BarInfo;
 use crate::app::*;
 use quarry_core::action::{Action, SqlA};
+use quarry_core::state::sql::bar::BarEdit;
 
 impl App {
     pub(in crate::app) fn sql_mode(&self, conn: u64) -> db::sql::ddl::Mode {
@@ -32,6 +33,8 @@ impl App {
         if self.t().is_some_and(|t| t.size != 0 && t.size != size && !t.loading) {
             self.exec(Action::Sql(SqlA::PageSize { tab }));
         }
+        // The bar reads the WHERE text as rules first, so it draws from the tree Core holds.
+        self.exec(Action::Sql(SqlA::BarSync { tab }));
         let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
         let (conn, db) = (self.core.tabs[self.core.cur].sel.conn, self.core.tabs[self.core.cur].sel.db.clone());
         let schema = self.sel_schema(&self.core.tabs[self.core.cur].sel);
@@ -42,21 +45,26 @@ impl App {
         let covered = self.window_open();
         let table = self.core.tabs[self.core.cur].sel.coll.clone();
         let facts = self.core.sql_facts.get(&(conn, ns_key(&db, &schema), table.clone()));
-        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts, acts: Vec::new(), save_view: false, explain: false, save_filter: false };
-        let t = &mut self.core.tabs[self.core.cur];
-        let run = crate::app::sql::bar::bar(ui, t, dialect, bs, scope, self.core.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
-        let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
-        let want_facts = t.sql.as_mut().and_then(|s| s.bar.want_facts.take());
-        // Picking from the history fills the box, as in the Documents view; Run or Enter applies it.
-        for a in std::mem::take(&mut side.qacts) {
-            match a {
-                QAct::Filter(v) => t.filter_txt = v,
-                QAct::Sort(v) => t.sort_txt = v,
-                QAct::Project(_) => {}
-            }
+        let mut side = crate::app::sql::bar::Side { hist: &hist, pick: &pick, qacts: Vec::new(), pick_acts: Vec::new(), help: false, covered, facts, acts: Vec::new(), save_view: false, explain: false, save_filter: false, edit: None };
+        let u = self.ui.bar_ui.entry(tab).or_default();
+        let run = crate::app::sql::bar::bar(ui, &self.core.tabs[self.core.cur], u, dialect, bs, scope, self.core.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none), &mut side);
+        let wants = std::mem::take(&mut u.wants);
+        let want_facts = u.want_facts.take();
+        // Everything the bar left in `side` is taken before the first action runs, since `side` still borrows the core.
+        let (edit, qacts, pick_acts) = (side.edit.take(), std::mem::take(&mut side.qacts), std::mem::take(&mut side.pick_acts));
+        let (acts, help, save_view, explain, save_filter) = (std::mem::take(&mut side.acts), side.help, side.save_view, side.explain, side.save_filter);
+        if let Some(edit) = edit {
+            self.exec(Action::Sql(SqlA::BarEdit { tab, edit: Box::new(edit) }));
         }
-        let pick_acts = std::mem::take(&mut side.pick_acts);
-        let (acts, tab, help, save_view, explain, save_filter) = (std::mem::take(&mut side.acts), t.uid, side.help, side.save_view, side.explain, side.save_filter);
+        // Picking from the history fills the box, as in the Documents view; Run or Enter applies it.
+        for a in qacts {
+            let edit = match a {
+                QAct::Filter(v) => BarEdit { filter: Some(v), ..Default::default() },
+                QAct::Sort(v) => BarEdit { sort: Some(v), ..Default::default() },
+                QAct::Project(_) => continue,
+            };
+            self.exec(Action::Sql(SqlA::BarEdit { tab, edit: Box::new(edit) }));
+        }
         for a in acts {
             self.exec(Action::Sql(a));
         }

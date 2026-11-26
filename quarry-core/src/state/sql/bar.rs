@@ -3,13 +3,11 @@
 use super::filter_panel::Panel;
 use crate::db::sql::{filter::self, rules::{Grain, Rule}, schema::SchemaCol, value::Kind, Col, PageQuery};
 use crate::state::Tab;
-use crate::state::complete::Ac;
-use crate::state::sql_complete::Wants;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
-#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Clauses {
     /// SQL mode of the bar instead of Rules mode.
@@ -46,7 +44,8 @@ pub struct GroupDlg {
     pub bs: bool,
 }
 
-/// Runtime state of the bar. Only `c` is saved.
+/// Runtime state of the bar that Core reads. Only `c` is saved. What only drawing needs (suggestions, popovers, the group editor)
+/// is `BarUi` in src/app/sql/bar.rs.
 #[derive(Default)]
 pub struct Bar {
     pub c: Clauses,
@@ -64,17 +63,10 @@ pub struct Bar {
     pub src: String,
     /// The tree was read again, so the text is written back once, in the tree's spelling.
     pub rewrite: bool,
-    pub fold_open: bool,
-    pub gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
     pub table_cols: Arc<Vec<Col>>,
-    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
-    pub ac: Ac,
-    pub wants: Wants,
     /// Initial open states; only the offline demo sets them.
     pub preset: Preset,
-    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
-    pub adding: Option<Add>,
     /// Whether the bar holds another query than the page's, worked out once a frame by `bar` so the results need not
     /// build the query again.
     pub dirty: bool,
@@ -82,8 +74,6 @@ pub struct Bar {
     pub respelled: Option<(String, String)>,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
     pub memo: Option<ColsMemo>,
-    /// Whether the WHERE text read as a tree, for the text, the column pairs and the mode it was read with.
-    pub parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
 }
 
 impl Bar {
@@ -123,7 +113,73 @@ pub struct Preset {
 /// What the worker is asked for, from the tab's texts.
 pub fn page_query(t: &Tab) -> PageQuery {
     let c = t.sql.as_ref().map(|s| s.bar.c.clone()).unwrap_or_default();
-    PageQuery { filter: t.filter_txt.clone(), order: t.sort_txt.clone(), select: split_top(&c.select), distinct: c.distinct, group: split_top(&c.group), having: c.having, limit: c.limit.trim().parse().ok(), skip: c.offset.trim().parse().unwrap_or(0), index_hint: c.hint }
+    query_of(&t.filter_txt, &t.sort_txt, c)
+}
+
+/// The same from texts and clauses the bar is still editing, which Core has not been told of yet.
+pub fn query_of(filter: &str, sort: &str, c: Clauses) -> PageQuery {
+    PageQuery { filter: filter.to_string(), order: sort.to_string(), select: split_top(&c.select), distinct: c.distinct, group: split_top(&c.group), having: c.having, limit: c.limit.trim().parse().ok(), skip: c.offset.trim().parse().unwrap_or(0), index_hint: c.hint }
+}
+
+/// What the bar derives from the columns and the text before it draws: the memo, the tree read from the WHERE text, and
+/// whether the bar holds another query than the one that ran. Reading the text as rules spells it their way, which is what
+/// is written back; it is the same query, so it must not count as an edit of the one that ran.
+pub fn sync(t: &mut Tab, d: Dialect, bs: bool) {
+    let mut q = page_query(t);
+    let Some(s) = t.sql.as_mut() else { return };
+    let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+    let memo = match s.bar.memo.take() {
+        Some(m) if Arc::ptr_eq(&m.cols, &cols) && m.pk == s.pk => m,
+        _ => ColsMemo {
+            fallback: Arc::new(cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect()),
+            pairs: Arc::new(cols.iter().map(|c| (c.name.clone(), c.kind)).collect()),
+            pk: s.pk.clone(),
+            cols: cols.clone(),
+        },
+    };
+    let pairs = memo.pairs.clone();
+    let b = &mut s.bar;
+    b.memo = Some(memo);
+    if read_tree(b, &t.filter_txt, &pairs, d, bs, false) && !pairs.is_empty() && !b.c.sql {
+        let out = filter::to_sql(&b.tree, d, bs);
+        if out != t.filter_txt {
+            b.respelled = Some((t.filter_txt.clone(), out.clone()));
+        }
+        q.filter = out;
+    }
+    b.dirty = q != *b.ran_as_shown(&s.ran);
+    // After a read, so a text read in another spelling is shown as the tree writes it.
+    if !b.c.sql && std::mem::take(&mut b.rewrite) {
+        write_tree(b, &mut t.filter_txt, &pairs, d, bs);
+    }
+}
+
+/// The panel's own state that the drawing changes; the counts are Core's.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PanelView {
+    pub open: bool,
+    pub sel: Option<u32>,
+    pub pick: Option<u32>,
+    pub ops: Option<u32>,
+    pub hover: Option<u32>,
+}
+
+/// What a frame of the bar changed, each part only when it differs from what Core held. `written` is the panel's own edit of a
+/// row, after which the WHERE text is written from the tree.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct BarEdit {
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub clauses: Option<Clauses>,
+    pub tree: Option<filter::Tree>,
+    pub written: bool,
+    pub panel: Option<PanelView>,
+}
+
+impl BarEdit {
+    pub fn is_empty(&self) -> bool {
+        self.filter.is_none() && self.sort.is_none() && self.clauses.is_none() && self.tree.is_none() && !self.written && self.panel.is_none()
+    }
 }
 
 /// Splits at commas outside quotes and parentheses: select lists and GROUP BY lists.

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub type Counted = Result<FilterCount, FilterErr>;
 
 /// One count the panel shows: the text last asked about under which request, and the answer with the text it is for.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Count {
     pub req: u64,
     pub asked: Option<String>,
@@ -52,7 +52,7 @@ impl Count {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Panel {
     pub open: bool,
     /// The selected row or group.

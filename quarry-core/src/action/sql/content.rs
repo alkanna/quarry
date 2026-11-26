@@ -138,3 +138,47 @@ impl Core {
         }
     }
 }
+
+impl Core {
+    /// Before the Content bar draws: reads the WHERE text as a tree and works out whether the bar holds another query than the one that ran.
+    pub(super) fn sql_bar_sync(&mut self) {
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
+        crate::state::sql::bar::sync(&mut self.tabs[self.cur], d, bs);
+    }
+
+    /// What a frame of the Content bar changed: its texts, clauses, tree and panel. A row edited in the panel also writes the WHERE text.
+    pub(super) fn sql_bar_edit(&mut self, e: crate::state::sql::bar::BarEdit) {
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
+        let t = &mut self.tabs[self.cur];
+        let Some(s) = t.sql.as_mut() else { return };
+        if let Some(f) = e.filter {
+            t.filter_txt = f;
+        }
+        if let Some(v) = e.sort {
+            t.sort_txt = v;
+        }
+        let b = &mut s.bar;
+        if let Some(c) = e.clauses {
+            // The Rules or SQL switch is its own action and may have run since the bar copied the clauses.
+            let sql = b.c.sql;
+            b.c = c;
+            b.c.sql = sql;
+        }
+        if let Some(v) = e.panel {
+            // Opening shows counts for rows that may have changed while it was closed, so they are asked again.
+            if v.open && !b.panel.open {
+                b.panel.forget_counts();
+            }
+            (b.panel.open, b.panel.sel, b.panel.pick, b.panel.ops, b.panel.hover) = (v.open, v.sel, v.pick, v.ops, v.hover);
+        }
+        if let Some(tree) = e.tree {
+            b.tree = tree;
+        }
+        if e.written {
+            let cols = if b.table_cols.is_empty() { s.cols.clone() } else { b.table_cols.clone() };
+            let pairs: Vec<_> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
+            crate::state::sql::bar::write_tree(b, &mut t.filter_txt, &pairs, d, bs);
+            b.tree_json = crate::db::sql::filter::to_json(&b.tree);
+        }
+    }
+}

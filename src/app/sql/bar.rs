@@ -7,12 +7,11 @@ use super::filter_cells::{col_pick, combo_w, mono_edit, pill_combo, rule_editor,
 use crate::db::sql::{
     filter::{self, Match},
     rules::{self, Grain, Rule},
-    schema::SchemaCol,
     value::Kind,
     Col, Dialect, };
 use crate::ui::sql_complete::{open_list, sql_ac_field, Scope, Wants};
 pub(crate) use quarry_core::state::sql::bar::*;
-use super::filter_panel::PanelFold;
+use super::filter_panel::{Panel, PanelFold};
 
 const FUNCS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
 
@@ -398,6 +397,8 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) explain: bool,
     /// The panel's Save as filter was clicked; `sql_content` opens the Save dialog.
     pub(in crate::app) save_filter: bool,
+    /// What the frame changed in the bar's texts, clauses, tree and panel, sent before the other actions.
+    pub(in crate::app) edit: Option<BarEdit>,
 }
 
 /// A row of the "+" menu: a condition or a clause. `on` marks the ones already in the query.
@@ -540,44 +541,54 @@ pub(in crate::app) fn stale_note(ui: &mut egui::Ui) -> bool {
     run
 }
 
-/// Draws the query line and what hangs under it. Returns true when the query should run.
+/// What only drawing the bar needs, kept per tab by uid in `App.ui`, with the copies of the clauses, tree and panel a frame edits.
+/// The frame copies them from Core and sends what differs as one `BarEdit`.
+#[derive(Default)]
+pub(in crate::app) struct BarUi {
+    pub(in crate::app) c: Clauses,
+    pub(in crate::app) tree: filter::Tree,
+    pub(in crate::app) panel: Panel,
+    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
+    pub(in crate::app) ac: Ac,
+    pub(in crate::app) wants: Wants,
+    /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
+    pub(in crate::app) want_facts: Option<(String, Kind)>,
+    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
+    adding: Option<Add>,
+    gdlg: GroupDlg,
+    fold_open: bool,
+    /// Whether the WHERE text read as a tree, for the text, the column pairs and the mode it was read with.
+    parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
+    /// What the demo opened the bar with, copied from Core once; the picker's text is used once.
+    preset: Preset,
+    init: bool,
+}
+
+/// Draws the query line and what hangs under it. Returns true when the query should run. Core has read the text as rules
+/// already (`SqlA::BarSync`); what the frame edits goes to `side.edit`.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
-    let mut q = page_query(t);
-    let Some(s) = t.sql.as_mut() else { return false };
+pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &Tab, b: &mut BarUi, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
+    let Some(s) = t.sql.as_ref() else { return false };
+    let Some(memo) = s.bar.memo.as_ref() else { return false };
     let matched = s.matched.unwrap_or(0);
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-    let memo = match s.bar.memo.take() {
-        Some(m) if Arc::ptr_eq(&m.cols, &cols) && m.pk == s.pk => m,
-        _ => ColsMemo {
-            fallback: Arc::new(cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect()),
-            pairs: Arc::new(cols.iter().map(|c| (c.name.clone(), c.kind)).collect()),
-            pk: s.pk.clone(),
-            cols: cols.clone(),
-        },
-    };
     // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
     let table = t.sel.coll.clone();
     scope.table = Some(table.clone());
     scope.fallback = memo.fallback.clone();
     let pairs = memo.pairs.clone();
     let (rows, tab) = (t.count, t.uid);
-    let b = &mut s.bar;
-    b.memo = Some(memo);
+    if !b.init {
+        b.init = true;
+        b.preset = Preset { ac: s.bar.preset.ac, order: s.bar.preset.order, pick: s.bar.preset.pick.clone() };
+    }
+    (b.c, b.tree, b.panel) = (s.bar.c.clone(), s.bar.tree.clone(), s.bar.panel.clone());
+    let (mut filter, mut sort) = (t.filter_txt.clone(), t.sort_txt.clone());
     let mut run = false;
     b.gdlg.bs = bs;
-    // Reading the text as rules spells it their way, which is what this frame writes back. It is the same query, so it must not
-    // count as an edit of the one that ran.
-    if read_tree(b, &t.filter_txt, &pairs, d, bs, false) && !pairs.is_empty() && !b.c.sql {
-        let out = filter::to_sql(&b.tree, d, bs);
-        if out != t.filter_txt {
-            b.respelled = Some((t.filter_txt.clone(), out.clone()));
-        }
-        q.filter = out;
-    }
-    let dirty = q != *b.ran_as_shown(&s.ran);
-    b.dirty = dirty;
+    let dirty = s.bar.dirty;
     let (mut copy, mut save_view) = (false, false);
+    let mut written = false;
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
     let fid = query_id("SQL-WHERE");
@@ -617,10 +628,10 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
                 let can_rules = pairs.is_empty()
                     || match &b.parsable {
-                        Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
+                        Some((text, p, bs0, ok)) if *text == filter && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
                         _ => {
-                            let ok = filter::parse(&t.filter_txt, &pairs, d, bs).is_some();
-                            b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
+                            let ok = filter::parse(&filter, &pairs, d, bs).is_some();
+                            b.parsable = Some((filter.clone(), pairs.clone(), bs, ok));
                             ok
                         }
                     };
@@ -642,9 +653,9 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         // Leaves room for the field's side margins, the gap and the "+" that ends the row, or the "+" wraps under the text.
                         let w = (ui.max_rect().right() - ui.cursor().left() - (BUTTON_H + 4.0 + LINE_GAP.x + 8.0)).max(160.0);
                         if b.preset.ac {
-                            open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
+                            open_list(ui, fid, &filter, &mut b.ac, &scope, values);
                         }
-                        run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
+                        run |= sql_input(ui, fid, &mut filter, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                     } else {
                         let f = super::filter_line::filters_button(ui, &b.tree, b.panel.open);
                         if f.clicked() {
@@ -658,7 +669,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                             b.panel.show(ui.ctx(), Some(at));
                         }
                     }
-                    run |= clause_chips(ui, &mut t.sort_txt, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
+                    run |= clause_chips(ui, &mut sort, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
                 });
             });
         });
@@ -666,8 +677,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     if focused {
         line_ring(ui, frame.response.rect);
     }
-    if let Some(s) = t.sql.as_mut().filter(|s| !s.bar.c.sql) {
-        let b = &mut s.bar;
+    if !b.c.sql {
         let mut hints = Hints { table: &table, facts: side.facts, values: Some(values), ..Default::default() };
         let out = super::filter_panel::panel(ui, &mut b.tree, &mut b.panel, &cols, d, bs, !side.covered, &mut hints);
         if let Some(f) = hints.want_facts.take() {
@@ -676,13 +686,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         if let Some(column) = hints.want_values.take() {
             b.wants.values = Some(crate::ui::sql_complete::Need { table: table.clone(), column, prefix: None });
         }
-        // After a read too, so a text read in another spelling is shown as the tree writes it.
-        if std::mem::take(&mut b.rewrite) || out.changed {
-            write_tree(b, &mut t.filter_txt, &pairs, d, bs);
-        }
-        if out.changed {
-            b.tree_json = filter::to_json(&b.tree);
-        }
+        written = out.changed;
         side.acts.extend(out.acts.into_iter().map(|a| quarry_core::action::SqlA::Filter { tab, a }));
         if out.as_sql {
             side.acts.push(quarry_core::action::SqlA::WhereMode { tab, sql: true });
@@ -691,28 +695,39 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         side.save_filter |= out.save;
         run |= out.run;
     }
-    fold_line(ui, t, d);
-    if dirty && !t.sql.as_ref().is_some_and(|s| s.bar.panel.open) {
+    fold_line(ui, t, b, &filter, &sort, d);
+    if dirty && !b.panel.open {
         ui.add_space(8.0);
         run |= stale_note(ui);
     }
     ui.add_space(8.0);
     if copy {
-        ui.ctx().copy_text(format!("{};", select_sql(t, d)));
+        ui.ctx().copy_text(format!("{};", select_sql(t, &filter, &sort, &b.c, d)));
     }
     side.save_view = save_view;
+    let sb = &s.bar;
+    let view = |p: &Panel| PanelView { open: p.open, sel: p.sel, pick: p.pick, ops: p.ops, hover: p.hover };
+    let edit = BarEdit {
+        filter: (filter != t.filter_txt).then_some(filter),
+        sort: (sort != t.sort_txt).then_some(sort),
+        clauses: (b.c != sb.c).then(|| b.c.clone()),
+        tree: (b.tree != sb.tree).then(|| b.tree.clone()),
+        written,
+        panel: (view(&b.panel) != view(&sb.panel)).then(|| view(&b.panel)),
+    };
+    side.edit = Some(edit).filter(|e| !e.is_empty());
     run
 }
 
 /// The SELECT of the bar as it reads now.
-fn select_sql(t: &Tab, d: Dialect) -> String {
-    page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None)
+fn select_sql(t: &Tab, filter: &str, sort: &str, c: &Clauses, d: Dialect) -> String {
+    query_of(filter, sort, c.clone()).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None)
 }
 
 /// The clauses in use as chips, then the "+" that adds one. Each chip is in a scope of its own so its popover keeps its place when
 /// the chips before it come and go.
 #[allow(clippy::too_many_arguments)]
-fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields, table: &str, matched: u64, rows: u64, help: &mut bool) -> bool {
+fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut BarUi, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields, table: &str, matched: u64, rows: u64, help: &mut bool) -> bool {
     let mut run = false;
     let sql = b.c.sql;
     let mono = FontId::monospace(TXT_SMALL);
@@ -923,14 +938,12 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
 }
 
 /// The full SELECT, folded under the bar in SQL mode.
-fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
-    if !t.sql.as_ref().is_some_and(|s| s.bar.c.sql) {
+fn fold_line(ui: &mut egui::Ui, t: &Tab, b: &mut BarUi, filter: &str, sort: &str, d: Dialect) {
+    if !b.c.sql {
         return;
     }
-    let stmt = select_sql(t, d);
+    let stmt = select_sql(t, filter, sort, &b.c, d);
     let uid = t.uid;
-    let Some(s) = t.sql.as_mut() else { return };
-    let b = &mut s.bar;
     ui.add_space(8.0);
     // The folded line as a job, kept per tab with the statement text and the fold state it was built from.
     let memo = egui::Id::unique(("sql-fold", uid));
