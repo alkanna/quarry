@@ -16,7 +16,7 @@ fn loading_then_failure_and_retry(var: &str, db: &str, fail: impl Fn(&App) -> Ms
     ui.wait("the list", |a| a.core.side_err.is_empty() && a.h_loaded(db));
     assert!(ui.h.query_by_label("Loading…").is_none(), "{var}: the loading row stays after the list arrived");
     let m = fail(ui.app());
-    ui.app().core.worker.send(m);
+    ui.app().core.test_worker().send(m);
     ui.show("Could not list. Retry");
     ui.click("Could not list. Retry");
     ui.wait("the retried list", |a| a.core.side_err.is_empty() && a.h_loaded(db));

@@ -165,7 +165,7 @@ fn a_write_for_another_tab_keeps_the_open_editor() {
     let app = ui.h.state_mut();
     let sel = app.core.tabs[tab_of(app, &a)].sel.clone();
     let target = app.core.target_for(&sel).unwrap();
-    app.core.worker.insert(CONN, target, doc! { "_id": 10, "name": "delta" }, None);
+    app.core.test_worker().insert(CONN, target, doc! { "_id": 10, "name": "delta" }, None);
     let mut want = seed();
     want.push(doc! { "_id": 10, "name": "delta" });
     f.expect(&mut ui, want);

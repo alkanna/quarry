@@ -60,6 +60,6 @@ fn the_parent_of_a_foreign_key_reaches_the_mysql_new_table_dialog() {
     let mut k = NewFk::new("shop", Dialect::MySql);
     k.req = 9001;
     f.keys.fks.push(k);
-    ui.app().core.worker.send(Msg::SqlStructure { req: 9001, res: Ok(Structure::default()) });
+    ui.app().core.test_worker().send(Msg::SqlStructure { req: 9001, res: Ok(Structure::default()) });
     ui.wait("the parent to arrive", |a| matches!(&a.modal, Some(Modal::SqlNewTable(f)) if f.keys.fks.first().is_some_and(|k| k.parent.is_some())));
 }

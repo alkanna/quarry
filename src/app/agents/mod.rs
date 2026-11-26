@@ -71,7 +71,7 @@ mod tests {
     /// Sends an open_shell call through the worker channel as the link does, and steps until it is answered.
     fn open_shell(h: &mut egui_kittest::Harness<'static, App>, args: Value) -> Result<Value, ToolErr> {
         let (reply, mut rx) = oneshot::channel();
-        h.state().core.worker.send(Msg::Agent(db::AgentEvent::Call { session: 1, id: 1, tool: "open_shell".into(), args, client: ClientInfo { name: "claude-code".into(), version: "1".into() }, reply }));
+        h.state().core.test_worker().send(Msg::Agent(db::AgentEvent::Call { session: 1, id: 1, tool: "open_shell".into(), args, client: ClientInfo { name: "claude-code".into(), version: "1".into() }, reply }));
         for _ in 0..20 {
             h.step();
             if let Ok(r) = rx.try_recv() {
@@ -88,9 +88,9 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
         {
             let app = h.state_mut();
-            app.core.conns.push(Conn::new(ConnMeta { id: 21, name: "prod".into(), ..Default::default() }, Status::Ready));
-            app.core.agents.cfg.enabled = true;
-            app.core.agents.cfg.conns.insert(21, ConnPolicy { access: Access::Read, scripts: Mode::Ask, ..Default::default() });
+            app.core.test_mut().conns.push(Conn::new(ConnMeta { id: 21, name: "prod".into(), ..Default::default() }, Status::Ready));
+            app.core.test_mut().agents.cfg.enabled = true;
+            app.core.test_mut().agents.cfg.conns.insert(21, ConnPolicy { access: Access::Read, scripts: Mode::Ask, ..Default::default() });
             app.modal = Some(Modal::Attach(Box::default()));
         }
         let script = "async function run() { return 1 }";

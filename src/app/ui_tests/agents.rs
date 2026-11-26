@@ -12,7 +12,7 @@ type Rx = oneshot::Receiver<Result<Value, ToolErr>>;
 /// Sends a call through the worker channel, as the link listener does.
 fn inject(app: &App, link: u64, tool: &str, args: Value) -> Rx {
     let (reply, rx) = oneshot::channel();
-    app.core.worker.send(Msg::Agent(db::AgentEvent::Call { session: 1, id: link, tool: tool.into(), args, client: ClientInfo { name: "claude-code".into(), version: "1".into() }, reply }));
+    app.core.test_worker().send(Msg::Agent(db::AgentEvent::Call { session: 1, id: link, tool: tool.into(), args, client: ClientInfo { name: "claude-code".into(), version: "1".into() }, reply }));
     rx
 }
 

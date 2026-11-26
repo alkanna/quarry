@@ -31,7 +31,7 @@ fn form_mut(app: &mut App) -> &mut ConnForm {
 
 /// Sends one gcloud answer the way the worker does and waits until the app took it.
 fn feed(ui: &mut UiApp, found: Found, what: &str, taken: impl Fn(&App) -> bool) {
-    ui.app().core.worker.send(Msg::CloudSql { req: REQ, found });
+    ui.app().core.test_worker().send(Msg::CloudSql { req: REQ, found });
     ui.wait(what, taken);
 }
 
@@ -157,7 +157,7 @@ fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
         c.attempt = attempt;
         ui.h.state_mut().core.conns.push(c);
     }
-    let w = &ui.app().core.worker;
+    let w = &ui.app().core.test_worker();
     w.send(Msg::SqlConnected { conn: 71, attempt: 3, res: Err("late".into()) });
     w.send(Msg::Connected { conn: 72, attempt: 2, res: Err("late".into()) });
     w.send(Msg::SqlConnected { conn: 73, attempt: 5, res: Err("refused".into()) });
@@ -210,7 +210,7 @@ fn refresh_in_the_cloud_sql_browser_keeps_the_window_size_while_it_checks_again(
         assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size while Refresh waited");
     }
     assert!(ui.app().core.cloud.start.is_none(), "the answer has not come yet");
-    ui.app().core.worker.send(Msg::CloudSql { req, found: Found::Start(missing()) });
+    ui.app().core.test_worker().send(Msg::CloudSql { req, found: Found::Start(missing()) });
     ui.wait("the answer", |a| a.core.cloud.start.is_some());
     ui.settle();
     assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size after the answer");

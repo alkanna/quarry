@@ -190,7 +190,7 @@ fn ssh_connect(ui: &mut UiApp, id: u64, pass: &str, far: &str) {
     c.status = Status::Connecting;
     c.attempt = attempt;
     let net = db::Net { ssh: c.meta.ssh.clone().map(|s| (s, crate::ssh::SshSecrets { password: Some(pass.into()), passphrase: None })), ..Default::default() };
-    app.core.worker.connect(id, attempt, far.to_string(), timeout, net);
+    app.core.test_worker().connect(id, attempt, far.to_string(), timeout, net);
     ui.wait("the SSH connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
     ui.assert_ready(id);
 }

@@ -125,9 +125,9 @@ pub(super) fn ui_app(var: &str) -> Option<UiApp> {
     let mut ui = harness();
     let app = ui.h.state_mut();
     let engine = db::sql::Engine::from_uri(&uri).unwrap_or_default();
-    app.core.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: CONN, name: "test".into(), engine, ..Default::default() }, Status::Idle) });
-    app.core.active = Some(CONN);
-    app.core.rail_order.push(CONN);
+    app.core.test_mut().conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: CONN, name: "test".into(), engine, ..Default::default() }, Status::Idle) });
+    app.core.test_mut().active = Some(CONN);
+    app.core.test_mut().rail_order.push(CONN);
     ui.connect(CONN, &uri);
     ui.assert_ready(CONN);
     Some(ui)
@@ -142,9 +142,9 @@ pub(super) fn demo_ui(load: fn(&mut App)) -> Option<UiApp> {
     }
     let mut ui = harness();
     let app = ui.h.state_mut();
-    app.core.demo = true;
+    app.core.test_mut().demo = true;
     load(app);
-    for c in &mut app.core.conns {
+    for c in &mut app.core.test_mut().conns {
         c.writable = true;
     }
     ui.h.run_steps(5);
@@ -199,7 +199,7 @@ impl UiApp {
 
     /// Connects `id` to `uri` as Reconnect does, then waits until that attempt has ended, ready or failed.
     pub fn connect(&mut self, id: u64, uri: &str) {
-        self.h.state_mut().core.connect_uri(id, uri.into());
+        self.h.state_mut().core.test_mut().connect_uri(id, uri.into());
         self.wait("the connect to end", |a| a.conn(id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Failed(_))));
     }
 
@@ -321,7 +321,7 @@ impl UiApp {
 
     /// Turns every connection read-only again, without the badge and its dialog.
     pub fn lock(&mut self) {
-        for c in &mut self.h.state_mut().core.conns {
+        for c in &mut self.h.state_mut().core.test_mut().conns {
             c.writable = false;
         }
     }

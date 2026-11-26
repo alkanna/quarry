@@ -218,6 +218,12 @@ impl Front {
     pub fn test_mut(&mut self) -> &mut Core {
         &mut self.0
     }
+
+    /// Tests send fake answers through the real channel, as the worker would.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_worker(&self) -> &crate::db::Worker {
+        &self.0.worker
+    }
 }
 
 /// What the app asks of Core for the Export dialog's streams. Each starts one job, tracked as `Core.export_job`.

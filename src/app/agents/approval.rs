@@ -199,7 +199,7 @@ impl App {
         ctx.request_repaint_after(if awake { Duration::from_millis(500) } else { WAKE.saturating_sub(now.saturating_duration_since(shown)) });
         if let Some(a) = answer {
             #[cfg(test)]
-            self.core.agents.answered.push((ask.id, a));
+            self.core.test_mut().agents.answered.push((ask.id, a));
             self.exec(Action::Agents(AgentsA::Answer { id: ask.id, answer: a }));
         }
     }
