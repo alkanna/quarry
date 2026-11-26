@@ -118,3 +118,8 @@ jobs:
           path: target/llvm-cov/html
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --workspace --locked --all-targets
+      # Without the test-support feature the core has no test doors, so this fails if drawing code writes the core.
+      - run: cargo check -p quarry --locked --bins
+      # quarry-core stays free of any UI toolkit, so its state and actions run without a window.
+      - shell: bash
+        run: "! grep -nE '^(egui|eframe|rfd|muda|winit|arboard)' quarry-core/Cargo.toml"

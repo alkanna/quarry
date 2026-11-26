@@ -109,7 +109,7 @@ remote-test:
 remote-check:
 	@[ -n "$(REMOTE)" ] || { echo "Set REMOTE=<ssh alias>, here or in local.mk"; exit 1; }
 	git push -qf $(REMOTE):quarry HEAD:refs/heads/remote-$(SET)
-	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; unset $$(env | grep -o "^QUARRY_TEST_[A-Z_]*"); cargo check --workspace --all-targets && cargo test --workspace --bins --lib $(T)'
+	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; unset $$(env | grep -o "^QUARRY_TEST_[A-Z_]*"); cargo check --workspace --all-targets && cargo check -p quarry --bins && cargo test --workspace --bins --lib $(T)'
 
 # Needs cargo-llvm-cov (cargo install cargo-llvm-cov) and rustup's llvm-tools-preview component.
 coverage: servers-up
