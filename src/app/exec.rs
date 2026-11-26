@@ -76,6 +76,10 @@ impl App {
         if let Dialog::SqlExplain(text) = d {
             return self.sql_explain(text);
         }
+        // The save form reads the library and the tab's script binding, which the app's builder already does.
+        if let Dialog::SaveScript(tt) = d {
+            return self.open_save_dialog(*tt);
+        }
         self.modal = Some(match d {
             Dialog::Unlock(conn) => Modal::Unlock(conn, None),
             Dialog::PgNewRole(f) => Modal::PgNewRole(f),
@@ -90,7 +94,7 @@ impl App {
             Dialog::WhatsNew(w) => Modal::WhatsNew(w),
             Dialog::ErrorDetails(e) => Modal::ErrorDetails(e),
             Dialog::Text { title, body, code } => Modal::Text { title, body, code },
-            Dialog::SqlExplain(_) => unreachable!("handled above"),
+            Dialog::SqlExplain(_) | Dialog::SaveScript(_) => unreachable!("handled above"),
             Dialog::SaveAll(keys) => Modal::SaveAll(keys),
             Dialog::SqlRow(f) => Modal::SqlRow(f),
             Dialog::Save { tag, changes } => Modal::Save { tag, changes },
