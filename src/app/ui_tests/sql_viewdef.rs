@@ -164,3 +164,26 @@ fn a_materialized_postgres_view_is_shown_and_cannot_be_saved() {
     ui.click("Close");
     assert!(ui.app().modal.is_none());
 }
+
+/// The answer to a save reaches the dialog that waits for it: a failure stays in the dialog, a success closes it.
+#[test]
+fn a_saved_view_closes_its_dialog_and_a_refused_one_says_why_there() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let saved = |res: db::Res<String>| db::Msg::SqlViewSaved { conn: 0, database: "shop".into(), schema: String::new(), name: "paid".into(), kind: db::sql::view::ViewDone::Created, res, undo: None, need_drop: false, sql_mode: None, waiting: false };
+    let conn = {
+        let a = ui.h.state_mut();
+        open_edit(a, "shop", "", "paid");
+        let Some(Modal::SqlView(f)) = a.modal.as_mut() else { unreachable!() };
+        (f.loading, f.edit, f.busy) = (false, false, true);
+        f.conn
+    };
+    ui.app().core.test_worker().send(db::Msg::SqlViewSaved { conn, ..saved(Err("refused by the server".into())) });
+    ui.settle();
+    let f = view_form(&ui);
+    assert!(!f.busy && f.error.as_deref() == Some("refused by the server"), "the refusal did not reach the dialog: busy {}, error {:?}", f.busy, f.error);
+    let Some(Modal::SqlView(f)) = ui.h.state_mut().modal.as_mut() else { unreachable!() };
+    f.busy = true;
+    ui.app().core.test_worker().send(db::Msg::SqlViewSaved { conn, ..saved(Ok("CREATE VIEW paid AS SELECT 1".into())) });
+    ui.settle();
+    assert!(ui.app().modal.is_none(), "the dialog stayed open after the save");
+}
