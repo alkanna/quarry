@@ -417,7 +417,7 @@ impl Cmd {
             Cmd::Run | Cmd::RunAll => query_view && !tree_keys,
             Cmd::NextTab | Cmd::PrevTab | Cmd::Back | Cmd::Forward | Cmd::GoTab(_) => n > 0,
             // A SQL tab has seven views, so Cmd+Alt+8 is left for Cmd+8.
-            Cmd::ViewAt(i) => n > 0 && (i as usize) < views(core.t().is_some_and(|t| t.sql.is_some())).len(),
+            Cmd::ViewAt(i) => n > 0 && (i as usize) < views(tab_sql(core)).len(),
             _ => true,
         }
     }
@@ -431,7 +431,7 @@ impl Cmd {
         let query_view = t.is_some_and(|t| t.view == View::Sql && t.sql.is_some());
         match self {
             Cmd::Run | Cmd::RunAll | Cmd::Explain if query_view => Some(Action::Sql(SqlA::Run { tab: t?.uid, all: self == Cmd::RunAll, explain: self == Cmd::Explain })),
-            Cmd::ViewAt(i) => Some(Action::Tab(TabA::View { tab: t?.uid, view: views(t?.sql.is_some()).get(i as usize)?.0 })),
+            Cmd::ViewAt(i) => Some(Action::Tab(TabA::View { tab: t?.uid, view: views(tab_sql(core)).get(i as usize)?.0 })),
             Cmd::GoTab(i) if n > 0 => pick(if i == 8 { n - 1 } else { (i as usize).min(n - 1) }),
             Cmd::NextTab if n > 0 => pick((core.cur + 1) % n),
             Cmd::PrevTab if n > 0 => pick((core.cur + n - 1) % n),

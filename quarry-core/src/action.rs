@@ -397,8 +397,9 @@ impl Core {
             Msg::Aggregated { .. } | Msg::StagePreview { .. } => true,
             Msg::Compared { .. } | Msg::Schema { .. } | Msg::Analyzed { .. } | Msg::Grouped { .. } | Msg::ColumnValues { .. } | Msg::Related { .. } | Msg::RefFound { .. } => true,
             Msg::SqlRoutine { .. } => true,
-            // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds; SqlViewSaved is taken here after the app has told it whether its dialog waits.
-            Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } | Msg::SqlViewSaved { .. } => true,
+            // SqlDropInfo, SqlViewDef and SqlBulkPrep fill a form the app's Modal holds. SqlViewSaved goes to the app first, which
+            // closes or fails its dialog and then hands it on with whether that dialog waits.
+            Msg::SqlDdl { .. } | Msg::SqlRenamed { .. } => true,
             Msg::Agent(_) => true,
             Msg::CloudSql { .. } => true,
             Msg::SqlExport { .. } => true,

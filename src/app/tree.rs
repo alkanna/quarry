@@ -413,7 +413,7 @@ impl App {
                 let mut job = LayoutJob::default();
                 job.append(key, 0.0, mono(BRIGHT()));
                 job.append(&leaf_text(v), (self.ui.key_w - key_px).max(12.0), mono(FAINT()));
-                let adding_here = self.core.new_field.as_ref().is_some_and(|n| n.parent == *path);
+                let adding_here = !self.ui.doc_passive && self.core.new_field.as_ref().is_some_and(|n| n.parent == *path);
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
                     .id_salt(id.with(&*path))
