@@ -69,6 +69,15 @@ impl Front {
         self.0.json_edit = Some(je);
     }
 
+    /// The SQL value editor, drawn in place as the big value editor is: a cell's text can be megabytes too.
+    pub fn take_sql_cell(&mut self) -> Option<crate::state::sql::edit::CellEdit> {
+        self.0.sql_cell.take()
+    }
+
+    pub fn put_sql_cell(&mut self, e: crate::state::sql::edit::CellEdit) {
+        self.0.sql_cell = Some(e);
+    }
+
     /// The text behind `r`, for a `TextEdit`. None when its window is not open.
     pub fn text_mut(&mut self, r: TextRef) -> Option<&mut String> {
         match r {

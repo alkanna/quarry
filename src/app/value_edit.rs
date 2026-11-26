@@ -2,7 +2,7 @@
 //! as a panel docked beside the page (docs/long-values.figcraft, options A and C).
 
 use super::*;
-use quarry_core::action::{Action, DocsA, SqlA, ValueA};
+use quarry_core::action::{Action, DocsA, ValueA};
 
 #[derive(PartialEq, Clone, Copy)]
 pub(super) enum ValueAct {
@@ -131,15 +131,14 @@ impl App {
             self.core.put_json_edit(je);
             self.json_edit_act(close(&r, act));
         }
-        if let Some(before) = self.core.sql_cell.clone().filter(|e| e.big) {
-            let mut e = before.clone();
+        if let Some(mut e) = self.core.sql_cell.as_ref().is_some_and(|e| e.big).then(|| self.core.take_sql_cell()).flatten() {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "sqlcell"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.sql_cell_body(ui, &mut e, None, max_h);
             });
             sql_cell_act(&mut e, close(&r, act));
-            self.sql_cell_keep(before, e);
+            self.core.put_sql_cell(e);
         }
     }
 
@@ -155,11 +154,10 @@ impl App {
                 let act = self.json_edit_body(ui, &mut je, Some(rows), max_h);
                 self.core.put_json_edit(je);
                 self.json_edit_act(act);
-            } else if let Some(before) = self.core.sql_cell.clone() {
-                let mut e = before.clone();
+            } else if let Some(mut e) = self.core.take_sql_cell() {
                 let act = self.sql_cell_body(ui, &mut e, Some(rows), max_h);
                 sql_cell_act(&mut e, act);
-                self.sql_cell_keep(before, e);
+                self.core.put_sql_cell(e);
             }
         });
     }
@@ -202,15 +200,6 @@ impl App {
         ui.add_space(4.0);
         let null = (!je.path.is_empty()).then_some("Set null");
         value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, !matches!(je.kind, "string" | "binary"), &mut je.focus, &mut je.dirty, None, null, rows, max_h)
-    }
-
-    /// Hands the cell editor as a frame left it to Core, when it changed.
-    fn sql_cell_keep(&mut self, before: CellEdit, e: CellEdit) {
-        if e == before {
-            return;
-        }
-        let Some(tab) = self.cur_uid() else { return };
-        self.exec(Action::Sql(SqlA::CellEdit { tab, edit: Some(Box::new(e)) }));
     }
 
     /// Hands the editor as a frame left it to Core when it changed, then runs its button.
