@@ -1,0 +1,169 @@
+//! Recent changes: undoing a write from the list or a toast, and forgetting the entries a drop made pointless. The list
+//! itself and `push_undo` are in core/notify.rs; src/app/modals.rs draws the Recent changes dialog.
+
+use super::{Dialog, Refusal, Reply, UiFx};
+use crate::core::Core;
+use crate::db::{self, Target, UndoAction, UndoKind};
+use crate::state::Danger;
+use serde::{Deserialize, Serialize};
+
+/// What the Undo of a write that is not this note's own says on a read-only connection.
+pub const NOTE_UNDO: &str = "Undo is a write. Unlock writes on that connection first.";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum UndoA {
+    /// Undoes the entry of Recent changes made `at` (see `undo_id`), found again when it runs since writes that land
+    /// meanwhile move the list. `confirmed` once a structure undo that loses data passed its typed confirmation.
+    Apply { at: u64, confirmed: bool },
+}
+
+impl Core {
+    pub(super) fn undo(&mut self, a: UndoA) -> Result<Reply, Refusal> {
+        match a {
+            UndoA::Apply { at, confirmed } => match self.undo.iter().position(|a| self.undo_id(a.at) == at) {
+                Some(i) => self.apply_undo_as(i, confirmed),
+                None => Err(self.refuse("That change is no longer in Recent changes.")),
+            },
+        }
+    }
+
+    /// An undo entry's time as nanoseconds since the app started, which an action can carry.
+    pub fn undo_id(&self, at: std::time::Instant) -> u64 {
+        at.saturating_duration_since(self.started).as_nanos() as u64
+    }
+
+    /// Forgets the undo entries of what a drop just removed. A database or table made again under the name would otherwise get them.
+    /// `database` is the PostgreSQL database (empty on MySQL, where `schema` is the database); `schema` and `table` narrow it, empty for the whole of it.
+    pub fn purge_undo(&mut self, conn: u64, database: &str, schema: &str, table: &str) {
+        self.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
+    }
+
+    /// The MongoDB side of `purge_undo`: undoing a delete after a drop would quietly make the collection again.
+    /// An empty `coll` means the whole database.
+    pub fn purge_mongo_undo(&mut self, conn: u64, db: &str, coll: &str) {
+        self.undo.retain(|a| !mongo_undo_is_under(a, conn, db, coll));
+    }
+
+    pub fn apply_undo(&mut self, i: usize) -> Result<Reply, Refusal> {
+        self.apply_undo_as(i, false)
+    }
+
+    /// `confirmed` once a structure undo that loses data passed its typed confirmation.
+    pub fn apply_undo_as(&mut self, i: usize, confirmed: bool) -> Result<Reply, Refusal> {
+        let Some(a) = self.undo.get(i) else { return Err(self.refuse("That change is no longer in Recent changes.")) };
+        let Some(c) = self.conn(a.conn) else { return Ok(Reply::Done) };
+        let writable = c.writable;
+        if !writable {
+            let conn = a.conn;
+            return Err(self.refuse_ro(conn, Some(NOTE_UNDO)));
+        }
+        if !confirmed && self.alter_undo_gate(i) {
+            return Ok(Reply::Done);
+        }
+        let Some(c) = self.conn(self.undo[i].conn) else { return Ok(Reply::Done) };
+        let a = &self.undo[i];
+        // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
+        if let (Some(sql), UndoKind::Sql { database, .. }) = (c.sql.as_ref(), &a.kind) {
+            // A PostgreSQL write ran in one database, and the undo runs on that one's pool.
+            let sql = sql.at(database);
+            let a = self.undo.remove(i);
+            let pk = match &a.kind {
+                UndoKind::Sql { undo, .. } => undo.pk_names(),
+                _ => Vec::new(),
+            };
+            // The worker hands the action back if the undo fails, so it is not lost.
+            self.worker.sql_undo(sql, a, pk, !writable);
+            return Ok(Reply::Done);
+        }
+        let Some(client) = c.client.clone() else {
+            return Err(self.refuse("That connection is closed."));
+        };
+        let a = self.undo.remove(i);
+        let t = Target { client, db: a.db.clone(), coll: a.coll.clone(), timeout: self.timeout() };
+        // The worker hands the action back if the undo fails, so it is not lost.
+        self.worker.undo_doc(t, a);
+        Ok(Reply::Done)
+    }
+
+    /// An ALTER undo that would lose data asks for the table's name first. True when it asked.
+    pub fn alter_undo_gate(&mut self, i: usize) -> bool {
+        let Some(a) = self.undo.get(i) else { return false };
+        let UndoKind::Sql { undo: db::sql::write::SqlUndo::Alter(u), .. } = &a.kind else { return false };
+        if u.loss.is_empty() {
+            return false;
+        }
+        let title = format!("Undo \"{}\" on {}? {} This cannot be undone.", u.label, a.coll, u.loss.join(" "));
+        let (expect, at) = (a.coll.clone(), a.at);
+        self.ui_fx.push(UiFx::Open(Dialog::Typed { title, expect, action: Danger::UndoAlter(at) }));
+        true
+    }
+}
+
+/// Whether the action acts on the dropped database, schema or table (see `purge_undo`).
+pub fn undo_is_under(a: &UndoAction, conn: u64, database: &str, schema: &str, table: &str) -> bool {
+    let UndoKind::Sql { database: d, undo, .. } = &a.kind else { return false };
+    // An account is not under any schema, whatever its label looks like.
+    if a.conn != conn || matches!(undo, db::sql::write::SqlUndo::Account(_) | db::sql::write::SqlUndo::PgRoles(_)) {
+        return false;
+    }
+    if schema.is_empty() && table.is_empty() && !database.is_empty() {
+        // A created database's entry sits on the maintenance database and names the new one as its schema.
+        return d == database || (matches!(undo, db::sql::write::SqlUndo::CreatedDb { .. }) && a.db == database);
+    }
+    d == database && a.db == schema && (table.is_empty() || a.coll == table)
+}
+
+/// Whether a MongoDB undo entry acts on the dropped database, or on collection `coll` of it when one is named.
+pub fn mongo_undo_is_under(a: &UndoAction, conn: u64, db: &str, coll: &str) -> bool {
+    !matches!(a.kind, UndoKind::Sql { .. }) && a.conn == conn && a.db == db && (coll.is_empty() || a.coll == coll)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::notify::trim_undo;
+    use mongodb::bson::Bson;
+    use std::time::{Duration, Instant};
+
+    fn action(at: Instant) -> UndoAction {
+        UndoAction { agent: None, at, conn: 1, db: "shop".into(), coll: "c".into(), kind: UndoKind::Insert { id: Bson::Int32(1) } }
+    }
+
+    #[test]
+    fn a_mongo_drop_takes_only_its_own_undo_entries() {
+        let a = action(Instant::now());
+        assert!(mongo_undo_is_under(&a, 1, "shop", "c") && mongo_undo_is_under(&a, 1, "shop", ""));
+        assert!(!mongo_undo_is_under(&a, 1, "shop", "d") && !mongo_undo_is_under(&a, 2, "shop", "c") && !mongo_undo_is_under(&a, 1, "hr", ""));
+        assert!(!mongo_undo_is_under(&sql_action(1, "", "shop", "c"), 1, "shop", "c"), "SQL entries are purged by their own drops");
+    }
+
+    #[test]
+    fn undo_list_is_capped_by_size_and_age() {
+        let t0 = Instant::now();
+        let mut undo: Vec<UndoAction> = (0..db::UNDO_MAX + 5).map(|_| action(t0)).collect();
+        trim_undo(&mut undo, t0);
+        assert_eq!(undo.len(), db::UNDO_MAX);
+        let later = t0 + Duration::from_secs(db::UNDO_MAX_AGE_S + 1);
+        undo.insert(0, action(later));
+        trim_undo(&mut undo, later);
+        assert_eq!(undo.len(), 1, "only the action from within the last day stays");
+    }
+
+    fn sql_action(conn: u64, database: &str, schema: &str, table: &str) -> UndoAction {
+        let kind = UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: db::sql::write::SqlUndo::Inserted(Vec::new()), ids: Default::default() };
+        UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind }
+    }
+
+    #[test]
+    fn a_drop_forgets_the_undo_entries_under_it_and_no_others() {
+        let all = || vec![sql_action(1, "shop", "public", "orders"), sql_action(1, "shop", "public", "items"), sql_action(1, "shop", "ext", "orders"), sql_action(1, "other", "public", "orders"), sql_action(2, "shop", "public", "orders")];
+        let left = |database: &str, schema: &str, table: &str| all().iter().filter(|a| !undo_is_under(a, 1, database, schema, table)).count();
+        assert_eq!(left("shop", "public", "orders"), 4, "a table");
+        assert_eq!(left("shop", "public", ""), 3, "a schema takes its tables");
+        assert_eq!(left("shop", "", ""), 2, "a database takes all of its own");
+        // MySQL has no separate database name: the schema is the database.
+        let my = [sql_action(1, "", "shop", "orders"), sql_action(1, "", "shop", "items"), sql_action(1, "", "other", "orders")];
+        assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "")).count(), 1);
+        assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "orders")).count(), 2);
+    }
+}

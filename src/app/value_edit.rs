@@ -2,6 +2,7 @@
 //! as a panel docked beside the page (docs/long-values.figcraft, options A and C).
 
 use super::*;
+use quarry_core::action::{Action, DocsA, ValueA};
 
 #[derive(PartialEq, Clone, Copy)]
 pub(super) enum ValueAct {
@@ -9,11 +10,6 @@ pub(super) enum ValueAct {
     Apply,
     Close,
     Null,
-}
-
-/// A value the one-line editors cannot show faithfully, so double-click opens the large editor straight away.
-pub(super) fn is_long(s: &str) -> bool {
-    s.contains('\n') || s.len() > 500
 }
 
 /// The editor, its error and the footer, shared by the dialog and the panel. `null` labels a Set null button. `rows` is the
@@ -108,17 +104,12 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
 impl App {
     /// The large editor shows in the docked panel rather than a dialog. A whole document always gets the dialog.
     pub(super) fn value_in_panel(&self) -> bool {
-        self.prefs.value_panel && (self.json_edit.as_ref().is_some_and(|je| !je.path.is_empty()) || self.sql_cell.as_ref().is_some_and(|e| e.big))
+        self.core.value_in_panel()
     }
 
     /// The large editor shows as a dialog, which takes the keys from the page.
     pub(super) fn value_dialog_open(&self) -> bool {
-        (self.json_edit.is_some() || self.sql_cell.as_ref().is_some_and(|e| e.big)) && !self.value_in_panel()
-    }
-
-    /// The side panel holds text not applied yet, which opening another value would throw away.
-    pub(super) fn panel_dirty(&self) -> bool {
-        self.value_in_panel() && (self.json_edit.as_ref().is_some_and(|j| j.dirty) || self.sql_cell.as_ref().is_some_and(|e| e.big && e.dirty))
+        self.core.value_dialog_open()
     }
 
     /// The large editor as a dialog, from `modals`.
@@ -131,22 +122,23 @@ impl App {
         let screen = ctx.content_rect();
         let max_h = screen.height() * 0.62;
         let width = (screen.width() * 0.72).clamp(480.0, 1200.0);
-        if let Some(mut je) = self.json_edit.take() {
+        if let Some(mut je) = self.core.take_json_edit() {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.json_edit_body(ui, &mut je, None, max_h);
             });
-            self.json_edit_act(je, close(&r, act));
+            self.core.put_json_edit(je);
+            self.json_edit_act(close(&r, act));
         }
-        if let Some(mut e) = self.sql_cell.take_if(|e| e.big) {
+        if let Some(mut e) = self.core.sql_cell.as_ref().is_some_and(|e| e.big).then(|| self.core.take_sql_cell()).flatten() {
             let mut act = ValueAct::None;
             let r = dialog(egui::Id::unique(("quarry-layer", "sqlcell"))).show(ctx, |ui| {
                 ui.set_width(width);
                 act = self.sql_cell_body(ui, &mut e, None, max_h);
             });
             sql_cell_act(&mut e, close(&r, act));
-            self.sql_cell = Some(e);
+            self.core.put_sql_cell(e);
         }
     }
 
@@ -158,13 +150,14 @@ impl App {
         egui::Panel::right("value-panel").default_size(380.0).size_range(280.0..=900.0).resizable(true).frame(egui::Frame::new().fill(PANEL()).inner_margin(12)).show(ui, |ui| {
             let max_h = (ui.available_height() - 120.0).max(80.0);
             let rows = (max_h / ui.text_style_height(&egui::TextStyle::Monospace)) as usize;
-            if let Some(mut je) = self.json_edit.take() {
+            if let Some(mut je) = self.core.take_json_edit() {
                 let act = self.json_edit_body(ui, &mut je, Some(rows), max_h);
-                self.json_edit_act(je, act);
-            } else if let Some(mut e) = self.sql_cell.take() {
+                self.core.put_json_edit(je);
+                self.json_edit_act(act);
+            } else if let Some(mut e) = self.core.take_sql_cell() {
                 let act = self.sql_cell_body(ui, &mut e, Some(rows), max_h);
                 sql_cell_act(&mut e, act);
-                self.sql_cell = Some(e);
+                self.core.put_sql_cell(e);
             }
         });
     }
@@ -209,40 +202,16 @@ impl App {
         value_body(ui, egui::Id::unique("json-editor-text"), &mut je.text, !matches!(je.kind, "string" | "binary"), &mut je.focus, &mut je.dirty, None, null, rows, max_h)
     }
 
-    fn json_edit_act(&mut self, je: JsonEdit, act: ValueAct) {
-        let new = match act {
-            ValueAct::None => return self.json_edit = Some(je),
-            ValueAct::Close => return,
-            ValueAct::Null => db::edit_path(&je.base, &je.path, Some(Bson::Null)),
-            ValueAct::Apply if je.path.is_empty() => db::parse_doc(&je.text).and_then(|mut new| {
-                match (je.base.get("_id"), new.get("_id")) {
-                    (Some(a), Some(b)) if a != b => return Err("The _id of a document cannot change. Use Duplicate to make a copy.".to_string()),
-                    (Some(a), None) => {
-                        // Keep _id first, as MongoDB stores it.
-                        let mut d = doc! { "_id": a.clone() };
-                        d.extend(new);
-                        new = d;
-                    }
-                    _ => {}
-                }
-                Ok(new)
-            }),
-            ValueAct::Apply if je.kind == "binary" && !je.enc.is_empty() => db::decode_bytes(&je.text, je.enc).and_then(|bytes| {
-                let subtype = je.subtype;
-                db::edit_path(&je.base, &je.path, Some(Bson::Binary(mongodb::bson::Binary { subtype, bytes })))
-            }),
-            ValueAct::Apply => db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v))),
+    /// Hands the editor as a frame left it to Core when it changed, then runs its button.
+    fn json_edit_act(&mut self, act: ValueAct) {
+        let Some(tab) = self.cur_uid() else { return };
+        let act = match act {
+            ValueAct::None => return,
+            ValueAct::Apply => ValueA::Apply,
+            ValueAct::Null => ValueA::Null,
+            ValueAct::Close => ValueA::Close,
         };
-        match new {
-            Ok(n) => {
-                let base = je.base.clone();
-                self.stage(&base, Ok(n));
-            }
-            Err(e) => {
-                self.err(e);
-                self.json_edit = Some(je);
-            }
-        }
+        self.exec(Action::Docs(DocsA::Value { tab, act }));
     }
 
     fn sql_cell_body(&mut self, ui: &mut egui::Ui, e: &mut CellEdit, rows: Option<usize>, max_h: f32) -> ValueAct {

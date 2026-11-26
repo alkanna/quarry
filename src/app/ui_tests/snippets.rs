@@ -14,13 +14,13 @@ fn with_snippets(a: &mut App) {
     a.load_sql_demo();
     a.sql_new_query(3, "shop".into());
     for (name, body) in [("Orders on a day", READ), ("Mark orders shipped", WRITE)] {
-        let id = a.library.next_id();
-        a.library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), ..Default::default() });
+        let id = a.core.test_mut().library.next_id();
+        a.core.test_mut().library.scripts.push(Script { id, name: name.into(), kind: "sql".into(), body: body.into(), conn: 3, db: "shop".into(), ..Default::default() });
     }
 }
 
 fn id_of(a: &App, name: &str) -> u64 {
-    a.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
+    a.core.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
 }
 
 fn form(a: &mut App) -> &mut crate::app::library::snippet_form::SnippetForm {
@@ -71,12 +71,12 @@ fn a_tab_reused_for_another_snippet_drops_the_old_values() {
     let id = id_of(ui.app(), "Orders on a day");
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
     ui.h.run_steps(2);
-    let t = ui.h.state_mut().tm().unwrap();
+    let t = ui.h.state_mut().core.test_mut().tm().unwrap();
     t.snip.vals.insert("day".into(), "2025-01-01".into());
     t.snip.filled = true;
-    let cur = ui.app().cur;
+    let cur = ui.app().core.cur;
     // Back to the saved text, so the tab is clean and the next script takes it.
-    ui.h.state_mut().tabs[cur].sql.as_mut().unwrap().query = READ.into();
+    ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut().unwrap().query = READ.into();
     let other = id_of(ui.app(), "Mark orders shipped");
     ui.h.state_mut().open_script(&ScriptRef::Saved(other), crate::app::library::open::How::Here);
     let t = ui.app().t().unwrap();
@@ -87,8 +87,8 @@ fn a_tab_reused_for_another_snippet_drops_the_old_values() {
 #[test]
 fn braces_a_value_brings_in_are_sent_as_typed() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
-    let id = ui.h.state_mut().library.next_id();
-    ui.h.state_mut().library.scripts.push(Script { id, name: "Echo".into(), kind: "sql".into(), body: "SELECT {{t}} AS v;".into(), conn: 3, db: "shop".into(), ..Default::default() });
+    let id = ui.h.state_mut().core.test_mut().library.next_id();
+    ui.h.state_mut().core.test_mut().library.scripts.push(Script { id, name: "Echo".into(), kind: "sql".into(), body: "SELECT {{t}} AS v;".into(), conn: 3, db: "shop".into(), ..Default::default() });
     ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("t".into(), "Hello {{user}}".into());
     ui.h.run_steps(2);
@@ -133,7 +133,7 @@ fn a_write_asks_first_and_esc_steps_back() {
 #[test]
 fn a_write_on_a_locked_connection_unlocks_then_confirms() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
-    for c in &mut ui.h.state_mut().conns {
+    for c in &mut ui.h.state_mut().core.test_mut().conns {
         c.writable = false;
     }
     let id = id_of(ui.app(), "Mark orders shipped");
@@ -161,15 +161,15 @@ fn cmd_enter_on_a_snippet_opens_it_to_edit_and_make_default_moves_it() {
     assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.r == ScriptRef::Saved(id)));
     ui.show("Run on");
     // Run fills the tab's values, and refuses one that does not read.
-    ui.h.state_mut().tm().unwrap().snip.vals.insert("day".into(), "2026-11-03".into());
+    ui.h.state_mut().core.test_mut().tm().unwrap().snip.vals.insert("day".into(), "2026-11-03".into());
     assert_eq!(ui.app().snippet_fill_run(READ.into()).unwrap(), "SELECT id FROM orders WHERE DATE(created_at) = '2026-11-03' AND status = 'paid' LIMIT 10;");
-    ui.h.state_mut().tm().unwrap().snip.vals.insert("n".into(), "ten".into());
+    ui.h.state_mut().core.test_mut().tm().unwrap().snip.vals.insert("n".into(), "ten".into());
     assert!(ui.app().snippet_fill_run(READ.into()).unwrap_err().contains("n needs a whole number"));
     // The tab runs in another database: Make default puts that on the script.
-    let s = ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
+    let s = ui.h.state_mut().core.test_mut().tm().and_then(|t| t.sql.as_mut()).unwrap();
     s.run_db = "shop_eu".into();
     ui.click("Make default");
-    let sc = ui.app().library.scripts.iter().find(|s| s.id == id).unwrap();
+    let sc = ui.app().core.library.scripts.iter().find(|s| s.id == id).unwrap();
     assert_eq!((sc.conn, sc.db.as_str()), (3, "shop_eu"));
 }
 
@@ -177,7 +177,7 @@ fn cmd_enter_on_a_snippet_opens_it_to_edit_and_make_default_moves_it() {
 fn make_it_a_value_turns_a_literal_into_a_placeholder() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let text = "SELECT id FROM orders WHERE DATE(created_at) = '2026-11-03';";
-    ui.h.state_mut().tm().and_then(|t| t.sql.as_mut()).unwrap().query = text.into();
+    ui.h.state_mut().core.test_mut().tm().and_then(|t| t.sql.as_mut()).unwrap().query = text.into();
     let at = text.find('\'').unwrap();
     ui.h.state_mut().ask_make_value(at..at + 12, Src::Query);
     ui.click("Make value");
@@ -199,7 +199,7 @@ fn esc_closes_a_form_opened_outside_the_palette() {
 fn a_snippet_whose_connection_was_removed_waits_for_a_pick() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Orders on a day");
-    ui.h.state_mut().library.scripts.iter_mut().find(|s| s.id == id).unwrap().conn = 9999;
+    ui.h.state_mut().core.test_mut().library.scripts.iter_mut().find(|s| s.id == id).unwrap().conn = 9999;
     ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("day".into(), "2026-11-03".into());
     ui.h.run_steps(2);
@@ -213,11 +213,11 @@ fn running_from_cmd_k_leaves_the_snippet_tab_alone() {
     let Some(mut ui) = demo_ui(with_snippets) else { return };
     let id = id_of(ui.app(), "Orders on a day");
     ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
-    let tabs = ui.app().tabs.len();
+    let tabs = ui.app().core.tabs.len();
     ui.h.state_mut().open_snippet_form(id, None);
     form(ui.h.state_mut()).values.insert("day".into(), "2026-11-03".into());
     ui.h.run_steps(2);
     ui.key(egui::Modifiers::NONE, egui::Key::Enter);
-    assert_eq!(ui.app().tabs.len(), tabs + 1, "the filled statement did not get a tab of its own");
-    assert!(ui.app().tabs.iter().any(|t| t.script.as_ref().is_some_and(|b| b.r == ScriptRef::Saved(id)) && t.sql.as_ref().is_some_and(|s| s.query == READ)));
+    assert_eq!(ui.app().core.tabs.len(), tabs + 1, "the filled statement did not get a tab of its own");
+    assert!(ui.app().core.tabs.iter().any(|t| t.script.as_ref().is_some_and(|b| b.r == ScriptRef::Saved(id)) && t.sql.as_ref().is_some_and(|s| s.query == READ)));
 }

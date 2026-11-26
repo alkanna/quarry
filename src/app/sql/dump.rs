@@ -4,87 +4,8 @@
 use crate::app::*;
 use db::sql::csv::Source;
 use db::sql::dump::{DumpPlan, DumpTable};
-use db::sql::import::{JobDone, Progress};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-#[derive(Clone, Copy, PartialEq)]
-pub(in crate::app) enum JobKind {
-    Import,
-    Script,
-}
-
-/// A CSV import or a script file running, with what Cancel needs.
-pub(in crate::app) struct SqlJob {
-    pub(in crate::app) req: u64,
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) db: db::sql::Db,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) kind: JobKind,
-    pub(in crate::app) prog: Arc<Progress>,
-    pub(in crate::app) id: Arc<AtomicU64>,
-    pub(in crate::app) cancel: Arc<AtomicBool>,
-    pub(in crate::app) total_rows: u64,
-    pub(in crate::app) total_bytes: u64,
-    /// False for an import into a table whose engine has no transactions, where Cancel keeps what was written.
-    pub(in crate::app) rolls_back: bool,
-}
-
-impl SqlJob {
-    pub(in crate::app) fn new(req: u64, conn: u64, db: db::sql::Db, schema: String, kind: JobKind, total_rows: u64, total_bytes: u64) -> SqlJob {
-        SqlJob { req, conn, db, schema, kind, prog: Arc::new(Progress::default()), id: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), total_rows, total_bytes, rolls_back: true }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum What {
-    /// The rows the Content view shows, with no structure.
-    Filtered,
-    Selected,
-    Whole,
-}
-
-struct Row {
-    name: String,
-    view: bool,
-    on: bool,
-    structure: bool,
-    content: bool,
-    drop: bool,
-    rows: Option<u64>,
-    /// Data and indexes on disk, once the server said.
-    bytes: Option<u64>,
-}
-
-pub(in crate::app) struct DumpForm {
-    conn: u64,
-    db: String,
-    /// The schema of a PostgreSQL database the table list is of; empty on MySQL, where the database is the namespace.
-    schema: String,
-    conn_name: String,
-    what: What,
-    /// The open table with a filter: its name, the WHERE text and the rows it matches.
-    filtered: Option<(String, String, u64)>,
-    rows: Vec<Row>,
-    extended: bool,
-    snapshot: bool,
-    extras: bool,
-    /// PostgreSQL only. Both off by default: they name roles, and a restore where one is missing stops there.
-    grants: bool,
-    owners: bool,
-    path: String,
-    /// The request the table sizes answer.
-    size_req: u64,
-}
-
-pub(in crate::app) struct RunForm {
-    conn: u64,
-    db: String,
-    /// The schema a PostgreSQL file's unqualified names land in (its search_path); empty on MySQL.
-    schema: String,
-    conn_name: String,
-    src: Source,
-    name: String,
-}
+use std::sync::atomic::Ordering;
+pub(crate) use quarry_core::state::sql::dump::*;
 
 /// Today as YYYY-MM-DD in UTC, for a default file name.
 fn today() -> String {
@@ -125,12 +46,12 @@ impl App {
         let schema = if pg { Some(schema).filter(|s| !s.is_empty()).unwrap_or_else(|| c.pg_picked(&db).to_string()) } else { String::new() };
         let names: Vec<String> = if pg { c.tables_in(&db, &schema).cloned().unwrap_or_default() } else { c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default() };
         // The estimates are kept per database by table name, which a second schema of the same name would confuse.
-        let est = self.sql_schema.get(&(conn, db.clone())).filter(|_| !pg);
+        let est = self.core.sql_schema.get(&(conn, db.clone())).filter(|_| !pg);
         let ns = ns_key(&db, &schema);
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.has(conn, &ns, n);
+                let view = self.core.views.has(conn, &ns, n);
                 Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows), bytes: None }
             })
             .collect();
@@ -148,11 +69,7 @@ impl App {
         let conn_name = c.meta.name.clone();
         let path = dirs::download_dir().unwrap_or_default().join(format!("{db}-{}.sql", today())).display().to_string();
         // The sizes come later; until then the footer counts rows only.
-        self.req += 1;
-        let size_req = self.req;
-        if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_table_sizes(size_req, sql.at(&db), if pg { schema.clone() } else { db.clone() });
-        }
+        let size_req = self.exec_req(Action::SqlAsk(SqlAskA::TableSizes { conn, db: db.clone(), schema: if pg { schema.clone() } else { String::new() } })).unwrap_or_default();
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, grants: false, owners: false, path, size_req })));
     }
 
@@ -355,7 +272,7 @@ impl App {
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            let busy = self.export_job.is_some();
+            let busy = self.core.export_job.is_some();
             go = ui.add_enabled(ready && !busy, primary_button(ui, if total > 0 { format!("Export {} rows", group(&total.to_string())) } else { "Export".to_string() }, PRIMARY())).on_disabled_hover_text(if busy { "An export is already running" } else { "Pick something to export" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -373,9 +290,7 @@ impl App {
     }
 
     fn start_dump(&mut self, f: &DumpForm, total: u64) {
-        let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         // A PostgreSQL connection belongs to one database, so the database picks the pool, and the schema is the namespace.
-        let sql = sql.at(&f.db);
         let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
         let per = if f.extended { 1000 } else { 1 };
         let pg = !f.schema.is_empty();
@@ -386,11 +301,7 @@ impl App {
                 DumpPlan { schema: space.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None, grants: pg && f.grants, owners: pg && f.owners }
             }
         };
-        self.req += 1;
-        let job = crate::app::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: Some(sql.clone()), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
-        self.worker.sql_dump(job.req, sql, plan, PathBuf::from(f.path.trim()), job.count.clone(), job.id.clone(), job.cancel.clone());
-        self.export_job = Some(job);
-        self.ok(format!("Exporting {} to {}", if total > 0 { format!("about {} rows", group(&total.to_string())) } else { "the structure".to_string() }, f.path.trim()));
+        self.exec(Action::SqlAsk(SqlAskA::Dump { conn: f.conn, db: f.db.clone(), plan, path: f.path.clone(), total }));
     }
 
     pub(in crate::app) fn sql_run_file_dialog(&mut self, ui: &mut egui::Ui, f: &mut RunForm, keep: &mut bool) {
@@ -417,7 +328,7 @@ impl App {
         b.end(outer);
         let ui = outer;
         dialog_foot(ui, |ui| {
-            let busy = self.sql_job.is_some();
+            let busy = self.core.sql_job.is_some();
             go = ui.add_enabled(writable && !busy, primary_button(ui, "Run file", ALERT())).on_disabled_hover_text(if busy { "Another import or script is running" } else { "Allow writes on this connection first" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -427,15 +338,9 @@ impl App {
             }
         });
         if go {
-            let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-            let sql = sql.at(&f.db);
-            let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
-            self.req += 1;
-            let job = SqlJob::new(self.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.script_len());
-            self.worker.sql_run_file(job.req, sql, space, f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
-            self.sql_job = Some(job);
-            self.ok(format!("Running {}", f.name));
-            *keep = false;
+            if self.exec_req(Action::SqlAsk(SqlAskA::RunFile { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), src: f.src.clone(), name: f.name.clone() })).is_some() {
+                *keep = false;
+            }
         } else if unlock {
             *keep = false;
             let (conn, db, schema, src, name, conn_name) = (f.conn, f.db.clone(), f.schema.clone(), f.src.clone(), f.name.clone(), f.conn_name.clone());
@@ -443,76 +348,9 @@ impl App {
         }
     }
 
-    /// An import or a script finished: report it, keep its undo, and reload what it changed.
-    pub(in crate::app) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
-        let Some(j) = self.sql_job.take_if(|j| j.req == req) else { return };
-        // A script can create or drop anything anywhere, and one that failed or was stopped kept what ran before.
-        if j.kind == JobKind::Script && j.db.dialect == db::sql::Dialect::Postgres {
-            // The database list of a PostgreSQL server is not what a script changes; its schemas and tables are, in the database the
-            // run was for, and the tabs of that database follow what the server has now.
-            let database = j.db.pg_database();
-            self.pg_refresh(j.conn, &database);
-            let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == database && !self.tabs[i].sel.coll.is_empty()).collect();
-            for i in open {
-                self.reload_of(i);
-            }
-        } else if j.kind == JobKind::Script {
-            self.worker.sql_lists(j.conn, j.db.clone(), j.schema.clone());
-        }
-        match res {
-            Ok(d) => {
-                self.ok(d.msg);
-                if let Some(u) = d.undo {
-                    self.push_undo(u);
-                }
-                // A script's tabs and lists follow in `sql_lists_done`.
-                if j.kind == JobKind::Import {
-                    // A tab is the table's when its database and namespace, resolved as a read of it resolves them, are the job's: another
-                    // PostgreSQL database or schema can hold a table of the same name.
-                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| crate::app::sql::alter::answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
-                    for i in tabs {
-                        self.reload_of(i);
-                    }
-                    if d.tables_changed {
-                        self.side_act(j.conn, SideAct::Refresh(j.schema.clone()));
-                    }
-                }
-            }
-            Err(e) if e == "Import cancelled" => self.ok("Import stopped. Nothing was imported."),
-            // A table that cannot roll back: the message counts the rows that stayed.
-            Err(e) if e.starts_with("Import stopped.") => self.ok(e),
-            Err(e) => self.err(e),
-        }
-    }
-
-    /// After a script, finished or not: the database list, the tables of its database and the open tabs follow what
-    /// the server has now. Tabs of a database or table that is gone close; the others of its database reload.
-    pub(in crate::app) fn sql_lists_done(&mut self, conn: u64, schema: String, res: db::Res<(Vec<String>, Option<Vec<String>>)>) {
-        let Ok((dbs, tables)) = res else { return };
-        let mut dropped = Vec::new();
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-            let old = std::mem::take(&mut c.dbs);
-            dropped = old.iter().filter(|o| !dbs.contains(&o.0)).map(|o| o.0.clone()).collect();
-            c.dbs = dbs.iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == *d).and_then(|o| o.1.clone()))).collect();
-        }
-        for d in &dropped {
-            self.open_dbs.remove(&(conn, d.clone()));
-            self.sql_asked.remove(&(conn, d.clone()));
-            self.forget_schema(conn, d);
-        }
-        self.remove_tabs(|t| t.sel.conn == conn && tab_gone(&t.sel, &dbs, &schema, tables.as_deref()));
-        let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.db == schema && !self.tabs[i].sel.coll.is_empty()).collect();
-        for i in open {
-            self.reload_of(i);
-        }
-        if tables.is_some() {
-            self.side_act(conn, SideAct::Refresh(schema));
-        }
-    }
-
     /// The status bar readout of a running import or script, with Cancel. True while one runs.
     pub(in crate::app) fn sql_job_progress(&mut self, ui: &mut egui::Ui) -> bool {
-        let Some(j) = &self.sql_job else { return false };
+        let Some(j) = &self.core.sql_job else { return false };
         spin(ui);
         let (rows, bytes) = (j.prog.rows.load(Ordering::Relaxed), j.prog.bytes.load(Ordering::Relaxed));
         let text = match j.kind {
@@ -520,8 +358,9 @@ impl App {
             JobKind::Script => format!("Running statement {}, {}%", group(&rows.to_string()), (bytes * 100).checked_div(j.total_bytes).map_or(0, |p| p.min(100))),
         };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
-        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import && j.rolls_back { "Stop and roll everything back" } else if j.kind == JobKind::Import { "Stop. This table's engine cannot roll back, so rows written so far stay." } else { "Interrupt the running statement and stop. Statements that already ran stay applied." }).clicked() {
-            self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
+        let cancel = quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import && j.rolls_back { "Stop and roll everything back" } else if j.kind == JobKind::Import { "Stop. This table's engine cannot roll back, so rows written so far stay." } else { "Interrupt the running statement and stop. Statements that already ran stay applied." });
+        if cancel.clicked() {
+            self.exec(Action::SqlAsk(SqlAskA::CancelJob));
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true
@@ -545,48 +384,5 @@ impl App {
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None, bytes: None },
         ];
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into(), size_req: 0 })));
-    }
-}
-
-#[cfg(test)]
-impl DumpForm {
-    pub(in crate::app) fn path(&self) -> &str {
-        &self.path
-    }
-    pub(in crate::app) fn whole(&self) -> bool {
-        self.what == What::Whole
-    }
-}
-
-/// Whether a tab shows a database the server no longer lists, or a table of `schema` that is not among `tables`.
-/// `tables` is None when they could not be read, which closes nothing on its own.
-fn tab_gone(sel: &Sel, dbs: &[String], schema: &str, tables: Option<&[String]>) -> bool {
-    if sel.db.is_empty() {
-        return false;
-    }
-    if !dbs.contains(&sel.db) {
-        return true;
-    }
-    sel.db == schema && !sel.coll.is_empty() && tables.is_some_and(|t| !t.contains(&sel.coll))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Final review finding 8: after a script the tabs of what it dropped close, wherever it was.
-    #[test]
-    fn tabs_of_what_a_script_dropped_close() {
-        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into(), ..Default::default() };
-        let dbs = vec!["shop".to_string(), "other".to_string()];
-        let tables = vec!["orders".to_string()];
-        let t = Some(tables.as_slice());
-        assert!(!tab_gone(&sel("shop", "orders"), &dbs, "shop", t));
-        assert!(tab_gone(&sel("shop", "items"), &dbs, "shop", t), "a table the script dropped");
-        assert!(tab_gone(&sel("gone", "x"), &dbs, "shop", t), "a database the script dropped");
-        assert!(tab_gone(&sel("gone", ""), &dbs, "shop", t), "a Query tab of a dropped database");
-        assert!(!tab_gone(&sel("shop", ""), &dbs, "shop", t), "a Query tab of the database stays");
-        assert!(!tab_gone(&sel("other", "items"), &dbs, "shop", t), "tables of other databases were not read");
-        assert!(!tab_gone(&sel("shop", "items"), &dbs, "shop", None));
     }
 }

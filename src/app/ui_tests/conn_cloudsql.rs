@@ -31,22 +31,22 @@ fn form_mut(app: &mut App) -> &mut ConnForm {
 
 /// Sends one gcloud answer the way the worker does and waits until the app took it.
 fn feed(ui: &mut UiApp, found: Found, what: &str, taken: impl Fn(&App) -> bool) {
-    ui.app().worker.send(Msg::CloudSql { req: REQ, found });
+    ui.app().core.test_worker().send(Msg::CloudSql { req: REQ, found });
     ui.wait(what, taken);
 }
 
 #[test]
 fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_password() {
     let mut ui = harness();
-    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().core.test_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
     // The instance lists first: a project already answered is not asked again when the project list arrives.
-    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(PROD) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
+    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(PROD) }, "the acme-prod instances", |a| a.core.cloud.instances.contains_key("acme-prod"));
     let refused = "Cloud SQL: gcloud failed: ERROR: (gcloud.sql.instances.list) HTTPError 403: Cloud SQL Admin API has not been used in project acme-sandbox before or it is disabled.";
-    feed(&mut ui, Found::Instances { project: "acme-sandbox".into(), res: Err(refused.into()) }, "the acme-sandbox refusal", |a| a.cloud.instances.contains_key("acme-sandbox"));
+    feed(&mut ui, Found::Instances { project: "acme-sandbox".into(), res: Err(refused.into()) }, "the acme-sandbox refusal", |a| a.core.cloud.instances.contains_key("acme-sandbox"));
     let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(["acme-prod", "acme-sandbox"].map(|id| Project { id: id.into(), name: String::new() }).to_vec()), adc: false };
-    feed(&mut ui, Found::Start(start), "the project list", |a| a.cloud.start.is_some());
-    assert_eq!(ui.app().cloud.running, 0, "no gcloud was started for projects that had answered");
+    feed(&mut ui, Found::Start(start), "the project list", |a| a.core.cloud.start.is_some());
+    assert_eq!(ui.app().core.cloud.running, 0, "no gcloud was started for projects that had answered");
 
     ui.show("acme-prod:europe-west1:orders-db");
     // A project with nothing to list is folded away, its reason on hover, so dozens of them do not bury the list.
@@ -60,12 +60,12 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     // The proxy signs in to IAM with Application Default Credentials only, so without them Use asks for them first.
     ui.click("Use acme-prod:europe-west1:orders-db");
     ui.show("IAM sign-in needs Application Default Credentials");
-    assert!(ui.app().cloud_browser.is_some() && ui.app().modal.is_none(), "no form is filled for a sign-in that cannot work");
-    ui.h.state_mut().cloud.start.as_mut().unwrap().adc = true;
+    assert!(ui.app().core.cloud_browser.is_some() && ui.app().modal.is_none(), "no form is filled for a sign-in that cannot work");
+    ui.h.state_mut().core.test_mut().cloud.start.as_mut().unwrap().adc = true;
     ui.settle();
     assert!(ui.h.query_all_by_label("IAM sign-in needs Application Default Credentials").next().is_none(), "the card goes once they exist");
     ui.click("Use acme-prod:europe-west1:orders-db");
-    ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
+    ui.wait("the form", |a| a.core.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
     assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert_eq!((f.name.as_str(), f.addr.user.as_str(), f.engine), ("orders-db", "jane@example.com", db::sql::Engine::Postgres));
@@ -80,7 +80,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     form_mut(ui.h.state_mut()).addr.password = "left-over".into();
     ui.click("Save and connect");
     ui.wait("the form to close", |a| a.modal.is_none());
-    let c = ui.app().conns.last().expect("the saved connection");
+    let c = ui.app().core.conns.last().expect("the saved connection");
     assert_eq!(c.meta.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public, mysql: false }));
     assert!(c.meta.ssh.is_none());
     assert!(!c.masked_uri.contains("****") && c.masked_uri.contains("jane%40example.com@"), "the stored address has no password: {}", c.masked_uri);
@@ -88,12 +88,13 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     // Through the stub proxy to a real server: the test binary stands in for cloud-sql-proxy, set as in Settings.
     let Ok(uri) = std::env::var("QUARRY_TEST_POSTGRES") else { return };
     let live = db::sql::Addr::parse(&uri).unwrap();
-    *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = Some(format!("{}:{}", live.host, live.port));
-    ui.h.state_mut().prefs.cloud_sql_proxy = std::env::current_exe().unwrap().display().to_string();
+    *crate::cloudsql::stub::TEST.lock().unwrap() = "app::ui_tests::conn_cloudsql::stub_proxy";
+    *crate::cloudsql::stub::TARGET.lock().unwrap() = Some(format!("{}:{}", live.host, live.port));
+    ui.h.state_mut().core.test_mut().prefs.cloud_sql_proxy = std::env::current_exe().unwrap().display().to_string();
     // The answers are kept for the session: reopening lists the instances at once and asks nothing.
     ui.h.state_mut().open_cloud_browser(false);
     ui.show("acme-prod:europe-west1:reporting");
-    assert_eq!(ui.app().cloud.req, REQ);
+    assert_eq!(ui.app().core.cloud.req, REQ);
     ui.click("Use acme-prod:europe-west1:reporting");
     ui.wait("the form", |a| matches!(a.modal, Some(Modal::Conn(_))));
     assert_eq!(form(ui.app()).cloud_sql.as_ref().map(|c| c.ip), Some(IpKind::Private), "reporting has no public IP, so Private is picked");
@@ -103,21 +104,21 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     let f = form_mut(ui.h.state_mut());
     (f.addr.user, f.addr.password, f.addr.database) = (live.user.clone(), live.password.clone(), live.database.clone());
     ui.click("Test");
-    ui.wait("the Test answer", |a| a.conn_test.is_some());
-    match &ui.app().conn_test {
+    ui.wait("the Test answer", |a| a.core.conn_test.is_some());
+    match &ui.app().core.conn_test {
         Some((_, Ok(m))) => assert!(m.contains("through the Cloud SQL proxy"), "{m}"),
         other => panic!("Test through the stub proxy failed: {:?}", other.as_ref().map(|t| &t.1)),
     }
     ui.click("Save and connect");
     ui.wait("the form to close", |a| a.modal.is_none());
-    let id = ui.app().conns.last().unwrap().meta.id;
+    let id = ui.app().core.conns.last().unwrap().meta.id;
     assert_eq!(ui.app().conn(id).unwrap().meta.cloud_sql.as_ref().map(|c| c.iam), Some(false));
     // The app keeps no keychain in tests, so Connect gets the address the form saved; the proxy replaces its host.
     let saved = db::sql::Addr { host: CLOUD_HOST.into(), port: 5432, ..live };
-    ui.h.state_mut().connect_uri(id, saved.to_uri());
+    ui.h.state_mut().core.test_mut().connect_uri(id, saved.to_uri());
     ui.wait("the connection through the proxy", |a| a.conn(id).is_some_and(|c| c.status == Status::Ready));
     assert!(matches!(ui.app().conn(id).unwrap().tunnel, Some(db::Way::CloudSql(_))), "the proxy is kept with the connection");
-    *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = None;
+    *crate::cloudsql::stub::TARGET.lock().unwrap() = None;
 }
 
 const QUEUE: &str = r#"[
@@ -127,15 +128,15 @@ const QUEUE: &str = r#"[
 #[test]
 fn a_mysql_instance_with_iam_on_fills_the_mysql_form_with_an_iam_sign_in() {
     let mut ui = harness();
-    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().core.test_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
-    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(QUEUE) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
+    feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(QUEUE) }, "the acme-prod instances", |a| a.core.cloud.instances.contains_key("acme-prod"));
     let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(vec![Project { id: "acme-prod".into(), name: String::new() }]), adc: true };
-    feed(&mut ui, Found::Start(start), "the project list", |a| a.cloud.start.is_some());
+    feed(&mut ui, Found::Start(start), "the project list", |a| a.core.cloud.start.is_some());
 
     ui.show("acme-prod:europe-west1:queue");
     ui.click("Use acme-prod:europe-west1:queue");
-    ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
+    ui.wait("the form", |a| a.core.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
     // MySQL cuts the IAM user at the @.
     assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:queue".into(), iam: true, ip: IpKind::Public, mysql: true }));
@@ -154,9 +155,9 @@ fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
     for (id, engine, status, attempt) in [(71, db::sql::Engine::Postgres, Status::Idle, 3), (72, db::sql::Engine::Mongo, Status::Connecting, 4), (73, db::sql::Engine::Postgres, Status::Connecting, 5)] {
         let mut c = Conn::new(ConnMeta { id, name: format!("c{id}"), engine, ..Default::default() }, status);
         c.attempt = attempt;
-        ui.h.state_mut().conns.push(c);
+        ui.h.state_mut().core.test_mut().conns.push(c);
     }
-    let w = &ui.app().worker;
+    let w = &ui.app().core.test_worker();
     w.send(Msg::SqlConnected { conn: 71, attempt: 3, res: Err("late".into()) });
     w.send(Msg::Connected { conn: 72, attempt: 2, res: Err("late".into()) });
     w.send(Msg::SqlConnected { conn: 73, attempt: 5, res: Err("refused".into()) });
@@ -170,17 +171,17 @@ fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
 fn settings_finds_gcloud_once_and_the_demo_shows_no_real_path() {
     let mut ui = harness();
     let app = ui.h.state_mut();
-    app.demo = true;
-    app.settings_cat = super::super::settings::SettingsCat::Tools;
+    app.core.test_mut().demo = true;
+    app.core.test_mut().settings_cat = super::super::settings::SettingsCat::Tools;
     app.modal = Some(Modal::Settings);
     ui.settle();
     ui.show("Found automatically at ~/google-cloud-sdk/bin/gcloud. Set a path only to use another gcloud.");
-    assert!(!ui.app().cloud.gcloud_asked, "the demo never looks for gcloud");
-    ui.h.state_mut().demo = false;
-    ui.wait("the answer from the worker", |a| a.cloud.gcloud_seen.is_some());
+    assert!(!ui.app().core.cloud.gcloud_asked, "the demo never looks for gcloud");
+    ui.h.state_mut().core.test_mut().demo = false;
+    ui.wait("the answer from the worker", |a| a.core.cloud.gcloud_seen.is_some());
     ui.h.state_mut().modal = None;
     ui.settle();
-    assert!(!ui.app().cloud.gcloud_asked && ui.app().cloud.gcloud_seen.is_none(), "closed, Settings looks again next time");
+    assert!(!ui.app().core.cloud.gcloud_asked && ui.app().core.cloud.gcloud_seen.is_none(), "closed, Settings looks again next time");
 }
 
 /// Height of the browser window, read from its title to its Cancel button.
@@ -191,26 +192,33 @@ fn browser_h(ui: &UiApp) -> f32 {
 #[test]
 fn refresh_in_the_cloud_sql_browser_keeps_the_window_size_while_it_checks_again() {
     let mut ui = harness();
-    ui.h.state_mut().cloud.req = REQ;
+    ui.h.state_mut().core.test_mut().cloud.req = REQ;
     ui.h.state_mut().open_cloud_browser(false);
     let missing = || Start { gcloud: None, proxy: None, components: false, account: None, projects: Ok(Vec::new()), adc: false };
-    feed(&mut ui, Found::Start(missing()), "the gcloud missing answer", |a| a.cloud.start.is_some());
+    feed(&mut ui, Found::Start(missing()), "the gcloud missing answer", |a| a.core.cloud.start.is_some());
     ui.show("Google Cloud CLI not found");
     ui.settle();
     let before = browser_h(&ui);
 
     // What Refresh does minus the real gcloud lookup, so the answer comes only when the test sends it.
     let a = ui.h.state_mut();
-    a.req += 1;
-    let req = a.req;
-    a.cloud.reload(req);
+    a.core.test_mut().req += 1;
+    let req = a.core.req;
+    a.core.test_mut().cloud.reload(req);
     for _ in 0..6 {
         ui.h.step();
         assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size while Refresh waited");
     }
-    assert!(ui.app().cloud.start.is_none(), "the answer has not come yet");
-    ui.app().worker.send(Msg::CloudSql { req, found: Found::Start(missing()) });
-    ui.wait("the answer", |a| a.cloud.start.is_some());
+    assert!(ui.app().core.cloud.start.is_none(), "the answer has not come yet");
+    ui.app().core.test_worker().send(Msg::CloudSql { req, found: Found::Start(missing()) });
+    ui.wait("the answer", |a| a.core.cloud.start.is_some());
     ui.settle();
     assert!((browser_h(&ui) - before).abs() <= 1.0, "the window changed size after the answer");
+}
+
+/// The stand-in for cloud-sql-proxy that the stub runs in this test binary.
+#[test]
+#[ignore]
+fn stub_proxy() {
+    crate::cloudsql::stub::run();
 }

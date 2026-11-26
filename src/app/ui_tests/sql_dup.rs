@@ -6,9 +6,9 @@ use crate::db::sql::structure::{Index, IndexCol, Structure};
 
 fn dup_toast(ui: &mut UiApp, raw: &str) -> Sel {
     let app = ui.h.state_mut();
-    let sel = app.tabs[app.cur].sel.clone();
+    let sel = app.core.tabs[app.core.cur].sel.clone();
     let e = app.log_err(raw, Some(sel.conn), Some(sel.clone()), "Content".into(), "");
-    app.err_toast(e);
+    app.core.test_mut().err_toast(e);
     ui.settle();
     sel
 }

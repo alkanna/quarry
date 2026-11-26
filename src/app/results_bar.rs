@@ -3,6 +3,7 @@
 
 use super::*;
 use egui::containers::menu::MenuButton;
+use quarry_core::action::{Pref, PrefsA};
 
 /// What the left side of the bar says. `total` is the number of rows, documents or groups the query matches.
 pub(super) struct BarInfo<'a> {
@@ -102,8 +103,7 @@ impl App {
             });
             // Remembered for every tab; the others reload when shown, see the top of `documents`.
             if size != self.page_size() {
-                self.prefs.page_size = size;
-                self.save_prefs();
+                self.exec(Action::Prefs(PrefsA::Set(Pref::PageSize(size))));
                 out.go = Some(0);
             }
         });

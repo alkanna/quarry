@@ -2,64 +2,14 @@
 //! index edits (`alter.rs`), so the statement the preview shows is the one that runs and the undo comes from the structure
 //! read before. Editing a CHECK is a drop and an add staged together, since no engine changes the condition in place.
 
-use crate::app::sql::alter::{restage, sql_block, BUSY_NOTE};
+use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
 use db::sql::ddl::{self, Change};
 use db::sql::structure::CheckConstraint;
 use db::sql::Dialect;
-
-/// The Add check and Edit check dialog.
-pub(in crate::app) struct CheckForm {
-    /// The constraint being edited; None adds one.
-    from: Option<CheckConstraint>,
-    def: CheckConstraint,
-    /// The staged changes this one goes after.
-    rest: Vec<Change>,
-    view: Option<CheckView>,
-}
-
-/// The plan and the warnings of the constraint as it stands, kept until the definition changes.
-struct CheckView {
-    def: CheckConstraint,
-    changes_empty: bool,
-    /// The staged changes with this one added, which Stage change keeps.
-    all: Vec<Change>,
-    text: Result<String, String>,
-    warnings: Vec<String>,
-}
+pub(crate) use quarry_core::state::sql::checks::*;
 
 impl App {
-    pub(in crate::app) fn open_check_form(&mut self, i: Option<usize>) {
-        let Some(st) = self.structure().cloned() else { return };
-        let staged = self.staged().to_vec();
-        let from = i.and_then(|i| st.checks.get(i)).cloned();
-        if let Some(f) = &from && staged.iter().any(|c| matches!(c, Change::DropCheck(n) if *n == f.name)) {
-            return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
-        }
-        let def = match &from {
-            Some(f) => f.clone(),
-            None => {
-                // A name to start from, so the statement reads at once and the person only has to type the condition.
-                let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-                let taken = ddl::checks_after(&st, &staged);
-                let name = (0..).map(|n| if n == 0 { format!("chk_{table}") } else { format!("chk_{table}_{n}") }).find(|c| !taken.iter().any(|t| ddl::same_name(t, c))).unwrap_or_default();
-                CheckConstraint { name, ..Default::default() }
-            }
-        };
-        self.modal = Some(Modal::CheckEdit(Box::new(CheckForm { from, def, rest: staged, view: None })));
-    }
-
-    pub(in crate::app) fn stage_drop_check(&mut self, i: usize) {
-        let Some(k) = self.structure().and_then(|s| s.checks.get(i)) else { return };
-        let name = k.name.clone();
-        let mut staged = self.staged().to_vec();
-        if staged.iter().any(|c| matches!(c, Change::DropCheck(n) if *n == name)) {
-            return;
-        }
-        staged.push(Change::DropCheck(name));
-        self.set_staged(staged);
-    }
-
     /// What the dialog shows for its current definition: the changes it stages, the SQL or the reason there is none, and the warnings.
     fn check_view(&self, f: &CheckForm) -> CheckView {
         let pg = self.alter_env().0 == Dialect::Postgres;
@@ -156,10 +106,7 @@ impl App {
         if stage || now {
             *keep = false;
             let all = f.view.take().map(|v| v.all).unwrap_or_default();
-            self.set_staged(restage(self.staged(), None, all, f.rest.len()));
-            if now {
-                self.request_alter_apply();
-            }
+            self.stage_from_dialog(all, f.rest.len(), None, now);
         }
     }
 }

@@ -47,16 +47,15 @@ fn wide_row(ui: &mut egui::Ui, title: &str, desc: &str, reserve: f32, control: i
 
 impl App {
     pub(super) fn agents_open_page(&mut self, id: u64) {
-        self.agents.page = Some(id);
-        self.agents.globs = self.agents.cfg.conns.get(&id).map(|p| p.scope.globs.join(", ")).unwrap_or_default();
+        self.exec(Action::Agents(AgentsA::Page(Some(id))));
     }
 
     pub(super) fn agents_conn_page(&mut self, ui: &mut egui::Ui, id: u64) {
         let Some(c) = self.conn(id) else { return };
         let name = c.meta.name.clone();
-        let always = self.prefs.always_writable;
-        let shared = self.agents.cfg.conns.get(&id).cloned();
-        let mut p = shared.clone().unwrap_or_else(|| self.agents.cfg.defaults.clone());
+        let always = self.core.prefs.always_writable;
+        let shared = self.core.agents.cfg.conns.get(&id).cloned();
+        let mut p = shared.clone().unwrap_or_else(|| self.core.agents.cfg.defaults.clone());
         let mut back = false;
         let mut edit_rule: Option<Option<usize>> = None;
         ui.horizontal(|ui| {
@@ -71,7 +70,7 @@ impl App {
             ui.label(semibold(RichText::new(&name).size(TXT_SUBHEAD).color(BRIGHT())));
         });
         ui.add_space(6.0);
-        let hides = own_rules_hide(&self.agents.cfg, &p);
+        let hides = own_rules_hide(&self.core.agents.cfg, &p);
         if hides && p.access != Access::NotShared {
             egui::Frame::new().fill(tint(WARNING(), 30)).stroke(Stroke::new(1.0, tint(WARNING(), 90))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -122,7 +121,7 @@ impl App {
                 });
             });
         });
-        let presets = &self.agents.cfg.presets;
+        let presets = &self.core.agents.cfg.presets;
         let mut open_checks: Option<RulesTab> = None;
         settings_section(ui, "DATA PROTECTION HERE", |ui| {
             for (i, (title, global, tri)) in [("Secrets", presets.secrets.on, &mut p.presets.secrets), ("Personal data", presets.pii.on, &mut p.presets.pii)].into_iter().enumerate() {
@@ -150,12 +149,13 @@ impl App {
             self.agents_open_rules(Some(id), tab);
         }
         let mut globs_changed = false;
+        let mut globs = self.core.agents.globs.clone();
         let pg = self.is_pg(id);
         settings_section(ui, "DATABASES AND COLLECTIONS", |ui| {
             segmented(ui, &mut p.scope.mode, &SCOPES);
             if p.scope.mode != ScopeMode::All {
                 let w = ui.available_width();
-                let r = ui.add(egui::TextEdit::singleline(&mut self.agents.globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text(if pg { "public.orders_*, reporting, sales.public.*" } else { "shop.audit_*, *.sessions, billing" }).desired_width(w));
+                let r = ui.add(egui::TextEdit::singleline(&mut globs).id(egui::Id::unique(("agent-globs", id))).font(egui::TextStyle::Monospace).hint_text(if pg { "public.orders_*, reporting, sales.public.*" } else { "shop.audit_*, *.sessions, billing" }).desired_width(w));
                 globs_changed = r.changed();
             }
             let help = if pg {
@@ -166,7 +166,8 @@ impl App {
             ui.add(egui::Label::new(RichText::new(help).size(TXT_SMALL).color(FAINT())).wrap());
         });
         if globs_changed {
-            p.scope.globs = self.agents.globs.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
+            self.exec(Action::Agents(AgentsA::Globs(globs.clone())));
+            p.scope.globs = globs.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
         }
         let mut flip: Option<usize> = None;
         let mut drop: Option<usize> = None;
@@ -218,13 +219,14 @@ impl App {
         }
         ui.label(RichText::new("Agent writes also need this connection unlocked in Quarry, as yours do.").size(TXT_SMALL).color(FAINT()));
         // A connection never shared stays out of the file until the user shares it, so "missing means Not shared" holds.
-        let keep = shared.is_some() || p != self.agents.cfg.defaults;
+        let keep = shared.is_some() || p != self.core.agents.cfg.defaults;
         if keep && shared.as_ref() != Some(&p) {
-            self.agents.cfg.conns.insert(id, p);
-            self.save_agents();
+            let mut cfg = self.core.agents.cfg.clone();
+            cfg.conns.insert(id, p);
+            self.exec(Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if back {
-            self.agents.page = None;
+            self.exec(Action::Agents(AgentsA::Page(None)));
         }
         if let Some(rule) = edit_rule {
             self.agents_rules_for(Some(id), rule);

@@ -6,7 +6,7 @@ use super::*;
 /// The columns the grid shows, in order.
 fn shown(ui: &UiApp) -> Vec<String> {
     let a = ui.app();
-    crate::app::table::visible_cols(a.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())
+    crate::app::table::visible_cols(a.core.prefs.cols.get(&a.col_key(false)), &a.t().unwrap().fields, a.default_cols())
 }
 
 /// The rect of the header of `col`. Other widgets in the Mongo demo carry field names too, so it is the one right above
@@ -40,7 +40,7 @@ fn a_column_moves_by_dragging_its_whole_row_in_the_popover() {
     let c = want.remove(1);
     want.insert(3, c);
     assert_eq!(shown(&ui), want, "the row did not land after the one it was dropped on");
-    assert!(ui.app().prefs.cols.get(&ui.app().col_key(false)).is_some_and(|p| p.shown.as_ref() == Some(&want)), "the order was not kept in the column prefs");
+    assert!(ui.app().core.prefs.cols.get(&ui.app().col_key(false)).is_some_and(|p| p.shown.as_ref() == Some(&want)), "the order was not kept in the column prefs");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn esc_cancels_a_drag_and_keeps_the_popover_open() {
 /// How many of the shown columns are pinned; they come first.
 fn pins(ui: &UiApp) -> usize {
     let a = ui.app();
-    let p = a.prefs.cols.get(&a.col_key(false)).map(|p| p.pinned.clone()).unwrap_or_default();
+    let p = a.core.prefs.cols.get(&a.col_key(false)).map(|p| p.pinned.clone()).unwrap_or_default();
     shown(ui).iter().filter(|c| p.contains(c)).count()
 }
 
@@ -141,7 +141,7 @@ fn the_resize_edge_still_resizes_instead_of_dragging_the_header() {
     ui.release(to);
     assert_eq!(shown(&ui), before, "dragging the resize edge moved the column");
     let a = ui.app();
-    assert!(a.prefs.cols.get(&a.col_key(false)).is_some_and(|p| p.widths.contains_key(&c)), "dragging the resize edge did not resize {c}");
+    assert!(a.core.prefs.cols.get(&a.col_key(false)).is_some_and(|p| p.widths.contains_key(&c)), "dragging the resize edge did not resize {c}");
 }
 
 #[test]
@@ -158,11 +158,6 @@ fn alt_arrow_moves_the_focused_header() {
     assert_eq!(shown(&ui), want, "Alt+Right did not move the focused header");
 }
 
-#[test]
-fn the_shortcut_list_names_the_keyboard_moves() {
-    assert!(SHORTCUTS.iter().any(|(k, what)| k.starts_with("Alt+Up/Down") && what.contains("Move the focused row")), "Alt+arrows are missing from the shortcut list");
-}
-
 /// Opens the right-click menu of the widget named `label`.
 fn menu_of(ui: &mut UiApp, label: &str) {
     ui.show(label);
@@ -174,7 +169,7 @@ fn menu_of(ui: &mut UiApp, label: &str) {
 #[test]
 fn a_tab_moves_from_its_menu() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    let colls = |a: &App| a.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
+    let colls = |a: &App| a.core.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
     assert_eq!(colls(ui.app()), ["customers", "orders", "events"]);
     menu_of(&mut ui, "Tab customers");
     ui.click_contains("Move right");
@@ -208,7 +203,7 @@ fn a_group_member_moves_from_its_menu() {
 #[test]
 fn alt_arrows_move_the_focused_tab() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    let colls = |a: &App| a.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
+    let colls = |a: &App| a.core.tabs.iter().map(|t| t.sel.coll.clone()).collect::<Vec<_>>();
     ui.show("Tab customers");
     ui.h.get_by_label("Tab customers").focus();
     ui.settle();

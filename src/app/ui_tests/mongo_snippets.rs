@@ -13,13 +13,13 @@ const FILTER: &str = "{ status: {{status:paid|shipped=paid}}, total: { $gte: {{m
 fn with_scripts(a: &mut App) {
     a.load_demo();
     for (name, kind, body, coll) in [("Paid since", "shell", SHELL, ""), ("Gift wrap", "shell", WRITE, ""), ("Big orders", "filter", FILTER, "orders")] {
-        let id = a.library.next_id();
-        a.library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() });
+        let id = a.core.test_mut().library.next_id();
+        a.core.test_mut().library.scripts.push(Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() });
     }
 }
 
 fn id_of(a: &App, name: &str) -> u64 {
-    a.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
+    a.core.library.scripts.iter().find(|s| s.name == name).map(|s| s.id).unwrap()
 }
 
 fn form(a: &mut App) -> &mut crate::app::library::snippet_form::SnippetForm {
@@ -47,7 +47,7 @@ fn a_shell_snippet_from_cmd_k_opens_filled_in_the_shell() {
     assert_eq!(t.shell.code, SHELL.replace("{{status:paid|shipped=paid}}", "\"paid\"").replace("{{from:date}}", "ISODate(\"2026-11-03T00:00:00Z\")"));
     // Run again sends the same text, not one filled a second time.
     assert!(t.snip.off);
-    assert_eq!(ui.app().shell_code().unwrap(), t.shell.code);
+    assert_eq!(ui.app().core.shell_code().unwrap(), t.shell.code);
 }
 
 #[test]
@@ -85,12 +85,12 @@ fn a_shell_tab_fills_its_values_and_refuses_one_in_quotes() {
     ui.h.run_steps(2);
     assert!(ui.app().t().unwrap().view == View::Shell);
     ui.show("Run on");
-    assert!(ui.app().shell_code().unwrap_err().contains("from needs a value"));
-    ui.h.state_mut().tm().unwrap().snip.vals.insert("from".into(), "2026-11-03".into());
-    assert!(ui.app().shell_code().unwrap().contains("$gte: ISODate(\"2026-11-03T00:00:00Z\")"));
+    assert!(ui.app().core.shell_code().unwrap_err().contains("from needs a value"));
+    ui.h.state_mut().core.test_mut().tm().unwrap().snip.vals.insert("from".into(), "2026-11-03".into());
+    assert!(ui.app().core.shell_code().unwrap().contains("$gte: ISODate(\"2026-11-03T00:00:00Z\")"));
     // In the Shell a value goes in code: inside quotes it could be SQL text of an attached connection.
-    ui.h.state_mut().tm().unwrap().shell.code = "print('{{from}}')".into();
-    assert!(ui.app().shell_code().unwrap_err().contains("outside quotes"));
+    ui.h.state_mut().core.test_mut().tm().unwrap().shell.code = "print('{{from}}')".into();
+    assert!(ui.app().core.shell_code().unwrap_err().contains("outside quotes"));
 }
 
 #[test]
@@ -107,14 +107,14 @@ fn make_it_a_value_works_in_the_shell() {
 #[test]
 fn the_documents_bar_fills_its_values_and_names_a_missing_one() {
     let Some(mut ui) = demo_ui(|a| a.load_demo()) else { return };
-    let t = ui.h.state_mut().tm().unwrap();
+    let t = ui.h.state_mut().core.test_mut().tm().unwrap();
     t.view = View::Documents;
     (t.filter_txt, t.sort_txt) = (FILTER.into(), "{ {{by:identifier=total}}: -1 }".into());
     ui.h.run_steps(2);
     ui.show("Run on");
     let err = crate::app::run::find_query(ui.app().t().unwrap()).err().unwrap();
     assert!(err.contains("Filter: min needs a value"), "{err}");
-    ui.h.state_mut().tm().unwrap().snip.vals.insert("min".into(), "50".into());
+    ui.h.state_mut().core.test_mut().tm().unwrap().snip.vals.insert("min".into(), "50".into());
     let q = crate::app::run::find_query(ui.app().t().unwrap()).unwrap();
     assert_eq!(q.filter.get_str("status").unwrap(), "paid");
     assert!(q.sort.unwrap().contains_key("total"));

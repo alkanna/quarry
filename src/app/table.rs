@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::{Action, DocsA, GridA};
+pub(super) use quarry_core::action::grid::{col_acts_on, visible_cols};
+pub(crate) use quarry_core::state::table::Rows;
 
 /// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
 #[derive(Default)]
@@ -29,87 +32,6 @@ impl App {
         }
         if let Some((fk, d)) = a.fk {
             self.open_fk_row(&fk, &d);
-        }
-    }
-}
-
-/// The rows a results table draws: result documents, or the Documents view's rows kept as BSON bytes.
-#[derive(Clone, Copy)]
-pub(super) enum Rows<'a> {
-    Docs(&'a [Document]),
-    Raw(&'a [db::Row]),
-}
-
-impl<'a> Rows<'a> {
-    pub(super) fn len(self) -> usize {
-        match self {
-            Rows::Docs(d) => d.len(),
-            Rows::Raw(r) => r.len(),
-        }
-    }
-
-    pub(super) fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    pub(super) fn slice(self, range: std::ops::Range<usize>) -> Rows<'a> {
-        match self {
-            Rows::Docs(d) => Rows::Docs(&d[range]),
-            Rows::Raw(r) => Rows::Raw(&r[range]),
-        }
-    }
-
-    /// Where the rows live, part of the column width cache key.
-    fn addr(self) -> usize {
-        match self {
-            Rows::Docs(d) => d.as_ptr() as usize,
-            Rows::Raw(r) => r.as_ptr() as usize,
-        }
-    }
-
-    /// The value at a dotted path, read without decoding the rest of the row.
-    pub(super) fn value(self, i: usize, path: &str) -> Option<Val<'a>> {
-        match self {
-            Rows::Docs(d) => db::get_path(d.get(i)?, path).map(Val::B),
-            Rows::Raw(r) => r.get(i)?.value(path).map(Val::R),
-        }
-    }
-
-    /// Row `i` decoded; a raw row keeps it until the row closes, so only call it for open rows.
-    pub(super) fn doc(self, i: usize) -> Option<&'a Document> {
-        match self {
-            Rows::Docs(d) => d.get(i),
-            Rows::Raw(r) => r.get(i).map(db::Row::doc),
-        }
-    }
-
-    /// The top-level value `key` of row `i`, for rows whose keys may hold a dot.
-    pub(super) fn key(self, i: usize, key: &str) -> Option<Bson> {
-        match self {
-            Rows::Docs(d) => d.get(i)?.get(key).cloned(),
-            Rows::Raw(r) => Bson::try_from(r.get(i)?.raw().get(key).ok()??).ok(),
-        }
-    }
-
-    /// A decoded copy of row `i`, for actions.
-    pub(super) fn owned(self, i: usize) -> Option<Document> {
-        match self {
-            Rows::Docs(d) => d.get(i).cloned(),
-            Rows::Raw(r) => r.get(i).map(db::Row::owned),
-        }
-    }
-
-    pub(super) fn id(self, i: usize) -> Option<Bson> {
-        match self {
-            Rows::Docs(d) => d.get(i)?.get("_id").cloned(),
-            Rows::Raw(r) => r.get(i)?.id(),
-        }
-    }
-
-    fn doc_ref(self, i: usize) -> DocRef<'a> {
-        match self {
-            Rows::Docs(d) => DocRef::B(&d[i]),
-            Rows::Raw(r) => DocRef::from(&r[i]),
         }
     }
 }
@@ -188,110 +110,6 @@ pub(super) fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
     .max(x + 8.0)
 }
 
-/// Applies column actions to one set of column preferences. `n` is how many columns show before any were picked.
-pub(super) fn col_acts_on(p: &mut ColPrefs, n: usize, fields: &[String], acts: Vec<ColAct>) {
-    for a in acts {
-        let mut shown = visible_cols(Some(p), fields, n);
-        match a {
-            ColAct::Highlight(c) => {
-                let c = db::strip_indices(&c);
-                if !p.highlight.contains(&c) {
-                    p.highlight.push(c);
-                } else {
-                    p.highlight.retain(|x| *x != c);
-                }
-                continue;
-            }
-            ColAct::Pin(c) => {
-                if !p.pinned.contains(&c) {
-                    p.pinned.push(c);
-                } else {
-                    p.pinned.retain(|x| *x != c);
-                }
-                continue;
-            }
-            ColAct::Hide(c) => {
-                shown.retain(|x| *x != c);
-                p.pinned.retain(|x| *x != c);
-            }
-            ColAct::Move(c, d) => {
-                if let Some(i) = shown.iter().position(|x| *x == c) {
-                    let j = (i as i32 + d).clamp(0, shown.len() as i32 - 1) as usize;
-                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                    shown.swap(i, j);
-                    // Moving across the edge of the pinned block changes which columns are pinned.
-                    p.pinned = shown[..pinned_n].to_vec();
-                }
-            }
-            ColAct::MoveTo(c, to) => {
-                if let Some(i) = shown.iter().position(|x| *x == c) {
-                    let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
-                    let c = shown.remove(i);
-                    shown.insert(if to > i { to - 1 } else { to }.min(shown.len()), c);
-                    p.pinned = shown[..pinned_n].to_vec();
-                }
-            }
-            ColAct::Show(c) => {
-                if !shown.contains(&c) {
-                    shown.push(c);
-                }
-            }
-            ColAct::Align(c, a) => {
-                if a == 0 {
-                    p.align.remove(&c);
-                } else {
-                    p.align.insert(c, a);
-                }
-                continue;
-            }
-            ColAct::Customize { col, label, path } => {
-                if path != col {
-                    if shown.contains(&path) {
-                        shown.retain(|x| *x != col);
-                        p.pinned.retain(|x| *x != col);
-                    } else {
-                        shown.iter_mut().chain(p.pinned.iter_mut()).filter(|x| **x == col).for_each(|x| *x = path.clone());
-                    }
-                    // A column already at that path keeps its own width and alignment.
-                    if let Some(w) = p.widths.remove(&col) {
-                        p.widths.entry(path.clone()).or_insert(w);
-                    }
-                    if let Some(a) = p.align.remove(&col) {
-                        p.align.entry(path.clone()).or_insert(a);
-                    }
-                    p.labels.remove(&col);
-                    let (from, to) = (db::strip_indices(&col), db::strip_indices(&path));
-                    if p.highlight.contains(&from) {
-                        p.highlight.retain(|h| *h != from && *h != to);
-                        p.highlight.push(to);
-                    }
-                }
-                if label.trim().is_empty() {
-                    p.labels.remove(&path);
-                } else {
-                    p.labels.insert(path, label.trim().to_string());
-                }
-            }
-            ColAct::Reset => {
-                *p = ColPrefs::default();
-                continue;
-            }
-        }
-        p.shown = Some(shown);
-    }
-}
-
-pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
-    let base: Vec<String> = match p.and_then(|p| p.shown.clone()) {
-        Some(v) => v,
-        None => fields.iter().take(n).cloned().collect(),
-    };
-    let pinned: Vec<String> = p.map(|p| p.pinned.clone()).unwrap_or_default();
-    let mut out: Vec<String> = pinned.iter().filter(|c| base.contains(c)).cloned().collect();
-    out.extend(base.into_iter().filter(|c| !pinned.contains(c)));
-    out
-}
-
 /// A move in the filtered SHOWN list as the insert-before index into the whole list that `ColAct::MoveTo` takes.
 /// `kept` holds the whole-list index of each row the filter keeps: down a list the column goes after the row it was
 /// dropped past, up a list before it, so the columns the filter hides keep their places.
@@ -299,22 +117,16 @@ fn kept_before(kept: &[usize], m: dnd::Move) -> usize {
     if m.to > m.from { kept[m.to] + 1 } else { kept[m.to] }
 }
 
-/// How many columns show before the user picks some. SQL tables are narrow enough to show whole,
-/// while Mongo documents can have hundreds of fields.
-fn default_n(sql: bool, setting: usize) -> usize {
-    if sql { usize::MAX } else { setting }
-}
-
 impl App {
     pub(super) fn default_cols(&self) -> usize {
-        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.prefs.default_cols)
+        self.core.default_cols()
     }
 
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
         let fields = if agg { t.agg_source().1.to_vec() } else { t.fields.clone() };
-        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&key).cloned().unwrap_or_default();
         let n = self.default_cols();
         let shown = visible_cols(Some(&prefs), &fields, n);
         let mut acts = Vec::new();
@@ -325,7 +137,7 @@ impl App {
                 popover_head(ui, "Columns", &format!("{} of {total}", shown.len()), "Drag to reorder. Pinned columns stay first.");
                 // One field filters the lists and adds a path the lists do not offer. Its suggestions are
                 // nested paths seen in the loaded documents.
-                let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
+                let paths: &[String] = if agg { &fields } else { &self.core.tabs[self.core.cur].paths };
                 let suggest = |b: &str, _: bool| {
                     let typed = b.trim().to_lowercase();
                     let items: Vec<Sug> = paths
@@ -341,17 +153,17 @@ impl App {
                 let (mut enter, mut picked_path) = (false, false);
                 well_field(ui, id, FieldIcon::Search, None, |ui| {
                     let w = ui.available_width();
-                    let (out, picked, m) = ac_input(ui, id, &mut self.col_filter, &mut self.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
+                    let (out, picked, m) = ac_input(ui, id, &mut self.ui.col_filter, &mut self.ui.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
                     moved = m;
                     picked_path = picked;
                     enter = picked || (out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
                 });
                 // Drawn in the menu, not as a popup: a click on another layer would close the menu.
-                if ac_list(ui, id, &mut self.col_filter, &mut self.ac, moved, Some(ui.available_width() - 2.0)) {
+                if ac_list(ui, id, &mut self.ui.col_filter, &mut self.ui.ac, moved, Some(ui.available_width() - 2.0)) {
                     (enter, picked_path) = (true, true);
                 }
                 ui.add_space(12.0);
-                let typed = self.col_filter.trim().to_string();
+                let typed = self.ui.col_filter.trim().to_string();
                 let needle = typed.to_lowercase();
                 let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
                 let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
@@ -456,46 +268,41 @@ impl App {
         });
         if let Some(c) = add {
             acts.push(ColAct::Show(c));
-            self.col_filter.clear();
+            self.ui.col_filter.clear();
         }
         if !acts.is_empty() {
-            self.apply_col_acts(&key, &fields, acts);
+            self.exec(Action::Grid(GridA::Cols { key, agg, acts }));
         }
-    }
-
-    pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
-        let n = self.default_cols();
-        let p = self.prefs.cols.entry(key.to_string()).or_default();
-        col_acts_on(p, n, fields, acts);
-        self.save_prefs();
     }
 
     /// Draws the rows. SQL cell work found on the way comes back in `SqlAfter`, because the page is out of the tab
     /// while it is drawn (see `results`) and that work looks rows up in the tab.
     pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) -> SqlAfter {
         let key = self.col_key(agg);
-        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
-        let summarize = !self.prefs.object_preview;
+        let summarize = !self.core.prefs.object_preview;
         // Measuring lays out every loaded cell of the column, so it is done once per result set instead of
         // on every frame. The generation says which answer the rows came from; where they live and how
         // many say which window of it is on screen.
         let answer = self.t().map_or(0, |t| t.rows_gen);
+        // The window of rows is held for the frame, so what tells results apart is the generation, the window's offset and which view's.
+        let store = usize::from(agg) | usize::from(self.t().is_some_and(|t| t.view == View::Shell)) << 1;
         let widths: Vec<f32> = cols
             .iter()
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
-                    let k = (answer, docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
-                    if let Some(w) = self.width_cache.get(&k) {
+                    let k = (answer, (base as usize) << 2 | store, docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
+                    if let Some(w) = self.ui.width_cache.get(&k) {
                         return *w;
                     }
                     let w = optimal_width(ui, docs, c, prefs.label(c), summarize, OPTIMAL_MAX_W);
-                    if self.width_cache.len() > 512 {
-                        self.width_cache.clear();
+                    if self.ui.width_cache.len() > 512 {
+                        self.ui.width_cache.clear();
                     }
-                    self.width_cache.insert(k, w);
+                    self.ui.width_cache.insert(k, w);
                     w
                 })
             })
@@ -523,7 +330,7 @@ impl App {
         let mut save_widths = false;
         let mut fit = None;
         let mut head_acts: Vec<(String, HeadAct)> = Vec::new();
-        let mut scope_query = self.col_scope_query;
+        let mut scope_query = self.core.col_scope_query;
         let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
         // Single-field sort shown in the header and set from the column popover.
         let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
@@ -575,8 +382,8 @@ impl App {
         // Tab shows the selected row as a record under it; Esc or Tab again hides it.
         let record = sql && self.t().is_some_and(|t| t.record);
         // The Vim cursor's column, scrolled into view after a Vim key moved it. With the record open it walks the record.
-        let vim = self.prefs.vim && !cols.is_empty();
-        let vk = self.t().map_or(0, |t| t.vcol).min(cols.len().saturating_sub(1));
+        let vim = self.core.prefs.vim && !cols.is_empty();
+        let vk = self.vcol().min(cols.len().saturating_sub(1));
         let vscroll = vim && !record && std::mem::take(&mut self.vnav.scroll);
         if !record {
             self.vnav.cols = cols.len();
@@ -714,7 +521,7 @@ impl App {
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.scroll_sel) {
+                    if active && std::mem::take(&mut self.ui.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     // After the row's own scroll, so the cell's wins sideways.
@@ -728,7 +535,7 @@ impl App {
                         paint_row(ui, rr, active, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                         let p = ui.painter();
                         let off = num_w - NUM_W;
-                        if self.prefs.open_inline && !sql {
+                        if self.core.prefs.open_inline && !sql {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
@@ -758,7 +565,7 @@ impl App {
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
                             // With the record open, the row's editor is drawn in the record.
-                            if sql_rows && !(record && active) && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
+                            if sql_rows && !(record && active) && self.core.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -892,7 +699,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline && !sql {
+                    if (active || expanded.contains(&(agg, i))) && self.core.prefs.open_inline && !sql {
                         ui.add_space(4.0);
                         // Spans every column like the rows above it, not just the visible part.
                         let w = row_w.max(320.0);
@@ -913,18 +720,16 @@ impl App {
                 }
             });
         });
-        if let Some(c) = click_col
-            && let Some(t) = self.tm()
-        {
-            t.vcol = c;
+        if let Some(c) = click_col {
+            self.set_vcol(c);
         }
         // What a Vim key asked of the cell under the cursor, or of the record's line, as a click on it would do.
-        if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.prefs.vim)
+        if let Some((_, i)) = selected.filter(|s| s.0 == agg && self.core.prefs.vim)
             && let Some(a) = self.vnav.act.filter(|a| !matches!(a, super::vim_nav::Act::Fold(_)))
         {
             self.vnav.act = None;
             let names = if record { record_names(&cols, fields) } else { cols.clone() };
-            let at = self.t().map_or(0, |t| if record { t.vline } else { t.vcol }).min(names.len().saturating_sub(1));
+            let at = (if record { self.vline() } else { self.vcol() }).min(names.len().saturating_sub(1));
             let row = self.shown_row(docs, i, agg).or_else(|| docs.owned(i));
             if let (Some(c), Some(d)) = (names.get(at).cloned(), row) {
                 let b = if sql { d.get(&c).cloned() } else { db::get_path(&d, &c).cloned() }.unwrap_or(Bson::Null);
@@ -956,33 +761,34 @@ impl App {
         if let Some((c, v)) = view.or(rec.view) {
             self.sql_view_value(&c, &v);
         }
-        if let Some((c, w)) = resized {
-            self.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
-        }
+        let mut set: Vec<(String, Option<f32>)> = resized.into_iter().map(|(c, w)| (c, Some(w))).collect();
         if let Some(c) = fit {
             // Back to the measured width, like the original's "optimal" column width.
-            self.prefs.cols.entry(key.clone()).or_default().widths.remove(&c);
+            set.push((c, None));
             save_widths = true;
         }
-        if save_widths {
-            self.save_prefs();
+        if !set.is_empty() || save_widths {
+            self.exec(Action::Grid(GridA::Widths { key: key.clone(), set, save: save_widths }));
         }
-        self.col_scope_query = scope_query;
+        if scope_query != self.core.col_scope_query {
+            self.exec(Action::Grid(GridA::ScopeQuery(scope_query)));
+        }
         for (c, a) in head_acts {
-            self.head_act(ui, agg, docs, fields, &c, a);
+            self.head_act(ui, agg, docs, &c, a);
         }
         if let Some(i) = click {
             self.row_click(ui, agg, i);
         }
-        if let Some(i) = check_click {
-            self.toggle_check(i, ui.input(|i| i.modifiers.shift));
+        let tab = self.t().unwrap().uid;
+        if let Some(row) = check_click {
+            self.exec(Action::Docs(DocsA::Check { tab, row, range: ui.input(|i| i.modifiers.shift) }));
         }
         if let Some(on) = check_all {
-            *self.checks_mut().0 = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
+            self.exec(Action::Docs(DocsA::CheckAll { tab, rows: docs.len(), on }));
         }
         self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
-            self.select(agg, i, false);
+            self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle: false }));
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
@@ -994,7 +800,7 @@ impl App {
             fk: fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (fks[k].clone(), d))),
         };
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
-            self.select(agg, i, false);
+            self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle: false }));
             let path: Vec<String> = c.split('.').map(String::from).collect();
             let d = self.shown_row(docs, i, false).or_else(|| docs.owned(i)).unwrap_or_default();
             match db::get_path(&d, &c).cloned() {
@@ -1023,7 +829,7 @@ impl App {
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active && std::mem::take(&mut self.scroll_sel) {
+                    if active && std::mem::take(&mut self.ui.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
                     paint_row(ui, rect, active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);
@@ -1039,7 +845,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.core.prefs.open_inline {
                         ui.add_space(4.0);
                         card(ui, |ui| {
                             ui.set_width(view_w - 48.0);
@@ -1151,23 +957,6 @@ fn eye_button(ui: &mut egui::Ui) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sql_shows_every_column_by_default() {
-        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
-        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
-    }
-
-    #[test]
-    fn columns_default_pin_and_move() {
-        let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
-        let p = ColPrefs { pinned: vec!["f3".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
-        let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
-    }
 
     #[test]
     fn a_move_in_the_filtered_list_keeps_hidden_columns_in_place() {

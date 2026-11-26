@@ -14,6 +14,8 @@ use crate::db::sql::{
 use eframe::egui::{self, text::LayoutJob};
 use std::cell::RefCell;
 use std::sync::Arc;
+pub(crate) use quarry_core::state::sql_complete::*;
+use super::complete::AcUi;
 
 const MAX_SUGGESTIONS: usize = 50;
 
@@ -45,25 +47,7 @@ pub(crate) struct Scope<'a> {
     pub(crate) schemas: Vec<String>,
 }
 
-/// A lookup the caret asks the app to make: the schema of the database, or a column's values.
-#[derive(Default, Clone, PartialEq, Debug)]
-pub(crate) struct Wants {
-    pub(crate) schema: bool,
-    pub(crate) values: Option<Need>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct Need {
-    pub(crate) table: String,
-    pub(crate) column: String,
-    /// The text typed so far, when the list of frequent values did not hold it.
-    pub(crate) prefix: Option<String>,
-}
-
-/// Key of a column's values in the `Fields` the app keeps.
-pub(crate) fn value_key(table: &str, column: &str) -> String {
-    format!("{table}.{column}")
-}
+pub(crate) use quarry_core::state::sql_complete::value_key;
 
 /// The suggestions for a place in a statement, with the heading and footer the popup shows and the
 /// lookup that would make them better.
@@ -763,23 +747,23 @@ pub(crate) fn sql_ac_field(
     };
     let (out, picked, _moved) = ac_input_with(ui, id, text, ac, &compute, false, show);
     let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
-    if ac.id == Some(id) && !ac.items.is_empty() && let Some((t, f)) = meta.borrow_mut().take() {
+    if ac.id == Some(id.value()) && !ac.items.is_empty() && let Some((t, f)) = meta.borrow_mut().take() {
         (ac.title, ac.foot) = (t, f);
     }
     if let (Some(n), Some(ci)) = (need.borrow_mut().take(), caret) {
         // Values asked for the first time: the list waits, and says so, until they arrive.
         if n.prefix.is_none() && !ac.shown(id) {
-            *ac = Ac { id: Some(id), cursor: ci, loading: true, title: format!("{}.{}", n.table, n.column).to_ascii_uppercase(), want: value_key(&n.table, &n.column), ..Default::default() };
+            *ac = Ac { id: Some(id.value()), cursor: ci, loading: true, title: format!("{}.{}", n.table, n.column).to_ascii_uppercase(), want: value_key(&n.table, &n.column), ..Default::default() };
         }
         wants.values = Some(n);
     }
     // Values arrived while the list waited: build it now instead of on the next key.
-    if ac.id == Some(id) && ac.loading && values.contains_key(&ac.want) {
+    if ac.id == Some(id.value()) && ac.loading && values.contains_key(&ac.want) {
         let before: String = text.chars().take(ac.cursor).collect();
         let cursor = ac.cursor;
         match compute(&before, false) {
             Some((token, items)) => {
-                *ac = Ac { id: Some(id), token, items, cursor, ..Default::default() };
+                *ac = Ac { id: Some(id.value()), token, items, cursor, ..Default::default() };
                 if let Some((t, f)) = meta.borrow_mut().take() {
                     (ac.title, ac.foot) = (t, f);
                 }
@@ -820,7 +804,7 @@ pub(crate) fn open_list(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, sc
     let (b, full) = split_statement(text, "", scope.dialect);
     if let Some(out) = analyze(&b, &full, scope, values, false).filter(|o| !o.sugs.is_empty()) {
         let n = text.chars().count();
-        *ac = Ac { id: Some(id), token: b[out.from..].chars().count(), items: out.sugs, cursor: n, title: out.title, foot: out.foot, ..Default::default() };
+        *ac = Ac { id: Some(id.value()), token: b[out.from..].chars().count(), items: out.sugs, cursor: n, title: out.title, foot: out.foot, ..Default::default() };
         ui.memory_mut(|m| m.request_focus(id));
         let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
         st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));

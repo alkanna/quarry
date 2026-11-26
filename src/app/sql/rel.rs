@@ -4,8 +4,10 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
+use quarry_core::action::{Action, StructA};
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
+pub(crate) use quarry_core::state::sql::rel::*;
 
 /// Above this many rows the check for orphans waits for a click, because it joins the whole table.
 const CHECK_ROWS: u64 = 200_000;
@@ -14,124 +16,6 @@ const CHECK_ROWS: u64 = 200_000;
 /// nothing as the answer comes in. It is kept whatever is shown so the buttons below never move when the answer lands, where a
 /// click aimed at one could hit the space it just left.
 const ORPHAN_BOX_H: f32 = 64.0;
-
-/// What the orphan count depends on, as `ddl::orphan_key` names it.
-#[derive(Clone, PartialEq)]
-struct OrphanKey {
-    cols: Vec<String>,
-    ref_db: String,
-    ref_table: String,
-    ref_cols: Vec<String>,
-}
-
-impl OrphanKey {
-    fn of(fk: &ForeignKey) -> Self {
-        let (cols, ref_db, ref_table, ref_cols) = ddl::orphan_key(fk);
-        Self { cols, ref_db, ref_table, ref_cols }
-    }
-}
-
-/// The Add relation dialog.
-pub(in crate::app) struct FkForm {
-    name: String,
-    /// The name was typed, so it stops following the columns.
-    named: bool,
-    /// Column of this table and column it points to, in key order. Empty means not picked yet.
-    pairs: Vec<(String, String)>,
-    ref_db: String,
-    ref_table: String,
-    on_update: String,
-    on_delete: String,
-    own: Structure,
-    /// The columns of `own` the staged changes leave, for the pickers. Neither input changes while the dialog is open.
-    own_cols: Vec<String>,
-    rest: Vec<Change>,
-    /// The plan of the key as it stands, kept while the changes and the table stay as they are.
-    memo: Option<PlanMemo>,
-    parent: Option<Structure>,
-    /// The schema and table `parent` was asked for, and the request that carries the answer.
-    asked: (String, String),
-    parent_req: u64,
-    parent_err: Option<String>,
-    /// How many rows point at nothing for the key as it stands, and which columns and request that is for.
-    orphans: Option<Result<u64, String>>,
-    orphan_for: Option<OrphanKey>,
-    orphan_req: u64,
-    /// The server takes a key only on a whole primary or unique key, and the request that asks it.
-    strict: bool,
-    rules_req: u64,
-    /// The person asked for the check on a big table.
-    check: bool,
-    /// A few of the rows the count found, as their key values.
-    sample: Vec<String>,
-    /// PostgreSQL: the namespace is a schema of the tab's database, and these are the options only it has.
-    pg: bool,
-    match_full: bool,
-    deferrable: bool,
-    deferred: bool,
-    not_valid: bool,
-    /// The key being edited, which a change replaces (PostgreSQL). None for a new one.
-    from: Option<ForeignKey>,
-}
-
-impl FkForm {
-    pub(in crate::app) fn parent_loaded(&mut self, req: u64, res: db::Res<Structure>) -> bool {
-        if req != self.parent_req || req == 0 {
-            return false;
-        }
-        match res {
-            Ok(s) => (self.parent, self.parent_err) = (Some(s), None),
-            Err(e) => (self.parent, self.parent_err) = (None, Some(e)),
-        }
-        true
-    }
-
-    pub(in crate::app) fn rules_done(&mut self, req: u64, strict: bool) {
-        if req == self.rules_req && req != 0 {
-            self.strict = strict;
-        }
-    }
-
-    pub(in crate::app) fn orphans_done(&mut self, req: u64, res: db::Res<u64>, sample: Vec<String>) -> bool {
-        if req != self.orphan_req || req == 0 {
-            return false;
-        }
-        (self.orphans, self.sample) = (Some(res), sample);
-        true
-    }
-
-    /// Puts the form back in the state where the count of the rows with no match is asked and not answered yet.
-    #[cfg(test)]
-    pub(in crate::app) fn forget_orphan_answer(&mut self) {
-        self.orphans = None;
-    }
-
-    /// The key the form describes once every part is picked.
-    fn key(&self, schema: &str) -> Option<ForeignKey> {
-        if self.ref_table.is_empty() || self.pairs.is_empty() || self.pairs.iter().any(|(a, b)| a.is_empty() || b.is_empty()) {
-            return None;
-        }
-        Some(ForeignKey {
-            name: self.name.trim().to_string(),
-            db: schema.to_string(),
-            table: String::new(),
-            cols: self.pairs.iter().map(|p| p.0.clone()).collect(),
-            ref_db: self.ref_db.clone(),
-            ref_table: self.ref_table.clone(),
-            ref_cols: self.pairs.iter().map(|p| p.1.clone()).collect(),
-            on_update: self.on_update.clone(),
-            on_delete: self.on_delete.clone(),
-            match_full: self.pg && self.match_full,
-            deferrable: self.pg && self.deferrable,
-            deferred: self.pg && self.deferrable && self.deferred,
-            not_valid: self.pg && self.not_valid,
-            comment: self.from.as_ref().map(|o| o.comment.clone()).unwrap_or_default(),
-            // The parent as the form saw it, so the transaction can refuse when it changed before the key was added.
-            ref_seen: self.parent.as_ref().filter(|p| self.pg && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &self.pairs.iter().map(|x| x.1.clone()).collect::<Vec<_>>())).unwrap_or_default(),
-            ..Default::default()
-        })
-    }
-}
 
 /// What changing key `old` into `new` stages: a rename when only the name differs, else the key dropped and added again,
 /// which PostgreSQL does in the one transaction.
@@ -184,81 +68,10 @@ fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql
 }
 
 impl App {
-    /// The Add relation dialog, or with `edit` the dialog on that key of the table (PostgreSQL).
-    pub(in crate::app) fn open_fk_form(&mut self, edit: Option<usize>) {
-        let Some(own) = self.structure().cloned() else { return };
-        let from = edit.and_then(|i| own.foreign_keys.get(i).cloned());
-        if let Some(k) = &from {
-            if !k.opaque.is_empty() {
-                return self.warn(format!("{} cannot be edited here: {}.", k.name, k.opaque));
-            }
-            let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-            if self.staged().iter().any(|c| matches!(c, Change::DropFk(n) | Change::RenameFk { from: n, .. } | Change::SetFkDeferral { name: n, .. } if ddl::fk_name_is(pg, n, &k.name))) {
-                return self.warn(format!("{} already has a staged change. Remove it first.", k.name));
-            }
-        }
-        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        // The namespace the key points into: the database on MySQL, a schema of this database on PostgreSQL.
-        let pg = self.is_pg(sel.conn);
-        let ns = if pg { self.sel_schema(&sel) } else { sel.db.clone() };
-        let rest = self.staged().to_vec();
-        let first = own.columns.first().map(|c| c.name.clone()).unwrap_or_default();
-        let (d, version, _) = self.alter_env();
-        // Until the server answers, a MySQL that has the rule on by default is taken to have it.
-        let strict = ddl::fk_whole_key_default(d, &version);
-        let mut rules_req = 0;
-        if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()).filter(|_| !pg) {
-            self.req += 1;
-            rules_req = self.req;
-            self.worker.sql_fk_rules(rules_req, sql);
-        }
-        let (name, pairs) = match &from {
-            Some(k) => (k.name.clone(), k.cols.iter().cloned().zip(k.ref_cols.iter().cloned()).collect()),
-            None => (String::new(), vec![(first, String::new())]),
-        };
-        let (ref_db, ref_table) = from.as_ref().map(|k| (k.ref_db.clone(), k.ref_table.clone())).unwrap_or((ns, String::new()));
-        let (on_update, on_delete) = from.as_ref().map(|k| (k.on_update.clone(), k.on_delete.clone())).unwrap_or_else(|| if pg { ("NO ACTION".into(), "NO ACTION".into()) } else { ("CASCADE".into(), "RESTRICT".into()) });
-        self.modal = Some(Modal::FkEdit(Box::new(FkForm {
-            name,
-            named: from.is_some(),
-            pairs,
-            ref_db,
-            ref_table,
-            on_update,
-            on_delete,
-            own_cols: own.columns.iter().map(|c| c.name.clone()).filter(|n| !rest.iter().any(|c| matches!(c, Change::Drop(d) if d == n))).collect(),
-            own,
-            rest,
-            memo: None,
-            parent: None,
-            asked: (String::new(), String::new()),
-            parent_req: 0,
-            parent_err: None,
-            orphans: None,
-            orphan_for: None,
-            orphan_req: 0,
-            strict,
-            rules_req,
-            check: false,
-            sample: Vec::new(),
-            pg,
-            match_full: from.as_ref().is_some_and(|k| k.match_full),
-            deferrable: from.as_ref().is_some_and(|k| k.deferrable),
-            deferred: from.as_ref().is_some_and(|k| k.deferred),
-            not_valid: from.as_ref().is_some_and(|k| k.not_valid),
-            from,
-        })));
-    }
-
-    pub(in crate::app) fn stage_drop_fk(&mut self, i: usize) {
-        let Some(name) = self.structure().and_then(|s| s.foreign_keys.get(i)).map(|k| k.name.clone()) else { return };
-        let mut staged = self.staged().to_vec();
-        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
-        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if ddl::fk_name_is(pg, n, &name))) {
-            return;
-        }
-        staged.push(Change::DropFk(name));
-        self.set_staged(staged);
+    /// The Add relation dialog. Forwards to Core, which hands the form back at once.
+    pub(in crate::app) fn open_fk_form(&mut self) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Structure(StructA::EditFk { tab, fk: None }));
     }
 
     /// The tables a key can point at in a namespace (a database, or a schema of `db` on PostgreSQL), views left out. None
@@ -267,15 +80,13 @@ impl App {
         if self.is_pg(conn) {
             self.pg_load_tables(conn, db, schema);
             let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
-            return Some(self.conn(conn)?.tables_in(db, schema)?.iter().filter(|t| !self.views.has(conn, &key, t)).cloned().collect());
+            return Some(self.conn(conn)?.tables_in(db, schema)?.iter().filter(|t| !self.core.views.has(conn, &key, t)).cloned().collect());
         }
         let list = self.conn(conn)?.dbs.iter().find(|d| d.0 == schema)?.1.clone();
         match list {
-            Some(l) => Some(l.into_iter().filter(|t| !self.views.has(conn, schema, t)).collect()),
+            Some(l) => Some(l.into_iter().filter(|t| !self.core.views.has(conn, schema, t)).collect()),
             None => {
-                if self.sql_asked.insert((conn, schema.to_string())) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-                    self.worker.sql_tables(conn, sql, schema.to_string());
-                }
+                self.exec(Action::SqlAsk(SqlAskA::Tables { conn, schema: schema.to_string() }));
                 None
             }
         }
@@ -424,10 +235,8 @@ impl App {
             if f.ref_db == schema && f.ref_table == table {
                 f.parent = Some(f.own.clone());
                 f.parent_req = 0;
-            } else if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.req += 1;
-                f.parent_req = self.req;
-                self.worker.sql_structure(self.req, sql, f.ref_db.clone(), f.ref_table.clone());
+            } else if let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::Structure { sel: sel.clone(), ns: f.ref_db.clone(), table: f.ref_table.clone() })) {
+                f.parent_req = req;
             }
         }
 
@@ -454,11 +263,9 @@ impl App {
         let okey = key.as_ref().map(OrphanKey::of);
         if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) && f.orphan_for.as_ref() != Some(ok) {
             let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
-            if f.parent.is_some() && (!big || f.check) && let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.req += 1;
-                (f.orphan_req, f.orphan_for, f.orphans) = (self.req, okey.clone(), None);
+            if f.parent.is_some() && (!big || f.check) && let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::Orphans { sel: sel.clone(), schema: schema.clone(), table: table.clone(), fk: k.clone() })) {
+                (f.orphan_req, f.orphan_for, f.orphans) = (req, okey.clone(), None);
                 f.sample.clear();
-                self.worker.sql_orphans(self.req, sql, schema.clone(), table.clone(), k.clone());
             }
         }
 
@@ -478,7 +285,7 @@ impl App {
             } else if all.len() == f.rest.len() {
                 Err("Nothing is changed.".into())
             } else {
-                PlanMemo::of(&mut f.memo, self, &f.own, &all).plan.as_ref().map(|p| p.sql()).map_err(Clone::clone)
+                super::alter::plan_memo(&mut f.memo, self, &f.own, &all).plan.as_ref().map(|p| p.sql()).map_err(Clone::clone)
             };
         } else if let Some(p) = &problem {
             text = Err(p.clone());
@@ -549,10 +356,7 @@ impl App {
         });
         if stage || now {
             *keep = false;
-            self.set_staged(super::alter::restage(self.staged(), None, all, f.rest.len()));
-            if now {
-                self.request_alter_apply();
-            }
+            self.stage_from_dialog(all, f.rest.len(), None, now);
         }
     }
 
@@ -562,7 +366,7 @@ impl App {
     pub(in crate::app) fn open_fk_row(&mut self, fk: &ForeignKey, row: &Document) {
         let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
-        if self.sql_cell.is_some() {
+        if self.core.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
@@ -573,12 +377,7 @@ impl App {
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
         let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
-        self.open_tab(sel, Open::Link);
-        let Some(t) = self.tm() else { return };
-        t.view = View::Documents;
-        t.filter_txt = text;
-        t.page = 0;
-        self.reload();
+        self.exec(Action::Tab(TabA::FilterText { sel: Some(sel), text }));
     }
 
     /// QUARRY_TEST_SQL=addrel: the dialog filled as in the design, the currency column of orders pointing at
@@ -587,7 +386,7 @@ impl App {
         if which != "addrel" {
             return;
         }
-        self.open_fk_form(None);
+        self.open_fk_form();
         let Some(Modal::FkEdit(f)) = self.modal.as_mut() else { return };
         use db::sql::structure::{Column, Index, IndexCol};
         let code = Column { name: "code".into(), full_type: "char(3)".into(), collation: Some("utf8mb4_0900_ai_ci".into()), key: "PRI".into(), ..Default::default() };
@@ -615,7 +414,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tabs::has_clauses;
+    use quarry_core::action::tabs::has_clauses;
     use db::sql::value::Kind;
     use db::sql::{Col, Dialect};
 

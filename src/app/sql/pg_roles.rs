@@ -6,11 +6,12 @@
 
 use crate::app::sql::users::{forget_secret, secret_id};
 use crate::app::*;
-use db::sql::pg::roles::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
-use std::sync::Arc;
+use db::sql::pg::roles::{self as rp, Change, Cluster, DefKind, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
 use zeroize::Zeroize;
-
-const NOTE_LOCKED: &str = "Read-only: unlock writes to change roles and privileges.";
+pub(crate) use quarry_core::state::sql::pg_roles::*;
+pub(crate) use quarry_core::state::sql::pg_roles::DropForm;
+use quarry_core::action::roles::{RolesEnv as Env, NOTE_LOCKED};
+use quarry_core::action::{Action, RolesA as Act, Secret};
 /// What a hash computed here means for a server that checks passwords.
 const POLICY: &str = "The server gets no password to check, so policy extensions such as passwordcheck or credcheck cannot hold it to their rules, and one set to accept passwords only in clear refuses it.";
 
@@ -31,188 +32,6 @@ const CELL_H: f32 = 31.0;
 const CHIP_PRIV_H: f32 = 18.0;
 const SIDE_W: f32 = 220.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::app) enum PTab {
-    Privileges,
-    Roles,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::app) enum RTab {
-    Role,
-    Membership,
-    Defaults,
-}
-
-/// The + Default privilege form of the Roles tab.
-pub(in crate::app) struct DefForm {
-    owner: String,
-    schema: String,
-    kind: DefKind,
-    privs: BTreeSet<String>,
-}
-
-pub(in crate::app) struct PgRolesWin {
-    pub(in crate::app) conn: u64,
-    pub(in crate::app) tab: PTab,
-    pub(in crate::app) rtab: RTab,
-    pub(in crate::app) req_cluster: u64,
-    /// Shared so a frame borrows it alongside the window instead of copying every role and membership.
-    pub(in crate::app) cluster: Option<db::Res<Arc<Cluster>>>,
-    /// Each role's `Cluster::chain`, worked out once per answer rather than for every cell of every frame.
-    chains: HashMap<String, Vec<String>>,
-    pub(in crate::app) database: String,
-    pub(in crate::app) schema: String,
-    pub(in crate::app) kind: Kind,
-    pub(in crate::app) inherited: bool,
-    /// Whether the pg_ roles are listed.
-    pub(in crate::app) system: bool,
-    pub(in crate::app) req_objs: u64,
-    pub(in crate::app) objs: Option<db::Res<Objects>>,
-    pub(in crate::app) req_defs: u64,
-    pub(in crate::app) defs: Option<db::Res<Defaults>>,
-    /// The role of the side panel and the Roles tab.
-    pub(in crate::app) role: Option<String>,
-    /// The cell whose editor is open: the object's oid and the grantee ("" for PUBLIC).
-    pub(in crate::app) cell: Option<(String, String)>,
-    pub(in crate::app) filter: String,
-    pub(in crate::app) staged: Vec<Change>,
-    pub(in crate::app) busy: bool,
-    /// The request id of the Apply in flight; an answer with another one is from an Apply this window no longer waits for.
-    pub(in crate::app) req_apply: u64,
-    /// The signed-in role's name typed to confirm a change to its own membership.
-    confirm: String,
-    /// The Role tab's text fields as typed, for the role in `fields_for`.
-    lim: String,
-    until: String,
-    fields_for: String,
-    field_err: Option<String>,
-    def_form: Option<DefForm>,
-}
-
-impl PgRolesWin {
-    pub(in crate::app) fn new(conn: u64, database: String) -> PgRolesWin {
-        PgRolesWin {
-            conn,
-            tab: PTab::Privileges,
-            rtab: RTab::Role,
-            req_cluster: 0,
-            cluster: None,
-            chains: HashMap::new(),
-            database,
-            schema: "public".into(),
-            kind: Kind::Tables,
-            inherited: true,
-            system: false,
-            req_objs: 0,
-            objs: None,
-            req_defs: 0,
-            defs: None,
-            role: None,
-            cell: None,
-            filter: String::new(),
-            staged: Vec::new(),
-            busy: false,
-            req_apply: 0,
-            confirm: String::new(),
-            lim: String::new(),
-            until: String::new(),
-            fields_for: String::new(),
-            field_err: None,
-            def_form: None,
-        }
-    }
-
-    fn cl(&self) -> Option<&Cluster> {
-        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).map(|c| &**c)
-    }
-
-    fn cl_arc(&self) -> Option<Arc<Cluster>> {
-        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).cloned()
-    }
-
-    fn set_cluster(&mut self, res: db::Res<Cluster>) {
-        self.chains = match &res {
-            Ok(c) => c.roles.iter().map(|r| (r.name.clone(), c.chain(&r.name))).chain([(String::new(), vec![String::new()])]).collect(),
-            Err(_) => HashMap::new(),
-        };
-        self.cluster = Some(res.map(Arc::new));
-    }
-
-    /// The staged changes to the signed-in role's own membership that need a typed confirmation, by index, with why.
-    fn risky(&self) -> Vec<(usize, String)> {
-        let Some(c) = self.cl() else { return Vec::new() };
-        self.staged.iter().enumerate().filter_map(|(i, s)| c.self_membership_risk(s).map(|why| (i, why))).collect()
-    }
-
-    fn objects(&self) -> Option<&Objects> {
-        self.objs.as_ref().and_then(|o| o.as_ref().ok())
-    }
-
-    fn defaults(&self) -> Option<&Defaults> {
-        self.defs.as_ref().and_then(|o| o.as_ref().ok())
-    }
-
-    /// The roles shown as matrix columns and in the list, pg_ roles only when asked for.
-    fn roles(&self) -> Vec<&Role> {
-        self.cl().map(|c| c.roles.iter().filter(|r| self.system || !r.system()).collect()).unwrap_or_default()
-    }
-
-    /// Staged changes of objects or default privileges, which tie the batch to the picked database.
-    fn tied(&self) -> bool {
-        self.staged.iter().any(Change::in_database)
-    }
-
-    /// Adds a change, folded into one staged earlier on the same thing so the batch holds one change per thing, from what the
-    /// server had to what the boxes say now. A change back to where it started is dropped.
-    fn stage(&mut self, c: Change) {
-        let k = key(&c);
-        if let Some(i) = self.staged.iter().position(|s| key(s) == k) {
-            let first = self.staged.remove(i);
-            let merged = match (first, c) {
-                (Change::Acl { target, grantee, from, .. }, Change::Acl { to, .. }) => Change::Acl { target, grantee, from, to },
-                (Change::Attrs { role, from, .. }, Change::Attrs { to, .. }) => Change::Attrs { role, from, to },
-                (Change::Member { group, member, from, .. }, Change::Member { to, .. }) => Change::Member { group, member, from, to },
-                (Change::Default { owner, schema, kind, grantee, from, .. }, Change::Default { to, .. }) => Change::Default { owner, schema, kind, grantee, from, to },
-                (_, c) => c,
-            };
-            if !merged.is_noop() {
-                self.staged.insert(i, merged);
-            }
-        } else if !c.is_noop() {
-            self.staged.push(c);
-        }
-    }
-
-    fn privs_now(&self, o: &Obj, grantee: &str) -> Privs {
-        let k = format!("acl|{:?}|{}|{grantee}", self.kind, o.oid);
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Acl { to, .. }) => to.clone(),
-            _ => o.direct(grantee),
-        }
-    }
-
-    fn attrs_now(&self, role: &str) -> Option<Attrs> {
-        let k = format!("attrs|{role}");
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Attrs { to, .. }) => Some(to.clone()),
-            _ => self.cl()?.role(role).map(|r| r.attrs.clone()),
-        }
-    }
-
-    fn member_now(&self, group: &str, member: &str) -> Option<Opts> {
-        let k = format!("mem|{group}|{member}");
-        match self.staged.iter().find(|s| key(s) == k) {
-            Some(Change::Member { to, .. }) => *to,
-            _ => self.cl()?.membership(group, member),
-        }
-    }
-
-    fn staged_key(&self, k: &str) -> bool {
-        self.staged.iter().any(|s| key(s) == k)
-    }
-}
-
 /// What the + Default privilege form stages for the row `k`: the privileges a staged change of that row leaves, else the
 /// server's, plus the ones ticked. Starting from the server's would cancel a staged revoke of the row, since stage keeps
 /// the earlier `from` with this `to`.
@@ -227,59 +46,6 @@ fn def_form_to(staged: &[Change], k: &str, server: &Privs, add: &BTreeSet<String
     to
 }
 
-fn key(c: &Change) -> String {
-    match c {
-        Change::Acl { target, grantee, .. } => format!("acl|{:?}|{}|{grantee}", target.kind, target.oid),
-        Change::Attrs { role, .. } => format!("attrs|{role}"),
-        Change::Member { group, member, .. } => format!("mem|{group}|{member}"),
-        Change::Default { owner, schema, kind, grantee, .. } => format!("def|{owner}|{schema}|{:?}|{grantee}", kind),
-    }
-}
-
-pub(in crate::app) struct NewRoleForm {
-    conn: u64,
-    name: String,
-    attrs: Attrs,
-    groups: Vec<String>,
-    /// Typed here and handed to the worker by Create; never shown, logged or kept after.
-    password: String,
-    serial: u64,
-}
-
-pub(in crate::app) struct PgPwForm {
-    conn: u64,
-    role: String,
-    oid: String,
-    password: String,
-    again: String,
-    serial: u64,
-}
-
-/// The typed passwords are wiped whenever a dialog goes away, by a button, Esc or another dialog taking its place.
-impl Drop for NewRoleForm {
-    fn drop(&mut self) {
-        self.password.zeroize();
-    }
-}
-
-impl Drop for PgPwForm {
-    fn drop(&mut self) {
-        self.password.zeroize();
-        self.again.zeroize();
-    }
-}
-
-#[cfg(test)]
-impl PgPwForm {
-    pub(in crate::app) fn for_test(conn: u64, role: &str, serial: u64) -> PgPwForm {
-        PgPwForm { conn, role: role.into(), oid: String::new(), password: String::new(), again: String::new(), serial }
-    }
-
-    pub(in crate::app) fn typed(&self) -> &str {
-        &self.password
-    }
-}
-
 /// Drops what egui keeps of a closing password dialog's fields, the undo history of their text included.
 pub(in crate::app) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
     match m {
@@ -289,50 +55,12 @@ pub(in crate::app) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
     }
 }
 
-pub(in crate::app) struct DropForm {
-    conn: u64,
-    role: String,
-    req: u64,
-    info: Option<db::Res<DropInfo>>,
-    reassign: bool,
-    heir: String,
-    typed: String,
-}
-
-enum Act {
-    Tab(PTab),
-    RTab(RTab),
-    Database(String),
-    Schema(String),
-    Kind(Kind),
-    Role(String),
-    OpenRole(String),
-    Stage(Change),
-    Apply,
-    Discard,
-    Close,
-    Unlock,
-    Refresh,
-    NewRole,
-    Drop(String),
-    Password(String),
-}
-
-/// What the tabs need to know about the connection and the login.
-struct Env {
-    major: u32,
-    /// The lock's note while writes are locked.
-    locked: Option<String>,
-    /// Why privileges and attributes cannot be staged: the lock, or a login without CREATEROLE. Its own password and the members
-    /// of roles it holds ADMIN on have checks of their own.
-    blocked: Option<String>,
-}
-
-impl Env {
-    /// Whether `c` may be staged: memberships go by the ADMIN option the server asks for, not by CREATEROLE.
-    fn may_stage(&self, c: &Change) -> bool {
-        self.locked.is_none() && (self.blocked.is_none() || matches!(c, Change::Member { .. }))
-    }
+/// The open cell editor as the actions pushed so far this frame leave it, so a second cell drawn later sees the first one's change.
+fn cell_now<'a>(w: &'a PgRolesWin, acts: &'a [Act]) -> Option<&'a (String, String)> {
+    acts.iter().rev().find_map(|a| match a {
+        Act::Cell(c) => Some(c.as_ref()),
+        _ => None,
+    }).unwrap_or(w.cell.as_ref())
 }
 
 /// The matrix columns `left..right` shows, of `n` columns `w` wide from `x0`.
@@ -428,136 +156,10 @@ fn mono_label(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
 }
 
 impl App {
-    fn pg_roles_db(&self, conn: u64) -> Option<db::sql::Db> {
-        self.conn(conn).and_then(|c| c.sql.clone())
-    }
-
-    /// Opens the window on the connection's own database.
-    pub(in crate::app) fn open_pg_roles(&mut self, conn: u64) {
-        let database = self.pg_roles_db(conn).map(|d| d.pg_database()).filter(|d| !d.is_empty()).unwrap_or_else(|| "postgres".into());
-        self.pg_roles = Some(PgRolesWin::new(conn, database));
-        self.pg_roles_reload();
-    }
-
-    /// Reads the roles again, then the objects and default privileges the window shows.
-    fn pg_roles_reload(&mut self) {
-        let Some((conn, database, schema, kind)) = self.pg_roles.as_ref().map(|w| (w.conn, w.database.clone(), w.schema.clone(), w.kind)) else { return };
-        let Some(sql) = self.pg_roles_db(conn) else { return };
-        self.req += 3;
-        let r = self.req;
-        if let Some(w) = &mut self.pg_roles {
-            (w.req_cluster, w.req_objs, w.req_defs) = (r - 2, r - 1, r);
-            w.cluster = None;
-            w.objs = None;
-            w.defs = None;
-        }
-        self.worker.pg_roles_cluster(conn, r - 2, sql.clone());
-        self.worker.pg_roles_objects(conn, r - 1, sql.clone(), database.clone(), schema, kind);
-        self.worker.pg_roles_defaults(conn, r, sql, database);
-    }
-
-    fn pg_roles_objects(&mut self) {
-        let Some((conn, database, schema, kind)) = self.pg_roles.as_ref().map(|w| (w.conn, w.database.clone(), w.schema.clone(), w.kind)) else { return };
-        let Some(sql) = self.pg_roles_db(conn) else { return };
-        self.req += 1;
-        let r = self.req;
-        if let Some(w) = &mut self.pg_roles {
-            w.req_objs = r;
-            w.objs = None;
-            w.cell = None;
-        }
-        self.worker.pg_roles_objects(conn, r, sql, database, schema, kind);
-    }
-
-    fn pg_roles_defaults(&mut self) {
-        let Some((conn, database)) = self.pg_roles.as_ref().map(|w| (w.conn, w.database.clone())) else { return };
-        let Some(sql) = self.pg_roles_db(conn) else { return };
-        self.req += 1;
-        let r = self.req;
-        if let Some(w) = &mut self.pg_roles {
-            w.req_defs = r;
-            w.defs = None;
-        }
-        self.worker.pg_roles_defaults(conn, r, sql, database);
-    }
-
-    pub(in crate::app) fn pg_roles_answer(&mut self, conn: u64, req: u64, ans: Answer) {
-        match ans {
-            Answer::Cluster(res) => {
-                if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_cluster == req) {
-                    if let Ok(c) = &res && w.role.as_ref().is_none_or(|r| c.role(r).is_none()) {
-                        w.role = c.roles.iter().find(|r| !r.system() && r.name != c.me).or_else(|| c.me()).map(|r| r.name.clone());
-                    }
-                    w.set_cluster(res);
-                }
-            }
-            Answer::Objects(res) => {
-                if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_objs == req) {
-                    // A schema that is not in this database falls back to public or the first one listed.
-                    if let Ok(o) = &res && w.kind.in_schema() && !o.schemas.contains(&w.schema) && let Some(s) = o.schemas.iter().find(|s| *s == "public").or(o.schemas.first()).cloned() {
-                        w.schema = s;
-                        w.objs = None;
-                        self.pg_roles_objects();
-                        return;
-                    }
-                    w.objs = Some(res);
-                }
-            }
-            Answer::Defaults(res) => {
-                if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_defs == req) {
-                    w.defs = Some(res);
-                }
-            }
-            Answer::DropInfo(res) => {
-                if let Some(Modal::PgDropRole(f)) = &mut self.modal && f.conn == conn && f.req == req {
-                    f.info = Some(res);
-                }
-            }
-            Answer::Done { did, res, undo } => self.pg_roles_done(conn, req, did, res, undo),
-        }
-    }
-
-    fn pg_roles_done(&mut self, conn: u64, req: u64, did: Did, res: db::Res<String>, undo: Option<UndoAction>) {
-        let ok = res.is_ok();
-        match res {
-            Ok(s) => self.ok(s),
-            Err(e) => self.err(e),
-        }
-        if let Some(u) = undo {
-            self.push_undo(u);
-        }
-        let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn) else { return };
-        match &did {
-            // Only the Apply this window waits for: one from before Esc closed it must not clear what was staged since.
-            Did::Applied if req == w.req_apply => {
-                w.busy = false;
-                // A failed batch ran nothing and stays staged, so its reason can be read against what the server holds now.
-                if ok {
-                    w.staged.clear();
-                    w.confirm.clear();
-                }
-            }
-            Did::Created(name) if ok => w.role = Some(name.clone()),
-            Did::Dropped(name) if ok && w.role.as_deref() == Some(name.as_str()) => w.role = None,
-            _ => {}
-        }
-        w.fields_for.clear();
-        if did != Did::Password {
-            self.pg_roles_reload();
-        }
-    }
-
-    fn pg_roles_env(&self, w: &PgRolesWin) -> Env {
-        let major = w.cl().map(|c| c.major).or_else(|| self.pg_roles_db(w.conn).map(|d| d.version.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0))).unwrap_or(17);
-        let locked = (!self.conn_writable(w.conn)).then(|| NOTE_LOCKED.to_string());
-        let blocked = locked.clone().or_else(|| w.cl().and_then(Cluster::read_only_reason));
-        Env { major, locked, blocked }
-    }
-
     pub(in crate::app) fn pg_roles_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.pg_roles.take() else { return };
+        let Some(w) = self.core.pg_roles.as_ref() else { return };
         let conn = w.conn;
-        let env = self.pg_roles_env(&w);
+        let env = self.core.roles_env(&w);
         let locked = !self.conn_writable(conn);
         let conn_name = self.conn_name(conn);
         let version = self.conn(conn).map(|c| c.server.version.clone()).unwrap_or_default();
@@ -595,124 +197,27 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(format!("Could not read the roles: {e}")).color(ALERT())).wrap());
                 }
                 Some(Ok(_)) => match w.tab {
-                    PTab::Privileges => self.pg_privileges_tab(ui, &mut w, &env, &mut acts),
-                    PTab::Roles => self.pg_roles_tab(ui, &mut w, &env, &mut acts),
+                    PTab::Privileges => self.pg_privileges_tab(ui, w, &env, &mut acts),
+                    PTab::Roles => self.pg_roles_tab(ui, w, &env, &mut acts),
                 },
             }
             b.end(outer);
-            dialog_foot_free(outer, |ui| self.pg_staged_bar(ui, &mut w, &env, &mut acts));
+            dialog_foot_free(outer, |ui| self.pg_staged_bar(ui, w, &env, &mut acts));
         });
-        let mut open = true;
         for a in acts {
-            match a {
-                Act::Tab(t) => {
-                    w.tab = t;
-                    w.cell = None;
-                }
-                Act::RTab(t) => w.rtab = t,
-                Act::Database(d) => {
-                    w.database = d;
-                    self.pg_roles = Some(w);
-                    self.pg_roles_objects();
-                    self.pg_roles_defaults();
-                    w = self.pg_roles.take().unwrap();
-                }
-                Act::Schema(s) => {
-                    w.schema = s;
-                    self.pg_roles = Some(w);
-                    self.pg_roles_objects();
-                    w = self.pg_roles.take().unwrap();
-                }
-                Act::Kind(k) => {
-                    w.kind = k;
-                    self.pg_roles = Some(w);
-                    self.pg_roles_objects();
-                    w = self.pg_roles.take().unwrap();
-                }
-                Act::Role(r) => w.role = Some(r),
-                Act::OpenRole(r) => {
-                    w.role = Some(r);
-                    w.tab = PTab::Roles;
-                    w.rtab = RTab::Role;
-                    w.cell = None;
-                }
-                Act::Stage(c) => {
-                    let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
-                    if let Some(why) = Cluster::self_lockout(&me, &c) {
-                        self.warn(why);
-                    } else if env.may_stage(&c) && !w.busy {
-                        w.stage(c);
-                    }
-                }
-                Act::Apply => {
-                    self.pg_roles = Some(w);
-                    self.pg_roles_apply();
-                    w = self.pg_roles.take().unwrap();
-                }
-                Act::Discard => {
-                    w.staged.clear();
-                    w.fields_for.clear();
-                    w.confirm.clear();
-                }
-                Act::Close => open = false,
-                Act::Unlock => self.modal = Some(Modal::Unlock(conn, None)),
-                Act::Refresh => {
-                    self.pg_roles = Some(w);
-                    self.pg_roles_reload();
-                    w = self.pg_roles.take().unwrap();
-                }
-                Act::NewRole => self.pg_new_role(conn),
-                Act::Drop(role) => self.pg_drop_role_ask(conn, role),
-                Act::Password(role) => {
-                    let oid = w.cl().and_then(|c| c.role(&role)).map(|r| r.oid.clone()).unwrap_or_default();
-                    self.req += 1;
-                    self.modal = Some(Modal::PgPassword(Box::new(PgPwForm { conn, role, oid, password: String::new(), again: String::new(), serial: self.req })));
-                }
-            }
+            self.exec(Action::Roles(a));
         }
         // Esc closes the cell editor first, and the window only on the next press.
-        let esc_closes = r.should_close() && self.modal.is_none() && !popover_open;
-        if !open || esc_closes {
-            return;
+        if r.should_close() && self.modal.is_none() && !popover_open {
+            self.exec(Action::Roles(Act::Close));
+        } else if r.should_close() && popover_open {
+            self.exec(Action::Roles(Act::Cell(None)));
         }
-        if r.should_close() && popover_open {
-            w.cell = None;
-        }
-        self.pg_roles = Some(w);
     }
 
-    fn pg_roles_apply(&mut self) {
-        let Some(w) = self.pg_roles.as_ref() else { return };
-        if w.staged.is_empty() || w.busy {
-            return;
-        }
-        let conn = w.conn;
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        if !self.conn_writable(conn) {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        let Some(sql) = self.pg_roles_db(conn) else { return self.warn_offline() };
-        self.req += 1;
-        let req = self.req;
-        let Some(w) = self.pg_roles.as_mut() else { return };
-        let risky = w.risky();
-        let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
-        if !risky.is_empty() && w.confirm != me {
-            return self.warn(format!("Type {me} to confirm the change to your own membership."));
-        }
-        // Objects and default privileges run in the database they were read from; role changes run anywhere, so there too.
-        let db_oid = if w.tied() { w.objects().map(|o| o.db_oid.clone()).or_else(|| w.defaults().map(|d| d.db_oid.clone())).unwrap_or_default() } else { String::new() };
-        let roles = w.cl().map(|c| c.roles.iter().map(|r| (r.name.clone(), r.oid.clone())).collect()).unwrap_or_default();
-        let batch = Batch { database: w.database.clone(), db_oid, changes: w.staged.clone(), roles, no_undo: risky.into_iter().map(|(i, _)| i).collect(), ..Default::default() };
-        w.busy = true;
-        w.req_apply = req;
-        self.worker.pg_roles_apply(conn, req, sql, batch, false);
-    }
-
-    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let preview = rp::preview(env.major, &w.staged);
+        let mut confirm = w.confirm.clone();
         let risky = w.risky();
         let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
         if !risky.is_empty() {
@@ -723,7 +228,11 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Type {me} to apply")).color(MUTED()));
-                    ui.add(egui::TextEdit::singleline(&mut w.confirm).font(egui::TextStyle::Monospace).desired_width(160.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirm own membership"));
+                    let typed = ui.add(egui::TextEdit::singleline(&mut confirm).font(egui::TextStyle::Monospace).desired_width(160.0));
+                    typed.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirm own membership"));
+                    if typed.changed() {
+                        acts.push(Act::Confirm(confirm.clone()));
+                    }
                 });
             });
             ui.add_space(6.0);
@@ -758,7 +267,7 @@ impl App {
                     });
                 });
                 right_group(ui, |ui| {
-                    let confirmed = risky.is_empty() || w.confirm == me;
+                    let confirmed = risky.is_empty() || confirm == me;
                     let can = !w.staged.is_empty() && preview.is_ok() && !w.busy && gate.is_none() && confirmed;
                     let why = if w.busy { "Applying…" } else if let Some(b) = &gate { b.as_str() } else if !confirmed { "Type the role name above to confirm" } else { "Nothing to apply" };
                     if ui.add_enabled(can, primary_button(ui, if w.busy { "Applying…" } else { "Apply" }, PRIMARY())).on_disabled_hover_text(why).clicked() {
@@ -775,7 +284,7 @@ impl App {
 
     // Privileges.
 
-    fn pg_privileges_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_privileges_tab(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let Some(c) = w.cl_arc() else { return };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -809,10 +318,17 @@ impl App {
                 acts.push(Act::Kind(kind));
             }
             right_group(ui, |ui| {
-                ui.checkbox(&mut w.inherited, "Show inherited").on_hover_text("Privileges a role holds through the roles it inherits from, and through PUBLIC, as dashed chips");
+                let mut inherited = w.inherited;
+                if ui.checkbox(&mut inherited, "Show inherited").on_hover_text("Privileges a role holds through the roles it inherits from, and through PUBLIC, as dashed chips").changed() {
+                    acts.push(Act::Inherited(inherited));
+                }
                 // A server with many roles makes a wide matrix; the filter keeps the columns that matter.
-                let f = ui.add(egui::TextEdit::singleline(&mut w.filter).hint_text("Filter roles").desired_width(120.0));
+                let mut filter = w.filter.clone();
+                let f = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter roles").desired_width(120.0));
                 f.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Filter roles"));
+                if f.changed() {
+                    acts.push(Act::Filter(filter));
+                }
             });
         });
         ui.add_space(10.0);
@@ -832,25 +348,19 @@ impl App {
         });
     }
 
-    fn pg_matrix(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
-        // Taken out for the frame instead of cloned: a schema can list thousands of objects.
-        let objs = match w.objs.take() {
+    fn pg_matrix(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
+        match &w.objs {
             None => {
                 spin(ui);
-                return;
             }
             Some(Err(e)) => {
                 ui.add(egui::Label::new(RichText::new(format!("Could not read the {}s of {}: {e}", w.kind.noun(), w.database)).color(ALERT())).wrap());
-                w.objs = Some(Err(e));
-                return;
             }
-            Some(Ok(o)) => o,
-        };
-        self.pg_matrix_of(ui, w, c, env, acts, &objs);
-        w.objs = Some(Ok(objs));
+            Some(Ok(objs)) => self.pg_matrix_of(ui, w, c, env, acts, objs),
+        }
     }
 
-    fn pg_matrix_of(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>, objs: &Objects) {
+    fn pg_matrix_of(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>, objs: &Objects) {
         let find = w.filter.trim().to_lowercase();
         let mut cols: Vec<(String, String)> = w.roles().iter().filter(|r| find.is_empty() || r.name.to_lowercase().contains(&find)).map(|r| (r.name.clone(), col_sub(c, r))).collect();
         cols.push((String::new(), "every role".into()));
@@ -927,7 +437,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn pg_cell(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, o: &Obj, role: &str, rect: egui::Rect, order: &[&str], env: &Env, acts: &mut Vec<Act>) {
+    fn pg_cell(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, o: &Obj, role: &str, rect: egui::Rect, order: &[&str], env: &Env, acts: &mut Vec<Act>) {
         let id = egui::Id::unique(("pg-cell", w.conn, &o.oid, role));
         let resp = ui.interact(rect.shrink(2.0), id, Sense::click());
         let cell = match w.chains.get(role) {
@@ -936,8 +446,8 @@ impl App {
         };
         let privs = w.privs_now(o, role);
         let staged = w.staged_key(&format!("acl|{:?}|{}|{role}", w.kind, o.oid));
-        let this = |w: &PgRolesWin| w.cell.as_ref().is_some_and(|(oid, g)| *oid == o.oid && g == role);
-        let open = this(w);
+        let this = |w: &PgRolesWin, acts: &[Act]| cell_now(w, acts).is_some_and(|(oid, g)| *oid == o.oid && g == role);
+        let open = this(w, &acts[..]);
         if resp.hovered() && !open {
             ui.painter().rect_filled(rect.shrink(2.0), R_SM, HOVER());
         }
@@ -1040,22 +550,22 @@ impl App {
             let click = ui.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten());
             if click.is_some_and(|p| !area.contains(p) && !rect.contains(p)) {
                 ui.ctx().data_mut(|d| d.insert_temp(pid, false));
-                if this(w) {
-                    w.cell = None;
+                if this(w, &acts[..]) {
+                    acts.push(Act::Cell(None));
                 }
                 return;
             }
         }
         if now_open && !open {
-            w.cell = Some((o.oid.clone(), role.to_string()));
-        } else if !now_open && this(w) {
-            w.cell = None;
+            acts.push(Act::Cell(Some((o.oid.clone(), role.to_string()))));
+        } else if !now_open && this(w, &acts[..]) {
+            acts.push(Act::Cell(None));
         }
     }
 
     // Roles.
 
-    fn pg_roles_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_roles_tab(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let Some(c) = w.cl_arc() else { return };
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(240.0, 480.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -1087,7 +597,7 @@ impl App {
         });
     }
 
-    fn pg_role_attrs(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_role_attrs(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
         let may = c.may_alter(role);
         let can = env.blocked.is_none() && may.is_ok() && !w.busy;
         if let (None, Err(why)) = (&env.blocked, &may) {
@@ -1095,12 +605,6 @@ impl App {
             ui.add_space(4.0);
         }
         let now = w.attrs_now(&role.name).unwrap_or_default();
-        if w.fields_for != role.name {
-            w.fields_for = role.name.clone();
-            w.lim = now.conn_limit.to_string();
-            w.until = now.valid_until.clone();
-            w.field_err = None;
-        }
         caption(ui, "ATTRIBUTES");
         ui.add_space(4.0);
         egui::Grid::new("pg-role-attrs").num_columns(4).spacing([14.0, 8.0]).show(ui, |ui| {
@@ -1142,29 +646,23 @@ impl App {
         ui.add_space(4.0);
         egui::Grid::new("pg-role-signin").num_columns(3).spacing([14.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
             form_label(ui, "Connection limit");
-            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.lim).font(egui::TextStyle::Monospace).desired_width(90.0));
+            let mut lim = w.lim.clone();
+            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut lim).font(egui::TextStyle::Monospace).desired_width(90.0));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Connection limit"));
             let was = role.attrs.conn_limit;
             ui.label(RichText::new(if now.conn_limit != was { format!("was {was}, -1 is no limit") } else { "-1 is no limit".into() }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
-                match w.lim.trim().parse::<i64>() {
-                    Ok(n) if (-1..=i32::MAX as i64).contains(&n) => {
-                        w.field_err = None;
-                        acts.push(Act::Stage(Change::Attrs { role: role.name.clone(), from: role.attrs.clone(), to: Attrs { conn_limit: n, ..now.clone() } }));
-                    }
-                    _ => w.field_err = Some("The connection limit is a whole number, -1 for none.".into()),
-                }
+                acts.push(Act::LimitEdited(lim));
             }
             form_label(ui, "Valid until");
-            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
+            let mut until = w.until.clone();
+            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Valid until"));
             ui.label(RichText::new(if now.valid_until == "-infinity" { "expired: -infinity, never valid" } else { "a date in UTC, or empty for never" }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
-                let v = w.until.trim();
-                let v = if v.eq_ignore_ascii_case("never") { "" } else { v };
-                acts.push(Act::Stage(Change::Attrs { role: role.name.clone(), from: role.attrs.clone(), to: Attrs { valid_until: v.to_string(), ..now.clone() } }));
+                acts.push(Act::UntilEdited(until));
             }
             form_label(ui, "Password");
             // Every role may set its own password, CREATEROLE or not.
@@ -1189,18 +687,10 @@ impl App {
 
     // Dialogs.
 
-    fn pg_new_role(&mut self, conn: u64) {
-        if !self.conn_writable(conn) {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        self.req += 1;
-        self.modal = Some(Modal::PgNewRole(Box::new(NewRoleForm { conn, name: String::new(), attrs: Attrs { login: true, ..Default::default() }, groups: Vec::new(), password: String::new(), serial: self.req })));
-    }
-
     pub(in crate::app) fn pg_new_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewRoleForm, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
-        let cluster = self.pg_roles.as_ref().and_then(|w| w.cl_arc()).unwrap_or_default();
+        let cluster = self.core.pg_roles.as_ref().and_then(|w| w.cl_arc()).unwrap_or_default();
         dialog_head(ui, &Head::new("New role").sub(self.conn_name(f.conn)).glyph(glyphs::user));
         let mut b = body_begin(ui);
         let outer = ui;
@@ -1297,15 +787,7 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked() {
                 // Whatever does not reach the worker is wiped here, a group's password included.
-                let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
-                if !spec.attrs.login {
-                    password.zeroize();
-                }
-                if self.demo {
-                    self.ok("Offline demo: no database is connected.");
-                } else if let Some(sql) = self.pg_roles_db(f.conn) {
-                    self.worker.pg_role_create(f.conn, sql, spec.clone(), std::mem::take(&mut *password), false);
-                }
+                self.exec(Action::Roles(Act::Create { conn: f.conn, spec: spec.clone(), password: Secret::new(std::mem::take(&mut f.password)) }));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -1321,7 +803,7 @@ impl App {
     pub(in crate::app) fn pg_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgPwForm, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
-        let encryption = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.password_encryption.clone())).unwrap_or_default();
+        let encryption = self.core.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.password_encryption.clone())).unwrap_or_default();
         dialog_head(ui, &Head::new("Change password").sub(&f.role).glyph(glyphs::key));
         let mut b = body_begin(ui);
         let outer = ui;
@@ -1354,13 +836,8 @@ impl App {
         let ui = outer;
         dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
-                let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
                 f.again.zeroize();
-                if self.demo {
-                    self.ok("Offline demo: no database is connected.");
-                } else if let Some(sql) = self.pg_roles_db(f.conn) {
-                    self.worker.pg_role_password(f.conn, sql, f.role.clone(), f.oid.clone(), std::mem::take(&mut *password), false);
-                }
+                self.exec(Action::Roles(Act::SetPassword { conn: f.conn, role: f.role.clone(), oid: f.oid.clone(), password: Secret::new(std::mem::take(&mut f.password)) }));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -1374,25 +851,12 @@ impl App {
         }
     }
 
-    fn pg_drop_role_ask(&mut self, conn: u64, role: String) {
-        if !self.conn_writable(conn) {
-            return self.modal = Some(Modal::Unlock(conn, None));
-        }
-        self.req += 1;
-        let req = self.req;
-        let heir = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.me.clone())).unwrap_or_default();
-        self.modal = Some(Modal::PgDropRole(Box::new(DropForm { conn, role: role.clone(), req, info: None, reassign: true, heir, typed: String::new() })));
-        if let Some(sql) = self.pg_roles_db(conn) {
-            self.worker.pg_role_drop_info(conn, req, sql, role);
-        }
-    }
-
     pub(in crate::app) fn pg_drop_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
-        let home = self.pg_roles_db(f.conn).map(|d| d.pg_database()).unwrap_or_default();
-        let roles: Vec<String> = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.roles.iter().filter(|r| !r.system() && r.name != f.role).map(|r| r.name.clone()).collect())).unwrap_or_default();
+        let home = self.conn(f.conn).and_then(|c| c.sql.as_ref()).map(|d| d.pg_database()).unwrap_or_default();
+        let roles: Vec<String> = self.core.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.roles.iter().filter(|r| !r.system() && r.name != f.role).map(|r| r.name.clone()).collect())).unwrap_or_default();
         dialog_head(ui, &Head::new(format!("Drop role {}?", f.role)).glyph(glyphs::trash).tone(ALERT()));
         let mut b = body_begin(ui);
         let outer = ui;
@@ -1483,8 +947,8 @@ impl App {
         dialog_foot(ui, |ui| {
             let ok = writable && plan.is_some() && f.typed == f.role;
             if ui.add_enabled(ok, primary_button(ui, "Drop role", ALERT())).clicked() {
-                if let (Some((info, mode)), Some(sql)) = (plan, self.pg_roles_db(f.conn)) {
-                    self.worker.pg_role_drop(f.conn, sql, info, mode, false);
+                if let Some((info, mode)) = plan {
+                    self.exec(Action::Roles(Act::DropRun { conn: f.conn, info, mode }));
                 }
                 *keep = false;
             }
@@ -1494,38 +958,6 @@ impl App {
         });
     }
 
-    /// QUARRY_TEST_PG=roles (the Privileges tab with a cell editor open and one change staged) or roles-role (the Roles tab on
-    /// app_writer with its connection limit staged).
-    pub(in crate::app) fn pg_roles_demo(&mut self, which: &str, conn: u64) {
-        if !matches!(which, "roles" | "roles-role") {
-            return;
-        }
-        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-            c.writable = true;
-        }
-        let mut w = PgRolesWin::new(conn, "analytics".into());
-        let (mut cl, objs, defs) = demo_data();
-        w.role = Some("app_writer".into());
-        if which == "roles" {
-            let o = objs.objs.iter().find(|o| o.name == "orders").cloned().unwrap_or_default();
-            let mut to = o.direct("app_writer");
-            to.insert("DELETE".into(), false);
-            w.staged.push(Change::Acl { target: o.target(Kind::Tables), grantee: "app_writer".into(), from: o.direct("app_writer"), to });
-            w.cell = Some((o.oid.clone(), "app_writer".into()));
-        } else {
-            w.tab = PTab::Roles;
-            // The server has no limit yet, so the staged change reads as in the design.
-            if let Some(r) = cl.roles.iter_mut().find(|r| r.name == "app_writer") {
-                r.attrs.conn_limit = -1;
-            }
-            let r = cl.role("app_writer").cloned().unwrap_or_default();
-            w.staged.push(Change::Attrs { role: r.name.clone(), from: r.attrs.clone(), to: Attrs { conn_limit: 20, ..r.attrs.clone() } });
-        }
-        w.set_cluster(Ok(cl));
-        w.objs = Some(Ok(objs));
-        w.defs = Some(Ok(defs));
-        self.pg_roles = Some(w);
-    }
 }
 
 fn pg_side_panel(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, acts: &mut Vec<Act>) {
@@ -1581,10 +1013,13 @@ fn pg_side_panel(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, acts: &mut Vec<
     });
 }
 
-fn pg_role_list(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
-    ui.add(egui::TextEdit::singleline(&mut w.filter).hint_text("Filter roles").desired_width(f32::INFINITY));
+fn pg_role_list(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
+    let mut filter = w.filter.clone();
+    if ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter roles").desired_width(f32::INFINITY)).changed() {
+        acts.push(Act::Filter(filter.clone()));
+    }
     ui.add_space(6.0);
-    let find = w.filter.trim().to_lowercase();
+    let find = filter.trim().to_lowercase();
     let shown: Vec<Role> = w.roles().into_iter().filter(|r| find.is_empty() || r.name.to_lowercase().contains(&find)).cloned().collect();
     egui::ScrollArea::vertical().id_salt("pg-role-list").max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
         for (title, login) in [("LOGIN ROLES", true), ("GROUP ROLES", false)] {
@@ -1635,11 +1070,11 @@ fn pg_role_list(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, a
     let hidden = c.roles.iter().filter(|r| r.system()).count();
     let t = if w.system { format!("pg_ roles shown ({hidden})") } else { "pg_ roles hidden".into() };
     if ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(FAINT())).sense(Sense::click())).on_hover_text("Show or hide the server's built-in pg_ roles").clicked() {
-        w.system = !w.system;
+        acts.push(Act::System(!w.system));
     }
 }
 
-fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
+fn pg_role_members(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
     let opts = c.options();
     // Both lists, each a set of (group, member) pairs: what the server holds plus what is staged to be added.
     let pairs = |of: bool| -> Vec<(String, String)> {
@@ -1748,7 +1183,7 @@ fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Ro
     ui.add(egui::Label::new(RichText::new(help).size(TXT_SMALL).color(FAINT())).wrap());
 }
 
-fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
+fn pg_role_defaults(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
     let defs = match &w.defs {
         None => {
             spin(ui);
@@ -1814,13 +1249,14 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
         });
     });
     ui.add_space(4.0);
-    match &mut w.def_form {
+    match w.def_form.clone() {
         None => {
             if ui.add_enabled(can, egui::Button::new("+ Default privilege")).clicked() {
-                w.def_form = Some(DefForm { owner: c.me.clone(), schema: String::new(), kind: DefKind::Tables, privs: BTreeSet::new() });
+                acts.push(Act::DefForm(Some(DefForm { owner: c.me.clone(), schema: String::new(), kind: DefKind::Tables, privs: BTreeSet::new() })));
             }
         }
-        Some(f) => {
+        Some(mut f) => {
+            let was = f.clone();
             let mut close = false;
             egui::Frame::new().stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1884,7 +1320,9 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
                 });
             });
             if close {
-                w.def_form = None;
+                acts.push(Act::DefForm(None));
+            } else if f != was {
+                acts.push(Act::DefForm(Some(f)));
             }
         }
     }
@@ -1905,51 +1343,6 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
     }
     ui.add_space(6.0);
     ui.add(egui::Label::new(RichText::new("Default privileges apply to objects created after the change, not to existing ones; grant those on the Privileges tab.").size(TXT_SMALL).color(FAINT())).wrap());
-}
-
-/// The sample server of QUARRY_TEST_PG=roles: PostgreSQL 17, the roles of the design, the tables of `public` and a few default
-/// privileges.
-fn demo_data() -> (Cluster, Objects, Defaults) {
-    let role = |oid: &str, name: &str, a: Attrs| Role { oid: oid.into(), name: name.into(), attrs: a, admin: true };
-    let login = Attrs { login: true, ..Default::default() };
-    let roles = vec![
-        role("16401", "app_reader", login.clone()),
-        role("16402", "app_writer", Attrs { conn_limit: 20, ..login.clone() }),
-        role("16405", "jane", Attrs { valid_until: "2026-12-31 00:00:00+00".into(), ..login.clone() }),
-        role("10", "postgres", Attrs { superuser: true, createdb: true, createrole: true, replication: true, bypassrls: true, ..login.clone() }),
-        role("16403", "readonly", Attrs::default()),
-        role("16404", "reporting", Attrs::default()),
-        role("3373", "pg_monitor", Attrs::default()),
-    ];
-    let m = |g: &str, mem: &str| rp::Membership { group: g.into(), member: mem.into(), opts: Opts { admin: false, inherit: Some(true), set: Some(true) }, grantors: vec!["postgres".into()] };
-    let members = vec![m("reporting", "app_writer"), m("reporting", "jane"), m("readonly", "app_reader"), m("readonly", "reporting")];
-    let cl = Cluster { major: 17, me: "postgres".into(), roles, members, databases: vec!["analytics".into(), "billing".into(), "postgres".into()], password_encryption: "scram-sha-256".into() };
-    let p = |v: &[(&str, bool)]| -> Privs { v.iter().map(|(k, g)| (k.to_string(), *g)).collect() };
-    let e = |g: &str, v: &[(&str, bool)]| rp::AclEntry { grantee: g.into(), grantor: "postgres".into(), privs: p(v) };
-    let all: Vec<(&str, bool)> = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"].iter().map(|k| (*k, false)).collect();
-    let write = [("SELECT", false), ("INSERT", false), ("UPDATE", false)];
-    let table = |oid: &str, name: &str, detail: &str, owner: &str, acl: Vec<rp::AclEntry>| Obj { oid: oid.into(), schema: "public".into(), name: name.into(), detail: detail.into(), owner: owner.into(), acl, ..Default::default() };
-    let objs = vec![
-        table("16501", "orders", "", "postgres", vec![e("postgres", &all), e("app_reader", &[("SELECT", false)]), e("app_writer", &[("SELECT", false), ("INSERT", false), ("UPDATE", false), ("TRUNCATE", false)]), e("reporting", &[("SELECT", false)])]),
-        table("16502", "customers", "", "postgres", vec![e("postgres", &all), e("app_reader", &[("SELECT", false)]), e("app_writer", &write), e("reporting", &[("SELECT", false)])]),
-        table("16503", "order_items", "", "postgres", vec![e("postgres", &all), e("app_reader", &[("SELECT", false)]), e("app_writer", &[("SELECT", false), ("INSERT", false), ("UPDATE", false), ("DELETE", false)]), e("reporting", &[("SELECT", false)])]),
-        table("16504", "payments", "", "postgres", vec![e("postgres", &all), e("app_writer", &[("SELECT", false), ("INSERT", false)]), e("reporting", &[("SELECT", false)])]),
-        table("16505", "daily_sales", "view", "jane", vec![e("jane", &all), e("reporting", &[("SELECT", true)])]),
-        table("16506", "events", "", "postgres", vec![e("postgres", &all), e("app_reader", &[("SELECT", false)]), e("app_writer", &[("INSERT", false)])]),
-    ];
-    let objects = Objects { database: "analytics".into(), schema: "public".into(), kind: Kind::Tables, objs, schemas: vec!["public".into(), "reporting".into(), "staging".into()], db_oid: "16384".into(), cut: false };
-    let d = |owner: &str, schema: &str, kind: DefKind, acl: Vec<rp::AclEntry>| rp::DefaultAcl { owner: owner.into(), schema: schema.into(), kind, acl };
-    let defs = Defaults {
-        database: "analytics".into(),
-        db_oid: "16384".into(),
-        rows: vec![
-            d("postgres", "public", DefKind::Tables, vec![e("reporting", &[("SELECT", false)]), e("app_writer", &write)]),
-            d("postgres", "public", DefKind::Sequences, vec![e("app_writer", &[("USAGE", false), ("SELECT", false)])]),
-            d("postgres", "reporting", DefKind::Tables, vec![e("reporting", &[("SELECT", false)])]),
-        ],
-        schemas: vec!["public".into(), "reporting".into(), "staging".into()],
-    };
-    (cl, objects, defs)
 }
 
 #[cfg(test)]

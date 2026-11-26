@@ -4,144 +4,16 @@
 
 use crate::app::*;
 use super::filter_cells::{col_pick, combo_w, mono_edit, pill_combo, rule_editor, type_name, Hints};
-use super::filter_panel::Panel;
 use crate::db::sql::{
     filter::{self, Match},
-    rules::{self, Grain, Op, Rule},
-    schema::SchemaCol,
+    rules::{self, Grain, Rule},
     value::Kind,
-    Col, Dialect, PageQuery,
-};
+    Col, Dialect, };
 use crate::ui::sql_complete::{open_list, sql_ac_field, Scope, Wants};
-
-/// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
-#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub(in crate::app) struct Clauses {
-    /// SQL mode of the bar instead of Rules mode.
-    pub(in crate::app) sql: bool,
-    pub(in crate::app) select: String,
-    pub(in crate::app) group: String,
-    pub(in crate::app) having: String,
-    pub(in crate::app) limit: String,
-    pub(in crate::app) offset: String,
-    pub(in crate::app) hint: String,
-    pub(in crate::app) distinct: bool,
-    /// The filter tree as the panel last wrote it, kept only in the saved tabs: groups, order and off rows that the
-    /// WHERE text alone loses. Empty at runtime, where the tree lives in `Bar`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(in crate::app) tree: String,
-}
-
-/// One aggregate of the GROUP BY editor: function index into `FUNCS`, column ("" is `*`) and alias.
-#[derive(Clone, Default)]
-struct Agg {
-    func: usize,
-    col: String,
-    alias: String,
-}
+pub(crate) use quarry_core::state::sql::bar::*;
+use super::filter_panel::{Panel, PanelFold};
 
 const FUNCS: [&str; 5] = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
-
-/// The state of the GROUP BY editor. It is what the last Apply wrote, so reopening shows it again;
-/// text edited by hand in SQL mode is not read back (ponytail: parse it if someone asks).
-#[derive(Default)]
-struct GroupDlg {
-    keys: Vec<(String, Option<Grain>)>,
-    aggs: Vec<Agg>,
-    having: Option<Rule>,
-    /// Whether the server reads backslash escapes, for the HAVING preview.
-    bs: bool,
-}
-
-/// Runtime state of the bar. Only `c` is saved.
-#[derive(Default)]
-pub(in crate::app) struct Bar {
-    pub(in crate::app) c: Clauses,
-    /// The filter as the panel edits it. The WHERE text stays the source of truth: the tree writes it on every edit and
-    /// is read again from any text that came from elsewhere.
-    pub(in crate::app) tree: filter::Tree,
-    /// A restored tab's saved tree, used once the columns are known and only while it still writes the WHERE text.
-    pub(in crate::app) pending: String,
-    /// The tree as the open tabs save it.
-    pub(in crate::app) tree_json: String,
-    pub(in crate::app) panel: Panel,
-    /// Set by the panel's Save as filter; `sql_content` opens the Save dialog.
-    pub(in crate::app) save_filter: bool,
-    /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
-    pub(in crate::app) want_facts: Option<(String, Kind)>,
-    /// The WHERE text the tree was last written as; a different `filter_txt` came from elsewhere.
-    src: String,
-    /// The tree was read again, so the text is written back once, in the tree's spelling.
-    rewrite: bool,
-    fold_open: bool,
-    gdlg: GroupDlg,
-    /// The table's own columns, kept when a grouped answer replaces the result columns.
-    pub(in crate::app) table_cols: Arc<Vec<Col>>,
-    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
-    pub(in crate::app) ac: Ac,
-    pub(in crate::app) wants: Wants,
-    /// Set by the Explain button; `sql_content` runs the same entry point as Cmd+E.
-    pub(in crate::app) explain: bool,
-    /// Initial open states; only the offline demo sets them.
-    pub(in crate::app) preset: Preset,
-    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
-    adding: Option<Add>,
-    /// Whether the bar holds another query than the page's, worked out once a frame by `bar` so the results need not
-    /// build the query again.
-    pub(in crate::app) dirty: bool,
-    /// A WHERE text as it ran and as the rules respelled it.
-    respelled: Option<(String, String)>,
-    /// What `bar` derives from the columns, kept while they and the primary key stay the same.
-    memo: Option<ColsMemo>,
-    /// Whether the WHERE text read as a tree, for the text, the column pairs and the mode it was read with.
-    parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
-    /// The folded statement line as a job, for the statement text and the fold state it was built from.
-    fold: Option<(String, bool, LayoutJob)>,
-}
-
-impl Bar {
-    /// Cmd+F in Rules mode: the filter panel, with a new row when it has none.
-    pub(in crate::app) fn open_filters(&mut self, ctx: &egui::Context, cols: &[Col], d: Dialect) {
-        if self.tree.root.kids.is_empty() {
-            super::filter_panel::add(&mut self.tree, &mut self.panel, 0, false, cols, d);
-        }
-        let at = self.panel.sel;
-        self.panel.show(ctx, at);
-    }
-
-    /// The query that ran, with its WHERE spelled as the rules write it when that is how the bar shows it now. The history keeps
-    /// the text as it ran, so only this comparison reads the other spelling.
-    pub(in crate::app) fn ran_as_shown<'a>(&self, ran: &'a PageQuery) -> std::borrow::Cow<'a, PageQuery> {
-        match &self.respelled {
-            Some((from, to)) if ran.filter == *from => std::borrow::Cow::Owned(PageQuery { filter: to.clone(), ..ran.clone() }),
-            _ => std::borrow::Cow::Borrowed(ran),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Add {
-    Order,
-    Columns,
-    Group,
-}
-
-struct ColsMemo {
-    cols: Arc<Vec<Col>>,
-    pk: Vec<String>,
-    fallback: Arc<Vec<SchemaCol>>,
-    pairs: Arc<Vec<(String, Kind)>>,
-}
-
-/// What the bar shows open from the first frame: the suggestion list, the ORDER BY popover and the
-/// text typed into its first column picker.
-#[derive(Default)]
-pub(in crate::app) struct Preset {
-    pub(in crate::app) ac: bool,
-    pub(in crate::app) order: bool,
-    pub(in crate::app) pick: Option<String>,
-}
 
 /// A one line SQL input with highlighting and suggestions. Returns whether Enter ended the edit, which runs the query.
 #[allow(clippy::too_many_arguments)]
@@ -150,68 +22,6 @@ fn sql_input(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, wa
     let (out, _) = sql_ac_field(ui, id, text, ac, scope, values, wants, |ui, text, _| egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono).hint_text(hint).desired_width(w).layouter(&mut sql_layout).show(ui));
     crate::ui::editor::paint_pair(ui, &out);
     out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-}
-
-/// Splits at commas outside quotes and parentheses: select lists and GROUP BY lists.
-pub(in crate::app) fn split_top(text: &str) -> Vec<String> {
-    let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0, None::<char>);
-    for c in text.chars() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '\'' | '"' | '`') => quote = Some(c),
-            (None, '(') => depth += 1,
-            (None, ')') => depth -= 1,
-            (None, ',') if depth == 0 => {
-                out.push(std::mem::take(&mut cur));
-                continue;
-            }
-            _ => {}
-        }
-        cur.push(c);
-    }
-    out.push(cur);
-    out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-}
-
-/// A plain column name from a name quoted the way `quote_ident` writes it or a bare word, or None for an expression.
-/// `d` picks the quote: on MySQL "a" is a string, and a caller that rewrites the text must not turn it into a column.
-/// None reads either quote, for the callers that only look and have no dialect at hand.
-fn plain_ident(s: &str, d: Option<Dialect>) -> Option<String> {
-    let s = s.trim();
-    let quotes: &[char] = match d {
-        Some(Dialect::Postgres) => &['"'],
-        Some(_) => &['`'],
-        None => &['`', '"'],
-    };
-    for &q in quotes {
-        if let Some(inner) = s.strip_prefix(q).and_then(|x| x.strip_suffix(q)) {
-            // A lone quote inside means several names or an expression, such as "a" || "b".
-            let mut out = String::with_capacity(inner.len());
-            let mut it = inner.chars();
-            while let Some(c) = it.next() {
-                if c == q && it.next() != Some(q) {
-                    return None;
-                }
-                out.push(c);
-            }
-            return (!out.is_empty()).then_some(out);
-        }
-    }
-    // PostgreSQL folds an unquoted name to lower case, and that is the column it reads.
-    (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')).then(|| if d == Some(Dialect::Postgres) { s.to_ascii_lowercase() } else { s.to_string() })
-}
-
-/// ORDER BY text as (column, descending) keys, or None when it holds anything but plain columns.
-fn parse_order(text: &str, d: Option<Dialect>) -> Option<Vec<(String, bool)>> {
-    split_top(text)
-        .iter()
-        .map(|k| {
-            let up = k.to_ascii_uppercase();
-            let (col, desc) = if up.ends_with(" DESC") { (&k[..k.len() - 5], true) } else if up.ends_with(" ASC") { (&k[..k.len() - 4], false) } else { (k.as_str(), false) };
-            Some((plain_ident(col, d)?, desc))
-        })
-        .collect()
 }
 
 /// Shift-click on a header: the column becomes the last sort key, or flips direction when it already
@@ -233,12 +43,6 @@ pub(in crate::app) fn group_names(s: &SqlTab) -> Vec<String> {
 
 pub(in crate::app) fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
     keys.iter().map(|(c, desc)| format!("{} {}", d.quote_ident(c), if *desc { "DESC" } else { "ASC" })).collect::<Vec<_>>().join(", ")
-}
-
-/// What the worker is asked for, from the tab's texts.
-pub(in crate::app) fn page_query(t: &Tab) -> PageQuery {
-    let c = t.sql.as_ref().map(|s| s.bar.c.clone()).unwrap_or_default();
-    PageQuery { filter: t.filter_txt.clone(), order: t.sort_txt.clone(), select: split_top(&c.select), distinct: c.distinct, group: split_top(&c.group), having: c.having, limit: c.limit.trim().parse().ok(), skip: c.offset.trim().parse().unwrap_or(0), index_hint: c.hint }
 }
 
 /// SQL text colored by token: keywords, numbers and strings. Plugs into `TextEdit::layouter`.
@@ -573,53 +377,6 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
     (sel.join(", "), grp.join(", "))
 }
 
-/// Reads the WHERE text into the tree when it changed from elsewhere (Filter to these, a restored tab, a foreign key row),
-/// or always with `force`. A tree that still writes the text stays, so off rows and groups survive a trip through SQL
-/// mode, and a restored tab's saved tree comes back the same way. Text that is not a tree switches the bar to SQL. Without
-/// columns nothing can be read, so `src` stays behind and the read happens once they arrive.
-fn read_tree(b: &mut Bar, text: &str, pairs: &[(String, Kind)], d: Dialect, bs: bool, force: bool) -> bool {
-    // A saved tree is read even when the text matches `src`, which it does for a restored tab whose rows are all off.
-    let read = !b.c.sql && (force || text != b.src || !b.pending.is_empty()) && (!pairs.is_empty() || (text.trim().is_empty() && b.pending.is_empty()));
-    if read {
-        let pending = std::mem::take(&mut b.pending);
-        let keep = pending.is_empty() && filter::to_sql(&b.tree, d, bs) == text;
-        let tree = if keep {
-            None
-        } else if !pending.is_empty() {
-            filter::reconcile(&pending, text, pairs, d, bs)
-        } else {
-            filter::parse(text, pairs, d, bs)
-        };
-        match tree {
-            Some(t) => {
-                // Ids start over in a tree read afresh, so a selection would name another row.
-                (b.panel.sel, b.panel.pick) = (None, None);
-                b.tree = t;
-                b.tree_json = filter::to_json(&b.tree);
-            }
-            None if keep => {}
-            None => b.c.sql = true,
-        }
-        b.src = text.to_string();
-        b.rewrite = true;
-    }
-    read
-}
-
-/// Writes the tree out as the WHERE text, so Run, Copy as SQL and the fold line see it. Only a tree read from the current
-/// text is written: another is stale and would replace a text not read yet.
-fn write_tree(b: &mut Bar, text: &mut String, pairs: &[(String, Kind)], d: Dialect, bs: bool) {
-    if pairs.is_empty() || b.src != *text {
-        return;
-    }
-    let out = filter::to_sql(&b.tree, d, bs);
-    // `src` already equals the text when nothing changed, so it is only copied on a change.
-    if out != *text {
-        *text = out;
-        b.src = text.clone();
-    }
-}
-
 /// What the bar shows beside Run: the table's filter history and its saved filters, and what was picked in them.
 pub(in crate::app) struct Side<'a> {
     pub(in crate::app) hist: &'a QueryHist,
@@ -632,6 +389,16 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) covered: bool,
     /// What is known of the table's columns for the value cells, by column name.
     pub(in crate::app) facts: Option<&'a HashMap<String, db::sql::facts::ColFacts>>,
+    /// The mode switch and the filter panel's structural edits, run once the bar is drawn.
+    pub(in crate::app) acts: Vec<quarry_core::action::SqlA>,
+    /// The Save as view menu item was clicked; `sql_content` opens the dialog once the bar is drawn.
+    pub(in crate::app) save_view: bool,
+    /// The Explain button was clicked; `sql_content` runs the same entry point as Cmd+E.
+    pub(in crate::app) explain: bool,
+    /// The panel's Save as filter was clicked; `sql_content` opens the Save dialog.
+    pub(in crate::app) save_filter: bool,
+    /// What the frame changed in the bar's texts, clauses, tree and panel, sent before the other actions.
+    pub(in crate::app) edit: Option<BarEdit>,
 }
 
 /// A row of the "+" menu: a condition or a clause. `on` marks the ones already in the query.
@@ -774,44 +541,54 @@ pub(in crate::app) fn stale_note(ui: &mut egui::Ui) -> bool {
     run
 }
 
-/// Draws the query line and what hangs under it. Returns true when the query should run.
+/// What only drawing the bar needs, kept per tab by uid in `App.ui`, with the copies of the clauses, tree and panel a frame edits.
+/// The frame copies them from Core and sends what differs as one `BarEdit`.
+#[derive(Default)]
+pub(in crate::app) struct BarUi {
+    pub(in crate::app) c: Clauses,
+    pub(in crate::app) tree: filter::Tree,
+    pub(in crate::app) panel: Panel,
+    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
+    pub(in crate::app) ac: Ac,
+    pub(in crate::app) wants: Wants,
+    /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
+    pub(in crate::app) want_facts: Option<(String, Kind)>,
+    /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.
+    adding: Option<Add>,
+    gdlg: GroupDlg,
+    fold_open: bool,
+    /// Whether the WHERE text read as a tree, for the text, the column pairs and the mode it was read with.
+    parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
+    /// What the demo opened the bar with, copied from Core once; the picker's text is used once.
+    preset: Preset,
+    init: bool,
+}
+
+/// Draws the query line and what hangs under it. Returns true when the query should run. Core has read the text as rules
+/// already (`SqlA::BarSync`); what the frame edits goes to `side.edit`.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
-    let mut q = page_query(t);
-    let Some(s) = t.sql.as_mut() else { return false };
+pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &Tab, b: &mut BarUi, d: Dialect, bs: bool, mut scope: Scope, values: &Fields, side: &mut Side) -> bool {
+    let Some(s) = t.sql.as_ref() else { return false };
+    let Some(memo) = s.bar.memo.as_ref() else { return false };
     let matched = s.matched.unwrap_or(0);
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-    let memo = match s.bar.memo.take() {
-        Some(m) if Arc::ptr_eq(&m.cols, &cols) && m.pk == s.pk => m,
-        _ => ColsMemo {
-            fallback: Arc::new(cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect()),
-            pairs: Arc::new(cols.iter().map(|c| (c.name.clone(), c.kind)).collect()),
-            pk: s.pk.clone(),
-            cols: cols.clone(),
-        },
-    };
     // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
     let table = t.sel.coll.clone();
     scope.table = Some(table.clone());
     scope.fallback = memo.fallback.clone();
     let pairs = memo.pairs.clone();
-    let rows = t.count;
-    let b = &mut s.bar;
-    b.memo = Some(memo);
+    let (rows, tab) = (t.count, t.uid);
+    if !b.init {
+        b.init = true;
+        b.preset = Preset { ac: s.bar.preset.ac, order: s.bar.preset.order, pick: s.bar.preset.pick.clone() };
+    }
+    (b.c, b.tree, b.panel) = (s.bar.c.clone(), s.bar.tree.clone(), s.bar.panel.clone());
+    let (mut filter, mut sort) = (t.filter_txt.clone(), t.sort_txt.clone());
     let mut run = false;
     b.gdlg.bs = bs;
-    // Reading the text as rules spells it their way, which is what this frame writes back. It is the same query, so it must not
-    // count as an edit of the one that ran.
-    if read_tree(b, &t.filter_txt, &pairs, d, bs, false) && !pairs.is_empty() && !b.c.sql {
-        let out = filter::to_sql(&b.tree, d, bs);
-        if out != t.filter_txt {
-            b.respelled = Some((t.filter_txt.clone(), out.clone()));
-        }
-        q.filter = out;
-    }
-    let dirty = q != *b.ran_as_shown(&s.ran);
-    b.dirty = dirty;
+    let dirty = s.bar.dirty;
     let (mut copy, mut save_view) = (false, false);
+    let mut written = false;
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
     let fid = query_id("SQL-WHERE");
@@ -828,7 +605,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 ui.spacing_mut().item_spacing.x = 2.0;
                 run |= line_run(ui, dirty, |ui| {
                     if run_item(ui, "Explain", "⌘E").on_hover_text("Explain the SELECT of the rows shown in a new Query tab").clicked() {
-                        b.explain = true;
+                        side.explain = true;
                         ui.close();
                     }
                     if run_item(ui, "Copy as SQL", "").on_hover_text("Copy the whole SELECT").clicked() {
@@ -851,10 +628,10 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
                 let can_rules = pairs.is_empty()
                     || match &b.parsable {
-                        Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
+                        Some((text, p, bs0, ok)) if *text == filter && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
                         _ => {
-                            let ok = filter::parse(&t.filter_txt, &pairs, d, bs).is_some();
-                            b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
+                            let ok = filter::parse(&filter, &pairs, d, bs).is_some();
+                            b.parsable = Some((filter.clone(), pairs.clone(), bs, ok));
                             ok
                         }
                     };
@@ -866,14 +643,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                     ui.interact(seg, ui.scope_id().with("mode-why"), Sense::hover()).on_hover_text("Rules mode reads column comparisons joined by AND or OR, in groups of any depth. This WHERE has something else (a function, a subquery, or AND mixed with OR without parentheses), so it stays SQL.");
                 }
                 if sql != b.c.sql && (sql || can_rules) {
-                    b.c.sql = sql;
-                    if sql {
-                        b.panel.open = false;
-                    } else {
-                        // The tree is from before SQL mode, so it is read again now, before this frame writes it out.
-                        b.src.clear();
-                        read_tree(b, &t.filter_txt, &pairs, d, bs, true);
-                    }
+                    side.acts.push(quarry_core::action::SqlA::WhereMode { tab, sql });
                 }
                 ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
                 // The conditions and the clauses in use share rows that wrap under the first condition, and the "+" ends the last.
@@ -883,9 +653,9 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                         // Leaves room for the field's side margins, the gap and the "+" that ends the row, or the "+" wraps under the text.
                         let w = (ui.max_rect().right() - ui.cursor().left() - (BUTTON_H + 4.0 + LINE_GAP.x + 8.0)).max(160.0);
                         if b.preset.ac {
-                            open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
+                            open_list(ui, fid, &filter, &mut b.ac, &scope, values);
                         }
-                        run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
+                        run |= sql_input(ui, fid, &mut filter, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                     } else {
                         let f = super::filter_line::filters_button(ui, &b.tree, b.panel.open);
                         if f.clicked() {
@@ -899,7 +669,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                             b.panel.show(ui.ctx(), Some(at));
                         }
                     }
-                    run |= clause_chips(ui, &mut t.sort_txt, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
+                    run |= clause_chips(ui, &mut sort, b, d, &cols, &scope, values, &table, matched, rows, &mut side.help);
                 });
             });
         });
@@ -907,8 +677,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     if focused {
         line_ring(ui, frame.response.rect);
     }
-    if let Some(s) = t.sql.as_mut().filter(|s| !s.bar.c.sql) {
-        let b = &mut s.bar;
+    if !b.c.sql {
         let mut hints = Hints { table: &table, facts: side.facts, values: Some(values), ..Default::default() };
         let out = super::filter_panel::panel(ui, &mut b.tree, &mut b.panel, &cols, d, bs, !side.covered, &mut hints);
         if let Some(f) = hints.want_facts.take() {
@@ -917,44 +686,48 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         if let Some(column) = hints.want_values.take() {
             b.wants.values = Some(crate::ui::sql_complete::Need { table: table.clone(), column, prefix: None });
         }
-        // After a read too, so a text read in another spelling is shown as the tree writes it.
-        if std::mem::take(&mut b.rewrite) || out.changed {
-            write_tree(b, &mut t.filter_txt, &pairs, d, bs);
-        }
-        if out.changed {
-            b.tree_json = filter::to_json(&b.tree);
-        }
+        written = out.changed;
+        side.acts.extend(out.acts.into_iter().map(|a| quarry_core::action::SqlA::Filter { tab, a }));
         if out.as_sql {
-            b.c.sql = true;
+            side.acts.push(quarry_core::action::SqlA::WhereMode { tab, sql: true });
             ui.memory_mut(|m| m.request_focus(fid));
         }
-        b.save_filter |= out.save;
+        side.save_filter |= out.save;
         run |= out.run;
     }
-    fold_line(ui, t, d);
-    if dirty && !t.sql.as_ref().is_some_and(|s| s.bar.panel.open) {
+    fold_line(ui, t, b, &filter, &sort, d);
+    if dirty && !b.panel.open {
         ui.add_space(8.0);
         run |= stale_note(ui);
     }
     ui.add_space(8.0);
     if copy {
-        ui.ctx().copy_text(format!("{};", select_sql(t, d)));
+        ui.ctx().copy_text(format!("{};", select_sql(t, &filter, &sort, &b.c, d)));
     }
-    if save_view && let Some(s) = t.sql.as_mut() {
-        s.save_view = true;
-    }
+    side.save_view = save_view;
+    let sb = &s.bar;
+    let view = |p: &Panel| PanelView { open: p.open, sel: p.sel, pick: p.pick, ops: p.ops, hover: p.hover };
+    let edit = BarEdit {
+        filter: (filter != t.filter_txt).then_some(filter),
+        sort: (sort != t.sort_txt).then_some(sort),
+        clauses: (b.c != sb.c).then(|| b.c.clone()),
+        tree: (b.tree != sb.tree).then(|| b.tree.clone()),
+        written,
+        panel: (view(&b.panel) != view(&sb.panel)).then(|| view(&b.panel)),
+    };
+    side.edit = Some(edit).filter(|e| !e.is_empty());
     run
 }
 
 /// The SELECT of the bar as it reads now.
-fn select_sql(t: &Tab, d: Dialect) -> String {
-    page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None)
+fn select_sql(t: &Tab, filter: &str, sort: &str, c: &Clauses, d: Dialect) -> String {
+    query_of(filter, sort, c.clone()).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None)
 }
 
 /// The clauses in use as chips, then the "+" that adds one. Each chip is in a scope of its own so its popover keeps its place when
 /// the chips before it come and go.
 #[allow(clippy::too_many_arguments)]
-fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields, table: &str, matched: u64, rows: u64, help: &mut bool) -> bool {
+fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut BarUi, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields, table: &str, matched: u64, rows: u64, help: &mut bool) -> bool {
     let mut run = false;
     let sql = b.c.sql;
     let mono = FontId::monospace(TXT_SMALL);
@@ -1109,7 +882,7 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
     match add_menu(&plus, &items, help) {
         Some("Column condition" | "Group of conditions") if sql => focus(ui, "SQL-WHERE"),
         Some(p @ ("Column condition" | "Group of conditions")) => {
-            super::filter_panel::add(&mut b.tree, &mut b.panel, 0, p == "Group of conditions", cols, d);
+            quarry_core::action::sql::filter::add(&mut b.tree, &mut b.panel, 0, p == "Group of conditions", cols, d);
             let at = b.panel.sel;
             b.panel.show(ui.ctx(), at);
         }
@@ -1165,20 +938,21 @@ fn clause_chips(ui: &mut egui::Ui, sort: &mut String, b: &mut Bar, d: Dialect, c
 }
 
 /// The full SELECT, folded under the bar in SQL mode.
-fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
-    if !t.sql.as_ref().is_some_and(|s| s.bar.c.sql) {
+fn fold_line(ui: &mut egui::Ui, t: &Tab, b: &mut BarUi, filter: &str, sort: &str, d: Dialect) {
+    if !b.c.sql {
         return;
     }
-    let stmt = select_sql(t, d);
-    let Some(s) = t.sql.as_mut() else { return };
-    let b = &mut s.bar;
+    let stmt = select_sql(t, filter, sort, &b.c, d);
+    let uid = t.uid;
     ui.add_space(8.0);
-    let mut job = match &b.fold {
-        Some((key, open, job)) if *open == b.fold_open && *key == stmt => job.clone(),
+    // The folded line as a job, kept per tab with the statement text and the fold state it was built from.
+    let memo = egui::Id::unique(("sql-fold", uid));
+    let mut job = match ui.data(|d| d.get_temp::<(String, bool, LayoutJob)>(memo)) {
+        Some((key, open, job)) if open == b.fold_open && key == stmt => job,
         _ => {
             let text = if b.fold_open { stmt.clone() } else { stmt.split_whitespace().collect::<Vec<_>>().join(" ") };
             let job = sql_job(&text, TXT_SMALL);
-            b.fold = Some((stmt.clone(), b.fold_open, job.clone()));
+            ui.data_mut(|d| d.insert_temp(memo, (stmt.clone(), b.fold_open, job.clone())));
             job
         }
     };
@@ -1199,102 +973,6 @@ fn fold_line(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) {
     if r.on_hover_text(if b.fold_open { "Fold the statement" } else { "Show the whole statement" }).clicked() {
         b.fold_open = !b.fold_open;
     }
-}
-
-fn tcols(s: &SqlTab) -> &[Col] {
-    if s.bar.table_cols.is_empty() { &s.cols } else { &s.bar.table_cols }
-}
-
-/// The table's own sort can name an aggregate, which an ungrouped query does not have. It only decides
-/// whether the sort stays, so it reads either quote: `ungroup` has no dialect at hand.
-fn keep_sort(sort: &str, cols: &[Col]) -> bool {
-    parse_order(sort, None).is_some_and(|k| k.iter().all(|(c, _)| cols.iter().any(|x| x.name == *c)))
-}
-
-fn bson_text(v: &Bson) -> Option<String> {
-    match v {
-        Bson::String(s) => Some(s.clone()),
-        Bson::Int32(n) => Some(n.to_string()),
-        Bson::Int64(n) => Some(n.to_string()),
-        Bson::Double(n) => Some(n.to_string()),
-        Bson::Boolean(b) => Some((*b as i32).to_string()),
-        _ => None,
-    }
-}
-
-/// Bytes as a literal of the dialect. On MySQL `rule` picks 0x, the form the rules write for a binary column;
-/// otherwise X'..', which the bar does not read as a rule, so a text column never gets it back as a quoted string.
-fn bytes_lit(b: &[u8], d: Dialect, bs: bool, rule: bool) -> String {
-    let pg = d == Dialect::Postgres;
-    let hex = db::sql::value::hex_digits(b, !pg);
-    if pg {
-        db::sql::value::pg_lit(&format!("\\x{hex}"))
-    } else if b.is_empty() {
-        // 0x without digits is not a literal; an empty string equals empty bytes.
-        db::sql::value::lit("", bs)
-    } else if rule {
-        format!("0x{hex}")
-    } else {
-        format!("X'{hex}'")
-    }
-}
-
-/// Clears GROUP BY, HAVING and the generated select list; the sort stays when it names real columns.
-pub(in crate::app) fn ungroup(t: &mut Tab) {
-    let Some(s) = t.sql.as_mut() else { return };
-    s.bar.c.group.clear();
-    s.bar.c.having.clear();
-    s.bar.c.select.clear();
-    if !keep_sort(&t.sort_txt, tcols(s)) {
-        t.sort_txt.clear();
-    }
-    t.page = 0;
-}
-
-/// Turns the double-clicked group into conditions on the WHERE text and ungroups.
-pub(in crate::app) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
-    let Some(doc) = t.docs.get(row).and_then(|r| r.decode().ok()) else { return };
-    let Some(s) = t.sql.as_ref() else { return };
-    let (select, group_list) = (split_top(&s.bar.c.select), split_top(&s.bar.c.group));
-    let mut conds: Vec<String> = Vec::new();
-    for g in &group_list {
-        let Some(name) = plain_ident(g, Some(d)) else { continue };
-        let Some(v) = doc.get(&name) else { continue };
-        // A group named after a select alias is an expression such as DATE(col).
-        let expr = select.iter().find_map(|i| {
-            let up = i.to_ascii_uppercase();
-            let at = up.rfind(" AS ")?;
-            (plain_ident(&i[at + 4..], Some(d))? == name).then(|| i[..at].trim().to_string())
-        });
-        let lhs = match (&expr, tcols(s).iter().find(|c| c.name == name)) {
-            (Some(e), _) => e.clone(),
-            (None, Some(_)) => d.quote_ident(&name),
-            _ => continue,
-        };
-        conds.push(match v {
-            Bson::Null => format!("{lhs} IS NULL"),
-            // Not through rule_sql by column kind: a MySQL text column with bytes that are not UTF-8 arrives as binary too.
-            Bson::Binary(bin) => {
-                let binary_col = expr.is_none() && tcols(s).iter().any(|c| c.name == name && rules::group_of(c.kind) == rules::Group::Other);
-                format!("{lhs} = {}", bytes_lit(&bin.bytes, d, bs, binary_col))
-            }
-            v => {
-                // The row reader makes no other value; a guessed condition would show the wrong rows, so the drill stops.
-                let Some(text) = bson_text(v) else { return };
-                match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
-                    Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text], case: rules::default_case(Op::Eq, d) }, d, bs),
-                    None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
-                }
-            }
-        });
-    }
-    let existing = t.filter_txt.trim().to_string();
-    let pairs: Vec<(String, Kind)> = tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect();
-    // Conditions joined by AND need no parentheses before the AND that adds the group's.
-    let flat = filter::parse(&existing, &pairs, d, bs).is_some_and(|t| t.root.mode == Match::All);
-    let existing = if existing.is_empty() { None } else if flat { Some(existing) } else { Some(format!("({existing})")) };
-    t.filter_txt = existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ");
-    ungroup(t);
 }
 
 #[cfg(test)]

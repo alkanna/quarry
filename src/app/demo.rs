@@ -10,38 +10,38 @@ impl App {
     /// over the MySQL one with its "New group" hint. Apart from `load_demo` so a test can load each state.
     pub(super) fn demo_rail(&mut self, state: &str) {
         // The SQL demo replaces the tabs, which the Mongo demo keeps.
-        let tabs = std::mem::take(&mut self.tabs);
+        let tabs = std::mem::take(&mut self.core.setup().tabs);
         self.load_sql_demo();
-        self.tabs = tabs;
-        self.cur = 1;
-        self.active = Some(1);
-        self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+        self.core.setup().tabs = tabs;
+        self.core.setup().cur = 1;
+        self.core.setup().active = Some(1);
+        self.core.setup().conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
         match state {
             // The Connect popover over the rail, and the menu of the MySQL tile.
-            "connect" => self.conns_ui.demo_picker = true,
-            "menu" => self.conns_ui.demo_tile_menu = Some(3),
+            "connect" => self.ui.conns.demo_picker = true,
+            "menu" => self.ui.conns.demo_tile_menu = Some(3),
             // The Mongo demo carried over the MySQL tile, which is about to make a new group.
-            "drag" => self.conns_ui.demo_rail_drop = Some(3),
+            "drag" => self.ui.conns.demo_rail_drop = Some(3),
             // A failed connection leaves the rail, so it shows only as the worst status of a closed folder.
-            "status" => self.conns.push(Conn::new(ConnMeta { id: 5, name: "legacy".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Failed("Connection refused".into()))),
+            "status" => self.core.setup().conns.push(Conn::new(ConnMeta { id: 5, name: "legacy".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Failed("Connection refused".into()))),
             _ => {}
         }
         if matches!(state, "groups" | "open" | "tip" | "status") {
-            let gid = self.groups.new_group("Production");
+            let gid = self.core.setup().groups.new_group("Production");
             let all = self.conn_ids();
             let members: &[u64] = if state == "status" { &[3, 5] } else { &[3, 4] };
             for &id in members {
-                self.groups.place(id, Place::Into(gid, None), &all);
+                self.core.setup().groups.place(id, Place::Into(gid, None), &all);
             }
             if state == "open" {
-                self.groups.set_rail_open(gid, true);
+                self.core.setup().groups.set_rail_open(gid, true);
             }
         }
     }
 
     pub(super) fn load_demo(&mut self) {
         // QUARRY_TEST_WINFRAME shows the Windows window buttons on any platform, for screenshots.
-        self.win_buttons |= std::env::var("QUARRY_TEST_WINFRAME").is_ok();
+        self.ui.win_buttons |= std::env::var("QUARRY_TEST_WINFRAME").is_ok();
         let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
         let status = ["paid", "shipped", "pending", "refunded"];
         let docs: Vec<Document> = (0..50)
@@ -69,18 +69,18 @@ impl App {
             ("shop".to_string(), colls(&["carts", "customers", "orders", "paid_orders", "products", "reviews", "shipments"])),
             ("users".to_string(), colls(&["accounts", "profiles"])),
         ];
-        self.conns.push(Conn {
+        self.core.setup().conns.push(Conn {
             dbs,
             masked_uri: "mongodb://localhost:27017".into(),
             server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into(), ..Default::default() },
             ..Conn::new(ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() }, Status::Ready)
         });
-        self.conns.push(Conn { masked_uri: "mongodb+srv://app:****@staging.example.net".into(), ..Conn::new(ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() }, Status::Idle) });
-        self.active = Some(1);
-        self.open_dbs.insert((1, "shop".into()));
-        self.views.add(1, "shop", "paid_orders");
+        self.core.setup().conns.push(Conn { masked_uri: "mongodb+srv://app:****@staging.example.net".into(), ..Conn::new(ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() }, Status::Idle) });
+        self.core.setup().active = Some(1);
+        self.core.setup().open_dbs.insert((1, "shop".into()));
+        self.core.setup().views.add(1, "shop", "paid_orders");
         let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into(), ..Default::default() };
-        self.tabs.push(Tab::new(sel("shop", "customers")));
+        self.core.setup().tabs.push(Tab::new(sel("shop", "customers")));
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
         t.paths = doc_paths(&docs);
@@ -94,18 +94,18 @@ impl App {
         t.sort_txt = "{ total: -1 }".into();
         t.query.sort = Some(doc! { "total": -1 });
         t.limit_txt = "50".into();
-        self.tabs.push(t);
-        self.tabs.push(Tab::new(sel("analytics", "events")));
-        self.cur = 1;
+        self.core.setup().tabs.push(t);
+        self.core.setup().tabs.push(Tab::new(sel("analytics", "events")));
+        self.core.setup().cur = 1;
         self.demo_seed_ran();
         // QUARRY_TEST_CROWD=1 adds long collection names and thirty connections, for the one-line rows and the scrolling connections menu.
         if std::env::var("QUARRY_TEST_CROWD").is_ok() {
-            if let Some((_, Some(c))) = self.conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
+            if let Some((_, Some(c))) = self.core.setup().conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
                 c.extend(["hydra_oauth2_obfuscated_authentication_session", "hydra_oauth2_trusted_jwt_bearer_issuer"].map(String::from));
                 c.sort();
             }
             for i in 0..30u64 {
-                self.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
+                self.core.setup().conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
             }
         }
         // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
@@ -137,10 +137,10 @@ impl App {
             ]);
         }
         // QUARRY_TEST_LOG docks the query log under the documents, as in the README's main picture.
-        self.log.open = std::env::var("QUARRY_TEST_LOG").is_ok();
+        self.ui.log.open = std::env::var("QUARRY_TEST_LOG").is_ok();
         let key = self.col_key(false);
-        self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
-        self.status = "Offline demo: no database is connected.".into();
+        self.core.setup().prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
+        self.core.setup().status = "Offline demo: no database is connected.".into();
         if std::env::var("QUARRY_TEST_CONNFORM").as_deref() == Ok("mysql") {
             // QUARRY_TEST_CONNFORM_TAB=advanced opens the Advanced tab with the design's example values.
             let advanced = std::env::var("QUARRY_TEST_CONNFORM_TAB").as_deref() == Ok("advanced");
@@ -184,7 +184,7 @@ impl App {
             })));
         }
         if std::env::var("QUARRY_TEST_USERS").is_ok() {
-            self.users = Some(UsersWin {
+            self.core.setup().users = Some(UsersWin {
                 conn: 1,
                 users: Some(Ok(vec![
                     doc! { "user": "admin", "db": "admin", "roles": [ { "role": "root", "db": "admin" } ] },
@@ -199,7 +199,7 @@ impl App {
             });
         }
         if std::env::var("QUARRY_TEST_WATCH").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Watch;
             t.selected = None;
             // A live-looking stream: the receiver is dropped, so nothing ever arrives.
@@ -217,10 +217,10 @@ impl App {
         }
         // QUARRY_TEST_SERVER=1 opens the Server window, =ops on its Operations section.
         if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {
-            self.server = Some(ServerWin::demo(1, v == "ops"));
+            self.core.setup().server = Some(ServerWin::demo(1, v == "ops"));
         }
         // The orders tab's indexes, for the Indexes view and the indexed-field marks.
-        self.tabs[1].set_indexes(vec![
+        self.core.setup().tabs[1].set_indexes(vec![
             doc! { "name": "_id_", "keys": { "_id": 1 } },
             doc! { "name": "number_1", "keys": { "number": 1 }, "unique": true },
             doc! { "name": "status_1_createdAt_-1", "keys": { "status": 1, "createdAt": -1 } },
@@ -229,14 +229,14 @@ impl App {
             doc! { "name": "notes_text", "keys": { "_fts": "text", "_ftsx": 1 }, "weights": { "notes": 1 } },
         ]);
         if std::env::var("QUARRY_TEST_INDEXES").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Indexes;
             t.selected = None;
             let now = mongodb::bson::DateTime::now().timestamp_millis();
             let day = 24 * 3600 * 1000;
             let stat = |name: &str, ops: i64, since: i64, size: usize| db::IndexStat { name: name.into(), ops, since: Some(since), hidden: name == "createdAt_1", size: Some(size) };
             let shape = db::Shape { filter: doc! { "total": { "$gt": 100 } }, sort: doc! { "createdAt": -1 }, count: 214, avg_ms: 380.0, suggestion: doc! { "createdAt": -1, "total": 1 } };
-            self.idx_info = Some((
+            self.core.setup().idx_info = Some((
                 "shop.orders".into(),
                 db::IndexInfo {
                     stats_err: None,
@@ -246,26 +246,26 @@ impl App {
                     shapes: vec![shape],
                 },
             ));
-            self.refresh_idx_rows("shop.orders");
+            self.core.setup().refresh_idx_rows("shop.orders");
             // QUARRY_TEST_INDEXES=new also opens the New index dialog.
             if std::env::var("QUARRY_TEST_INDEXES").is_ok_and(|v| v == "new") {
                 self.open_create_index(Some(doc! { "createdAt": -1, "total": 1 }));
             }
         }
         if std::env::var("QUARRY_TEST_SCHEMA").is_ok() {
-            self.tabs[1].view = View::Schema;
-            self.tabs[1].selected = None;
+            self.core.setup().tabs[1].view = View::Schema;
+            self.core.setup().tabs[1].selected = None;
         }
         // Test switch: a long generated validator, to check its box scrolls inside the window.
         if std::env::var("QUARRY_TEST_VALIDATOR").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Schema;
             t.selected = None;
             let props: Document = (0..60).map(|i| (format!("field{i}"), Bson::Document(doc! { "bsonType": "string", "description": "generated" }))).collect();
             t.schema.vtext = db::to_edit_json(&doc! { "$jsonSchema": { "bsonType": "object", "properties": props } });
         }
         if std::env::var("QUARRY_TEST_IMPORT").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Import;
             t.selected = None;
             t.import.kind = db::ImportKind::Csv;
@@ -275,8 +275,8 @@ impl App {
         // QUARRY_TEST_SETTINGS=1 opens Settings; a category's first word (reading, tools...) opens that one.
         if let Ok(cat) = std::env::var("QUARRY_TEST_SETTINGS") {
             self.modal = Some(Modal::Settings);
-            self.settings_cat = settings::SettingsCat::named(&cat);
-            if self.settings_cat == settings::SettingsCat::Agents {
+            self.core.setup().settings_cat = settings::SettingsCat::named(&cat);
+            if self.core.settings_cat == settings::SettingsCat::Agents {
                 self.agents_demo();
             }
         }
@@ -299,9 +299,9 @@ impl App {
         // Test switch: show the Shell view with a finished run in the demo picture. QUARRY_TEST_VIM shows it too, with
         // Vim on and the editor in that mode (see vim::demo).
         let vim = std::env::var("QUARRY_TEST_VIM").is_ok();
-        self.prefs.vim |= vim;
+        self.core.setup().prefs.vim |= vim;
         if std::env::var("QUARRY_TEST_SHELL").is_ok() || vim {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Shell;
             t.shell.code = "async function run() {\n  const n = await orders.countDocuments({ status: 'paid' });\n  console.log('paid orders:', n);\n  return await orders.find({ status: 'paid' }).project({ number: 1, total: 1 }).limit(3).toArray();\n}".into();
             t.shell.logs = vec![("log".into(), "paid orders: 321".into())];
@@ -317,7 +317,7 @@ impl App {
         }
         // Test switch: the shell with parameter hints and a suggestion list, see shell_sig_demo.
         if let Some(code) = shell_ls::shell_sig_code().filter(|_| std::env::var("QUARRY_TEST_SQL").is_err()) {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Shell;
             t.shell.code = code;
         }
@@ -325,7 +325,7 @@ impl App {
         if std::env::var("QUARRY_TEST_GROUP").is_ok() {
             let rows = vec![doc! { "_id": "paid", "count": 321 }, doc! { "_id": "shipped", "count": 321 }, doc! { "_id": "pending", "count": 321 }, doc! { "_id": "refunded", "count": 321 }];
             let pipeline = db::group_count_pipeline("status", &Bson::String("paid".into()), Document::new()).unwrap_or_default();
-            self.modal = Some(Modal::Grouped { sel: self.tabs[1].sel.clone(), path: "status".into(), pipeline, rows });
+            self.modal = Some(Modal::Grouped { sel: self.core.tabs[1].sel.clone(), path: "status".into(), pipeline, rows });
         }
         // Test switch: the Cmd+K palette with this query; a leading ">" opens command mode.
         if let Ok(q) = std::env::var("QUARRY_TEST_PALETTE") {
@@ -333,7 +333,7 @@ impl App {
         }
         // Test switch: show the pipeline builder with stage previews.
         if std::env::var("QUARRY_TEST_PIPELINE").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Aggregate;
             t.selected = None;
             let docs = t.decoded_docs();
@@ -355,7 +355,7 @@ impl App {
         }
         // Test switch: show the Compare view with a finished comparison.
         if std::env::var("QUARRY_TEST_COMPARE").is_ok() {
-            let t = &mut self.tabs[1];
+            let t = &mut self.core.setup().tabs[1];
             t.view = View::Compare;
             t.selected = None;
             (t.compare.conn, t.compare.db, t.compare.coll) = (1, "shop".into(), "paid_orders".into());
@@ -372,7 +372,7 @@ impl App {
         // Test switch: show the Data relations window with a few relations.
         if std::env::var("QUARRY_TEST_RELATIONS").is_ok() {
             let r = |coll: &str, path: &str, target: &str, preview: &str| Relation { coll: coll.into(), path: path.into(), target: target.into(), preview: preview.into() };
-            self.prefs.relations.insert("1/shop".into(), vec![r("orders", "customerId", "customers", "name"), r("orders", "items.productId", "products", "title"), r("reviews", "authorAccountId", "customers", "email")]);
+            self.core.setup().prefs.relations.insert("1/shop".into(), vec![r("orders", "customerId", "customers", "name"), r("orders", "items.productId", "products", "title"), r("reviews", "authorAccountId", "customers", "email")]);
             self.modal = Some(Modal::Relations { conn: 1, db: "shop".into() });
         }
         // Test switch: show the Dump dialog.
@@ -381,12 +381,13 @@ impl App {
         }
         // Test switch: show the JSON editor and an unsaved edit in the demo picture.
         if std::env::var("QUARRY_TEST_EDIT").is_ok() {
-            let d = self.tabs[1].docs[2].owned();
+            let d = self.core.tabs[1].docs[2].owned();
             let mut changed = d.clone();
             changed.insert("status", "shipped");
-            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
+            let key = self.draft_key(&d);
+            self.core.setup().drafts.insert(key, Draft { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
             let items = changed.get("items").cloned().unwrap();
-            self.json_edit = Some(JsonEdit { focus: false, ..JsonEdit::new(changed, vec!["items".into()], db::to_edit_value(&items), "array") });
+            self.core.setup().json_edit = Some(JsonEdit { focus: false, ..JsonEdit::new(changed, vec!["items".into()], db::to_edit_value(&items), "array") });
         }
         // QUARRY_TEST_ERR shows an error state: view, timeout, bar, toast, log, details or conn.
         if let Ok(v) = std::env::var("QUARRY_TEST_ERR") {
@@ -423,7 +424,7 @@ impl App {
             prog.verifying.store(verifying, std::sync::atomic::Ordering::Relaxed);
             Upd::Downloading { info, prog, started: Instant::now().checked_sub(Duration::from_secs(6)).unwrap_or_else(Instant::now) }
         };
-        self.upd = match state {
+        self.core.setup().upd = match state {
             "checking" => Upd::Checking { manual: true },
             "uptodate" => Upd::UpToDate(Instant::now() + Duration::from_secs(3600)),
             "available" => Upd::Available(info),
@@ -432,7 +433,7 @@ impl App {
             "ready" => Upd::Ready(info),
             "busy" => {
                 // A running comparison is work a restart would lose.
-                if let Some(t) = self.tabs.first_mut() {
+                if let Some(t) = self.core.setup().tabs.first_mut() {
                     t.compare.running = true;
                 }
                 Upd::Ready(info)
@@ -440,13 +441,13 @@ impl App {
             "failed" => Upd::Failed { msg: format!("The downloaded {} does not match its published checksum; nothing was installed.", info.name), info: Some(info) },
             _ => return,
         };
-        self.update_checked = Some(Instant::now());
-        self.upd_popup = open;
+        self.core.setup().update_checked = Some(Instant::now());
+        self.ui.upd_popup = open;
     }
 
     pub(super) fn demo_dialog(&mut self, which: &str) {
-        let sel = self.tabs[1].sel.clone();
-        let docs: Vec<Document> = self.tabs[1].decoded_docs().into_iter().take(3).collect();
+        let sel = self.core.tabs[1].sel.clone();
+        let docs: Vec<Document> = self.core.tabs[1].decoded_docs().into_iter().take(3).collect();
         self.modal = Some(match which {
             "unlock" => Modal::Unlock(1, None),
             "delete" => Modal::Delete(sel, docs),
@@ -463,7 +464,7 @@ impl App {
                 c.insert("gift", true);
                 Modal::Save { tag: String::new(), changes: db::diff(&d, &c) }
             }
-            "shell" => Modal::ShellWrite(vec!["deleteMany".into(), "drop".into()]),
+            "shell" => Modal::ShellWrite { tab: self.cur_uid().unwrap_or_default(), ops: vec!["deleteMany".into(), "drop".into()] },
             "agg" => Modal::AggWrite(vec![]),
             "column" => Modal::ColumnCustomize { key: String::new(), agg: false, col: "customer.name".into(), label: "Customer".into(), path: "customer.name".into() },
             "text" => Modal::Text { title: "Query help".into(), body: "{ status: 'paid' }            exact value\n{ total: { $gt: 100 } }       comparison\n{ tags: { $in: ['a', 'b'] } } any of".into(), code: true },
@@ -477,23 +478,23 @@ impl App {
     pub(super) fn demo_error(&mut self, which: &str) {
         const REFUSED: &str = r#"Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command { find: "orders", filter: { status: "paid" }, limit: 50, lsid: { id: UUID("3f1c9e2a-41c8-4bb4-9b1e-6f3c2d1a0b7e") }, $db: "shop" }"#;
         const DUP: &str = r#"An error occurred when trying to execute a write operation: WriteError(WriteError { code: 11000, code_name: None, message: "E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 10402 }", details: None })"#;
-        let i = self.cur;
-        let sel = self.tabs.get(i).map(|t| t.sel.clone());
+        let i = self.core.cur;
+        let sel = self.core.tabs.get(i).map(|t| t.sel.clone());
         // The demo connection is local and anonymous; a user shows what the panels say about privileges.
-        self.conns[0].masked_uri = "mongodb+srv://report_ro:****@cluster0.mongodb.net/?authSource=admin".into();
-        self.conns[0].server.host = "cluster0.mongodb.net".into();
+        self.core.setup().conns[0].masked_uri = "mongodb+srv://report_ro:****@cluster0.mongodb.net/?authSource=admin".into();
+        self.core.setup().conns[0].server.host = "cluster0.mongodb.net".into();
         match which {
             "view" | "timeout" => {
                 let raw = if which == "view" { REFUSED } else { "Command failed: Error code 50 (MaxTimeMSExpired): operation exceeded time limit" };
-                self.tabs[i].docs.clear();
-                self.tabs[i].count = 0;
+                self.core.setup().tabs[i].docs.clear();
+                self.core.setup().tabs[i].count = 0;
                 self.fail_view(i, View::Documents, raw.into(), "load the documents");
             }
             "bar" => {
-                self.tabs[i].filter_txt = "{ status: 'paid', total: { $gt: 50 } }}".into();
+                self.core.setup().tabs[i].filter_txt = "{ status: 'paid', total: { $gt: 50 } }}".into();
                 self.run_query();
                 // The picture is of the refused query alone, not of a line edited since the rows below.
-                self.tabs[i].seed_ran();
+                self.core.setup().tabs[i].seed_ran();
             }
             "toast" => {
                 self.err(DUP);
@@ -501,19 +502,19 @@ impl App {
                 self.toast_ok("Saved 1 document".into(), None);
             }
             "log" | "details" => {
-                self.errors_open = which == "log";
+                self.ui.errors_open = which == "log";
                 self.err("Could not write orders.csv: No space left on device (os error 28)");
                 self.err(DUP);
                 let e = self.log_err(REFUSED, Some(1), sel, "Documents · orders".into(), "load the documents");
-                self.toasts.clear();
+                self.core.setup().toasts.clear();
                 if which == "details" {
                     self.modal = Some(Modal::ErrorDetails(Box::new(e)));
                 }
             }
             "conn" => {
-                self.conns[0].status = Status::Failed("Command failed: Error code 18 (AuthenticationFailed): Authentication failed.".into());
-                self.tabs.clear();
-                self.cur = 0;
+                self.core.setup().conns[0].status = Status::Failed("Command failed: Error code 18 (AuthenticationFailed): Authentication failed.".into());
+                self.core.setup().tabs.clear();
+                self.core.setup().cur = 0;
             }
             _ => {}
         }
@@ -549,7 +550,7 @@ impl App {
             ("meta".to_string(), ColFacts { keys: v(&["channel", "coupon", "items", "source"]), ..Default::default() }),
             ("tags".to_string(), ColFacts { items: v(&["b2b", "express", "gift", "promo"]), ..Default::default() }),
         ]);
-        self.sql_facts.insert((conn, ns, "orders".into()), facts);
+        self.core.setup().sql_facts.insert((conn, ns, "orders".into()), facts);
     }
 
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
@@ -563,20 +564,20 @@ impl App {
         use db::sql::{Col, value::Kind};
         let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
         shop.sort();
-        self.conns.push(Conn {
+        self.core.setup().conns.push(Conn {
             dbs: vec![("information_schema".into(), None), ("mysql".into(), None), ("shop".into(), Some(shop)), ("analytics".into(), None), ("sys".into(), None)],
             masked_uri: "mysql://app:****@shop-prod.internal:3306/shop".into(),
             server: ServerInfo { version: "8.4.3".into(), product: "MySQL".into(), host: "shop-prod.internal:3306".into(), tls: true, ..Default::default() },
             ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready)
         });
-        self.active = Some(3);
-        self.open_dbs.insert((3, "shop".into()));
+        self.core.setup().active = Some(3);
+        self.core.setup().open_dbs.insert((3, "shop".into()));
         // The demo never lists tables, so every database counts as asked.
         for d in ["information_schema", "mysql", "analytics", "sys"] {
-            self.sql_asked.insert((3, d.into()));
+            self.core.setup().sql_asked.insert((3, d.into()));
         }
         for v in ["order_totals", "top_customers"] {
-            self.views.add(3, "shop", v);
+            self.core.setup().views.add(3, "shop", v);
         }
         let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into(), ..Default::default() };
         let engine = db::sql::Engine::MySql;
@@ -675,10 +676,10 @@ impl App {
             }
             _ => {}
         }
-        self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.core.setup().tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.demo_facts(3, ns_key("shop", ""));
-        self.cur = 0;
-        self.status = "Offline demo: no database is connected.".into();
+        self.core.setup().cur = 0;
+        self.core.setup().status = "Offline demo: no database is connected.".into();
         self.sql_structure_demo(which);
         self.sql_alter_demo(which);
         self.sql_rel_demo(which);
@@ -686,7 +687,7 @@ impl App {
         self.sql_users_demo(which);
         // QUARRY_TEST_SQL=processes, variables, overview or status opens the SQL Server window on that tab.
         if let v @ ("processes" | "variables" | "overview" | "status") = which {
-            self.sql_server = Some(SqlServerWin::demo(3, v));
+            self.core.setup().sql_server = Some(SqlServerWin::demo(3, v));
         }
         if matches!(which, "query" | "log" | "format" | "library" | "lint") {
             self.sql_query_demo();
@@ -695,7 +696,7 @@ impl App {
             self.demo_lint(false);
         }
         if which == "explain" {
-            self.demo_explain_offline(crate::db::sql::Dialect::MySql, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'", include_str!("../db/sql/plan/fixtures/mysql-join.json"));
+            self.demo_explain_offline(crate::db::sql::Dialect::MySql, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'", include_str!("../../quarry-core/src/db/sql/plan/fixtures/mysql-join.json"));
         }
         if which == "log" {
             self.sql_log_demo();
@@ -709,9 +710,9 @@ impl App {
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
         match which {
             "edit" => self.sql_demo_stage(),
-            "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
+            "select" => self.core.setup().tabs[0].checked = [1, 2, 4, 5].into(),
             // QUARRY_TEST_SQL=record shows row 2 as the record Tab opens.
-            "record" => (self.tabs[0].selected, self.tabs[0].record) = (Some((false, 1)), true),
+            "record" => (self.core.setup().tabs[0].selected, self.core.setup().tabs[0].record) = (Some((false, 1)), true),
             _ => {}
         }
         self.sql_json_demo();
@@ -731,7 +732,7 @@ impl App {
 
     /// The demo's tabs set their query lines without running them, so what they hold is what the rows below came from.
     pub(super) fn demo_seed_ran(&mut self) {
-        for t in &mut self.tabs {
+        for t in &mut self.core.setup().tabs {
             t.seed_ran();
         }
     }
@@ -752,8 +753,8 @@ impl App {
             db::Row::from_doc(&d).ok()
         }).collect();
         if query {
-            if let Some(set) = self.tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { (set.cols, set.rows) = (cols, rows); }
-        } else if let Some(t) = self.tabs.first_mut() {
+            if let Some(set) = self.core.setup().tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { let set = Arc::make_mut(set); (set.cols, set.rows) = (cols, rows); }
+        } else if let Some(t) = self.core.setup().tabs.first_mut() {
             t.fields = cols.iter().map(|c| c.name.clone()).collect();
             t.count = rows.len() as u64;
             t.docs = rows;
@@ -775,11 +776,11 @@ impl App {
         let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
         let payments = table("payments", Some(4377), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
         let shipments = table("shipments", Some(3120), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
-        self.put_sql_schema(3, "shop".into(), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
+        self.core.setup().put_sql_schema(3, "shop".into(), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
-        self.sql_values.insert((3, "shop".into()), vals);
+        self.core.setup().sql_values.insert((3, "shop".into()), vals);
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("acquery") {
             let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new(), ..Default::default() }).for_engine(db::sql::Engine::MySql);
             t.view = View::Sql;
@@ -788,8 +789,8 @@ impl App {
                 s.caret = s.query.chars().count();
                 s.bar.preset.ac = true;
             }
-            self.tabs.push(t);
-            self.cur = self.tabs.len() - 1;
+            self.core.setup().tabs.push(t);
+            self.core.setup().cur = self.core.setup().tabs.len() - 1;
         }
     }
 }

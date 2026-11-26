@@ -50,7 +50,7 @@ impl App {
     /// dot. It is the only way in for a connection that is not open, so it stays on screen however many tiles scroll above.
     fn connect_tile(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(egui::vec2(TILE_W, RAIL_TILE), Sense::click());
-        let demo_open = std::mem::take(&mut self.conns_ui.demo_picker);
+        let demo_open = std::mem::take(&mut self.ui.conns.demo_picker);
         if demo_open {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
         }
@@ -73,7 +73,7 @@ impl App {
                 ui.label(semibold(RichText::new("Connect").size(TXT_TITLE).color(BRIGHT())));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new(format!("{} saved", self.conns.len())).size(TXT_CAPTION).color(FAINT()));
+                    ui.label(RichText::new(format!("{} saved", self.core.conns.len())).size(TXT_CAPTION).color(FAINT()));
                 });
             });
             ui.add_space(4.0);
@@ -86,11 +86,11 @@ impl App {
             let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
             ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
             if opened {
-                self.conns_ui.picker_filter.clear();
+                self.ui.conns.picker_filter.clear();
             }
-            conns_panel::picker_filter(ui, &mut self.conns_ui.picker_filter, opened);
+            conns_panel::picker_filter(ui, &mut self.ui.conns.picker_filter, opened);
             egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
-                if let Some(id) = conns_panel::picker_list(ui, &self.conns, &self.groups, &mut self.conns_ui, self.active, opened) {
+                if let Some(id) = conns_panel::picker_list(ui, &self.core.conns, &self.core.groups, &mut self.ui.conns, self.core.active, opened) {
                     pick = Some(id);
                     ui.close();
                 }
@@ -113,10 +113,10 @@ impl App {
             ui.add_space(2.0);
         });
         if let Some(id) = pick {
-            self.active = Some(id);
+            self.exec(Action::Conn(ConnA::Switch { conn: id }));
             // A closed connection opens, and a failed one retries; an open one is only switched to.
-            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.demo {
-                self.connect(id);
+            if self.conn(id).is_some_and(|c| c.status.can_connect()) && !self.core.demo {
+                self.exec(Action::Conn(ConnA::Connect { conn: id }));
             }
         }
         if let Some(a) = act {
@@ -126,7 +126,7 @@ impl App {
 
     /// The Cloud SQL browser lists SQL instances only, so a MongoDB connection has no use for it.
     fn mongo_active(&self) -> bool {
-        self.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql())
+        self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| !c.meta.engine.is_sql())
     }
 
     /// The pinned Manage tile under Connect, like Discord's under its add button: it opens the Connections panel, and
@@ -139,10 +139,8 @@ impl App {
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Manage connections").clicked() {
             if on {
                 // Back to the panel and sidebar state Manage was opened from.
-                let (mode, hidden) = self.conns_ui.manage_back.take().unwrap_or((SideMode::Explorer, false));
-                self.prefs.set_side_mode(mode);
-                self.prefs.sidebar_hidden = hidden;
-                self.save_prefs();
+                let (mode, hidden) = self.ui.conns.manage_back.take().unwrap_or((SideMode::Explorer, false));
+                self.set_side(mode, hidden);
             } else {
                 self.rail_act(RailAct::Manage);
             }
@@ -161,7 +159,7 @@ impl App {
 
     /// Whether the Connections panel is on screen.
     fn manages(&self) -> bool {
-        self.prefs.side_mode() == SideMode::Connections && !self.prefs.sidebar_hidden
+        self.core.prefs.side_mode() == SideMode::Connections && !self.core.prefs.sidebar_hidden
     }
 
     /// The menu of the rail's empty space.
@@ -184,8 +182,8 @@ impl App {
             RailAct::NewGroup => {
                 self.open_manage();
                 // The panel's own New group field, at the end of its groups.
-                self.conns_ui.adding = Some(String::new());
-                self.conns_ui.focus_edit = true;
+                self.ui.conns.adding = Some(String::new());
+                self.ui.conns.focus_edit = true;
             }
         }
     }
@@ -193,11 +191,9 @@ impl App {
     /// Shows the Connections panel, remembering what the sidebar showed so closing it from the Manage tile goes back.
     fn open_manage(&mut self) {
         if !self.manages() {
-            self.conns_ui.manage_back = Some((self.prefs.side_mode(), self.prefs.sidebar_hidden));
+            self.ui.conns.manage_back = Some((self.core.prefs.side_mode(), self.core.prefs.sidebar_hidden));
         }
-        self.prefs.set_side_mode(SideMode::Connections);
-        self.prefs.sidebar_hidden = false;
-        self.save_prefs();
+        self.set_side(SideMode::Connections, false);
     }
 }
 
@@ -227,14 +223,12 @@ impl App {
     /// members, and a connection dragged in from the sidebar lands here, through the same `tile_drop` targets. Such a
     /// drop wins over the move the list would make, since it is the more precise of the two.
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
-        let open: Vec<u64> = self.conns.iter().filter(|c| c.status.is_open()).map(|c| c.meta.id).collect();
-        sync_order(&mut self.rail_order, &open);
-        if self.rail_order.is_empty() {
+        if self.core.rail_order.is_empty() {
             return;
         }
         // Leaves room for the Connect and Manage tiles and the Settings button, which stay pinned below the scrolling tiles.
         let room = (ui.available_height() - 36.0 - 2.0 * (RAIL_TILE + 8.0)).max(SLOT);
-        let items = rail_items(&self.rail_order, &self.groups);
+        let items = rail_items(&self.core.rail_order, &self.core.groups);
         let ctx = ui.ctx().clone();
         // How far open each folder is drawn. Its slot grows with it, so the reorder engine moves the tiles below smoothly.
         let opens: Vec<f32> = items
@@ -281,14 +275,14 @@ impl App {
                         self.conn_tile(ui, tile, *id, st.lifted, target, &mut pick, &mut act, &mut drops).unwrap_or_else(|| ui.response())
                     }
                     RailItem::Folder { gid, members } => {
-                        let Some(g) = self.groups.group(*gid) else { return ui.response() };
+                        let Some(g) = self.core.groups.group(*gid) else { return ui.response() };
                         let color = group_color(&g.color);
                         let open_now = self.rail_folder_open(*gid, members);
                         let can_toggle = members.len() > 1;
                         // The tile sits at the first open member in rail order, which is not always the group's first.
-                        let anchor = folder_anchor(&self.rail_order, members);
+                        let anchor = folder_anchor(&self.core.rail_order, members);
                         let worst = folder_status(g.members.iter().filter_map(|m| self.conn(*m)).map(|c| &c.status));
-                        let holds_active = self.active.is_some_and(|a| members.contains(&a));
+                        let holds_active = self.core.active.is_some_and(|a| members.contains(&a));
                         let e = opens[k];
                         let full = members.len() as f32 * MEMBER_SLOT;
                         // The shelf grows from one tile to all the members as the folder opens; the folder's own button
@@ -319,7 +313,7 @@ impl App {
                             if can_toggle {
                                 menu_act(ui, &mut folder_acts, (gid, FolderAct::Toggle), |ui| ui.button(if open_now { "Close" } else { "Open" }));
                             }
-                            match conns_panel::connect_all_items(ui, g, &self.conns) {
+                            match conns_panel::connect_all_items(ui, g, &self.core.conns) {
                                 Some(true) => folder_acts.push((gid, FolderAct::ConnectAll)),
                                 Some(false) => folder_acts.push((gid, FolderAct::DisconnectAll)),
                                 None => {}
@@ -330,7 +324,7 @@ impl App {
                         });
                         if !st.busy {
                             let top = if open_now { DropOn::FolderTop { gid: *gid, anchor } } else { DropOn::Folder { gid: *gid, anchor } };
-                            tile_drop(ui, &r, r.rect, top, &self.groups, &self.rail_order, &mut drops);
+                            tile_drop(ui, &r, r.rect, top, &self.core.groups, &self.core.rail_order, &mut drops);
                         }
                         if e > 0.0 && e < 1.0 {
                             // Opening or closing: the members slide out from under the tile as the capsule grows, and
@@ -379,7 +373,7 @@ impl App {
             });
         });
         if let Some(id) = pick {
-            self.active = Some(id);
+            self.exec(Action::Conn(ConnA::Switch { conn: id }));
         }
         if let Some(gid) = toggle {
             self.toggle_rail_folder(&ctx, gid);
@@ -395,11 +389,9 @@ impl App {
         } else if let Some(m) = outer {
             self.apply_rail_move(&items, m);
         } else if let Some((gid, members, m)) = inner {
-            let full = self.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
+            let full = self.core.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
             if let Some(at) = member_slot(&full, &members, m) {
-                let all = self.conn_ids();
-                self.groups.place(members[m.from], Place::Into(gid, Some(at)), &all);
-                self.save_groups();
+                self.exec(Action::Conn(ConnA::Group(GroupA::Move { conn: members[m.from], to: Place::Into(gid, Some(at)) })));
             }
         }
         if !folder_acts.is_empty() {
@@ -408,28 +400,21 @@ impl App {
         for (gid, a) in folder_acts {
             match a {
                 FolderAct::Toggle => self.toggle_rail_folder(&ctx, gid),
-                FolderAct::ConnectAll => self.connect_group(gid),
-                FolderAct::DisconnectAll => self.disconnect_group(gid),
+                FolderAct::ConnectAll => self.exec(Action::Conn(ConnA::Group(GroupA::ConnectAll { group: gid }))),
+                FolderAct::DisconnectAll => self.exec(Action::Conn(ConnA::Group(GroupA::DisconnectAll { group: gid }))),
                 FolderAct::Edit => self.edit_group(gid),
-                FolderAct::Unfold => {
-                    if let Some(g) = self.groups.group_mut(gid) {
-                        g.fold_rail = false;
-                        let name = g.name.clone();
-                        self.save_groups();
-                        self.ok(format!("{name} shows its connections one by one in the rail. Edit group turns folding back on."));
-                    }
-                }
+                FolderAct::Unfold => self.exec(Action::Conn(ConnA::Group(GroupA::Unfold { group: gid }))),
             }
         }
         match act {
             Some((id, TileAct::Reconnect)) => {
-                self.active = Some(id);
-                self.connect(id);
+                self.exec(Action::Conn(ConnA::Switch { conn: id }));
+                self.exec(Action::Conn(ConnA::Connect { conn: id }));
             }
             Some((id, TileAct::Server)) => self.open_server(id),
             Some((id, TileAct::Edit)) => self.edit_conn(id),
             Some((id, TileAct::Icon)) => self.modal = Some(Modal::ConnIcon(Box::new(super::conn_icon::IconForm::new(id)))),
-            Some((id, TileAct::Disconnect)) => self.disconnect(id),
+            Some((id, TileAct::Disconnect)) => self.exec(Action::Conn(ConnA::Disconnect { conn: id })),
             None => {}
         }
     }
@@ -447,7 +432,7 @@ impl App {
                 let mark = engine_mark(c.meta.engine, &c.server.product).0;
                 let (at, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
                 logo(ui.painter(), at.center(), 14.0, mark, mark_color(mark));
-                let active = self.active == Some(c.meta.id);
+                let active = self.core.active == Some(c.meta.id);
                 ui.label(RichText::new(&c.meta.name).color(if active { BRIGHT() } else { TEXT() }));
                 if let Status::Failed(why) = &c.status {
                     ui.label(RichText::new("failed").size(TXT_MICRO).color(status_color(&c.status))).on_hover_text(why.as_str());
@@ -460,14 +445,13 @@ impl App {
 
     /// Whether a folder is drawn open. One holding a single open connection shows that tile rather than a folder around it.
     fn rail_folder_open(&self, gid: u64, members: &[u64]) -> bool {
-        members.len() == 1 || self.groups.rail_open(gid)
+        members.len() == 1 || self.core.groups.rail_open(gid)
     }
 
     /// Opens or closes a folder in the rail, with its animation.
     fn toggle_rail_folder(&mut self, ctx: &egui::Context, gid: u64) {
-        let open = !self.groups.rail_open(gid);
-        self.groups.set_rail_open(gid, open);
-        self.save_groups();
+        let open = !self.core.groups.rail_open(gid);
+        self.exec(Action::Conn(ConnA::Group(GroupA::RailOpen { group: gid })));
         fold::start(ctx, fold_id(gid), open);
     }
 
@@ -475,8 +459,8 @@ impl App {
     /// connection is gone. A lifted tile floats with the pointer, so it gets no menu.
     #[allow(clippy::too_many_arguments)]
     fn conn_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, id: u64, lifted: bool, target: Option<DropOn>, pick: &mut Option<u64>, act: &mut Option<(u64, TileAct)>, drops: &mut Vec<RailDrop>) -> Option<egui::Response> {
-        let c = self.conns.iter().find(|c| c.meta.id == id)?;
-        let r = conn_shortcut(ui, rect, c, self.active == Some(id), || self.tabs.iter().filter(|t| t.sel.conn == id).count());
+        let c = self.core.conns.iter().find(|c| c.meta.id == id)?;
+        let r = conn_shortcut(ui, rect, c, self.core.active == Some(id), || self.core.tabs.iter().filter(|t| t.sel.conn == id).count());
         if lifted {
             return Some(r);
         }
@@ -484,11 +468,11 @@ impl App {
             *pick = Some(id);
         }
         if let Some(t) = target {
-            tile_drop(ui, &r, r.rect, t, &self.groups, &self.rail_order, drops);
+            tile_drop(ui, &r, r.rect, t, &self.core.groups, &self.core.rail_order, drops);
         }
         r.context_menu(|ui| tile_menu(ui, id, act));
         // The picture of a drag over this tile, since a screenshot cannot hold one.
-        if self.conns_ui.demo_rail_drop == Some(id) {
+        if self.ui.conns.demo_rail_drop == Some(id) {
             drop_ring(ui.painter(), r.rect);
             let at = r.rect.center() + egui::vec2(4.0, 2.0);
             if let Some(c) = self.conn(1) {
@@ -497,7 +481,7 @@ impl App {
             hint_card(ui.ctx(), at, "New group");
         }
         // The picture of the menu, drawn beside its tile since a screenshot has no right click to open it with.
-        if self.conns_ui.demo_tile_menu == Some(id) {
+        if self.ui.conns.demo_tile_menu == Some(id) {
             egui::Area::new(egui::Id::unique("demo-tile-menu")).order(egui::Order::Foreground).fixed_pos(r.rect.right_top() + egui::vec2(8.0, 0.0)).show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| tile_menu(ui, id, act));
             });
@@ -509,8 +493,8 @@ impl App {
     /// tile (a new group) or of a folder (into it). A folder let go on a tile does nothing, since groups do not nest.
     fn apply_rail_move(&mut self, items: &[RailItem], m: dnd::Move) {
         if !m.into {
-            self.rail_order = order_after_move(&self.rail_order, items, m);
-            return;
+            let order = order_after_move(&self.core.rail_order, items, m);
+            return self.exec(Action::Conn(ConnA::Group(GroupA::RailOrder { order })));
         }
         let Some(RailItem::Conn(conn)) = items.get(m.from) else { return };
         match items.get(m.to) {
@@ -520,101 +504,18 @@ impl App {
         }
     }
 
-    /// Applies one drop on the rail: the groups are saved, and the toast offers Undo.
     fn apply_rail_drop(&mut self, d: RailDrop) {
-        let all = self.conn_ids();
-        // Undo puts back only what this drop moves: each connection's spot in the groups, the tile's place in the rail and
-        // the group it makes. A whole snapshot would also throw away group edits made while the toast is up.
-        let tile = match d {
-            RailDrop::Reorder { conn, .. } | RailDrop::Into { conn, .. } | RailDrop::Pair { conn, .. } => conn,
-        };
-        let at = self.rail_order.iter().position(|c| *c == tile).unwrap_or(0);
-        let prev = at.checked_sub(1).and_then(|i| self.rail_order.get(i).copied());
-        let spot = |a: &App, c: u64| {
-            let (g, i) = a.groups.spot(c, &all);
-            (c, g, i)
-        };
-        let undo = |moved: Vec<(u64, Option<u64>, usize)>, created: Option<u64>| Restore::Placed { moved, created, tile, prev, at };
-        let name = |a: &App, id: u64| a.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
-        match d {
-            RailDrop::Reorder { conn, anchor, after } => {
-                if !self.rail_order.contains(&conn) {
-                    return;
-                }
-                // A member of a folded group dropped between tiles leaves its group. An unfolded one is loose in the rail already.
-                let left = self.groups.group_of(conn).filter(|g| g.fold_rail).map(|g| g.name.clone());
-                if let Some(g) = left {
-                    let was = vec![spot(self, conn)];
-                    self.groups.place(conn, Place::Loose(None), &all);
-                    self.toast_restore(format!("{} left {g}.", name(self, conn)), undo(was, None));
-                }
-                move_next_to(&mut self.rail_order, conn, anchor, after);
-            }
-            RailDrop::Into { conn, gid, at } => {
-                let joined = self.groups.group_of(conn).map(|g| g.id) != Some(gid);
-                let was = vec![spot(self, conn)];
-                if self.groups.place(conn, Place::Into(gid, at), &all) && joined {
-                    let g = self.groups.group(gid).map(|g| g.name.clone()).unwrap_or_default();
-                    // The folder sits at its first open member, so a tile from above it must follow the group or the folder jumps.
-                    let members = self.groups.group(gid).map(|g| g.members.clone()).unwrap_or_default();
-                    if let Some(last) = self.rail_order.iter().copied().filter(|c| *c != conn && members.contains(c)).last() {
-                        move_next_to(&mut self.rail_order, conn, last, true);
-                    }
-                    self.toast_restore(format!("{} added to {g}.", name(self, conn)), undo(was, None));
-                }
-            }
-            RailDrop::Pair { conn, target } => {
-                let was = vec![spot(self, conn), spot(self, target)];
-                let gid = self.groups.new_group("New group");
-                self.groups.place(target, Place::Into(gid, None), &all);
-                self.groups.place(conn, Place::Into(gid, None), &all);
-                self.groups.set_rail_open(gid, true);
-                move_next_to(&mut self.rail_order, conn, target, true);
-                self.toast_restore_edit(format!("Grouped {} and {}.", name(self, target), name(self, conn)), undo(was, Some(gid)), Some(gid));
-            }
-        }
-        self.save_groups();
-        self.save_prefs();
+        self.exec(Action::Conn(ConnA::Group(GroupA::Drop(d))));
     }
 
     pub(super) fn open_server(&mut self, conn: u64) {
-        self.req += 1;
-        match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
-            Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
-            Some((db::sql::Engine::Postgres, _, adv)) => self.pg_server = Some(PgServerWin::new(conn, db::sql::pg::server::set_by_quarry(&adv))),
-            _ => self.server = Some(ServerWin::new(conn, self.req)),
+        match self.conn(conn).map(|c| c.meta.engine) {
+            Some(db::sql::Engine::MySql) => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Sql(quarry_core::action::SqlServerA::Open { conn }))),
+            Some(db::sql::Engine::Postgres) => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Pg(quarry_core::action::PgServerA::Open { conn }))),
+            _ => self.exec(quarry_core::action::Action::Server(quarry_core::action::ServerA::Mongo(quarry_core::action::MongoServerA::Open { conn }))),
         }
     }
 
-    /// Drops the session but keeps the saved connection, which then leaves the rail.
-    pub(super) fn disconnect(&mut self, id: u64) {
-        if let Some(name) = self.drop_session(id) {
-            self.ok(format!("Disconnected from {name}"));
-        }
-    }
-
-    /// Closes the connection's session and forgets what was listed on it. Returns its name, or None when it is gone.
-    pub(super) fn drop_session(&mut self, id: u64) -> Option<String> {
-        let c = self.conns.iter_mut().find(|c| c.meta.id == id)?;
-        (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
-        c.forget_lists();
-        let name = c.meta.name.clone();
-        self.stop_conn_work(id);
-        self.pg_tables_asked.forget(id, None, None);
-        self.explain_prev.forget(id);
-        Some(name)
-    }
-
-    /// A watch holds its own client and a Shell run its own tunnel or relay, any of which would keep an old session alive.
-    pub(super) fn stop_conn_work(&mut self, id: u64) {
-        for t in &mut self.tabs {
-            if t.sel.conn == id {
-                t.stop_work();
-            } else if t.shell.attached.iter().any(|a| a.conn == id) {
-                t.shell.stop();
-            }
-        }
-    }
 }
 
 /// The menu of a connection's tile.
@@ -634,17 +535,6 @@ fn tile_menu(ui: &mut egui::Ui, id: u64, act: &mut Option<(u64, TileAct)>) {
     }
     if danger_item(ui, "Disconnect").clicked() {
         *act = Some((id, TileAct::Disconnect));
-    }
-}
-
-/// Keeps the ids still open in their old order and appends the newly open ones, so a shortcut
-/// never jumps when another connection opens or closes.
-fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
-    order.retain(|id| open.contains(id));
-    for id in open {
-        if !order.contains(id) {
-            order.push(*id);
-        }
     }
 }
 
@@ -705,12 +595,7 @@ enum DropOn {
     FolderTop { gid: u64, anchor: u64 },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RailDrop {
-    Reorder { conn: u64, anchor: u64, after: bool },
-    Into { conn: u64, gid: u64, at: Option<usize> },
-    Pair { conn: u64, target: u64 },
-}
+use quarry_core::action::RailDrop;
 
 /// How a drop is marked on the tile: an insertion line at its top or bottom, or a fill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -943,17 +828,6 @@ fn folder_anchor(order: &[u64], members: &[u64]) -> u64 {
     order.iter().copied().find(|id| members.contains(id)).unwrap_or(members[0])
 }
 
-/// Moves `conn` to just before or after `anchor` in the rail order. An anchor that is gone, or is `conn` itself, puts it last.
-fn move_next_to(order: &mut Vec<u64>, conn: u64, anchor: u64, after: bool) {
-    // A connection dragged in from the sidebar may be closed, and a closed one has no tile to place.
-    if !order.contains(&conn) {
-        return;
-    }
-    order.retain(|c| *c != conn);
-    let at = order.iter().position(|c| *c == anchor).map_or(order.len(), |i| i + after as usize);
-    order.insert(at, conn);
-}
-
 /// A tile carried beside the pointer at `p`: its engine logo on a raised square, painted without a widget so it never
 /// covers the drop targets under the pointer.
 fn ghost_tile(ui: &egui::Ui, p: egui::Pos2, c: &Conn) {
@@ -1013,16 +887,7 @@ fn member_slot(full: &[u64], open: &[u64], m: dnd::Move) -> Option<usize> {
     }
 }
 
-/// Two-letter mark and product name. MariaDB shares the MySQL engine, so only the server
-/// reply, once connected, tells it apart.
-pub(super) fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'static str) {
-    match (engine, product) {
-        (db::sql::Engine::Mongo, _) => ("MO", "MongoDB"),
-        (db::sql::Engine::Postgres, _) => ("PG", "PostgreSQL"),
-        (_, "MariaDB") => ("MA", "MariaDB"),
-        _ => ("MY", "MySQL"),
-    }
-}
+pub(super) use quarry_core::action::agents::engine_mark;
 
 /// The colors of the connection form's engine cards, so an engine reads the same everywhere.
 pub(super) fn mark_color(mark: &str) -> Color32 {
@@ -1118,6 +983,7 @@ pub(super) fn search_icon(p: &egui::Painter, c: egui::Pos2, s: Stroke) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarry_core::action::conn::{move_next_to, sync_order};
 
     #[test]
     fn shortcuts_keep_the_order_they_opened_in() {

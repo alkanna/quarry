@@ -24,8 +24,8 @@ fn pg_shell(unlock: bool) -> Option<(Fx, UiApp, String)> {
     }
     ui.quiet();
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].view = View::Shell;
+    let c = a.core.cur;
+    a.core.test_mut().tabs[c].view = View::Shell;
     ui.settle();
     ui.show("Shell editor");
     Some((fx, ui, table))
@@ -39,11 +39,11 @@ fn shell(a: &App) -> &ShellTab {
 /// connection opens.
 fn run(ui: &mut UiApp, code: &str) {
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].shell.code = code.into();
+    let c = a.core.cur;
+    a.core.test_mut().tabs[c].shell.code = code.into();
     let before = shell(ui.app()).req;
     ui.click("Run");
-    if matches!(ui.app().modal, Some(Modal::ShellWrite(_))) {
+    if matches!(ui.app().modal, Some(Modal::ShellWrite { .. })) {
         ui.click("Execute");
     }
     assert_ne!(shell(ui.app()).req, before, "Run did not start the script; last error: {}", ui.app().last_problem());
@@ -84,7 +84,7 @@ fn loop_rows(fx: &Fx, table: &str) -> i64 {
 /// Waits until the looping script has written a few rows, which proves it runs before the test stops it.
 fn wait_writing(ui: &mut UiApp, fx: &Fx, table: &str) {
     ui.wait_for("the looping script to write", RUN_LIMIT, |a| {
-        let ended = a.tabs.iter().find(|x| x.sel.coll == table).and_then(|x| x.shell.error.clone());
+        let ended = a.core.tabs.iter().find(|x| x.sel.coll == table).and_then(|x| x.shell.error.clone());
         assert!(ended.is_none(), "the looping script ended: {ended:?}");
         loop_rows(fx, table) >= 3
     });
@@ -110,21 +110,6 @@ fn disconnect(ui: &mut UiApp, conn: u64, name: &str) {
 }
 
 #[test]
-fn shell_fix_the_console_keeps_the_latest_lines_each_cut_short() {
-    let mut sh = ShellTab::default();
-    for i in 0..1600 {
-        sh.push_log("log".into(), format!("line {i}"));
-    }
-    // Two bytes a character, so a cut by bytes would land inside one or keep only 1000 characters.
-    sh.push_log("log".into(), "é".repeat(3000));
-    assert!(sh.logs.len() <= 1500, "{} lines kept", sh.logs.len());
-    assert_eq!(sh.logs[sh.logs.len() - 2].1, "line 1599");
-    assert!(sh.logs_dropped > 0 && sh.logs.len() + sh.logs_dropped >= 1600, "{} dropped", sh.logs_dropped);
-    assert_eq!(sh.logs.last().unwrap().1.chars().count(), 2000);
-    assert!(!sh.logs.iter().any(|l| l.1 == "line 0"), "the oldest lines were kept");
-}
-
-#[test]
 fn shell_fix_a_script_that_logs_many_lines_keeps_the_latest_in_the_console() {
     let Some((_fx, mut ui, _t)) = pg_shell(false) else { return };
     let sh = run_done(&mut ui, "async function run() {\n  for (let i = 0; i < 1600; i++) console.log('line ' + i);\n  console.log('y'.repeat(5000));\n  return 1;\n}");
@@ -139,9 +124,9 @@ fn shell_fix_closing_a_tab_stops_its_running_script() {
     let Some((fx, mut ui, t)) = pg_shell(true) else { return };
     run(&mut ui, &looping(&t, "sql", ""));
     wait_writing(&mut ui, &fx, &t);
-    let cross = format!("Close tab {}", ui.app().tab_name(ui.app().cur));
+    let cross = format!("Close tab {}", ui.app().tab_name(ui.app().core.cur));
     ui.mouse_hold(&cross, 0);
-    assert!(ui.app().tabs.iter().all(|x| x.sel.coll != t), "the cross did not close the tab");
+    assert!(ui.app().core.tabs.iter().all(|x| x.sel.coll != t), "the cross did not close the tab");
     assert_stopped(&mut ui, &fx, &t);
 }
 
@@ -152,7 +137,7 @@ fn shell_fix_disconnect_stops_the_scripts_of_its_tabs() {
     wait_writing(&mut ui, &fx, &t);
     disconnect(&mut ui, CONN, "test");
     assert_stopped(&mut ui, &fx, &t);
-    ui.wait("the run to end", |a| a.tabs.iter().all(|x| x.shell.started.is_none()));
+    ui.wait("the run to end", |a| a.core.tabs.iter().all(|x| x.shell.started.is_none()));
 }
 
 #[test]
@@ -160,13 +145,13 @@ fn shell_fix_disconnect_stops_the_scripts_of_tabs_that_attached_it() {
     let Some((fx, mut ui, t)) = pg_shell(true) else { return };
     let uri = std::env::var(PG).unwrap();
     let a = ui.h.state_mut();
-    a.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: 2, name: "other".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Idle) });
-    a.rail_order.push(2);
+    a.core.test_mut().conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(ConnMeta { id: 2, name: "other".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Idle) });
+    a.core.test_mut().rail_order.push(2);
     ui.connect(2, &uri);
     ui.assert_ready(2);
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].shell.attached.push(crate::app::shell_attach::Attached { conn: 2, db: "quarry_test".into(), name: "other".into(), allow_writes: false, schema: "public".into(), tables: Vec::new() });
+    let c = a.core.cur;
+    a.core.test_mut().tabs[c].shell.attached.push(crate::app::shell_attach::Attached { conn: 2, db: "quarry_test".into(), name: "other".into(), allow_writes: false, schema: "public".into(), tables: Vec::new() });
     // The writes go through the tab's own connection, which stays open, so only the stop on Disconnect can end them.
     run(&mut ui, &looping(&t, "sql", "await other.sql`SELECT 1`;"));
     wait_writing(&mut ui, &fx, &t);
@@ -225,9 +210,9 @@ fn shell_fix_a_mongo_run_is_refused_after_disconnect() {
     ui.h.state_mut().open_collection(sel, Open::Here);
     ui.quiet();
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].view = View::Shell;
-    a.tabs[c].shell.code = "async function run() { return 1; }".into();
+    let c = a.core.cur;
+    a.core.test_mut().tabs[c].view = View::Shell;
+    a.core.test_mut().tabs[c].shell.code = "async function run() { return 1; }".into();
     disconnect(&mut ui, CONN, "test");
     ui.click("Run");
     let sh = shell(ui.app());

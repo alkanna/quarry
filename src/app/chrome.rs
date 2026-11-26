@@ -2,183 +2,49 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::sql::FilterA;
+use quarry_core::action::{Action, ConnA, DocsA, Pref, PrefsA, SqlA, TabA};
+use quarry_core::cmd::{KEY_ORDER, Layer, Scope};
 
 
 impl App {
-    /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
-    pub(super) fn remember_tabs(&mut self) {
-        if self.ephemeral || self.shot.is_some() {
-            return;
-        }
-        let tabs: Vec<SavedTab> = self
-            .tabs
-            .iter()
-            .map(|t| SavedTab {
-                conn: t.sel.conn,
-                db: t.sel.db.clone(),
-                schema: t.sel.schema.clone(),
-                coll: t.sel.coll.clone(),
-                view: match t.view {
-                    View::Documents => "Documents",
-                    View::Aggregate => "Aggregate",
-                    View::Indexes => "Indexes",
-                    View::Shell => "Shell",
-                    View::Schema => "Schema",
-                    View::Import => "Import",
-                    View::Compare => "Compare",
-                    View::Watch => "Watch",
-                    View::Structure => "Structure",
-                    View::Relations => "Relations",
-                    View::Triggers => "Triggers",
-                    View::Info => "Info",
-                    View::Sql => "Sql",
-                }
-                .into(),
-                filter: t.filter_txt.clone(),
-                sort: t.sort_txt.clone(),
-                project: t.proj_txt.clone(),
-                agg: t.agg_txt.clone(),
-                shell: t.shell.code.clone(),
-                attached: t.shell.attached.clone(),
-                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&crate::app::sql::bar::Clauses { tree: s.bar.tree_json.clone(), ..s.bar.c.clone() }).ok()).unwrap_or_default(),
-                query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
-                run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
-                run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
-                stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
-                agg_text_mode: t.agg_text_mode,
-                script: t.script.as_ref().map(|b| b.r.clone()),
-            })
-            .collect();
-        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| c.status.is_open())).collect();
-        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
-            self.prefs.open_tabs = tabs;
-            self.prefs.cur_tab = self.cur;
-            self.prefs.last_conn = self.active;
-            self.prefs.open_conns = open;
-            self.save_prefs();
-        }
+    /// What is over the page: Core's windows, or the app's modal. Each takes its own keys, Esc included, so page
+    /// shortcuts stay off while one is open; a new kind of window belongs in `quarry_core::cmd::WINDOWS`.
+    pub(super) fn layer(&self) -> Layer {
+        if self.modal.is_some() { Layer::Modal } else { self.core.layer() }
     }
 
-    /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
-    /// stay off while it is open; a new kind of window belongs in this list.
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.routines.window_open() || self.tool.is_some() || !self.agents.asks.is_empty() || self.agents.activity_open || self.agents.rules.is_some()
+        self.layer() != Layer::Page
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
-        if self.window_open() {
+        let page = self.layer() == Layer::Page;
+        // A plain key ("/") only while nothing is being typed into, so it never steals a character from a field.
+        let typing = ctx.memory(|m| m.focused().is_some());
+        let text = ctx.text_edit_focused();
+        // KEY_ORDER tries the longer combos first, since extra Shift and Alt still match a plain Cmd shortcut. A command
+        // whose keys_on is false leaves its key alone. Cmd+S reaches the library only when no page handler took it: staged
+        // SQL grid edits and document drafts consume it where they draw, before this runs, so they win. A new page handler
+        // of Cmd+S must consume the key too, or its press would also open the Save dialog.
+        for &(s, ch) in KEY_ORDER.iter() {
+            let on = match s.scope {
+                Scope::App => true,
+                Scope::Page | Scope::View => page,
+                Scope::Native => false,
+            };
+            if on && !(ch.mods() == 0 && typing) && s.cmd.keys_on(&self.core, text) && ctx.input_mut(|i| i.consume_shortcut(&shortcut(&ch))) {
+                self.run_cmd(s.cmd, ctx);
+            }
+        }
+        if !page {
             return;
         }
         let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
-        // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
-        // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
-        // would also open the Save dialog. A view that holds no script (a table's Structure, Indexes and the like) leaves
-        // the key alone. The cell editor of a SQL grid owns the key while it is open.
-        // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
-        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd | shift, Key::S) {
-            self.save_script_as();
-        }
-        if self.sql_cell.is_none() && self.tab_has_text() && k(cmd, Key::S) {
-            self.save_script();
-        }
-        // Cmd+O opens the library picker of the view on screen; a view with no script has none.
-        if self.tab_has_text() && k(cmd, Key::O) {
-            self.lib_ui.open_picker = true;
-        }
-        if k(cmd | shift, Key::L) {
-            self.focus_library();
-        }
-        // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
-        if k(cmd | shift, Key::T) {
-            self.reopen_tab();
-        }
-        if k(cmd, Key::W) {
-            self.ask_close_tab(self.cur);
-        }
-        if k(cmd, Key::K) {
-            self.open_palette();
-        }
-        if k(cmd, Key::T) {
-            self.open_new_tab();
-        }
-        let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
-        // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself. The tree has the keys
-        // only while it is on screen and no text field has taken them, so a flag left from a click never holds the editor's.
-        let tree_keys = self.lib_ui.panel.focus && !self.prefs.sidebar_hidden && self.prefs.side_mode() == SideMode::Library && !ctx.text_edit_focused();
-        let query_view = query_view && !tree_keys;
-        if query_view && k(cmd | shift, Key::Enter) {
-            self.sql_run(true, false);
-        } else if query_view && k(cmd, Key::Enter) {
-            self.sql_run(false, false);
-        }
-        if k(cmd, Key::E) {
-            if query_view {
-                self.sql_run(false, true);
-            } else {
-                self.explain();
-            }
-        }
-        if k(cmd | shift, Key::R) && let Some(id) = self.active.filter(|_| !self.demo) {
-            self.connect(id);
-        }
-        if k(cmd, Key::R) && !self.tabs.is_empty() {
-            self.reload();
-        }
-        // "/" only while nothing is being typed into, so it never steals a slash from a field.
-        let typing = ctx.memory(|m| m.focused().is_some());
-        if k(cmd | shift, Key::F) || (!typing && k(none, Key::Slash)) {
-            self.show_sidebar();
-            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("tree-filter")));
-        }
-        if k(cmd, Key::F) && !self.tabs.is_empty() {
-            self.set_view(View::Documents);
-            self.focus_query(ctx);
-        }
-        if k(cmd, Key::Comma) {
-            self.modal = Some(Modal::Settings);
-        }
-        if k(cmd, Key::N) {
-            self.new_conn_modal();
-        }
-        if k(cmd, Key::L) {
-            self.log.open = !self.log.open;
-        }
-        if k(cmd, Key::Slash) {
-            self.shortcuts_modal();
-        }
-        let n = self.tabs.len();
-        if n > 0 {
-            if k(ctrl | shift, Key::Tab) || k(cmd | shift, Key::OpenBracket) || k(cmd | shift, Key::OpenCurlyBracket) {
-                self.go_tab((self.cur + n - 1) % n);
-            }
-            if k(ctrl, Key::Tab) || k(cmd | shift, Key::CloseBracket) || k(cmd | shift, Key::CloseCurlyBracket) {
-                self.go_tab((self.cur + 1) % n);
-            }
-            const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-            // The palette shows these as each view's position in MONGO_VIEWS.
-            let views: &[(View, &str)] = if self.t().is_some_and(|t| t.sql.is_some()) { &SQL_VIEWS } else { &MONGO_VIEWS };
-            for (d, (v, _)) in DIGITS.iter().zip(views) {
-                if k(cmd | alt, *d) {
-                    self.set_view(*v);
-                }
-            }
-            // After the Cmd+Shift brackets above, which would also match these.
-            if k(cmd, Key::OpenBracket) {
-                self.nav(true);
-            }
-            if k(cmd, Key::CloseBracket) {
-                self.nav(false);
-            }
-            for (i, d) in DIGITS.iter().enumerate() {
-                if k(cmd, *d) {
-                    self.go_tab(if i == 8 { n - 1 } else { i.min(n - 1) });
-                }
-            }
-        }
+        let none = egui::Modifiers::NONE;
         // Plain keys only act when no text field, menu or cell editor wants them. The boolean switch and the calendar
         // leave no text field focused but still read the arrows and letters.
-        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
+        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.core.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.core.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
             let (up, down) = (k(none, Key::ArrowUp), k(none, Key::ArrowDown));
             let (prev, next) = (k(none, Key::PageUp), k(none, Key::PageDown));
             let nav = self.t().filter(|t| matches!(t.view, View::Documents | View::Aggregate)).map(|t| {
@@ -189,26 +55,23 @@ impl App {
                 let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
                 (agg, row, go)
             });
+            let tab = self.cur_uid().unwrap_or_default();
             if let Some((agg, row, go)) = nav {
-                if let Some(i) = row {
-                    // The open card moves with the keys instead of leaving the previous one open.
-                    if let Some(prev) = self.t().and_then(|t| t.selected) {
-                        self.tm().unwrap().expanded.remove(&prev);
-                    }
-                    self.select(agg, i, false);
-                    self.scroll_sel = true;
+                if let Some(row) = row {
+                    self.exec(Action::Docs(DocsA::Step { tab, agg, row }));
+                    self.ui.scroll_sel = true;
                 }
-                if let Some(p) = go {
-                    self.tm().unwrap().page = p;
-                    self.reload();
+                if let Some(page) = go {
+                    self.exec(Action::Docs(DocsA::Page { tab, page }));
                 }
             }
             // The Query grid keeps its own selection, so the arrows move that one.
-            if (up || down) && let Some(s) = self.tm().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_mut()).filter(|s| !s.text_mode) {
+            if (up || down) && let Some(s) = self.t().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_ref()).filter(|s| !s.text_mode) {
                 let len = s.cur_set().map_or(0, |x| x.rows.len());
                 if len > 0 {
-                    s.qsel = Some(step(s.qsel, down, len));
-                    self.scroll_sel = true;
+                    let row = step(s.qsel, down, len);
+                    self.exec(Action::Sql(SqlA::SelectRow { tab, row }));
+                    self.ui.scroll_sel = true;
                 }
             }
         }
@@ -216,41 +79,19 @@ impl App {
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
             return;
         }
-        // The calendar of a date closes before the editor under it.
-        if let Some(i) = &mut self.inline && let Some(o) = i.pick.take() {
-            i.text = o;
-            return;
-        }
-        if self.inline.take().is_some() || self.new_field.take().is_some() {
-            return;
-        }
-        if let Some(t) = self.tm() {
-            // A SQL row's record closes before the row is let go.
-            if t.record && t.record_row() {
-                t.record = false;
-                return;
-            }
-            if t.view == View::Sql && let Some(s) = &mut t.sql && s.qsel.take().is_some() {
-                return;
-            }
-            if let Some(key) = t.selected {
-                return self.close_row(key);
-            }
-            if !t.expanded.is_empty() {
-                t.expanded.clear();
-                return;
-            }
-        }
-        self.tree_filter.clear();
+        self.exec(Action::Docs(DocsA::Escape));
     }
 
     /// The Documents view's query: rules mode opens the filter panel, SQL mode focuses its WHERE field, and Mongo its query.
     pub(super) fn focus_query(&mut self, ctx: &egui::Context) {
-        let d = self.sql_dialect();
-        match self.tm().and_then(|t| t.sql.as_mut()) {
-            Some(s) if !s.bar.c.sql => {
-                let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
-                s.bar.open_filters(ctx, &cols, d);
+        let sql = self.t().and_then(|t| t.sql.as_ref().map(|s| (t.uid, s.bar.c.sql, s.bar.panel.open)));
+        match sql {
+            Some((tab, false, was_open)) => {
+                self.exec(Action::Sql(SqlA::Filter { tab, a: FilterA::Open }));
+                // Opening the panel folds it out, which lives in egui's memory.
+                if !was_open {
+                    sql::filter_panel::start_fold(ctx, true);
+                }
             }
             Some(_) => ctx.memory_mut(|m| m.request_focus(query_id("SQL-WHERE"))),
             None => ctx.memory_mut(|m| m.request_focus(query_id("QUERY"))),
@@ -258,31 +99,7 @@ impl App {
     }
 
     pub(super) fn shortcuts_modal(&mut self) {
-        let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
-        self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
-    }
-
-    pub(super) fn go_tab(&mut self, i: usize) {
-        if i != self.cur && i < self.tabs.len() {
-            self.set_cur(i);
-            self.reset_doc_state();
-        }
-    }
-
-    pub(super) fn set_view(&mut self, v: View) {
-        let Some(t) = self.tm().filter(|t| t.view != v) else { return };
-        // A tab with no collection has nothing for the other views to show.
-        if t.sel.coll.is_empty() && !matches!(v, View::Shell | View::Sql) {
-            return;
-        }
-        t.view = v;
-        t.selected = None;
-        // The editor belongs to the Content grid; another view must never inherit it.
-        self.sql_cell = None;
-        self.reset_doc_state();
-        if v == View::Indexes {
-            self.load_indexes();
-        }
+        self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body: quarry_core::cmd::sheet(), code: false });
     }
 
     pub(super) fn screenshot(&mut self, ctx: &egui::Context) {
@@ -337,11 +154,11 @@ impl App {
                 let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            let win = self.win_buttons;
+            let win = self.ui.win_buttons;
             ui.horizontal_centered(|ui| {
                 if crate::ui::widgets::glyph_button(ui, egui::vec2(26.0, 26.0), glyphs::sidebar, "Toggle sidebar", "Show or hide the sidebar").clicked() {
-                    self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
-                    self.save_prefs();
+                    let hidden = self.core.prefs.sidebar_hidden;
+                    self.exec(Action::Prefs(PrefsA::Set(Pref::SidebarHidden(!hidden))));
                 }
                 ui.add_space(4.0);
                 app_mark(ui);
@@ -355,8 +172,7 @@ impl App {
                     if win {
                         ui.add_space(window_buttons::BUTTONS_W - 4.0);
                     }
-                    self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
-                    let n = self.undo.len();
+                    let n = self.core.undo.len();
                     let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
                     if quiet_enabled(ui, n > 0, undo).on_hover_text("Recent writes you can take back").clicked() {
                         self.modal = Some(Modal::Undo);
@@ -377,13 +193,13 @@ impl App {
 
     /// Refreshes the memory and CPU readouts once a second, and asks for the repaint that shows them.
     fn sample_usage(&mut self, ctx: &egui::Context) {
-        let (at, cpu_then, pct, _) = self.usage;
+        let (at, cpu_then, pct, _) = self.ui.usage;
         let wall = at.elapsed();
         if wall >= Duration::from_secs(1) || cpu_then.is_zero() {
             let (mem, cpu_now) = process_usage();
             // A sample older than 2 s is from before the readouts were hidden, so it only starts a new second.
             let pct = if cpu_then.is_zero() || wall > Duration::from_secs(2) { pct } else { cpu_now.saturating_sub(cpu_then).as_secs_f32() / wall.as_secs_f32() * 100.0 };
-            self.usage = (std::time::Instant::now(), cpu_now, pct, mem);
+            self.ui.usage = (std::time::Instant::now(), cpu_now, pct, mem);
         }
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -395,7 +211,7 @@ impl App {
             ui.painter().hline(full.x_range(), full.top() + 0.5, Stroke::new(1.0, LINE()));
             ui.horizontal_centered(|ui| {
                 // The active connection: its state, then where it is and what it runs.
-                if let Some(c) = self.active.and_then(|id| self.conn(id)).filter(|_| self.prefs.show_server) {
+                if let Some(c) = self.core.active.and_then(|id| self.conn(id)).filter(|_| self.core.prefs.show_server) {
                     let (dot_r, dot_resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(dot_r.center(), 4.0, status_color(&c.status));
                     let state = match &c.status {
@@ -408,12 +224,12 @@ impl App {
                     ui.label(RichText::new(c.server.status_line(&c.masked_uri)).font(FontId::monospace(TXT_CAPTION)).color(MUTED()));
                     ui.add_space(10.0);
                 }
-                if self.prefs.show_fps {
+                if self.core.prefs.show_fps {
                     // Averaged over half a second of frames: one frame's dt swings above the refresh
                     // rate when an input event lands just after a vsync. Idle gaps are left out, but
                     // not the Shell's 100 ms repaints while a script runs.
                     let dt = ui.input(|i| i.unstable_dt);
-                    let (sum, n, shown) = &mut self.fps;
+                    let (sum, n, shown) = &mut self.ui.fps;
                     if dt < 0.25 {
                         *sum += dt;
                         *n += 1;
@@ -422,19 +238,19 @@ impl App {
                         *shown = *n as f32 / sum.max(0.000_1);
                         (*sum, *n) = (0.0, 0);
                     }
-                    let rate = self.fps.2.max(1.0);
-                    let color = if self.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
-                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                    let rate = self.ui.fps.2.max(1.0);
+                    let color = if self.ui.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
+                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.ui.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
                 }
-                if self.prefs.show_mem || self.prefs.show_cpu {
+                if self.core.prefs.show_mem || self.core.prefs.show_cpu {
                     self.sample_usage(ui.ctx());
-                    let (_, _, cpu, mem) = self.usage;
-                    if self.prefs.show_mem {
+                    let (_, _, cpu, mem) = self.ui.usage;
+                    if self.core.prefs.show_mem {
                         let text = mem.map_or("mem n/a".into(), |b| format!("mem {:>9}", human_bytes(b as usize)));
                         // Built only while hovered: it walks every row of every tab.
                         fixed_readout(ui, text, "mem 0000.0 MB", MUTED()).on_hover_ui(|ui| self.mem_tip(ui, mem));
                     }
-                    if self.prefs.show_cpu {
+                    if self.core.prefs.show_cpu {
                         let color = if cpu >= 80.0 { WARNING() } else { MUTED() };
                         fixed_readout(ui, format!("cpu {:>3.0}%", cpu), "cpu 000%", color).on_hover_text("Quarry's CPU use over the last second, in percent of one core.");
                     }
@@ -442,13 +258,13 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.agents_pill(ui);
                     let log = RichText::new("Query log").size(TXT_CAPTION);
-                    if quiet(ui, if self.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
-                        self.log.open = !self.log.open;
+                    if quiet(ui, if self.ui.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                        self.ui.log.open = !self.ui.log.open;
                     }
-                    let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
+                    let connected = self.core.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
                     let tip = if connected { "Server status" } else { "Server status (connect first)" };
                     if quiet_enabled(ui, connected, RichText::new("Server").size(TXT_CAPTION)).on_hover_text(tip).clicked()
-                        && let Some(conn) = self.active
+                        && let Some(conn) = self.core.active
                     {
                         self.open_server(conn);
                     }
@@ -463,8 +279,8 @@ impl App {
                         if self.export_progress(ui) || self.sql_job_progress(ui) {
                             return;
                         }
-                        let first = self.status.lines().next().unwrap_or_default();
-                        ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(FAINT())).truncate()).on_hover_text(self.status.as_str());
+                        let first = self.core.status.lines().next().unwrap_or_default();
+                        ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(FAINT())).truncate()).on_hover_text(self.core.status.as_str());
                     });
                 });
             });
@@ -481,7 +297,7 @@ impl App {
         let mut tab_move: Option<dnd::Move> = None;
         // Move left or Move right picked in a tab's menu.
         let mut menu_move: Option<dnd::Move> = None;
-        let has_closed = !self.closed.is_empty();
+        let has_closed = !self.core.closed.is_empty();
         const TAB_MIN_W: f32 = 146.0;
         // Left of the name: the engine logo and its gap. Right: the close cross.
         const TAB_PAD_L: f32 = 38.0;
@@ -489,11 +305,11 @@ impl App {
         const TAB_PAD_R: f32 = 34.0;
         const PLUS_W: f32 = 32.0;
         const LIST_W: f32 = 84.0;
-        let n = self.tabs.len();
+        let n = self.core.tabs.len();
         // The name is left as a placeholder so its color can follow hover, which is known only after layout.
-        let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
+        let titles: Vec<_> = self.core.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
-            job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
+            job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.core.cur { W_MEDIUM } else { 400.0 }, 0.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
                 View::Indexes => Some("indexes"),
@@ -528,8 +344,8 @@ impl App {
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
-        let moved = self.tab_seen != Some(self.cur);
-        self.tab_seen = Some(self.cur);
+        let moved = self.ui.tab_seen != Some(self.core.cur);
+        self.ui.tab_seen = Some(self.core.cur);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // egui's own edge fades, opaque, show there are more tabs now that the scrollbar is hidden.
@@ -542,11 +358,11 @@ impl App {
                 .show(ui, |ui| {
                     // Tabs drag sideways to reorder; the engine's drag sits under each tab's own click, so a click picks,
                     // a middle click closes and the right click opens the menu as before.
-                    let keys: Vec<egui::Id> = self.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
+                    let keys: Vec<egui::Id> = self.core.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
                     tab_move = dnd::reorder(ui, egui::Id::unique("tab-strip"), dnd::Items::horizontal(&widths, TAB_STRIP_H).keys(&keys), |ui, i, st| {
-                        let t = &self.tabs[i];
+                        let t = &self.core.tabs[i];
                         let (title, sub) = titles[i].clone();
-                        let active = i == self.cur;
+                        let active = i == self.core.cur;
                         let rect = ui.max_rect();
                         let resp = ui.interact(rect, ui.scope_id().with("tab"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, format!("Tab {}", self.tab_name(i))));
@@ -669,66 +485,38 @@ impl App {
             }
         });
         });
+        let uid = |app: &App, i: usize| app.core.tabs.get(i).map(|t| t.uid);
         if let Some(m) = tab_move.or(menu_move) {
-            // The current tab stays current wherever it or the others move; nothing else is kept by tab index.
-            let c = self.cur;
-            self.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };
-            m.apply(&mut self.tabs);
-            self.tab_seen = Some(self.cur);
+            // A drop into a tab is not a move; tabs only reorder.
+            if let (false, Some(tab)) = (m.into, uid(self, m.from)) {
+                self.exec(Action::Tab(TabA::Move { tab, to: m.to }));
+            }
             ui.ctx().request_repaint();
             return;
         }
         if pick.is_some() {
             // Scroll even when the picked tab was already active but scrolled out of view.
-            self.tab_seen = None;
+            self.ui.tab_seen = None;
         }
         if reopen {
-            return self.reopen_tab();
+            return self.exec(Action::Tab(TabA::Reopen));
         }
         if let Some(query) = search {
             return self.open_palette_with(query);
         }
         if let Some((i, what)) = many {
-            let keep = |j: usize| match what {
-                TabClose::This => j != i,
-                TabClose::Others => j == i,
-                TabClose::Left => j >= i,
-                TabClose::Right => j <= i,
-                TabClose::All => false,
-            };
-            let cur = self.cur;
-            let all = std::mem::take(&mut self.tabs);
-            for (j, t) in all.into_iter().enumerate() {
-                if keep(j) {
-                    self.tabs.push(t);
-                } else {
-                    self.remember_closed(t);
-                }
+            if let Some(tab) = uid(self, i) {
+                self.exec(Action::Tab(TabA::CloseMany { tab, what }));
             }
-            // Stay on the same tab when it survives, else on the clicked one, else the nearest.
-            self.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.tabs.len().saturating_sub(1));
-            self.set_cur(self.cur);
-            self.reset_doc_state();
         } else if let Some(i) = close {
             self.ask_close_tab(i);
-        } else if let Some(i) = pick {
-            self.go_tab(i);
-        }
-        if dup {
-            let t = &self.tabs[self.cur];
-            let mut n = Tab::new(t.sel.clone());
-            (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
-            // Copy what ran, not the typed texts, so edits the source never ran stay marked as unrun.
-            n.ran_txt = t.ran_txt.clone();
-            self.tabs.insert(self.cur + 1, n);
-            self.set_cur(self.cur + 1);
-            self.reset_doc_state();
-            self.reload();
+        } else if let Some(tab) = pick.and_then(|i| uid(self, i)) {
+            self.exec(Action::Tab(if dup { TabA::Duplicate { tab } } else { TabA::Pick { tab } }));
         }
     }
 
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
-        if let Some(id) = self.active.filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Failed(_)))) {
+        if let Some(id) = self.core.active.filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Failed(_)))) {
             return self.conn_failed_card(ui, id);
         }
         ui.vertical_centered(|ui| {
@@ -748,8 +536,7 @@ impl App {
     }
 
     pub(super) fn new_conn_modal(&mut self) {
-        self.conn_test = None;
-        self.test_info = None;
+        self.exec(Action::Conn(ConnA::ForgetTest));
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }
 }

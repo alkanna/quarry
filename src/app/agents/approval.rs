@@ -52,11 +52,15 @@ fn fact(ui: &mut egui::Ui, dot: Color32, main: &str, sub: Option<&str>) {
 
 impl App {
     pub(in crate::app) fn agents_approval(&mut self, ctx: &egui::Context) {
-        let Some(ask) = self.agents.asks.front_mut() else { return };
+        let Some(ask) = self.core.agents.asks.front().cloned() else { return };
         let now = std::time::Instant::now();
-        let shown = *ask.shown.get_or_insert(now);
-        let ask = ask.clone();
-        let total = self.agents.asks.len();
+        let shown = match (ask.shown, self.ui.ask_shown) {
+            // Only demos and tests set it, to picture or check Allow asleep or awake.
+            (Some(at), _) => at,
+            (None, Some((id, at))) if id == ask.id => at,
+            _ => self.ui.ask_shown.insert((ask.id, now)).1,
+        };
+        let total = self.core.agents.asks.len();
         let awake = now.saturating_duration_since(shown) >= WAKE;
         let conn = self.conn(ask.conn);
         let name = conn.map_or_else(|| "A connection".to_string(), |c| c.meta.name.clone());
@@ -69,9 +73,9 @@ impl App {
         let w = 520.0f32.min(ctx.content_rect().width() - 40.0);
         let shell = ask.tool == "run_shell";
         let sql = conn.is_some_and(|c| c.meta.engine.is_sql());
-        let p = self.agents.cfg.conn(ask.conn);
+        let p = self.core.agents.cfg.conn(ask.conn);
         let large_change = p.map_or(0, |p| p.large_change);
-        let undo_docs = self.agents.cfg.limits.undo_docs;
+        let undo_docs = self.core.agents.cfg.limits.undo_docs;
         let client = if ask.client.is_empty() { "An agent".to_string() } else { ask.client.clone() };
         let r = top_banded(id).show(ctx, |ui| {
             ui.set_width(w + 40.0);
@@ -197,8 +201,8 @@ impl App {
         ctx.request_repaint_after(if awake { Duration::from_millis(500) } else { WAKE.saturating_sub(now.saturating_duration_since(shown)) });
         if let Some(a) = answer {
             #[cfg(test)]
-            self.agents.answered.push((ask.id, a));
-            self.agent_answer(ask.id, a);
+            self.core.test_mut().agents.answered.push((ask.id, a));
+            self.exec(Action::Agents(AgentsA::Answer { id: ask.id, answer: a }));
         }
     }
 }

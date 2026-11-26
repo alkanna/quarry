@@ -2,23 +2,14 @@
 
 use super::*;
 use crate::ui::dnd;
+use quarry_core::action::aggregate::AggA;
+use quarry_core::action::Action;
 
-pub(super) enum StageAct {
-    Edited(usize),
-    Toggled(usize),
-    /// Move the stage at the first index to the second, dragged there.
-    Move(usize, usize),
-    Remove(usize),
-    Add(String),
-    Op(usize, String),
-    /// Show 10 more documents; `usize::MAX` is the collection sample.
-    More(usize),
-    Preview(usize),
-}
+pub(super) use quarry_core::action::aggregate::StageA as StageAct;
 
 /// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
 /// on the left and what comes out of the stage on the right.
-pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &Stage, auto: bool, acts: &mut Vec<StageAct>) {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
@@ -35,8 +26,9 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
             })
             .response
             .on_hover_text("Change the stage operator");
-            if ui.checkbox(&mut s.on, "").on_hover_text("Include this stage in the pipeline").changed() {
-                acts.push(StageAct::Toggled(i));
+            let mut on = s.on;
+            if ui.checkbox(&mut on, "").on_hover_text("Include this stage in the pipeline").changed() {
+                acts.push(StageAct::Flip(i));
             }
             ui.hyperlink_to(RichText::new("Docs").size(TXT_SMALL), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -58,17 +50,16 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                 ui.set_width(w);
                 let id = egui::Id::unique(("stage-editor", s.uid));
                 let rows = s.text.lines().count().clamp(2, 16);
-                // A formatted stage goes back into the pipeline text, as an edit does.
-                if crate::ui::editor::format_on_key(ui, id, &mut s.text) {
-                    acts.push(StageAct::Edited(i));
-                }
-                let out = crate::ui::vim::wrap(ui, id, &mut s.text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
+                // Edited on a copy and sent back as one action, which also puts it into the pipeline text.
+                let mut text = s.text.clone();
+                crate::ui::editor::format_on_key(ui, id, &mut text);
+                let out = crate::ui::vim::wrap(ui, id, &mut text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, format!("Stage {} editor", i + 1)));
-                if out.response.changed() {
-                    acts.push(StageAct::Edited(i));
-                }
-                if let Err(e) = db::parse_value(&s.text) {
+                if let Err(e) = db::parse_value(&text) {
                     ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
+                }
+                if text != s.text {
+                    acts.push(StageAct::Text(i, text));
                 }
             });
             // A gap, not ui.separator(): in a row a separator takes all the height left and
@@ -118,7 +109,7 @@ fn lifted_stage(ui: &mut egui::Ui, i: usize, s: &Stage) -> egui::Response {
 
 /// The first documents out of a stage, one line each. The whole row toggles the document open
 /// or closed, and several can be open at once.
-pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_samples(ui: &mut egui::Ui, s: &Stage, i: usize, acts: &mut Vec<StageAct>) {
     if s.sample.is_empty() {
         if s.count == Some(0) {
             ui.label(RichText::new("No documents come out of this stage.").color(FAINT()));
@@ -137,8 +128,8 @@ pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
             let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
             let clip = ui.painter().with_clip_rect(rect.shrink2(egui::vec2(2.0, 0.0)));
             clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT());
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() && !s.open.remove(&k) {
-                s.open.insert(k);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() {
+                acts.push(StageAct::OpenSample(i, k));
             }
             if open {
                 let text = db::to_edit_json(d);
@@ -169,11 +160,12 @@ impl App {
         let mut code_lang = None;
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
-        self.sync_stages();
-        let auto = self.prefs.auto_preview;
+        let auto = self.core.prefs.auto_preview;
         let mut auto_now = auto;
-        let t = self.tm().unwrap();
-        let builder = !t.agg_text_mode;
+        let t = self.t().unwrap();
+        let mut agg_txt = t.agg_txt.clone();
+        let (tab, builder) = (t.uid, !t.agg_text_mode);
+        let mut text_mode = t.agg_text_mode;
         let labels: Vec<String> = if builder || db::is_shell(&t.agg_txt) {
             Vec::new()
         } else {
@@ -187,7 +179,7 @@ impl App {
             ui.horizontal(|ui| {
                 caption(ui, if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" });
                 ui.add_space(8.0);
-                segmented(ui, &mut t.agg_text_mode, &[(false, "Stages"), (true, "Text")]);
+                segmented(ui, &mut text_mode, &[(false, "Stages"), (true, "Text")]);
                 if builder {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
@@ -208,7 +200,7 @@ impl App {
                                 let n = t.agg_input.count.map_or(String::new(), |n| format!("  ·  about {} documents", group(&n.to_string())));
                                 // Closed at first, like the original's collection sample (isOpen: false, renderer line 111386).
                                 egui::CollapsingHeader::new(RichText::new(format!("Collection input{n}")).color(MUTED())).id_salt("agg-input").default_open(false).show(ui, |ui| {
-                                    stage_samples(ui, &mut t.agg_input, usize::MAX, &mut sacts);
+                                    stage_samples(ui, &t.agg_input, usize::MAX, &mut sacts);
                                 });
                             });
                             let n = t.stages.len();
@@ -221,7 +213,7 @@ impl App {
                             let keys: Vec<egui::Id> = t.stages.iter().map(|s| egui::Id::unique(("stage", s.uid))).collect();
                             let mut grew = false;
                             let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys).menu(), |ui, i, st| {
-                                let s = &mut t.stages[i];
+                                let s = &t.stages[i];
                                 if st.lifted {
                                     return lifted_stage(ui, i, s);
                                 }
@@ -276,8 +268,8 @@ impl App {
             } else {
                 let id = ui.make_persistent_id("agg-editor");
                 text_id = Some(id);
-                crate::ui::editor::format_on_key(ui, id, &mut t.agg_txt);
-                crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
+                crate::ui::editor::format_on_key(ui, id, &mut agg_txt);
+                crate::ui::vim::wrap(ui, id, &mut agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
                 let (main, tip) = run_split(ui, "Run", "⌘↵", true, "Choose what to run");
@@ -292,7 +284,7 @@ impl App {
                     if let Some(id) = text_id
                         && ui.button("Format").on_hover_text("Indent the pipeline by its brackets and break long lines (Shift+Alt+F)").clicked()
                     {
-                        crate::ui::editor::format_in(ui.ctx(), id, &mut t.agg_txt);
+                        crate::ui::editor::format_in(ui.ctx(), id, &mut agg_txt);
                         ui.close();
                     }
                     code_menu(ui, &mut code_lang);
@@ -316,39 +308,30 @@ impl App {
                 });
             }
         });
+        if agg_txt != self.core.tabs[self.core.cur].agg_txt {
+            self.exec(Action::Aggregate(AggA::Text { tab, text: agg_txt }));
+        }
+        if text_mode != !builder {
+            self.exec(Action::Aggregate(AggA::TextMode { tab, on: text_mode }));
+        }
         if auto_now != auto {
-            self.prefs.auto_preview = auto_now;
-            self.save_prefs();
-            if auto_now {
-                self.stages_changed(0, false);
-            }
+            self.exec(Action::Aggregate(AggA::AutoPreview(auto_now)));
         }
-        self.apply_stage_acts(sacts);
-        if builder && unsynced.is_none() {
-            self.pump_previews(ui.ctx());
+        if !sacts.is_empty() {
+            self.exec(Action::Aggregate(AggA::Stages { tab, acts: sacts }));
         }
+        self.take_repaint(ui.ctx());
         if let Some(l) = code_lang {
             self.show_code(l, false);
         }
         if let Some(b) = demo_pick {
             self.demo_open_picker(ui.ctx(), &b, "picker-agg");
         }
-        let t = self.tm().unwrap();
-        if let (Some(i), false) = (stage, run) && let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
-            self.run_pipeline(p);
-            self.tm().unwrap().agg_stage = Some(i);
+        if let (Some(stage), false) = (stage, run) {
+            self.exec(Action::Aggregate(AggA::RunTo { tab, stage }));
         }
-        let t = self.tm().unwrap();
         if run {
-            let text = t.agg_txt.clone();
-            if db::is_shell(&text) {
-                self.run_shell(&text);
-            } else {
-                match db::parse_pipeline(&text) {
-                    Err(e) => self.err(e),
-                    Ok(p) => self.run_pipeline(p),
-                }
-            }
+            self.exec(Action::Aggregate(AggA::Run { tab }));
         }
         if explain {
             self.explain();
@@ -359,116 +342,5 @@ impl App {
         }
         // Last, since opening a script may change the tab this frame was drawn for.
         self.pick_acts(pick_acts);
-    }
-
-    /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
-    /// library, a pasted query).
-    pub(super) fn sync_stages(&mut self) {
-        let Some(t) = self.tm() else { return };
-        if t.agg_text_mode || t.stages_src == t.agg_txt || db::is_shell(&t.agg_txt) {
-            return;
-        }
-        if let Ok(st) = stages_from_text(&t.agg_txt) {
-            t.stages = st;
-            t.stages_src = t.agg_txt.clone();
-        }
-    }
-
-    /// Stages from `from` on need a new preview (a second later while typing), and the pipeline
-    /// text follows the stages.
-    pub(super) fn stages_changed(&mut self, from: usize, typing: bool) {
-        let auto = self.prefs.auto_preview;
-        let t = self.tm().unwrap();
-        let at = std::time::Instant::now() + std::time::Duration::from_millis(if typing { 1000 } else { 0 });
-        for s in t.stages.iter_mut().skip(from) {
-            s.due = auto.then_some(at);
-        }
-        t.agg_txt = text_from_stages(&t.stages);
-        t.stages_src = t.agg_txt.clone();
-    }
-
-    pub(super) fn apply_stage_acts(&mut self, acts: Vec<StageAct>) {
-        for a in acts {
-            let t = self.tm().unwrap();
-            match a {
-                StageAct::Edited(i) => self.stages_changed(i, true),
-                StageAct::Toggled(i) => self.stages_changed(i, false),
-                StageAct::Move(i, j) => {
-                    if i < t.stages.len() && j < t.stages.len() && i != j {
-                        let s = t.stages.remove(i);
-                        t.stages.insert(j, s);
-                        self.stages_changed(i.min(j), false);
-                    }
-                }
-                StageAct::Remove(i) => {
-                    if i < t.stages.len() {
-                        t.stages.remove(i);
-                        self.stages_changed(i, false);
-                    }
-                }
-                StageAct::Add(op) => {
-                    let body = db::STAGES.iter().find(|(o, _)| *o == op).map_or("{}", |(_, b)| b);
-                    t.stages.push(Stage::new(&op, body, true));
-                    let i = t.stages.len() - 1;
-                    self.stages_changed(i, false);
-                }
-                StageAct::Op(i, op) => {
-                    let s = &mut t.stages[i];
-                    // A body still equal to the old stage's example becomes the new stage's example.
-                    let template = |o: &str| db::STAGES.iter().find(|(x, _)| *x == o).map(|(_, b)| *b);
-                    if template(&s.op) == Some(s.text.as_str()) || s.text.trim().is_empty() {
-                        s.text = template(&op).unwrap_or("{}").to_string();
-                    }
-                    s.op = op;
-                    self.stages_changed(i, false);
-                }
-                StageAct::More(i) => {
-                    let s = if i == usize::MAX { &mut t.agg_input } else { &mut t.stages[i] };
-                    s.limit += db::STAGE_SAMPLE;
-                    s.due = Some(std::time::Instant::now());
-                }
-                StageAct::Preview(i) => t.stages[i].due = Some(std::time::Instant::now()),
-            }
-        }
-    }
-
-    /// Runs the next stage preview that is due, one at a time and in order, like the original's
-    /// getResultsForStages (renderer line 112079), so a pipeline never floods the server.
-    pub(super) fn pump_previews(&mut self, ctx: &egui::Context) {
-        if self.demo {
-            return;
-        }
-        let Some(target) = self.target() else { return };
-        let now = std::time::Instant::now();
-        let t = &mut self.tabs[self.cur];
-        if t.agg_input.req == 0 && t.agg_input.due.is_some_and(|d| d <= now) {
-            t.agg_input.due = None;
-            self.req += 1;
-            t.agg_input.req = self.req;
-            self.worker.stage_preview(self.req, target.clone(), Vec::new(), t.agg_input.limit);
-        }
-        if t.stages.iter().any(|s| s.req != 0) {
-            return;
-        }
-        if let Some(next) = t.stages.iter().filter_map(|s| s.due).min() && next > now {
-            ctx.request_repaint_after(next - now);
-        }
-        let Some(k) = t.stages.iter().position(|s| s.due.is_some_and(|d| d <= now)) else { return };
-        t.stages[k].due = None;
-        if !t.stages[k].on {
-            return;
-        }
-        match stage_pipeline(&t.stages, k) {
-            Err(e) => (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some(e), None, Vec::new()),
-            // The original never previews past $out or $merge (lastStages, renderer line 112045).
-            Ok(p) if db::has_write_stage(&p) => {
-                (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some("This stage writes, so it only runs with the whole pipeline (Run).".into()), None, Vec::new());
-            }
-            Ok(p) => {
-                self.req += 1;
-                t.stages[k].req = self.req;
-                self.worker.stage_preview(self.req, target, p, t.stages[k].limit);
-            }
-        }
     }
 }

@@ -1,6 +1,7 @@
 //! The connection form: engine, address, auth, SSH, TLS and proxy settings, with Test and Save.
 
 use super::*;
+use quarry_core::action::{Action, ConnA};
 
 /// One engine in the left column. Disabled cards show what comes later.
 fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Color32, selected: bool, enabled: bool) -> egui::Response {
@@ -828,34 +829,35 @@ impl App {
     /// groups, saved tabs and history stay behind on purpose, and a new connection that took its id would adopt them and run
     /// its scripts on another server.
     pub(super) fn next_conn_id(&self) -> u64 {
-        let lib = &self.library;
+        let lib = &self.core.library;
         let held = lib.scripts.iter().map(|s| s.conn).chain(lib.links.iter().flat_map(|l| l.conns.iter().copied()));
-        let groups = self.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.groups.loose.iter().copied());
-        let prefs = self.prefs.open_tabs.iter().map(|t| t.conn).chain(self.prefs.open_conns.iter().copied()).chain(self.prefs.last_conn);
+        let groups = self.core.groups.groups.iter().flat_map(|g| g.members.iter().copied()).chain(self.core.groups.loose.iter().copied());
+        let prefs = self.core.prefs.open_tabs.iter().map(|t| t.conn).chain(self.core.prefs.open_conns.iter().copied()).chain(self.core.prefs.last_conn);
         // Per-connection settings are keyed "{conn}/...".
-        let p = &self.prefs;
+        let p = &self.core.prefs;
         let keyed = p.history.keys().chain(p.shell_histories.keys()).chain(p.cols.keys()).chain(p.schema_maps.keys()).chain(p.relations.keys());
         let history = keyed.filter_map(|k| k.split('/').next().and_then(|c| c.parse::<u64>().ok()));
         // An agent policy names its connection by id too, and a new connection must never inherit another's access.
-        let agents = self.agents.cfg.conns.keys().copied();
-        self.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).chain(agents).max().unwrap_or(0) + 1
+        let agents = self.core.agents.cfg.conns.keys().copied();
+        self.core.conns.iter().map(|c| c.meta.id).chain(held).chain(groups).chain(prefs).chain(history).chain(agents).max().unwrap_or(0) + 1
     }
 
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
-        if self.demo {
+        if self.core.demo {
             paste_seed(ui.ctx(), f);
         }
         let mut save = false;
         let mut test = false;
         let mut browse = false;
-        let default_s = self.prefs.timeout_ms / 1000;
+        let default_s = self.core.prefs.timeout_ms / 1000;
         // An edited Cloud SQL connection shows the gcloud account and the instance's state, which the browser's load reads.
         if f.cloud_on().is_some() {
             self.cloud_load(false);
         }
         // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
-        if let Some((req, info)) = self.test_info.take() {
+        if let Some((req, info)) = self.core.test_info.clone() {
             f.take_test_info(req, info);
+            self.exec(Action::Conn(ConnA::TestInfoTaken));
         }
         ui.set_width(fit_width(ui.ctx(), 800.0));
         let tabs = conn_tabs(f.engine);
@@ -870,7 +872,7 @@ impl App {
         let mut b = body_begin(ui);
         let outer = ui;
         let ui = &mut b.content_ui;
-        let cloud = &self.cloud;
+        let cloud = &self.core.cloud;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(210.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -932,10 +934,10 @@ impl App {
             banner(ui, Notice::Info, "", "A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.", None);
         }
         // An answer for an older Test or another form is not this form's.
-        if self.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
-            self.conn_test = None;
+        if self.core.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
+            self.exec(Action::Conn(ConnA::ForgetTest));
         }
-        match self.conn_test.as_ref().map(|(_, r)| r) {
+        match self.core.conn_test.as_ref().map(|(_, r)| r) {
             // Testing and a success show in the footer, beside the Test button.
             None | Some(Ok(_)) => {}
             Some(Err(e)) if e.contains(crate::cloudsql::PROXY_MISSING) => {}
@@ -946,7 +948,7 @@ impl App {
                 banner(ui, Notice::Danger, "Test failed.", &text, None);
             }
         }
-        if matches!(&self.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
+        if matches!(&self.core.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
             ui.add_space(6.0);
             match self.proxy_missing_card(ui, "Test") {
                 Some(super::cloud_sql::CardAct::Again) => test = true,
@@ -959,8 +961,8 @@ impl App {
         }
         b.end(outer);
         let ui = outer;
-        let testing = f.testing && self.conn_test.is_none();
-        let passed = match self.conn_test.as_ref().map(|(_, r)| r) {
+        let testing = f.testing && self.core.conn_test.is_none();
+        let passed = match self.core.conn_test.as_ref().map(|(_, r)| r) {
             Some(Ok(m)) => Some(m.clone()),
             _ => None,
         };
@@ -991,80 +993,46 @@ impl App {
             self.open_cloud_browser(true);
         }
         if test {
-            f.testing = true;
-            self.conn_test = None;
-            self.test_info = None;
-            self.req += 1;
-            f.test_req = self.req;
-            self.test_started = Some(std::time::Instant::now());
-            let mut net = f.net();
-            net.tools = self.cloud_tools();
-            if f.engine.is_sql() {
-                self.worker.sql_test_with(f.test_req, f.sql_addr().to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
-            } else {
-                self.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
+            if let Ok(quarry_core::action::Reply::Pending(req)) = self.core.execute(Action::Conn(quarry_core::action::conn::test_of(f))) {
+                f.testing = true;
+                f.test_req = req;
             }
+            self.run_fx();
         }
         if save {
             let id = f.id.unwrap_or_else(|| self.next_conn_id());
-            // Demo ids overlap real ones, so the demo keeps its edits in memory only.
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
             let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.ephemeral { Ok(()) } else { store_uri(id, &uri) };
-            match saved {
-                Ok(()) => {
-                    let stored = if self.ephemeral {
-                        Vec::new()
-                    } else {
-                        vec![
-                            set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
-                            set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
-                            set_secret(id, "proxy-password", if f.proxy_active() { &f.proxy_pwd } else { "" }),
-                            set_secret(id, "pg-key-passphrase", if f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty() { &f.pg_key_pass } else { "" }),
-                        ]
-                    };
-                    let meta = ConnMeta {
-                        id,
-                        engine: f.engine,
-                        name: f.name.trim().into(),
-                        tag: clean_tag(&f.tag).into(),
-                        // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
-                        ssh: f.ssh_on.then(|| {
-                            let old = self.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
-                            let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
-                            crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
-                        }),
-                        proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
-                        cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
-                        advanced: f.advanced().unwrap_or_default(),
-                        icon: self.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
-                    };
-                    match self.conns.iter_mut().find(|c| c.meta.id == id) {
-                        Some(c) => {
-                            c.meta = meta;
-                            c.masked_uri = db::mask_uri(&uri);
-                            c.writable = false;
-                            c.dbs.clear();
-                            c.server = Default::default();
-                        }
-                        None => self.conns.push(Conn { masked_uri: db::mask_uri(&uri), ..Conn::new(meta, Status::Idle) }),
-                    }
-                    self.active = Some(id);
-                    self.save_conns();
-                    if let (None, Some(g)) = (f.id, f.group) {
-                        let all = self.conn_ids();
-                        if self.groups.place(id, Place::Into(g, None), &all) {
-                            self.save_groups();
-                        }
-                    }
-                    self.connect(id);
-                    *keep = false;
-                    if let Some(Err(e)) = stored.into_iter().find(|r| r.is_err()) {
-                        self.err(e);
-                    }
-                }
-                Err(e) => self.err(format!("Could not save the address to the Keychain: {e}")),
+            let secret = |what: &str, on: bool, v: &str| (what.to_string(), Secret::new(if on { v.to_string() } else { String::new() }));
+            let secrets = vec![
+                secret("ssh-password", f.ssh_on, &f.ssh_pwd),
+                secret("ssh-passphrase", f.ssh_on, &f.ssh_pass),
+                secret("proxy-password", f.proxy_active(), &f.proxy_pwd),
+                secret("pg-key-passphrase", f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty(), &f.pg_key_pass),
+            ];
+            let meta = ConnMeta {
+                id,
+                engine: f.engine,
+                name: f.name.trim().into(),
+                tag: clean_tag(&f.tag).into(),
+                // The form copied the key when it opened. Keep what the stored connection has now, since a first connect may have remembered one meanwhile, unless the bastion changed or the key was forgotten.
+                ssh: f.ssh_on.then(|| {
+                    let old = self.core.conns.iter().find(|c| c.meta.id == id).and_then(|c| c.meta.ssh.as_ref());
+                    let same = !f.forget_key && old.is_some_and(|o| o.host == f.ssh.host.trim() && o.port == f.ssh.port);
+                    crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), known_host: if same { old.and_then(|o| o.known_host.clone()) } else { None }, ..f.ssh.clone() }
+                }),
+                proxy: f.proxy_active().then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
+                advanced: f.advanced().unwrap_or_default(),
+                icon: self.core.conns.iter().any(|c| c.meta.id == id && c.meta.icon),
+            };
+            // A refused save keeps the form and what was typed in it.
+            let group = if f.id.is_none() { f.group } else { None };
+            let done = self.core.execute(Action::Conn(ConnA::Save { meta, uri: Secret::new(uri), secrets, group })).is_ok();
+            self.run_fx();
+            if done {
+                *keep = false;
             }
         }
     }

@@ -5,29 +5,8 @@ use crate::app::*;
 use db::sql::bulk::{self, BulkOp, BulkPlan, BulkPrep};
 use db::sql::value::{self, Kind};
 use db::sql::Col;
-
-/// One `column = value` of an update. `col` is the column's `Col::name`.
-#[derive(Clone, Default)]
-pub(in crate::app) struct Pair {
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) null: bool,
-}
-
-pub(in crate::app) struct BulkForm {
-    pub(in crate::app) update: bool,
-    pub(in crate::app) sel: Sel,
-    /// The namespace the page was read in, which the count and the write use too.
-    pub(in crate::app) ns: String,
-    /// The WHERE of the last page asked for, kept from when the dialog opened: the grid may reload while it is open.
-    pub(in crate::app) filter: String,
-    /// The last page had a LIMIT or OFFSET chip, which the write does not follow.
-    pub(in crate::app) capped: bool,
-    pub(in crate::app) req: u64,
-    pub(in crate::app) prep: Option<BulkPrep>,
-    pub(in crate::app) pairs: Vec<Pair>,
-    pub(in crate::app) typed: String,
-}
+pub(crate) use quarry_core::state::sql::bulk::*;
+use quarry_core::action::SqlOpsA;
 
 /// Columns an update may set: the key would break undo, and computed and geometry columns cannot take a typed value.
 fn settable<'a>(p: &'a BulkPrep) -> Vec<&'a Col> {
@@ -72,27 +51,8 @@ impl App {
 
     /// `col` starts the update with that column, as the column menu's Update values to does.
     pub(in crate::app) fn open_bulk_with(&mut self, update: bool, col: Option<String>) {
-        let Some(t) = self.t() else { return };
-        let Some(s) = t.sql.as_ref() else { return };
-        if let Some(why) = self.sql_edit_block() {
-            return self.warn(why);
-        }
-        if s.ran.grouped() {
-            return self.warn("Grouped rows are summaries, not table rows. Ungroup to change rows.");
-        }
-        if !self.sel_writable() {
-            return self.ask_unlock_then(move |a| a.open_bulk_with(update, col));
-        }
-        let (sel, ran) = (t.sel.clone(), s.ran.clone());
-        if self.sql_db_for(sel.conn, Some("Connect first.")).is_none() {
-            return;
-        }
-        let Some((db, ns)) = self.sql_target(&sel) else { return self.warn_offline() };
-        self.req += 1;
-        let req = self.req;
-        self.worker.sql_bulk_prep(req, db, ns.clone(), sel.coll.clone(), ran.filter.clone());
-        let capped = ran.limit.is_some() || ran.skip > 0;
-        self.modal = Some(Modal::SqlBulk(Box::new(BulkForm { update, sel, ns, filter: ran.filter, capped, req, prep: None, pairs: col.map(|col| vec![Pair { col, ..Default::default() }]).unwrap_or_default(), typed: String::new() })));
+        let Some(tab) = self.cur_uid() else { return };
+        self.exec(Action::SqlOps(SqlOpsA::Bulk { tab, update, col }));
     }
 
     /// The count and columns are back. A failure closes the dialog and says why.
@@ -240,24 +200,11 @@ impl App {
             let ready = n > 0 && stmt.is_ok() && f.typed == table;
             if danger_solid(ui, ready, &label).clicked() && let Ok(p) = plan.clone() {
                 *keep = false;
-                self.run_bulk(f, p);
+                self.exec(Action::SqlOps(SqlOpsA::BulkRun { sel: f.sel.clone(), ns: f.ns.clone(), plan: p }));
             }
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
         });
-    }
-
-    /// Sends a confirmed plan. A connection locked again since the dialog opened is refused here and by the worker.
-    fn run_bulk(&mut self, f: &BulkForm, plan: BulkPlan) {
-        let conn = f.sel.conn;
-        if !self.conn_writable(conn) {
-            return self.warn_ro();
-        }
-        if self.sql_db_for(conn, Some("Connect first.")).is_none() {
-            return;
-        }
-        let Some((db, _)) = self.sql_target(&f.sel) else { return self.warn_offline() };
-        self.worker.sql_bulk(conn, db, f.ns.clone(), f.sel.coll.clone(), plan, !self.conn_writable(conn));
     }
 }

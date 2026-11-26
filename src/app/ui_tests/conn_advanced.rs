@@ -39,7 +39,7 @@ fn run(var: &str) {
     // A value shaped right but refused by the server shows under its row after Test.
     add_setting(&mut ui, "work_mem", "1kB");
     ui.click("Test");
-    ui.wait("the Test answer", |a| a.conn_test.is_some());
+    ui.wait("the Test answer", |a| a.core.conn_test.is_some());
     ui.show("Connected, but the server refused 1 setting. See the marked rows on the Advanced tab.");
     let t = std::time::Instant::now();
     while ui.h.query_all_by_label_contains("outside the valid range").next().is_none() {
@@ -70,12 +70,12 @@ fn run(var: &str) {
     assert_eq!(saved.search_path, ["adv_ui2", "public"], "{var}");
 
     // Reconnecting uses the saved settings; the session answers with them.
-    ui.h.state_mut().connect_uri(CONN, uri);
+    ui.h.state_mut().core.test_mut().connect_uri(CONN, uri);
     ui.wait("the reconnect", |a| a.conn(CONN).is_some_and(|c| c.status == Status::Ready && c.sql.is_some()));
     let db = ui.app().conn(CONN).unwrap().sql.clone().unwrap();
     // Through a worker of the test's own, so the answer does not go to the app. A run reads in the session the app's would.
     let (tx, rx) = std::sync::mpsc::channel();
-    let w = crate::db::Worker::new(tx, egui::Context::default());
+    let w = crate::db::Worker::for_test(tx);
     let read = |q: &str| {
         // No tab schema, so the path is the saved list alone; with one, that schema would come first.
         w.sql_run(9, db.clone(), "".into(), q.into(), true, 0, db::sql::RunHandle::default());

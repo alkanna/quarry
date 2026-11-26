@@ -13,7 +13,8 @@ fn hint(a: &App, name: &str) -> Option<String> {
 fn insert_document_on_a_sql_tab_opens_the_row_form_on_the_content_grid() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
-    app.tabs[app.cur].view = View::Sql;
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].view = View::Sql;
     app.sql_insert_row_menu();
     ui.settle();
     assert!(ui.app().t().map(|t| t.view) == Some(View::Documents), "the tab did not go to Content first");
@@ -24,8 +25,8 @@ fn insert_document_on_a_sql_tab_opens_the_row_form_on_the_content_grid() {
 fn insert_document_with_no_table_open_says_so_and_opens_nothing() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].sel.coll.clear();
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].sel.coll.clear();
     app.sql_insert_row_menu();
     assert!(ui.app().modal.is_none(), "a form opened with no table");
     assert!(ui.app().last_problem().contains("Open a table first"), "{}", ui.app().last_problem());
@@ -35,13 +36,13 @@ fn insert_document_with_no_table_open_says_so_and_opens_nothing() {
 fn cmd_f_opens_the_filter_panel_in_rules_mode_and_focuses_the_where_field_in_sql_mode() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = false;
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].sql.as_mut().expect("a SQL tab").bar.c.sql = false;
     ui.settle();
     ui.key(egui::Modifiers::COMMAND, egui::Key::F);
     ui.wait("the filter panel", |a| a.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open && !s.bar.c.sql));
     let app = ui.h.state_mut();
-    let s = app.tabs[cur].sql.as_mut().expect("a SQL tab");
+    let s = app.core.test_mut().tabs[cur].sql.as_mut().expect("a SQL tab");
     s.bar.panel.open = false;
     s.bar.c.sql = true;
     ui.settle();
@@ -178,9 +179,9 @@ fn arrows_and_page_keys_move_the_content_grid() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let size = ui.app().page_size();
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].count = size * 2;
-    assert!(app.tabs[cur].docs.len() > 1, "the demo table has fewer than two rows");
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].count = size * 2;
+    assert!(app.core.tabs[cur].docs.len() > 1, "the demo table has fewer than two rows");
     ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
     ui.key(egui::Modifiers::NONE, egui::Key::ArrowDown);
     assert_eq!(ui.app().t().and_then(|t| t.selected), Some((false, 1)));
@@ -207,10 +208,10 @@ fn the_results_bar_has_no_duplicate_or_delete_but_the_selection_bar_has() {
 fn the_page_size_menu_changes_the_size_and_goes_to_the_first_page() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].page = 1;
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].page = 1;
     ui.click("Page size");
     ui.click("200 per page");
-    assert_eq!(ui.app().prefs.page_size, 200);
+    assert_eq!(ui.app().core.prefs.page_size, 200);
     assert_eq!(ui.app().t().map(|t| t.page), Some(0));
 }

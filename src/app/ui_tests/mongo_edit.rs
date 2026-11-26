@@ -89,10 +89,10 @@ impl UiApp {
     /// Opens the inline editor of a cell, replaces its text and commits with Enter, which stages the edit.
     fn mongo_edit_cell(&mut self, col: &str, row: usize, text: &str) {
         self.double_click_cell(col, row);
-        self.wait("the inline editor", |a| a.inline.is_some());
+        self.wait("the inline editor", |a| a.core.inline.is_some());
         self.type_over(text);
         self.h.key_press(egui::Key::Enter);
-        self.wait("the edit to be staged", |a| a.inline.is_none() && !a.drafts.is_empty());
+        self.wait("the edit to be staged", |a| a.core.inline.is_none() && !a.core.drafts.is_empty());
     }
 
     /// Replaces the text of the focused editor. The inline editor does not select its text when it opens.
@@ -123,14 +123,14 @@ impl UiApp {
     /// Takes back the most recent action through the toolbar and Recent changes, leaving that dialog open for a test that waits for
     /// the answer first.
     pub(super) fn undo_latest_open(&mut self) {
-        let before = self.app().undo.len();
+        let before = self.app().core.undo.len();
         self.click(&format!("Undo ({before})"));
         self.click("Undo change 1");
     }
 
     /// Closes Recent changes once the undo has answered. Its toast goes first, since an error toast stays and has a Close of its own.
     pub(super) fn close_recent_changes(&mut self) {
-        self.h.state_mut().toasts.clear();
+        self.h.state_mut().core.test_mut().toasts.clear();
         self.settle();
         self.click("Close");
         self.wait("Recent changes to close", |a| a.modal.is_none());
@@ -183,18 +183,18 @@ fn inline_edit_after_cancelling_with_escape() {
     let mut ui = open(&f);
     ui.unlock();
     ui.double_click_cell("name", 1);
-    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.wait("the inline editor", |a| a.core.inline.is_some());
     ui.type_over("discarded");
     ui.h.key_press(egui::Key::Escape);
-    ui.wait("the editor to close", |a| a.inline.is_none());
-    assert!(ui.app().drafts.is_empty(), "Esc must not stage the typed text");
+    ui.wait("the editor to close", |a| a.core.inline.is_none());
+    assert!(ui.app().core.drafts.is_empty(), "Esc must not stage the typed text");
     assert_eq!(f.all(), seed());
     // The editor must open again, with the stored value and not the abandoned text.
     ui.double_click_cell("name", 3);
-    ui.wait("the inline editor again", |a| a.inline.as_ref().is_some_and(|i| i.text == "gamma"));
+    ui.wait("the inline editor again", |a| a.core.inline.as_ref().is_some_and(|i| i.text == "gamma"));
     ui.type_over("omega");
     ui.h.key_press(egui::Key::Enter);
-    ui.wait("the edit to be staged", |a| a.inline.is_none() && !a.drafts.is_empty());
+    ui.wait("the edit to be staged", |a| a.core.inline.is_none() && !a.core.drafts.is_empty());
     ui.save();
     assert_eq!(f.all(), vec![doc! { "_id": 1, "name": "alpha", "qty": 1 }, doc! { "_id": 2, "name": "beta", "qty": 2 }, doc! { "_id": 3, "name": "omega", "qty": 3 }]);
 }
@@ -246,7 +246,7 @@ fn undo_an_edit() {
     ui.mongo_edit_cell("name", 1, "changed");
     ui.save();
     assert_eq!(f.all()[0].get_str("name"), Ok("changed"));
-    ui.wait("the undo entry", |a| a.undo.len() == 1);
+    ui.wait("the undo entry", |a| a.core.undo.len() == 1);
     ui.undo_latest();
     f.expect(&mut ui, seed());
 }
@@ -259,7 +259,7 @@ fn undo_a_delete() {
     ui.check_row(2);
     ui.delete_checked();
     ui.waits_for_rows(2);
-    ui.wait("the undo entry", |a| a.undo.len() == 1);
+    ui.wait("the undo entry", |a| a.core.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
     f.expect(&mut ui, seed());
@@ -274,7 +274,7 @@ fn undo_deleting_several_documents() {
     ui.check_row(2);
     ui.delete_checked();
     ui.waits_for_rows(1);
-    ui.wait("the undo entry", |a| a.undo.len() == 1);
+    ui.wait("the undo entry", |a| a.core.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
     f.expect(&mut ui, seed());
@@ -291,7 +291,7 @@ fn undo_an_insert() {
     ui.type_over("{ _id: 10, name: \"delta\" }");
     ui.click("Insert");
     ui.waits_for_rows(4);
-    ui.wait("the undo entry", |a| a.undo.len() == 1);
+    ui.wait("the undo entry", |a| a.core.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
     f.expect(&mut ui, seed());
@@ -303,9 +303,9 @@ fn locked_connection_asks_before_editing() {
     let mut ui = open(&f);
     ui.double_click_cell("name", 1);
     ui.show("Stay read-only");
-    assert!(ui.app().inline.is_none());
+    assert!(ui.app().core.inline.is_none());
     ui.click("Stay read-only");
-    assert!(ui.app().modal.is_none() && ui.app().inline.is_none() && ui.app().drafts.is_empty());
+    assert!(ui.app().modal.is_none() && ui.app().core.inline.is_none() && ui.app().core.drafts.is_empty());
     assert!(!ui.app().conn(CONN).unwrap().writable);
     assert_eq!(f.all(), seed());
 }
@@ -319,11 +319,11 @@ fn locked_connection_asks_before_adding_a_field() {
     ui.click("+ Add field");
     ui.show("Stay read-only");
     ui.click("Stay read-only");
-    assert!(ui.app().new_field.is_none() && ui.app().drafts.is_empty());
+    assert!(ui.app().core.new_field.is_none() && ui.app().core.drafts.is_empty());
     ui.click("Edit JSON");
     ui.show("Stay read-only");
     ui.click("Stay read-only");
-    assert!(ui.app().json_edit.is_none() && ui.app().drafts.is_empty());
+    assert!(ui.app().core.json_edit.is_none() && ui.app().core.drafts.is_empty());
     assert!(!ui.app().conn(CONN).unwrap().writable);
     assert_eq!(f.all(), seed());
 }
@@ -347,9 +347,9 @@ fn locked_connection_asks_before_inserting() {
     let mut ui = open(&f);
     ui.click("+ Insert");
     ui.show("Stay read-only");
-    assert!(ui.app().insert.is_none());
+    assert!(ui.app().core.insert.is_none());
     ui.click("Stay read-only");
-    assert!(ui.app().modal.is_none() && ui.app().insert.is_none() && !ui.app().conn(CONN).unwrap().writable);
+    assert!(ui.app().modal.is_none() && ui.app().core.insert.is_none() && !ui.app().conn(CONN).unwrap().writable);
     // Allowing writes carries on to the insert dialog the click asked for.
     ui.click("+ Insert");
     ui.click("Allow writes");
@@ -364,12 +364,12 @@ fn expand_button_moves_the_inline_edit_to_the_dialog() {
     let mut ui = open(&f);
     ui.unlock();
     ui.double_click_cell("name", 2);
-    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.wait("the inline editor", |a| a.core.inline.is_some());
     ui.click("Open in editor");
-    ui.wait("the dialog", |a| a.inline.is_none() && a.json_edit.as_ref().is_some_and(|j| j.kind == "string" && j.text == "beta"));
+    ui.wait("the dialog", |a| a.core.inline.is_none() && a.core.json_edit.as_ref().is_some_and(|j| j.kind == "string" && j.text == "beta"));
     ui.type_over("two\nlines");
     ui.click("Apply");
-    ui.wait("the edit to be staged", |a| a.json_edit.is_none() && !a.drafts.is_empty());
+    ui.wait("the edit to be staged", |a| a.core.json_edit.is_none() && !a.core.drafts.is_empty());
     ui.save();
     f.expect(&mut ui, vec![doc! { "_id": 1, "name": "alpha", "qty": 1 }, doc! { "_id": 2, "name": "two\nlines", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]);
 }
@@ -380,11 +380,11 @@ fn set_null_in_the_dialog_stores_null() {
     let mut ui = open(&f);
     ui.unlock();
     ui.double_click_cell("name", 1);
-    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.wait("the inline editor", |a| a.core.inline.is_some());
     ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
-    ui.wait("the dialog", |a| a.json_edit.is_some());
+    ui.wait("the dialog", |a| a.core.json_edit.is_some());
     ui.click("Set null");
-    ui.wait("the edit to be staged", |a| a.json_edit.is_none() && !a.drafts.is_empty());
+    ui.wait("the edit to be staged", |a| a.core.json_edit.is_none() && !a.core.drafts.is_empty());
     ui.save();
     f.expect(&mut ui, vec![doc! { "_id": 1, "name": null, "qty": 1 }, doc! { "_id": 2, "name": "beta", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]);
 }
@@ -395,9 +395,9 @@ fn a_long_string_opens_the_side_panel_directly() {
     let Some(f) = Fixture::new("panel", vec![doc! { "_id": 1, "note": &long }]) else { return };
     let mut ui = open(&f);
     ui.unlock();
-    ui.h.state_mut().prefs.value_panel = true;
+    ui.h.state_mut().core.test_mut().prefs.value_panel = true;
     ui.double_click_cell("note", 1);
-    ui.wait("the panel", |a| a.inline.is_none() && a.value_in_panel());
+    ui.wait("the panel", |a| a.core.inline.is_none() && a.value_in_panel());
     assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");
-    assert_eq!(ui.app().json_edit.as_ref().unwrap().text, long);
+    assert_eq!(ui.app().core.json_edit.as_ref().unwrap().text, long);
 }

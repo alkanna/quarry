@@ -80,19 +80,19 @@ build:
 	cargo build --release
 
 check:
-	cargo check --all-targets
+	cargo check --workspace --all-targets
 
 test:
-	cargo test
+	cargo test --workspace
 
 test-live: servers-up
-	$(LIVE) cargo test $(T)
+	$(LIVE) cargo test --workspace $(T)
 
 test-ui: servers-up
 	$(LIVE) cargo test ui_tests
 
 test-one: servers-up
-	$(LIVE) cargo test $(T)
+	$(LIVE) cargo test --workspace $(T)
 
 # Runs every test on another machine (REMOTE, an ssh alias) against servers there, on the committed HEAD. Each SET gets its
 # own checkout there, ~/quarry-wt/<SET>, which keeps its build between runs. Needs Rust, Bun, Docker and the build
@@ -103,17 +103,17 @@ remote-test:
 	git push -qf $(REMOTE):quarry HEAD:refs/heads/remote-$(SET)
 	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; make test-live SET=$(SET) $(if $(T),T=$(T))'
 
-# cargo check --all-targets and then the tests on REMOTE, with no servers and every QUARRY_TEST_* variable unset: the demo UI tests
+# cargo check --workspace --all-targets and then the tests of every crate on REMOTE, with no servers and every QUARRY_TEST_* variable unset: the demo UI tests
 # skip themselves when one is set, so remote-test alone would pass without running them. T filters the tests by name. Use this
 # while iterating and remote-test once before a PR.
 remote-check:
 	@[ -n "$(REMOTE)" ] || { echo "Set REMOTE=<ssh alias>, here or in local.mk"; exit 1; }
 	git push -qf $(REMOTE):quarry HEAD:refs/heads/remote-$(SET)
-	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; unset $$(env | grep -o "^QUARRY_TEST_[A-Z_]*"); cargo check --all-targets && cargo test --bin quarry $(T)'
+	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; unset $$(env | grep -o "^QUARRY_TEST_[A-Z_]*"); cargo check --workspace --all-targets && cargo check -p quarry --bins && cargo test --workspace --bins --lib $(T)'
 
 # Needs cargo-llvm-cov (cargo install cargo-llvm-cov) and rustup's llvm-tools-preview component.
 coverage: servers-up
-	$(LIVE) cargo llvm-cov --no-report
+	$(LIVE) cargo llvm-cov --workspace --no-report
 	cargo llvm-cov report --html --open
 
 demo:

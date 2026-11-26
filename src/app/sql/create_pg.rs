@@ -4,105 +4,17 @@
 //! and a table is built from the structure editor's column model.
 
 use crate::app::sql::create::{list_and, plural, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
-use crate::app::sql::new_keys::{KeyEnv, NewKeys, NewFk};
+use crate::app::sql::new_keys::{KeyEnv, NewFk};
 use crate::app::*;
-use db::sql::create::{Ddl, DropInfo};
-use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
-use db::sql::ddl::{self, ColDef, Dv};
+use db::sql::create::DropInfo;
+use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, Unique};
+use db::sql::ddl::{ColDef, Dv};
 use db::sql::Dialect;
-
-pub(in crate::app) struct PgNewDb {
-    conn: u64,
-    name: String,
-    /// The template is None for the server's own default, template1, and every other None is the template's own setting.
-    pub(in crate::app) opts: DbOpts,
-    /// None while the server's lists load.
-    pub(in crate::app) choices: Option<DbChoices>,
-    load_err: Option<String>,
-    focused: bool,
-}
-
-pub(in crate::app) struct PgNewSchema {
-    conn: u64,
-    database: String,
-    name: String,
-    focused: bool,
-}
-
-/// One column of the builder: the structure editor's definition and the two marks the table level needs.
-#[derive(Clone, PartialEq)]
-pub(in crate::app) struct PgCol {
-    def: ColDef,
-    pk: bool,
-    unique: bool,
-}
-
-pub(in crate::app) struct PgNewTable {
-    conn: u64,
-    database: String,
-    schema: String,
-    name: String,
-    cols: Vec<PgCol>,
-    /// The UNIQUE constraints over several columns (one over a single column is also its column's Unique box), the CHECKs, the
-    /// foreign keys and the indexes.
-    pub(in crate::app) keys: NewKeys,
-    comment: String,
-    show_sql: bool,
-    focused: bool,
-    /// The statements of the form as it was last built, with the spec they came from.
-    pub(in crate::app) built: Option<(TableSpec, db::Res<Vec<String>>)>,
-}
+use quarry_core::action::DdlA;
+pub(crate) use quarry_core::state::sql::create_pg::*;
 
 /// The types the picker offers. The type box takes any other name, and the server checks it before anything is made.
 const TYPES: [&str; 17] = ["integer", "bigint", "smallint", "text", "varchar(255)", "numeric(10,2)", "boolean", "date", "timestamp", "timestamptz", "time", "uuid", "jsonb", "json", "real", "double precision", "bytea"];
-
-impl PgNewTable {
-    fn new(conn: u64, database: String, schema: String) -> Self {
-        PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], keys: NewKeys::default(), comment: String::new(), show_sql: false, focused: false, built: None }
-    }
-
-    /// Builds the statements again only when the spec changed since the last frame.
-    fn refresh_built(&mut self) {
-        let spec = self.spec();
-        if self.built.as_ref().is_some_and(|(k, _)| *k == spec) {
-            return;
-        }
-        let stmts = create::create_table_stmts(&spec);
-        self.built = Some((spec, stmts));
-    }
-
-    fn spec(&self) -> TableSpec {
-        let cols: Vec<ColDef> = self.cols.iter().map(|c| ColDef { nullable: c.def.nullable && !c.pk && !c.def.auto_increment, ..c.def.clone() }).collect();
-        let marked = self.cols.iter().filter(|c| c.unique).map(|c| Unique { name: String::new(), cols: vec![c.def.name.clone()] });
-        let mut fks = self.keys.fk_keys(&self.schema, &self.name);
-        for (key, k) in fks.iter_mut().zip(&self.keys.fks) {
-            // The parent as the dialog saw it, so the transaction can refuse when it changed before the table was made.
-            key.ref_seen = k.parent.as_ref().filter(|p| !k.own && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &key.ref_cols)).unwrap_or_default();
-        }
-        TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: marked.chain(self.keys.uniques.iter().cloned()).collect(), checks: self.keys.checks.clone(), fks, indexes: self.keys.indexes.clone(), comment: self.comment.clone() }
-    }
-
-    /// The first thing stopping a key that the statements cannot see: a part not picked, a parent not read yet or one that does not
-    /// fit. The second value is true while a parent is still loading, which is not a mistake to point at.
-    fn key_problem(&self, spec: &TableSpec) -> Option<(String, bool)> {
-        self.keys.key_problem(&spec.fks, &spec.as_structure(), &spec.name, false, None)
-    }
-
-    /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its.
-    fn col_renamed(&mut self, from: &str, to: &str) {
-        self.keys.renamed(self.cols.iter().map(|c| c.def.name.as_str()), from, to);
-    }
-
-    fn remove_col(&mut self, i: usize) {
-        let gone = self.cols.remove(i).def.name;
-        self.keys.removed(self.cols.iter().map(|c| c.def.name.as_str()), &gone);
-    }
-}
-
-/// The first column of a new table: an integer identity primary key, which is what most tables want.
-fn id_col() -> PgCol {
-    PgCol { def: ColDef { auto_increment: true, nullable: false, ..ColDef::new("id", "integer") }, pk: true, unique: false }
-}
 
 /// A combo over plain strings, with `none` as the first item standing for no pick.
 fn str_pick(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, label: &str, width: f32, value: &mut Option<String>, none: &str, items: &[String]) {
@@ -128,185 +40,12 @@ fn editor_label(ui: &mut egui::Ui, text: &mut String, width: f32, label: &str) -
 }
 
 impl App {
-    pub(in crate::app) fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
-        if self.demo {
-            return None;
-        }
-        self.conn(conn)?.sql.clone()
-    }
-
-    /// The schema the sidebar lists for `db`, which is where a new table or a drop applies.
-    fn pg_schema_of(&self, conn: u64, db: &str) -> String {
-        Some(self.ns_of(conn, db)).filter(|s| !s.is_empty()).unwrap_or(PG_PUBLIC).to_string()
-    }
-
-    pub(in crate::app) fn pg_new_db(&mut self, conn: u64) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.pg_new_db(conn));
-        }
-        if let Some(sql) = self.pg_session(conn) {
-            self.worker.pg_db_choices(conn, sql);
-        }
-        self.modal = Some(Modal::PgNewDb(Box::new(PgNewDb { conn, name: String::new(), opts: DbOpts::default(), choices: None, load_err: None, focused: false })));
-    }
-
     pub(in crate::app) fn pg_choices_done(&mut self, conn: u64, res: db::Res<DbChoices>) {
         if let Some(Modal::PgNewDb(f)) = &mut self.modal && f.conn == conn {
             match res {
                 Ok(t) => f.choices = Some(t),
                 Err(e) => f.load_err = Some(e),
             }
-        }
-    }
-
-    pub(in crate::app) fn pg_new_schema(&mut self, conn: u64, database: String) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.pg_new_schema(conn, database));
-        }
-        self.modal = Some(Modal::PgNewSchema(Box::new(PgNewSchema { conn, database, name: String::new(), focused: false })));
-    }
-
-    pub(in crate::app) fn pg_new_table(&mut self, conn: u64, database: String) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.pg_new_table(conn, database));
-        }
-        let schema = self.pg_schema_of(conn, &database);
-        self.modal = Some(Modal::PgNewTable(Box::new(PgNewTable::new(conn, database, schema))));
-    }
-
-    /// Asks what a drop takes. `name` is the schema for a schema, the table or view for those, and empty for a database.
-    pub(in crate::app) fn pg_drop_ask(&mut self, conn: u64, db: String, name: String, kind: DropKind) {
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.pg_drop_ask(conn, db, name, kind));
-        }
-        let (database, schema, table) = match kind {
-            DropKind::Database => (db, String::new(), String::new()),
-            DropKind::Schema => (db, name, String::new()),
-            _ => {
-                let s = self.pg_schema_of(conn, &db);
-                (db, s, name)
-            }
-        };
-        if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
-            return self.warn(why);
-        }
-        if let Some(sql) = self.pg_session(conn) {
-            self.worker.pg_drop_info(conn, sql, database.clone(), schema.clone(), table.clone(), !self.conn_writable(conn));
-        }
-        self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database, schema, table, kind, typed: String::new(), opt: false, info: None })));
-    }
-
-    /// Why a drop cannot start: an import, script file or shell of Quarry's own is running in that database (or schema). The server would
-    /// refuse the drop for its connections and blame another session, and WITH (FORCE) would kill the work halfway.
-    /// A script can touch anything in its database, and an import is known by its schema only, so a table drop is held for both.
-    fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
-        let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql::dump::JobKind::Script || j.schema == schema);
-        let what = match job {
-            Some(j) if j.kind == sql::dump::JobKind::Import => "an import",
-            Some(_) => "a script file",
-            None if self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == database && t.shell.cancel.is_some()) => "a shell script",
-            None => return None,
-        };
-        Some(format!("Quarry is running {what} in {database}. Stop it first, then drop."))
-    }
-
-    /// Runs a confirmed drop. Tabs and sidebar state go when the server says it worked (`pg_ddl_done`), never before: a drop that is
-    /// refused (another session, a pooler) must leave the person's query text and staged changes where they were.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::app) fn pg_drop_run(&mut self, conn: u64, sql: db::sql::Db, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
-        // A job can start while the confirmation is open, so the check is made again here.
-        if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
-            return self.warn(why);
-        }
-        // The worker checks again so a lock taken while the confirmation was open still holds.
-        let ro = !self.conn_writable(conn);
-        match kind {
-            DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, ro),
-            DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, ro),
-            DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, ro),
-            DropKind::Truncate => unreachable!("PostgreSQL empties a table through pg_truncate_ask, not the drop dialog"),
-        }
-    }
-
-    /// What the open tabs of a database hold that closing them would lose: staged row edits, staged structure changes and Query text.
-    pub(in crate::app) fn pg_unsaved_in(&self, conn: u64, database: &str) -> (usize, usize, usize) {
-        let edits = self.drafts.values().filter(|d| d.conn == conn && d.db == database).count();
-        let mut staged = 0;
-        let mut queries = 0;
-        for t in self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == database) {
-            if let Some(s) = &t.sql {
-                staged += s.st.staged.len();
-                queries += usize::from(!s.query.trim().is_empty());
-            }
-        }
-        (edits, staged, queries)
-    }
-
-    /// A create or drop finished: the sidebar lists and the tabs follow what the server has now.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::app) fn pg_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, dbs: Option<Vec<String>>) {
-        match res {
-            Ok(s) => self.ok(s),
-            Err(e) => return self.err(e),
-        }
-        if let (Some(dbs), Some(c)) = (dbs, self.conns.iter_mut().find(|c| c.meta.id == conn)) {
-            let old = std::mem::take(&mut c.dbs);
-            c.dbs = dbs.into_iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == d).and_then(|o| o.1.clone()))).collect();
-        }
-        // The tabs of a selection without a schema belong to the one the sidebar shows.
-        let picked = self.pg_schema_of(conn, &database);
-        let in_schema = |t: &Tab, s: &str| t.sel.conn == conn && t.sel.db == database && (if t.sel.schema.is_empty() { picked.as_str() } else { t.sel.schema.as_str() }) == s;
-        match what {
-            Ddl::CreatedDb => {
-                // Its schemas load when the row opens, so nothing is marked asked.
-                self.open_dbs.insert((conn, schema.clone()));
-                self.reveal = Some((conn, schema, None));
-            }
-            Ddl::DroppedDb => {
-                self.purge_undo(conn, &schema, "", "");
-                self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == schema);
-                self.open_dbs.remove(&(conn, schema.clone()));
-                self.sql_asked.remove(&(conn, schema.clone()));
-                self.forget_schema(conn, &schema);
-                self.pg_tables_asked.forget(conn, Some(&schema), None);
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-                    c.pg.remove(&schema);
-                    c.tables.remove(&schema);
-                }
-            }
-            Ddl::CreatedSchema => {
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-                    c.pg.entry(database.clone()).or_default().picked = schema.clone();
-                }
-                self.pg_refresh(conn, &database);
-            }
-            Ddl::DroppedSchema => {
-                self.purge_undo(conn, &database, &schema, "");
-                self.remove_tabs(|t| in_schema(t, &schema));
-                self.forget_schema(conn, &ns_key(&database, &schema));
-                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-                    if let Some(p) = c.pg.get_mut(&database).filter(|p| p.picked == schema) {
-                        p.picked.clear();
-                    }
-                    if let Some(t) = c.tables.get_mut(&database) {
-                        t.remove(&schema);
-                    }
-                }
-                self.pg_refresh(conn, &database);
-            }
-            Ddl::CreatedTable => {
-                self.pg_refresh(conn, &database);
-                self.open_collection(Sel { conn, db: database, schema, coll: table }, Open::Here);
-                if let Some(t) = self.tm() {
-                    t.view = View::Structure;
-                }
-            }
-            Ddl::DroppedTable => {
-                self.purge_undo(conn, &database, &schema, &table);
-                self.remove_tabs(|t| in_schema(t, &schema) && t.sel.coll == table);
-                self.pg_refresh(conn, &database);
-            }
-            Ddl::Emptied => self.pg_emptied(conn, &database),
         }
     }
 
@@ -366,9 +105,7 @@ impl App {
         let ok = writable && f.choices.is_some() && built.is_ok();
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
-                if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_db(f.conn, sql, f.name.clone(), f.opts.clone(), !writable);
-                }
+                self.exec(Action::Ddl(DdlA::CreatePgDb { conn: f.conn, name: f.name.clone(), opts: f.opts.clone() }));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -410,9 +147,7 @@ impl App {
         let ok = writable && built.is_ok();
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create schema", PRIMARY())).clicked() {
-                if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_schema(f.conn, sql.at(&f.database), f.name.clone(), !writable);
-                }
+                self.exec(Action::Ddl(DdlA::CreateSchema { conn: f.conn, database: f.database.clone(), name: f.name.clone() }));
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -498,9 +233,7 @@ impl App {
         });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
-                if let Some(sql) = self.sql_db_for(f.conn, None) {
-                    self.worker.pg_create_table(f.conn, sql.at(&f.database), f.spec(), !writable);
-                }
+                self.exec(Action::Ddl(DdlA::CreatePgTable { conn: f.conn, database: f.database.clone(), spec: f.spec() }));
                 *keep = false;
             }
             if ui.button("Preview SQL").clicked() {
@@ -636,7 +369,7 @@ impl App {
                     wrap(ui, format!("{name} is marked as a template database, and PostgreSQL refuses to drop one until it is no longer a template."), WARNING());
                 }
                 wrap(ui, "Its open tabs here are closed once it is dropped, and Quarry's own connections to it are closed first.".into(), MUTED());
-                let (edits, staged, queries) = self.pg_unsaved_in(f.conn, &f.database);
+                let (edits, staged, queries) = self.core.pg_unsaved_in(f.conn, &f.database);
                 if edits + staged + queries > 0 {
                     let mut parts = Vec::new();
                     if edits > 0 {

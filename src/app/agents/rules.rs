@@ -10,44 +10,10 @@ use super::activity::cell;
 use crate::agents::config::{Action, Detector, Matcher, PresetMode, RuleSpec, Tri};
 use crate::agents::presets;
 use crate::agents::scrub::{Fired, Rules};
-
-/// Hashes in the tester use this key, not the keychain one: the tester must work in the demo, and a hash shown here
-/// must not match what agents get.
-const TESTER_KEY: [u8; 32] = [0; 32];
+pub(crate) use quarry_core::state::agents::rules::*;
 
 /// A rule row of the list: the 26 pt row and the line above it.
 const RULE_ROW_H: f32 = 32.0;
-
-const SAMPLE: &str = "{\n  \"full_name\": \"Ada Lovelace\",\n  \"email\": \"ada@example.com\",\n  \"card_number\": \"4111 1111 1111 1111\",\n  \"notes\": \"SSN 123-45-6789, call back\",\n  \"password\": \"hunter2\",\n  \"avatar\": { \"$binary\": { \"base64\": \"iVBORw0KGgo=\", \"subType\": \"00\" } }\n}";
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(in crate::app) enum RulesTab {
-    Secrets,
-    #[default]
-    Pii,
-    Custom,
-}
-
-pub(in crate::app) struct RulesWin {
-    pub(super) tab: RulesTab,
-    /// Whose custom rules show and which rules the tester runs: every connection, or one.
-    pub(in crate::app) scope: Option<u64>,
-    /// The custom rule open in the editor.
-    pub(in crate::app) sel: Option<usize>,
-    /// The editor's "where" globs as typed, and the rule they belong to.
-    globs: (Option<usize>, String),
-    pub(in crate::app) sample: String,
-    /// The tester's lines with what they were computed from (sample, scope, config revision), so they are rebuilt only when one changes.
-    tested: Option<((String, Option<u64>, u64), TesterLines)>,
-}
-
-type TesterLines = Result<Vec<(String, Option<String>)>, String>;
-
-impl Default for RulesWin {
-    fn default() -> Self {
-        Self { tab: RulesTab::default(), scope: None, sel: None, globs: (None, String::new()), sample: SAMPLE.into(), tested: None }
-    }
-}
 
 const DETECTORS: [(Detector, &str); 13] = [
     (Detector::CardNumber, "Card number, Luhn checked"),
@@ -67,14 +33,6 @@ const DETECTORS: [(Detector, &str); 13] = [
 
 pub(super) fn detector_label(d: Detector) -> &'static str {
     DETECTORS.iter().find(|x| x.0 == d).map_or("", |x| x.1)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Path,
-    Name,
-    Value,
-    Detect,
 }
 
 const KINDS: [(Kind, &str); 4] = [(Kind::Path, "Field path"), (Kind::Name, "Field name"), (Kind::Value, "Value regex"), (Kind::Detect, "Detector")];
@@ -138,46 +96,34 @@ pub(in crate::app) fn tester_lines(cfg: &AgentsConfig, scope: Option<u64>, sampl
     Ok(lines)
 }
 
+/// The custom rules of `scope`: every connection's, or one connection's own.
+fn rule_list(cfg: &mut AgentsConfig, scope: Option<u64>) -> &mut Vec<RuleSpec> {
+    match scope {
+        None => &mut cfg.rules,
+        Some(id) => &mut cfg.conns.entry(id).or_insert_with(|| cfg.defaults.clone()).rules,
+    }
+}
+
 impl App {
     /// Opens Data protection on the custom rules of `scope`, with rule `rule` in the editor, or a new one.
     /// Opens Data protection on a preset's checks, run as one connection sees them.
     pub(super) fn agents_open_rules(&mut self, scope: Option<u64>, tab: RulesTab) {
-        self.agents.rules = Some(RulesWin { tab, scope, ..Default::default() });
+        self.exec(quarry_core::action::Action::Agents(AgentsA::OpenRules { scope, tab }));
     }
 
     pub(super) fn agents_rules_for(&mut self, scope: Option<u64>, rule: Option<usize>) {
-        let i = rule.unwrap_or_else(|| {
-            // Off until its pattern is filled in: a rule that does not compile stops every agent call.
-            let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
-            let list = self.rule_list(scope);
-            list.push(r);
-            list.len() - 1
-        });
-        self.agents.rules = Some(RulesWin { tab: RulesTab::Custom, scope, sel: Some(i), ..Default::default() });
-        if rule.is_none() {
-            self.save_agents();
-        }
-    }
-
-    fn rule_list(&mut self, scope: Option<u64>) -> &mut Vec<RuleSpec> {
-        match scope {
-            None => &mut self.agents.cfg.rules,
-            Some(id) => {
-                let cfg = &mut self.agents.cfg;
-                &mut cfg.conns.entry(id).or_insert_with(|| cfg.defaults.clone()).rules
-            }
-        }
+        self.exec(quarry_core::action::Action::Agents(AgentsA::RulesFor { scope, rule }));
     }
 
     pub(in crate::app) fn agents_rules_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.agents.rules.take() else { return };
-        let before = super::settings::had_input(ctx).then(|| self.agents.cfg.clone());
+        let Some(mut w) = self.core.agents.rules.clone() else { return };
+        let mut cfg = self.core.agents.cfg.clone();
         let mut keep = true;
         let (mut import, mut export) = (false, false);
         let screen = ctx.content_rect();
         let width = fit_width(ctx, 1080.0);
         let body_h = (screen.height() - 200.0).clamp(300.0, 520.0);
-        let scopes: Vec<(Option<u64>, String)> = std::iter::once((None, "All connections".to_string())).chain(self.conns.iter().filter(|c| self.agents.cfg.conn(c.meta.id).is_some() || w.scope == Some(c.meta.id)).map(|c| (Some(c.meta.id), c.meta.name.clone()))).collect();
+        let scopes: Vec<(Option<u64>, String)> = std::iter::once((None, "All connections".to_string())).chain(self.core.conns.iter().filter(|c| cfg.conn(c.meta.id).is_some() || w.scope == Some(c.meta.id)).map(|c| (Some(c.meta.id), c.meta.name.clone()))).collect();
         let layer = egui::Id::unique(("quarry-layer", "agents-rules"));
         let r = top_banded(layer).show(ctx, |ui| {
             ui.set_width(width);
@@ -210,8 +156,8 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(left_w, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_width(left_w);
                     let custom_n = match w.scope {
-                        None => self.agents.cfg.rules.len(),
-                        Some(id) => self.agents.cfg.conns.get(&id).map_or(0, |p| p.rules.len()),
+                        None => cfg.rules.len(),
+                        Some(id) => cfg.conns.get(&id).map_or(0, |p| p.rules.len()),
                     };
                     let tabs = [(RulesTab::Secrets, format!("Secrets {}", presets::secrets().len())), (RulesTab::Pii, format!("Personal data {}", presets::pii().len())), (RulesTab::Custom, format!("Custom {custom_n}"))];
                     segmented(ui, &mut w.tab, &tabs.iter().map(|(t, l)| (*t, l.as_str())).collect::<Vec<_>>());
@@ -219,14 +165,14 @@ impl App {
                     egui::ScrollArea::vertical().id_salt("agents-rules-left").max_height(body_h - 40.0).auto_shrink([false, false]).show(ui, |ui| {
                         ui.set_width(left_w - 12.0);
                         match w.tab {
-                            RulesTab::Custom => self.rules_custom(ui, &mut w),
-                            tab => self.rules_preset(ui, &w, tab == RulesTab::Secrets),
+                            RulesTab::Custom => self.rules_custom(ui, &mut w, &mut cfg),
+                            tab => self.rules_preset(ui, &w, tab == RulesTab::Secrets, &mut cfg),
                         }
                     });
                 });
                 ui.add_space(20.0);
                 ui.allocate_ui_with_layout(egui::vec2(width - left_w - 20.0, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.rules_tester(ui, &mut w);
+                    self.rules_tester(ui, &mut w, &cfg);
                 });
             });
             b.end(outer);
@@ -238,7 +184,7 @@ impl App {
                 }
                 if w.tab == RulesTab::Custom && primary(ui, "Add rule", PRIMARY()).clicked() {
                     let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
-                    let list = self.rule_list(w.scope);
+                    let list = rule_list(&mut cfg, w.scope);
                     list.push(r);
                     w.sel = Some(list.len() - 1);
                 }
@@ -247,8 +193,8 @@ impl App {
                 foot_note(ui, note);
             });
         });
-        if before.is_some_and(|b| b != self.agents.cfg) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
             // The tester drew before the save moved the revision, so it redraws once more with the new rules.
             ctx.request_repaint();
         }
@@ -259,32 +205,21 @@ impl App {
             self.rules_export(w.scope);
         }
         if keep && !r.should_close() {
-            self.agents.rules = Some(w);
+            if self.core.agents.rules.as_ref() != Some(&w) {
+                self.exec(quarry_core::action::Action::Agents(AgentsA::Rules(Some(Box::new(w)))));
+            }
         } else {
-            self.drop_empty_rules();
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Rules(None)));
         }
     }
 
-    /// Add rule starts a rule with no pattern; one still empty when the window closes was never filled in.
-    fn drop_empty_rules(&mut self) {
-        let empty = |r: &RuleSpec| matches!(&r.matcher, Matcher::FieldPath(s) | Matcher::FieldName(s) | Matcher::ValueRegex(s) if s.trim().is_empty());
-        let before = self.agents.cfg.clone();
-        self.agents.cfg.rules.retain(|r| !empty(r));
-        for p in self.agents.cfg.conns.values_mut() {
-            p.rules.retain(|r| !empty(r));
-        }
-        if before != self.agents.cfg {
-            self.save_agents();
-        }
-    }
-
-    fn rules_preset(&mut self, ui: &mut egui::Ui, w: &RulesWin, secrets: bool) {
+    fn rules_preset(&mut self, ui: &mut egui::Ui, w: &RulesWin, secrets: bool, cfg: &mut AgentsConfig) {
         let (title, items) = if secrets { ("Secrets", presets::secrets()) } else { ("Personal data", presets::pii()) };
         if let Some(id) = w.scope {
             let name = self.conn(id).map(|c| c.meta.name.clone()).unwrap_or_default();
-            let global = if secrets { self.agents.cfg.presets.secrets.on } else { self.agents.cfg.presets.pii.on };
-            let defaults = self.agents.cfg.defaults.clone();
-            let p = self.agents.cfg.conns.entry(id).or_insert(defaults);
+            let global = if secrets { cfg.presets.secrets.on } else { cfg.presets.pii.on };
+            let defaults = cfg.defaults.clone();
+            let p = cfg.conns.entry(id).or_insert(defaults);
             let tri = if secrets { &mut p.presets.secrets } else { &mut p.presets.pii };
             card(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -294,7 +229,7 @@ impl App {
             });
             ui.add_space(6.0);
         }
-        let p = if secrets { &mut self.agents.cfg.presets.secrets } else { &mut self.agents.cfg.presets.pii };
+        let p = if secrets { &mut cfg.presets.secrets } else { &mut cfg.presets.pii };
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             let mode = match p.mode {
@@ -354,13 +289,13 @@ impl App {
         }
     }
 
-    fn rules_custom(&mut self, ui: &mut egui::Ui, w: &mut RulesWin) {
-        let names: HashMap<u64, String> = self.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
+    fn rules_custom(&mut self, ui: &mut egui::Ui, w: &mut RulesWin, cfg: &mut AgentsConfig) {
+        let names: HashMap<u64, String> = self.core.conns.iter().map(|c| (c.meta.id, c.meta.name.clone())).collect();
         let scope = w.scope;
-        let err = Rules::from_config(&self.agents.cfg, scope.and_then(|id| self.agents.cfg.conns.get(&id)), &TESTER_KEY).err();
+        let err = Rules::from_config(cfg, scope.and_then(|id| cfg.conns.get(&id)), &TESTER_KEY).err();
         // Global rules come first in the numbering the tester and compile errors use.
-        let offset = if scope.is_some() { self.agents.cfg.rules.len() } else { 0 };
-        let list = self.rule_list(scope);
+        let offset = if scope.is_some() { cfg.rules.len() } else { 0 };
+        let list = rule_list(cfg, scope);
         if w.sel.is_some_and(|i| i >= list.len()) {
             w.sel = None;
         }
@@ -528,7 +463,7 @@ impl App {
         }
     }
 
-    fn rules_tester(&mut self, ui: &mut egui::Ui, w: &mut RulesWin) {
+    fn rules_tester(&mut self, ui: &mut egui::Ui, w: &mut RulesWin, cfg: &AgentsConfig) {
         caption(ui, "TRY THEM");
         ui.label(RichText::new("Paste a document or a row. Nothing here is sent anywhere.").size(TXT_SMALL).color(MUTED()));
         let width = ui.available_width();
@@ -539,9 +474,9 @@ impl App {
         });
         ui.add_space(10.0);
         caption(ui, "WHAT AN AGENT GETS");
-        let key = (&w.sample, w.scope, self.agents.rev);
+        let key = (&w.sample, w.scope, self.core.agents.rev);
         if w.tested.as_ref().is_none_or(|(k, _)| (&k.0, k.1, k.2) != key) {
-            w.tested = Some(((w.sample.clone(), w.scope, self.agents.rev), tester_lines(&self.agents.cfg, w.scope, &w.sample)));
+            w.tested = Some(((w.sample.clone(), w.scope, self.core.agents.rev), tester_lines(cfg, w.scope, &w.sample)));
         }
         let lines = &w.tested.as_ref().expect("computed above").1;
         egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
@@ -581,7 +516,7 @@ impl App {
     }
 
     fn rules_import(&mut self, scope: Option<u64>) {
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
         let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() else { return };
@@ -598,21 +533,19 @@ impl App {
     /// Adds the rules of an exported file to the global list, or to connection `scope`'s. A file that does not parse,
     /// or holds a rule that does not compile, changes nothing: such a rule would stop every agent call.
     pub(in crate::app) fn import_rules(&mut self, scope: Option<u64>, text: &str) -> Result<usize, String> {
-        let rules: Vec<RuleSpec> = serde_json::from_str(text).map_err(|e| format!("not a Quarry rules file: {e}"))?;
-        // Tested alone before anything changes.
-        let none = crate::agents::config::Presets { secrets: crate::agents::config::Preset { on: false, ..self.agents.cfg.presets.secrets.clone() }, pii: crate::agents::config::Preset { on: false, ..self.agents.cfg.presets.pii.clone() } };
-        Rules::compile(&none, &Default::default(), &rules, &[], &TESTER_KEY).map_err(|e| format!("Nothing was imported. {e}"))?;
-        let n = rules.len();
-        self.rule_list(scope).extend(rules);
-        self.save_agents();
+        let n = serde_json::from_str::<Vec<RuleSpec>>(text).map_err(|e| format!("not a Quarry rules file: {e}"))?.len();
+        self.core.execute(quarry_core::action::Action::Agents(AgentsA::ImportRules { scope, text: text.to_string() })).map_err(|r| r.msg)?;
         Ok(n)
     }
 
     fn rules_export(&mut self, scope: Option<u64>) {
-        if self.ephemeral {
+        if self.core.ephemeral {
             return;
         }
-        let rules = self.rule_list(scope).clone();
+        let rules = match scope {
+            None => self.core.agents.cfg.rules.clone(),
+            Some(id) => self.core.agents.cfg.conns.get(&id).map(|p| p.rules.clone()).unwrap_or_default(),
+        };
         let Some(path) = rfd::FileDialog::new().set_file_name("quarry-rules.json").add_filter("JSON", &["json"]).save_file() else { return };
         match serde_json::to_string_pretty(&rules).map_err(|e| e.to_string()).and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string())) {
             Ok(()) => self.toast_ok(format!("Exported {}", plural(rules.len() as u64, "rule")), None),
@@ -633,9 +566,9 @@ mod tests {
         let bad = ok.replace("^token$", "(");
         assert!(app.import_rules(None, &bad).unwrap_err().contains("Nothing was imported"));
         assert!(app.import_rules(Some(4), "{ not json").unwrap_err().contains("not a Quarry rules file"));
-        assert!(app.agents.cfg.rules.is_empty() && !app.agents.cfg.conns.contains_key(&4), "nothing changed");
+        assert!(app.core.agents.cfg.rules.is_empty() && !app.core.agents.cfg.conns.contains_key(&4), "nothing changed");
         assert_eq!(app.import_rules(None, &ok), Ok(1));
         assert_eq!(app.import_rules(Some(4), &ok), Ok(1));
-        assert_eq!((app.agents.cfg.rules.len(), app.agents.cfg.conns[&4].rules.len()), (1, 1));
+        assert_eq!((app.core.agents.cfg.rules.len(), app.core.agents.cfg.conns[&4].rules.len()), (1, 1));
     }
 }

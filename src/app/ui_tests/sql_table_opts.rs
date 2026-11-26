@@ -19,7 +19,8 @@ fn table_changes(ui: &UiApp) -> Vec<Change> {
 }
 
 fn open_opts(ui: &mut UiApp) {
-    ui.h.state_mut().open_table_opts();
+    let tab = ui.app().core.tabs[ui.app().core.cur].uid;
+    ui.h.state_mut().exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::EditTable { tab }));
     ui.settle();
     assert!(matches!(ui.app().modal, Some(Modal::TableOpts(_))), "the dialog did not open");
 }
@@ -59,6 +60,6 @@ fn the_parent_of_a_foreign_key_reaches_the_mysql_new_table_dialog() {
     let mut k = NewFk::new("shop", Dialect::MySql);
     k.req = 9001;
     f.keys.fks.push(k);
-    ui.app().worker.send(Msg::SqlStructure { req: 9001, res: Ok(Structure::default()) });
+    ui.app().core.test_worker().send(Msg::SqlStructure { req: 9001, res: Ok(Structure::default()) });
     ui.wait("the parent to arrive", |a| matches!(&a.modal, Some(Modal::SqlNewTable(f)) if f.keys.fks.first().is_some_and(|k| k.parent.is_some())));
 }

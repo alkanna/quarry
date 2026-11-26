@@ -1,6 +1,7 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
 use crate::app::*;
+use quarry_core::action::{Action, Pref, PrefsA, SqlA};
 use crate::app::column_menu::{query_col_popover, HeadAct};
 use crate::app::sql::edit::CellAct;
 use crate::app::library::snippet_strip::{literal_at, Src};
@@ -10,7 +11,8 @@ use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
 use egui::text::{CCursor, CCursorRange};
 use std::ops::Range;
-use std::sync::atomic::Ordering;
+pub(crate) use quarry_core::state::sql::query::*;
+use quarry_core::state::sql::query::byte_at;
 
 /// Height of the editor's footer line.
 const FOOTER_H: f32 = 24.0;
@@ -18,110 +20,11 @@ const FOOTER_H: f32 = 24.0;
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
 
-/// How long typing rests before the statement under the caret is sent to the server to be checked, in seconds.
-const LINT_PAUSE: f64 = 0.6;
-
-/// How long a check that could not run (no connection, a lock) waits before the statement is asked again.
-const LINT_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The live check of the Query editor. Answers are kept by statement text for the current target, so moving the caret
-/// back to a checked statement asks nothing and every statement keeps its mark.
-#[derive(Default)]
-pub(in crate::app) struct LintState {
-    /// The connection, database and schema the answers in `seen` were read in; a change clears them.
-    target: String,
-    /// The statement in flight and its request, 0 when none.
-    asked: String,
-    req: u64,
-    /// The statement under the caret and when it last changed, until typing has rested for `LINT_PAUSE`.
-    wait: Option<(String, f64)>,
-    seen: HashMap<String, Seen>,
-}
-
-/// One answer of the live check, Err when the check could not run: it marks nothing and is asked again after `LINT_RETRY`.
-struct Seen {
-    lint: Result<Option<db::sql::Lint>, ()>,
-    at: std::time::Instant,
-}
-
-impl LintState {
-    /// What the check found in `stmt`, if it marked anything.
-    pub(in crate::app) fn mark(&self, stmt: &str) -> Option<&db::sql::Lint> {
-        self.seen.get(stmt).and_then(|s| s.lint.as_ref().ok()?.as_ref())
-    }
-
-    /// Whether `stmt` needs asking: never asked, or a check that could not run long enough ago.
-    fn stale(&self, stmt: &str) -> bool {
-        self.seen.get(stmt).is_none_or(|s| s.lint.is_err() && s.at.elapsed() >= LINT_RETRY)
-    }
-
-    /// Forgets the unknown-name warnings, once a run or a reread schema may have made what they named.
-    pub(in crate::app) fn drop_warnings(&mut self) {
-        self.seen.retain(|_, s| !matches!(&s.lint, Ok(Some(l)) if l.warn));
-    }
-
-    fn put(&mut self, stmt: String, lint: Result<Option<db::sql::Lint>, ()>) {
-        self.seen.insert(stmt, Seen { lint, at: std::time::Instant::now() });
-    }
-}
-
-/// 1-based line and column of a caret given as a char index.
-pub(in crate::app) fn line_col(text: &str, caret: usize) -> (usize, usize) {
-    text.chars().take(caret).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) })
-}
-
-fn byte_at(text: &str, caret: usize) -> usize {
-    text.char_indices().nth(caret).map_or(text.len(), |(b, _)| b)
-}
-
-/// Where the caret stands: line and column, and the statement under it.
-#[derive(Clone)]
-pub(in crate::app) struct CaretInfo {
-    key: (usize, u64, usize),
-    pub(in crate::app) line_col: (usize, usize),
-    pub(in crate::app) stmt: Option<(Range<usize>, usize, usize)>,
-    /// Every statement's byte range, kept so the gutter does not lex the script again each frame.
-    pub(in crate::app) stmts: std::sync::Arc<Vec<Range<usize>>>,
-}
-
-impl SqlTab {
-    /// The result set shown, clamped to the ones there are.
-    pub(in crate::app) fn cur_set(&self) -> Option<&db::sql::ResultSet> {
-        self.sets.get(self.set_sel.min(self.sets.len().saturating_sub(1)))
-    }
-
-    /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
-    /// until the text or the caret changes.
-    pub(in crate::app) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.query.hash(&mut h);
-        let key = (self.query.len(), h.finish(), self.caret);
-        let mut slot = self.caret_cache.borrow_mut();
-        match &*slot {
-            Some(c) if c.key == key => c.clone(),
-            _ => {
-                let stmts: Vec<Range<usize>> = lex::split_statements(&self.query, d).into_iter().map(|(r, _)| r).collect();
-                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_in(&stmts, &self.query, self.caret, d), stmts: std::sync::Arc::new(stmts) };
-                *slot = Some(c.clone());
-                c
-            }
-        }
-    }
-}
-
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
 #[cfg(test)]
 fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
     let all: Vec<Range<usize>> = lex::split_statements(text, d).into_iter().map(|(r, _)| r).collect();
     statement_in(&all, text, caret, d)
-}
-
-/// `statement_pos` with the statements of `text` already split.
-fn statement_in(all: &[Range<usize>], text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
-    let r = lex::statement_at(text, byte_at(text, caret), d)?;
-    let i = all.iter().position(|a| *a == r)?;
-    Some((r, i + 1, all.len()))
 }
 
 /// Wavy lines under what the live check marked, red for a syntax error and amber for a name the server does not know,
@@ -203,54 +106,6 @@ fn preview(text: &str, d: db::sql::Dialect) -> String {
     db::sql::server::one_line(&text[start..], 90)
 }
 
-/// The database a run uses: the picked one, else the tab's own.
-pub(in crate::app) fn run_db(t: &Tab) -> String {
-    t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
-}
-
-/// The schema a PostgreSQL Query view runs in: the tab's own run schema (restored or set by a library script), else the tab's own when the run is in
-/// the tab's own database. Another database has other schemas, so the tab's schema is never carried over to it and the
-/// answer stays empty until that database's schemas arrive.
-pub(in crate::app) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str, sel_schema: &str) -> String {
-    let typed = typed.trim();
-    if !typed.is_empty() {
-        typed.to_string()
-    } else if run_db.is_empty() || run_db == sel_db {
-        sel_schema.to_string()
-    } else {
-        String::new()
-    }
-}
-
-pub(in crate::app) fn run_schema_of(t: &Tab) -> String {
-    run_schema_choice(t.sql.as_ref().map_or("", |s| s.run_schema.as_str()), t.sql.as_ref().map_or("", |s| s.run_db.as_str()), &t.sel.db, &t.sel.schema)
-}
-
-/// The database a run connects to and the namespace inside it. A PostgreSQL connection is bound to one database, so
-/// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement. Export of a
-/// result uses it too, so the statement reads the same tables it ran against.
-pub(in crate::app) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
-    let (rd, rs) = t.sql.as_ref().map_or(("", ""), |s| (s.run_db.as_str(), s.run_schema.as_str()));
-    target_of(t, db, rd, rs)
-}
-
-/// `run_target` of the run whose results are shown, for statements read again from them.
-pub(in crate::app) fn ran_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
-    match t.sql.as_ref().and_then(|s| s.ran_in.as_ref()) {
-        Some((rd, rs)) => target_of(t, db, rd, rs),
-        None => run_target(t, db),
-    }
-}
-
-/// The target for a picked database `rd` (empty for the tab's own) and typed schema `rs`.
-fn target_of(t: &Tab, db: db::sql::Db, rd: &str, rs: &str) -> (db::sql::Db, String) {
-    let d = if rd.is_empty() { t.sel.db.clone() } else { rd.to_string() };
-    if db.dialect == db::sql::Dialect::Postgres {
-        return (db.at(&d), run_schema_choice(rs, rd, &t.sel.db, &t.sel.schema));
-    }
-    (db, d)
-}
-
 /// One result tab: the statement number, its kind and the outcome in color.
 fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Response {
     let (detail, color) = if set.error.is_some() {
@@ -274,16 +129,6 @@ fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Resp
     focus_ring(ui, &r, rect, R_MD as f32);
     r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Result"));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// The key each column of a result goes by in its column choices. A join can return two columns of one name, so the
-/// second and later ones carry their position after a separator the SQL names cannot hold.
-pub(in crate::app) fn result_keys(cols: &[Col]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::with_capacity(cols.len());
-    for (i, c) in cols.iter().enumerate() {
-        out.push(if out.contains(&c.name) { format!("{}\u{1}{i}", c.name) } else { c.name.clone() });
-    }
-    out
 }
 
 /// What the grid asks for: a row-menu action with its row, a check click (row and whether Shift extends a
@@ -534,7 +379,7 @@ fn open_pager(ui: &mut egui::Ui, page: usize, next: bool) -> Option<usize> {
 impl App {
     /// The name a tab shows: its table, or "Query N" for a Query tab that belongs to no table.
     pub(in crate::app) fn tab_name(&self, i: usize) -> String {
-        let Some(t) = self.tabs.get(i) else { return String::new() };
+        let Some(t) = self.core.tabs.get(i) else { return String::new() };
         // A tab opened from the library, or saved to it, is named for its script or file, so Cmd+S writing it back silently
         // is never a surprise.
         if let Some(b) = &t.script {
@@ -548,38 +393,32 @@ impl App {
             return format!("Shell · {}", t.sel.db);
         }
         if t.sql.is_some() && t.sel.coll.is_empty() {
-            return format!("Query {}", self.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
+            return format!("Query {}", self.core.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
         }
         t.sel.coll.clone()
     }
 
     /// Opens a Query tab for a database. It has no table, so its collection name stays empty.
     pub(in crate::app) fn sql_new_query(&mut self, conn: u64, db: String) {
-        let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-        // A PostgreSQL Query tab starts in the schema the sidebar shows for its database.
-        let mut t = Tab::new(self.sel_in(conn, &db, String::new())).for_engine(engine);
-        // A database never expanded has no schema list yet; the tab fills its schema when the list arrives.
-        if self.is_pg(conn) && !self.sql_asked.contains(&(conn, db.clone())) {
-            self.pg_ask_schemas(conn, &db);
-        }
-        t.view = View::Sql;
-        self.tabs.push(t);
-        self.set_cur(self.tabs.len() - 1);
-        self.reset_doc_state();
+        self.exec(Action::Tab(TabA::NewQuery { conn, db, schema: String::new() }))
     }
 
-    /// Runs the statement under the caret, or the whole script. `explain` puts EXPLAIN in front of the statement.
+    pub(in crate::app) fn sql_sort_page(&mut self, keys: Vec<(String, bool)>) {
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::SortPage { tab, keys }));
+        }
+    }
+
     pub(in crate::app) fn sql_run(&mut self, all: bool, explain: bool) {
-        let dialect = self.sql_dialect();
-        let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
-        let text = if all { s.query.clone() } else { s.caret_info(dialect).stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
-        self.sql_run_text(text, explain);
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::Run { tab, all, explain }));
+        }
     }
 
     /// The text selected in the editor, if any, for Run selection.
     fn editor_selection(&self, ctx: &egui::Context) -> Option<String> {
         let q = &self.t()?.sql.as_ref()?.query;
-        let r = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur))?.cursor.char_range().filter(|r| r.primary != r.secondary)?;
+        let r = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.core.cur))?.cursor.char_range().filter(|r| r.primary != r.secondary)?;
         let (p, q2) = (usize::from(r.primary.index), usize::from(r.secondary.index));
         let (a, b) = (byte_at(q, p.min(q2)), byte_at(q, p.max(q2)));
         Some(q[a..b].to_string()).filter(|t| !t.trim().is_empty())
@@ -615,116 +454,6 @@ impl App {
             }
         });
         pick
-    }
-
-    /// Runs `text` in the current Query tab, as picked from the Run button's tip or found by `sql_run`.
-    fn sql_run_text(&mut self, text: String, explain: bool) {
-        let Some(t) = self.t() else { return };
-        let (conn, schema) = (t.sel.conn, run_db(t));
-        if t.sql.as_ref().is_none_or(|s| s.run_req != 0) {
-            return;
-        }
-        if text.trim().is_empty() {
-            return self.warn("Nothing to run.");
-        }
-        // A snippet's values go in here, so Run, Run all, a picked statement and Explain all send the filled text.
-        let text = match self.snippet_fill_run(text) {
-            Ok(t) => t,
-            Err(e) => return self.warn(e),
-        };
-        // The plan has a dialog of its own; the classic rows are one click away there.
-        if explain {
-            return self.sql_explain(text);
-        }
-        let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
-        let (db, ns) = run_target(&self.tabs[self.cur], db);
-        let read_only = !self.conn_writable(conn);
-        let key = format!("{conn}/{schema}/#query");
-        // History is written to ui.json and listed in the menu, so a password never goes in.
-        push_history(&mut self.prefs.history.entry(key).or_default().selector, &db::redact_sql(&text).0);
-        self.save_prefs();
-        self.req += 1;
-        let req = self.req;
-        let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
-        // Fresh handles per run, so a Stop pressed for an old run never reaches this one.
-        (s.run_req, s.run, s.ran_in) = (req, Default::default(), Some((s.run_db.clone(), s.run_schema.clone())));
-        self.worker.sql_run(req, db, ns, text, read_only, 0, s.run.clone());
-    }
-
-    /// Stops the running script: the statement in flight is interrupted and the rest never starts.
-    fn sql_stop(&mut self) {
-        let Some(t) = self.t() else { return };
-        let Some(s) = t.sql.as_ref().filter(|s| s.run_req != 0) else { return };
-        if let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_kill(db, s.run.conn.load(Ordering::SeqCst), s.run.cancel.clone());
-        }
-    }
-
-    /// Applies a finished run to its tab; a run the tab no longer waits for is dropped. A page read replaces
-    /// only its result tab and keeps the row count; a new run starts the counts of its paged results.
-    pub(in crate::app) fn sql_ran(&mut self, req: u64, mut sets: Vec<ResultSet>) {
-        let Some(ti) = self.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.run_req == req)) else { return };
-        let conn = self.tabs[ti].sel.conn;
-        let Some(s) = self.tabs[ti].sql.as_mut() else { return };
-        // Checks belong to the page they were made on.
-        (s.run_req, s.text_cache, s.qanchor, s.qsel) = (0, None, None, None);
-        s.qchecked.clear();
-        if let Some(idx) = s.paging.take() {
-            let failed = match (s.sets.get_mut(idx), sets.pop()) {
-                (Some(old), Some(mut new)) if new.error.is_none() => {
-                    if let (Some(o), Some(n)) = (old.page, new.page.as_mut()) {
-                        n.total = o.total;
-                    }
-                    *old = new;
-                    None
-                }
-                (_, Some(new)) => new.error,
-                _ => None,
-            };
-            if let Some(e) = failed {
-                self.err(e);
-            }
-            return;
-        }
-        s.sets_req = req;
-        (s.set_sel, s.sets) = (0, sets);
-        // A last page already knows the total; the others ask the server.
-        let wants: Vec<(usize, String)> = s.sets.iter().enumerate().filter(|(_, x)| x.page.is_some_and(|p| p.next)).map(|(i, x)| (i, x.stmt.clone())).collect();
-        if let Some((db, ns)) = self.conn(conn).and_then(|c| c.sql.clone()).map(|db| ran_target(&self.tabs[ti], db)) {
-            for (i, stmt) in wants {
-                self.worker.sql_count(req, i, db.clone(), ns.clone(), stmt);
-            }
-        }
-        self.lint_schema_changed(conn);
-    }
-
-    /// A run, or a schema read again after a change elsewhere, may have made what an unknown name pointed at, so the
-    /// warnings of every tab of the connection are asked again; syntax stays as it is.
-    pub(in crate::app) fn lint_schema_changed(&mut self, conn: u64) {
-        for s in self.tabs.iter_mut().filter(|t| t.sel.conn == conn).filter_map(|t| t.sql.as_mut()) {
-            s.lint.drop_warnings();
-        }
-    }
-
-    /// The row count of a paged result arrived.
-    pub(in crate::app) fn sql_counted(&mut self, req: u64, idx: usize, res: db::Res<u64>) {
-        let p = self.tabs.iter_mut().find_map(|t| t.sql.as_mut().filter(|s| s.sets_req == req)).and_then(|s| s.sets.get_mut(idx)).and_then(|x| x.page.as_mut());
-        if let (Some(p), Ok(n)) = (p, res) {
-            p.total = Some(n);
-        }
-    }
-
-    /// Sorts the shown result by `keys` (column and whether descending) on the client, which only orders the rows
-    /// already fetched. No keys restores the server's order. Checks and the selected row follow their rows.
-    pub(in crate::app) fn sql_sort_page(&mut self, keys: Vec<(String, bool)>) {
-        let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) else { return };
-        let i = s.set_sel.min(s.sets.len().saturating_sub(1));
-        let Some(set) = s.sets.get_mut(i) else { return };
-        let moved = db::sql::sort::sort_rows(set, &keys);
-        s.qchecked = s.qchecked.iter().filter_map(|&r| moved.get(r).copied()).collect();
-        s.qanchor = s.qanchor.and_then(|r| moved.get(r).copied());
-        s.qsel = s.qsel.and_then(|r| moved.get(r).copied());
-        s.text_cache = None;
     }
 
     /// A cell menu pick in the shown result.
@@ -767,7 +496,7 @@ impl App {
         let q = d.quote_ident(found.map_or(col, |c| c.src.as_str()));
         let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", db::copy::sql_literal(d, Some(&v), numeric, self.sql_bs())) };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
-        if self.sql_cell.is_some() {
+        if self.core.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
         let base = Sel { conn: t.sel.conn, db: db_name, schema: String::new(), coll: String::new() };
@@ -777,12 +506,7 @@ impl App {
 
     /// Opens a table's Content in a tab of its own, filtered by the WHERE text `filter`.
     pub(in crate::app) fn sql_open_filtered(&mut self, sel: Sel, filter: String) {
-        self.open_tab(sel, Open::Link);
-        let Some(t) = self.tm() else { return };
-        t.view = View::Documents;
-        t.filter_txt = filter;
-        t.page = 0;
-        self.reload();
+        self.exec(Action::Tab(TabA::FilterText { sel: Some(sel), text: filter }));
     }
 
     /// Show the other row of a duplicate-key error on table `sel`. The error names an index (a PostgreSQL unique
@@ -790,13 +514,10 @@ impl App {
     /// whole column, and that column is filtered on. Reading it from the table also gives the column's own name,
     /// which PostgreSQL's message quotes and MySQL's does not give at all.
     pub(in crate::app) fn sql_show_dup(&mut self, sel: Sel, index: String, value: String) {
-        if self.sql_cell.is_some() {
+        if self.core.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
-        let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
-        self.req += 1;
-        self.dup_wait = Some((self.req, sel.clone(), index, value));
-        self.worker.sql_structure(self.req, db, space, sel.coll.clone());
+        self.exec(Action::SqlAsk(SqlAskA::ShowDup { sel, index, value }));
     }
 
     /// The table's indexes are in: the duplicate's index must be on this table and be one whole column.
@@ -826,24 +547,9 @@ impl App {
         if d == db::sql::Dialect::Postgres && value == "null" { format!("({q} IS NULL OR {eq})") } else { eq }
     }
 
-    /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.
-    fn sql_goto_page(&mut self, idx: usize, n: usize) {
-        let Some(t) = self.t() else { return };
-        let conn = t.sel.conn;
-        let Some(stmt) = t.sql.as_ref().filter(|s| s.run_req == 0).and_then(|s| s.sets.get(idx)).map(|x| x.stmt.clone()) else { return };
-        let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
-        let (db, schema) = ran_target(&self.tabs[self.cur], db);
-        let read_only = !self.conn_writable(conn);
-        self.req += 1;
-        let req = self.req;
-        let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
-        (s.run_req, s.paging, s.run) = (req, Some(idx), Default::default());
-        self.worker.sql_run(req, db, schema, stmt, read_only, n, s.run.clone());
-    }
-
     pub(in crate::app) fn sql_query_view(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
-        let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
+        let (conn, free, schema, tab) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t), t.uid);
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
         let lib_pick = self.pick_data(ui.ctx(), PickKind::Sql);
         let mut pick_acts = Vec::new();
@@ -869,7 +575,7 @@ impl App {
                 sticky_menu(ui, (icon_atom(paint_clock), "History"), |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
-                    let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.as_slice()).unwrap_or_default();
+                    let hist = self.core.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.as_slice()).unwrap_or_default();
                     if hist.is_empty() {
                         ui.label(RichText::new("Statements you run appear here.").color(MUTED()));
                     }
@@ -925,7 +631,7 @@ impl App {
             self.sql_replace(&ctx, text, None);
         }
         // Not while a run is on, as the button: the statement ranges it reports point into the text it ran.
-        if format || !running && crate::ui::editor::format_key(ui, Self::sql_editor_id(self.cur)) {
+        if format || !running && crate::ui::editor::format_key(ui, Self::sql_editor_id(self.core.cur)) {
             self.sql_format(&ctx);
         }
         if self.snippet_strip(ui, Src::Query) {
@@ -936,76 +642,34 @@ impl App {
         ui.add_space(4.0);
         self.sql_result_pane(ui, running);
         if stop {
-            self.sql_stop();
+            self.exec(Action::Sql(SqlA::Stop { tab }));
         }
         if let Some(text) = run_pick.or(run_sel) {
-            self.sql_run_text(text, false);
+            self.exec(Action::Sql(SqlA::RunText { tab, text }));
         }
         if run || run_all || explain {
-            self.sql_run(run_all, explain);
+            self.exec(Action::Sql(SqlA::Run { tab, all: run_all, explain }));
         }
         if save_view {
-            self.save_query_as_view();
+            self.exec(Action::Ddl(quarry_core::action::DdlA::QueryAsView { tab }));
         }
         // Last, since opening a script may change the tab this frame was drawn for.
         self.pick_acts(pick_acts);
     }
 
     /// Sends the statement under the caret (`stmt`, a byte range of the script) to be checked once typing has rested, one
-    /// request at a time per tab. Only on a live connection: the demo and a closed connection have no server to ask.
+    /// request at a time per tab; Core decides, the app only waits out the pause.
     fn sql_lint_tick(&mut self, ctx: &egui::Context, stmt: Option<Range<usize>>) {
-        let (ti, now) = (self.cur, ctx.input(|i| i.time));
-        let Some(t) = self.tabs.get(ti) else { return };
-        let conn = t.sel.conn;
-        let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
-        // A statement with {{...}} values is not SQL until Run fills it, so the server is not asked about it.
-        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || crate::library::snippet::is_snippet(&s.query[r.clone()], self.dialect_of(conn)) {
-            return;
-        }
-        let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
-        let Some(s) = self.tabs[ti].sql.as_mut() else { return };
-        let l = &mut s.lint;
-        // An answer still in flight for the old target is dropped with its request.
-        if l.target != target {
-            (l.target, l.seen, l.wait, l.req) = (target, HashMap::new(), None, 0);
-        }
-        let text = &s.query[r];
-        if l.req != 0 || !l.stale(text) {
-            return;
-        }
-        let since = match &l.wait {
-            Some((w, at)) if w == text => *at,
-            _ => {
-                l.wait = Some((text.to_string(), now));
-                now
-            }
-        };
-        if now - since < LINT_PAUSE {
-            return ctx.request_repaint_after(std::time::Duration::from_secs_f64(LINT_PAUSE - (now - since)));
-        }
-        (l.wait, l.asked) = (None, text.to_string());
-        self.req += 1;
-        l.req = self.req;
-        let stmt = l.asked.clone();
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        let (db, schema) = run_target(&self.tabs[ti], db);
-        self.worker.sql_lint(self.req, db, schema, stmt);
-    }
-
-    /// The check of request `req` came back. Answers for statements no longer in the script are dropped with it, so the
-    /// map stays as small as the script.
-    pub(in crate::app) fn sql_linted(&mut self, req: u64, lint: Result<Option<db::sql::Lint>, ()>) {
-        let Some(s) = self.tabs.iter_mut().filter_map(|t| t.sql.as_mut()).find(|s| s.lint.req == req) else { return };
-        s.lint.req = 0;
-        let stmt = std::mem::take(&mut s.lint.asked);
-        s.lint.put(stmt, lint);
-        s.lint.seen.retain(|k, _| s.query.contains(k.as_str()));
+        let Some(stmt) = stmt else { return };
+        self.exec(Action::SqlAsk(SqlAskA::LintTick { now: ctx.input(|i| i.time), stmt }));
+        self.take_repaint(ctx);
     }
 
     /// QUARRY_TEST_SQL=lint and QUARRY_TEST_PG=lint: a statement with a syntax error under the caret and one naming an
     /// unknown table, marked as the live check marks them.
     pub(in crate::app) fn demo_lint(&mut self, pg: bool) {
-        let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
+        let core = self.core.setup();
+        let Some(s) = core.tabs.get_mut(core.cur).and_then(|t| t.sql.as_mut()) else { return };
         let (bad, unknown) = ("SELCT ( FRO orders", "SELECT * FROM shipment WHERE order_id = 4405");
         let lint = |span: Range<usize>, msg: &str, warn: bool| Ok(Some(db::sql::Lint { span, msg: db::lint_wording(msg, warn), warn }));
         let (err, warn) = if pg {
@@ -1026,26 +690,26 @@ impl App {
     /// states, so the text before the change is added as a point first; changing the string alone would only become
     /// one after the text had rested for a second. `select` is the range of the new text to leave selected.
     pub(in crate::app) fn sql_replace(&mut self, ctx: &egui::Context, new: String, select: Option<Range<usize>>) {
-        let id = Self::sql_editor_id(self.cur);
-        let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
-        if s.query == new {
+        let id = Self::sql_editor_id(self.core.cur);
+        let Some((tab, mut text)) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref().map(|s| (t.uid, s.query.clone()))) else { return };
+        if text == new {
             return;
         }
-        let range = crate::ui::editor::replace_with_undo(ctx, id, &mut s.query, new, |before, _, new| {
+        let range = crate::ui::editor::replace_with_undo(ctx, id, &mut text, new, |before, _, new| {
             let end = new.chars().count();
             match select {
                 Some(r) => CCursorRange::two(CCursor::new(r.start.min(end)), CCursor::new(r.end.min(end))),
                 None => CCursorRange::one(CCursor::new(usize::from(before.primary.index).min(end))),
             }
         });
-        s.caret = usize::from(range.primary.index);
+        self.exec(Action::Sql(SqlA::SetQuery { tab, text, run_db: None, run_schema: None, caret: Some(usize::from(range.primary.index)), show: false }));
     }
 
     /// Format: the selection, or the whole script when nothing is selected.
     fn sql_format(&mut self, ctx: &egui::Context) {
-        let Some(s) = self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()) else { return };
+        let Some(s) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()) else { return };
         let text = s.query.clone();
-        let picked = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur)).and_then(|st| st.cursor.char_range()).filter(|r| r.primary != r.secondary);
+        let picked = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.core.cur)).and_then(|st| st.cursor.char_range()).filter(|r| r.primary != r.secondary);
         let (new, select, f) = match picked {
             None => {
                 let f = db::sql::format::format_script(&text, self.sql_dialect());
@@ -1072,28 +736,32 @@ impl App {
 
     /// The script editor with line numbers, token colors and a faint band behind the statement under the caret.
     fn sql_editor(&mut self, ui: &mut egui::Ui) {
-        let id = Self::sql_editor_id(self.cur);
+        let id = Self::sql_editor_id(self.core.cur);
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
-        let Some((conn, db, schema)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t), if self.is_pg(t.sel.conn) { Some(run_schema_of(t)).filter(|s| !s.is_empty()).unwrap_or_else(|| self.sel_schema(&t.sel)) } else { String::new() })) else { return };
-        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, &schema, None);
+        let Some((conn, db, schema)) = self.core.tabs.get(self.core.cur).map(|t| (t.sel.conn, run_db(t), if self.is_pg(t.sel.conn) { Some(run_schema_of(t)).filter(|s| !s.is_empty()).unwrap_or_else(|| self.sel_schema(&t.sel)) } else { String::new() })) else { return };
+        let scope = Self::sql_scope(&self.core.conns, &self.core.sql_schema, &self.core.views, conn, &db, &schema, None);
         let dialect = scope.dialect;
         let none = Fields::new();
-        let values = self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none);
+        let values = self.core.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none);
         // The footer's words are worked out before the tab is borrowed for the editor.
         let engine_db = self.conn(conn).map(|c| format!("{}  \u{b7}  {db}", super::super::sidebar::conn_product(c))).unwrap_or_default();
-        let saved_in = self.tabs.get(self.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
+        let saved_in = self.core.tabs.get(self.core.cur).and_then(|t| t.script.as_ref()).map(|b| self.chip_text(&b.r)).and_then(|t| t.split_once("  \u{b7}  ").map(|(name, place)| format!("Saved in {place} / {name}")));
         let mut gutter_run = None;
         let mut lint_stmt = None;
         let mut make_value = None;
-        let Some(t) = self.tabs.get_mut(self.cur) else { return };
-        let snip = &mut t.snip;
-        let Some(s) = t.sql.as_mut() else { return };
+        let tab = self.cur_uid().unwrap_or_default();
+        // The editor edits copies, which are sent as one action once it is drawn: the script, and its suggestion list.
+        let mut ac = self.ui.sql_ac.remove(&tab).unwrap_or_default();
+        let Some(s) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()) else { return };
+        let mut query = s.query.clone();
+        let mut wants = crate::ui::sql_complete::Wants::default();
+        let mut new_caret = s.caret;
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, avail - 3.0 * ROW_H - TABLE_HEAD_H - 110.0);
-        let custom = self.prefs.query_editor_h > 0.0;
-        let h = if custom { self.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
+        let custom = self.core.prefs.query_editor_h > 0.0;
+        let h = if custom { self.core.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
             crate::ui::editor::memo_galley(ui, 1, buf.as_str(), wrap, || {
                 let mut job = crate::ui::editor::sql_job_in(buf.as_str(), TXT_SMALL, dialect);
@@ -1111,11 +779,11 @@ impl App {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
                 if s.bar.preset.ac {
-                    open_list(ui, id, &s.query, &mut s.bar.ac, &scope, values);
+                    open_list(ui, id, &query, &mut ac, &scope, values);
                 }
                 // The suggestions work on the statement under the caret, with the tail after it for aliases.
-                let (out, _) = crate::ui::vim::wrap_with(ui, id, &mut s.query, |ui, query| {
-                    sql_ac_field(ui, id, query, &mut s.bar.ac, &scope, values, &mut s.bar.wants, |ui, text, _| {
+                let (out, _) = crate::ui::vim::wrap_with(ui, id, &mut query, |ui, query| {
+                    sql_ac_field(ui, id, query, &mut ac, &scope, values, &mut wants, |ui, text, _| {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
@@ -1129,10 +797,7 @@ impl App {
                     })
                 });
                 if let Some(r) = out.cursor_range {
-                    s.caret = usize::from(r.primary.index);
-                }
-                if out.response.changed() {
-                    snip.off = false;
+                    new_caret = usize::from(r.primary.index);
                 }
                 // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
                 // from the editor's stored state when the menu draws, as Run selection does.
@@ -1140,8 +805,8 @@ impl App {
                     menu_list(ui);
                     let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
                         let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
-                        let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
-                        literal_at(&s.query, a..b.max(a + 1), dialect.into())
+                        let (a, b) = (byte_at(&query, a.min(b)), byte_at(&query, a.max(b)));
+                        literal_at(&query, a..b.max(a + 1), dialect.into())
                     });
                     let mut acts = Vec::new();
                     if let Some(r) = picked {
@@ -1189,29 +854,42 @@ impl App {
             // inner_rect is the room offered before the area shrank, so the content is read instead.
             shown.content_size.y.min(h)
         });
-        let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        self.ui.sql_ac.insert(tab, ac);
+        let edited = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()).is_some_and(|s| s.query != query || s.caret != new_caret);
+        if edited {
+            self.exec(Action::Sql(SqlA::SetQuery { tab, text: query, run_db: None, run_schema: None, caret: Some(new_caret), show: false }));
+        }
         self.sql_serve(conn, &db, &schema, wants);
-        self.sql_lint_tick(ui.ctx(), lint_stmt);
+        // What was under the caret belongs to the script before this frame's typing, so the check waits for the next frame.
+        self.sql_lint_tick(ui.ctx(), lint_stmt.filter(|_| !edited));
         if let Some(r) = make_value {
             self.ask_make_value(r, Src::Query);
         }
         let bar = splitter(ui);
-        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.inner, lo, hi) {
-            self.save_prefs();
+        let mut editor_h = self.core.prefs.query_editor_h;
+        if resize_editor(&bar, &mut editor_h, framed.inner, lo, hi) {
+            self.exec(Action::Prefs(PrefsA::Set(Pref::QueryEditorH(editor_h))));
         }
         // The same path as picking the statement from the Run menu.
         if let Some(text) = gutter_run {
-            self.sql_run_text(text, false);
+            let tab = self.core.tabs[self.core.cur].uid;
+            self.exec(Action::Sql(SqlA::RunText { tab, text }));
         }
     }
 
     /// The result tabs, the Table or Text switch and the selected statement's outcome.
     fn sql_result_pane(&mut self, ui: &mut egui::Ui, running: bool) {
-        let cur = self.cur;
-        let hidden = self.modal.is_some() || self.insert.is_some();
+        let cur = self.core.cur;
+        let tab = self.core.tabs[cur].uid;
+        let mut acts: Vec<SqlA> = Vec::new();
+        let hidden = self.modal.is_some() || self.core.insert.is_some();
         let dialect = self.sql_dialect();
-        let record_open = self.tabs.get(cur).is_some_and(|t| t.record);
-        let Some(s) = self.tabs.get_mut(cur).and_then(|t| t.sql.as_mut()) else { return };
+        let record_open = self.core.tabs.get(cur).is_some_and(|t| t.record);
+        // The Text view is built by Core, once per result, before the frame reads it.
+        if self.core.tabs.get(cur).and_then(|t| t.sql.as_ref()).is_some_and(|s| s.text_mode && !s.sets.is_empty() && s.text_cache.as_ref().is_none_or(|c| c.0 != s.set_sel.min(s.sets.len() - 1))) {
+            self.exec(Action::Sql(SqlA::BuildText { tab }));
+        }
+        let Some(s) = self.core.tabs.get(cur).and_then(|t| t.sql.as_ref()) else { return };
         if s.sets.is_empty() {
             ui.horizontal(|ui| {
                 if running {
@@ -1271,11 +949,11 @@ impl App {
             });
         });
         ui.add_space(6.0);
-        s.text_mode = text_mode;
-        if let Some(i) = pick {
-            (s.set_sel, s.text_cache) = (i, None);
-            s.qchecked.clear();
-            (s.qanchor, s.qsel) = (None, None);
+        if text_mode != s.text_mode {
+            acts.push(SqlA::TextMode { tab, on: text_mode });
+        }
+        if let Some(set) = pick {
+            acts.push(SqlA::PickSet { tab, set });
         }
         let (error, stmt, affected, ms, capped, page) = {
             let x = &s.sets[sel];
@@ -1333,7 +1011,7 @@ impl App {
             }
             let checked_n = s.qchecked.len();
             let colnames = result_keys(&s.sets[sel].cols);
-            let nshown = table::visible_cols(s.qprefs.get(&colnames), &colnames, usize::MAX).len();
+            let nshown = table::visible_cols(self.ui.qprefs.get(&tab).and_then(|m| m.get(&colnames)), &colnames, usize::MAX).len();
             let sorted_by = s.sets[sel].sort.clone();
             if !s.sets[sel].rows.is_empty() && !text_mode && (!sorted_by.is_empty() || nshown < colnames.len()) {
                 ui.horizontal(|ui| {
@@ -1355,10 +1033,6 @@ impl App {
             if s.sets[sel].rows.is_empty() {
                 ui.label(RichText::new("No rows").color(MUTED()));
             } else if text_mode {
-                if s.text_cache.as_ref().is_none_or(|c| c.0 != sel) {
-                    let docs: Vec<Document> = s.sets[sel].rows.iter().map(db::Row::owned).collect();
-                    s.text_cache = Some((sel, db::copy::text_table(&s.sets[sel].cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), &docs)));
-                }
                 let text = s.text_cache.as_ref().map(|c| c.1.as_str()).unwrap_or_default();
                 egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
                     egui::ScrollArea::both().id_salt("sql-text").auto_shrink(false).show(ui, |ui| {
@@ -1370,7 +1044,7 @@ impl App {
                 if !hidden {
                     let (cancel, act) = selection_area(ui, checked_n, false, true, true, false);
                     if cancel {
-                        s.qchecked.clear();
+                        acts.push(SqlA::ClearChecks { tab });
                     }
                     match act {
                         Some(DocsAct::CopyAs(f)) => copy = Some((f, Some(s.qchecked.iter().copied().collect()))),
@@ -1380,15 +1054,15 @@ impl App {
                 }
                 // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
-                let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
-                let prefs = s.qprefs.get(&colnames).cloned().unwrap_or_default();
+                let (sets, checked) = (s.sets.clone(), s.qchecked.clone());
+                let prefs = self.ui.qprefs.get(&tab).and_then(|m| m.get(&colnames)).cloned().unwrap_or_default();
                 // Shown columns first, in grid order, so Tab puts the record's cursor on the grid cursor's column.
                 let names = if record_open { table::record_names(&table::visible_cols(Some(&prefs), &colnames, usize::MAX), &colnames) } else { Vec::new() };
                 // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
                 let filter = sets[sel].kind == "SELECT" && sets[sel].stmt.len() < 20_000 && db::sql::source::single_table(&sets[sel].stmt, dialect).is_some();
-                let vim = self.prefs.vim && !record_open;
-                let cursor = self.prefs.vim.then_some((self.tabs[cur].vcol, record_open));
-                let scroll = std::mem::take(&mut self.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
+                let vim = self.core.prefs.vim && !record_open;
+                let cursor = self.core.prefs.vim.then_some((self.vcol(), record_open));
+                let scroll = std::mem::take(&mut self.ui.scroll_sel) | (vim && std::mem::take(&mut self.vnav.scroll));
                 self.vnav.page = (ui.available_height() / ROW_H) as usize;
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
@@ -1398,21 +1072,20 @@ impl App {
                 }
                 // The record walks every column, the grid only those shown.
                 let shown = if record_open { &names } else { &out.shown };
-                let at = if record_open { self.tabs[cur].vline } else { self.tabs[cur].vcol };
+                let at = if record_open { self.vline() } else { self.vcol() };
                 let vim_act = self.vim_cell_act(ui.ctx(), qsel, at, shown, Rows::Raw(&sets[sel].rows));
                 if let Some(c) = out.col {
-                    self.tabs[cur].vcol = c;
+                    self.set_vcol(c);
                 }
-                let Some(s) = self.tabs[cur].sql.as_mut() else { return };
-                (s.sets, s.qchecked) = (sets, checked);
+                let Some(s) = self.core.tabs[cur].sql.as_ref() else { return };
                 view = out.view.or(rec.view);
                 head_acts = out.head;
                 cell_act = out.cell.or(vim_act);
-                if let Some(i) = out.select {
-                    s.qsel = Some(i);
+                if let Some(row) = out.select {
+                    acts.push(SqlA::SelectRow { tab, row });
                 }
                 if let Some(on) = out.all {
-                    s.qchecked = if on { (0..s.sets[sel].rows.len()).collect() } else { BTreeSet::new() };
+                    acts.push(SqlA::CheckAll { tab, on });
                 }
                 if let Some((i, a)) = out.act {
                     let targets: Vec<usize> = if s.qchecked.contains(&i) { s.qchecked.iter().copied().collect() } else { vec![i] };
@@ -1422,16 +1095,8 @@ impl App {
                         _ => {}
                     }
                 }
-                if let Some((i, range)) = out.check {
-                    match s.qanchor.filter(|_| range) {
-                        Some(a) => s.qchecked.extend(a.min(i)..=a.max(i)),
-                        None => {
-                            if !s.qchecked.insert(i) {
-                                s.qchecked.remove(&i);
-                            }
-                        }
-                    }
-                    s.qanchor = Some(i);
+                if let Some((row, range)) = out.check {
+                    acts.push(SqlA::Check { tab, row, range });
                 }
             }
         }
@@ -1444,10 +1109,10 @@ impl App {
             self.sql_view_value(&c, &v);
         }
         if unsort {
-            self.sql_sort_page(Vec::new());
+            acts.push(SqlA::SortPage { tab, keys: Vec::new() });
         }
-        if let Some(names) = show_cols && let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            let p = s.qprefs.entry(names.clone()).or_default();
+        if let Some(names) = show_cols {
+            let p = self.ui.qprefs.entry(tab).or_default().entry(names.clone()).or_default();
             let mut all = table::visible_cols(Some(p), &names, usize::MAX);
             all.extend(names.iter().filter(|n| !all.contains(n)).cloned().collect::<Vec<_>>());
             p.shown = Some(all);
@@ -1460,7 +1125,7 @@ impl App {
         }
         if let Some((fmt, idx)) = copy {
             let rows = set_rows(self, &idx);
-            let cols: Vec<CopyCol> = self.tabs[cur].sql.as_ref().map(|s| s.sets[sel].cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
+            let cols: Vec<CopyCol> = self.core.tabs[cur].sql.as_ref().map(|s| s.sets[sel].cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();
             let table = self.insert_table(super::super::export::Src::Query);
             let ctx = ui.ctx().clone();
             self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[], self.sql_bs());
@@ -1473,8 +1138,11 @@ impl App {
             let header = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
             self.copy_all_pages(fmt, header);
         }
-        if let Some((idx, n)) = goto {
-            self.sql_goto_page(idx, n);
+        if let Some((set, page)) = goto {
+            acts.push(SqlA::GotoPage { tab, set, page });
+        }
+        for a in acts {
+            self.exec(Action::Sql(a));
         }
     }
 
@@ -1497,11 +1165,12 @@ impl App {
         // QUARRY_TEST_SQL=library has two saved scripts and the menu open.
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
             let saved = |name: &str, sql: &str| crate::library::Script { name: name.into(), kind: "sql".into(), body: sql.into(), conn: 3, ..Default::default() };
-            let id = self.library.next_id();
-            self.library.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
-            let id = self.library.next_id();
-            self.library.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
-            self.library.recent = self.library.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
+            let lib = &mut self.core.setup().library;
+            let id = lib.next_id();
+            lib.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
+            let id = lib.next_id();
+            lib.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
+            lib.recent = lib.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
         }
         let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw, db::sql::Dialect::MySql).text } else { raw.to_string() };
         let query = query.as_str();
@@ -1522,14 +1191,15 @@ impl App {
         };
         if let Some(s) = t.sql.as_mut() {
             s.caret = query.lines().take(6).map(|l| l.chars().count() + 1).sum::<usize>() - 1;
-            (s.query, s.sets) = (query.into(), vec![first, refused, last]);
+            (s.query, s.sets) = (query.into(), vec![first.into(), refused.into(), last.into()]);
             // QUARRY_TEST_CHECKED=1 shows three rows checked with the selection bar.
             if std::env::var("QUARRY_TEST_CHECKED").is_ok() {
                 s.qchecked = [0, 2, 3].into();
             }
         }
-        self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        let core = self.core.setup();
+        core.tabs.push(t);
+        core.cur = core.tabs.len() - 1;
         // QUARRY_TEST_EXPORT=1 opens the Export dialog on the checked rows.
         // QUARRY_TEST_EXPORT=script shows the scope "All statements in the editor" on the demo script, which has a write in it
         // and so is refused; =script-ok shows it on a script of reads.

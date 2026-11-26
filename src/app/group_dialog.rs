@@ -5,28 +5,14 @@
 use super::conns_panel::color_swatches;
 use super::*;
 use crate::ui::dnd;
-
-/// The working copy of a group while the dialog is open.
-#[derive(Default)]
-pub(super) struct GroupForm {
-    pub(super) id: u64,
-    pub(super) name: String,
-    pub(super) color: String,
-    pub(super) fold_rail: bool,
-    /// In the order the group will have after Save.
-    pub(super) members: Vec<u64>,
-    /// The name field takes focus once, when the dialog opens.
-    pub(super) focus: bool,
-    /// The filter and folded groups of the Add connections list.
-    pub(super) pick: super::conns_panel::ConnsUi,
-}
+pub(crate) use quarry_core::state::group_dialog::*;
 
 const MEMBER_H: f32 = 44.0;
 
 impl App {
     /// Opens the Edit group dialog on a group, from the Rename action of a toast or a menu.
     pub(super) fn edit_group(&mut self, group: u64) {
-        let Some(g) = self.groups.group(group) else { return };
+        let Some(g) = self.core.groups.group(group) else { return };
         let alive = self.conn_ids();
         let members = g.members.iter().copied().filter(|c| alive.contains(c)).collect();
         self.modal = Some(Modal::GroupEdit(Box::new(GroupForm { id: g.id, name: g.name.clone(), color: g.color.clone(), fold_rail: g.fold_rail, members, focus: true, ..Default::default() })));
@@ -56,7 +42,7 @@ impl App {
                     toggle(ui, &mut f.fold_rail).widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "Fold in the rail"));
                 });
             });
-            members_card(ui, f, &self.conns, &self.groups);
+            members_card(ui, f, &self.core.conns, &self.core.groups);
         });
         let mut save = false;
         let mut delete = false;
@@ -87,22 +73,7 @@ impl App {
     /// Writes the form into the group: the fields, then the members, those that left first. Placing the members one by one in
     /// their order gives the group exactly that order and takes new ones out of their old groups.
     fn save_group_form(&mut self, f: &GroupForm) {
-        let Some(old) = self.groups.group(f.id).map(|g| g.members.clone()) else { return };
-        let all = self.conn_ids();
-        for c in old.iter().filter(|c| !f.members.contains(c)) {
-            self.groups.place(*c, Place::Loose(None), &all);
-        }
-        for (i, c) in f.members.iter().enumerate() {
-            self.groups.place(*c, Place::Into(f.id, Some(i)), &all);
-        }
-        if let Some(g) = self.groups.group_mut(f.id) {
-            if !f.name.trim().is_empty() {
-                g.name = f.name.trim().into();
-            }
-            g.color = f.color.clone();
-            g.fold_rail = f.fold_rail;
-        }
-        self.save_groups();
+        self.exec(Action::Conn(ConnA::Group(GroupA::Save { group: f.id, name: f.name.clone(), color: f.color.clone(), fold_rail: f.fold_rail, members: f.members.clone() })));
     }
 }
 

@@ -6,7 +6,9 @@ use super::*;
 
 /// Puts `filter` in the Content bar and waits for the page it loads.
 fn filter_to(ui: &mut UiApp, filter: &str) {
-    let t = ui.h.state_mut().tm().unwrap();
+    let a = ui.h.state_mut();
+    let cur = a.core.cur;
+    let t = &mut a.core.test_mut().tabs[cur];
     (t.filter_txt, t.page) = (filter.into(), 0);
     ui.h.state_mut().reload();
     ui.quiet();
@@ -34,7 +36,7 @@ fn delete_matching_rows_reaches_only_the_or_filter_and_undoes() {
         filter_to(ui, "qty > 25 OR name = 'alpha'");
         // The page that loaded is in the table's history.
         let key = ui.app().t().unwrap().coll_key();
-        assert_eq!(ui.app().prefs.history.get(&key).and_then(|h| h.selector.first()).map(String::as_str), Some("qty > 25 OR name = 'alpha'"));
+        assert_eq!(ui.app().core.prefs.history.get(&key).and_then(|h| h.selector.first()).map(String::as_str), Some("qty > 25 OR name = 'alpha'"));
         ui.h.state_mut().open_bulk(false);
         confirm(ui, &t, "Delete 2 rows");
         fx.expect(ui, &t, "2:beta:20");

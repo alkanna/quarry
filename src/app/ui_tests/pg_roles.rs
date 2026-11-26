@@ -16,7 +16,7 @@ fn sql(uri: &str, s: &str) -> String {
 }
 
 fn loaded(a: &App) -> bool {
-    a.pg_roles.as_ref().is_some_and(|w| matches!(w.cluster, Some(Ok(_))) && matches!(w.objs, Some(Ok(_))) && !w.busy)
+    a.core.pg_roles.as_ref().is_some_and(|w| matches!(w.cluster, Some(Ok(_))) && matches!(w.objs, Some(Ok(_))) && !w.busy)
 }
 
 fn run(var: &str) {
@@ -30,30 +30,30 @@ fn run(var: &str) {
     ui.wait("the roles and the tables", loaded);
     ui.click("Schema picker");
     ui.click(&schema);
-    ui.wait("the tables of the schema", |a| loaded(a) && a.pg_roles.as_ref().is_some_and(|w| w.objs.as_ref().is_some_and(|o| o.as_ref().is_ok_and(|o| o.schema == schema))));
+    ui.wait("the tables of the schema", |a| loaded(a) && a.core.pg_roles.as_ref().is_some_and(|w| w.objs.as_ref().is_some_and(|o| o.as_ref().is_ok_and(|o| o.schema == schema))));
 
     // Locked: the editor opens but nothing can be staged; the banner offers Unlock.
     // Other tests make roles on the same server, so the column is found through the filter rather than scrolled to.
     ui.fill("Filter roles", &role);
     ui.click(&format!("{role} on t"));
     ui.click("Granted SELECT");
-    assert!(ui.app().pg_roles.as_ref().unwrap().staged.is_empty(), "{var}: a locked connection staged a grant");
+    assert!(ui.app().core.pg_roles.as_ref().unwrap().staged.is_empty(), "{var}: a locked connection staged a grant");
     ui.click_last("Unlock…");
     ui.click("Allow writes");
     ui.wait("writes to be allowed", |a| a.conn(CONN).is_some_and(|c| c.writable));
 
-    if ui.app().pg_roles.as_ref().unwrap().cell.is_none() {
+    if ui.app().core.pg_roles.as_ref().unwrap().cell.is_none() {
         ui.click(&format!("{role} on t"));
     }
     ui.click("Granted SELECT");
-    ui.wait("the grant to be staged", |a| a.pg_roles.as_ref().is_some_and(|w| w.staged.len() == 1));
+    ui.wait("the grant to be staged", |a| a.core.pg_roles.as_ref().is_some_and(|w| w.staged.len() == 1));
     assert_eq!(can(&uri), "false", "{var}: nothing runs before Apply");
     ui.click_last("Apply");
-    ui.wait("the apply to finish", |a| a.pg_roles.as_ref().is_some_and(|w| w.staged.is_empty()) && loaded(a));
+    ui.wait("the apply to finish", |a| a.core.pg_roles.as_ref().is_some_and(|w| w.staged.is_empty()) && loaded(a));
     assert_eq!(can(&uri), "true", "{var}: {}", ui.app().last_problem());
 
     ui.click_last("Close");
-    ui.wait("the window to close", |a| a.pg_roles.is_none());
+    ui.wait("the window to close", |a| a.core.pg_roles.is_none());
     ui.click("Undo (1)");
     ui.click("Undo change 1");
     ui.click("Close");
@@ -90,21 +90,4 @@ fn pg_password_is_forgotten_when_esc_closes_the_dialog() {
     h.run_steps(2);
     assert!(h.state().modal.is_none(), "Esc closed the dialog");
     assert!(egui::TextEdit::load_state(&h.ctx, id).is_none(), "the field's state, with its undo history, is gone");
-}
-
-/// An Apply answer that is not the one the window waits for (from before Esc closed and reopened it) leaves what is staged now.
-#[test]
-fn pg_a_late_apply_answer_keeps_newer_staged_changes() {
-    use crate::db::sql::pg::roles::{Answer, Change, Did};
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_eframe(|cc| App::for_test(cc));
-    let app = h.state_mut();
-    let mut w = crate::app::sql::pg_roles::PgRolesWin::new(CONN, "shop".into());
-    w.staged.push(Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) });
-    (w.busy, w.req_apply) = (true, 7);
-    app.pg_roles = Some(w);
-    let done = || Answer::Done { did: Did::Applied, res: Ok("Applied".into()), undo: None };
-    app.pg_roles_answer(CONN, 3, done());
-    assert_eq!(app.pg_roles.as_ref().unwrap().staged.len(), 1, "a stale answer cleared the staged change");
-    app.pg_roles_answer(CONN, 7, done());
-    assert!(app.pg_roles.as_ref().unwrap().staged.is_empty() && !app.pg_roles.as_ref().unwrap().busy);
 }

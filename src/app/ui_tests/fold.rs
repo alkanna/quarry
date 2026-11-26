@@ -21,7 +21,7 @@ fn animated(load: fn(&mut App)) -> Option<UiApp> {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
     h.ctx.all_styles_mut(|s| s.animation_time = 0.2);
     let app = h.state_mut();
-    app.demo = true;
+    app.core.test_mut().demo = true;
     load(app);
     let mut ui = UiApp { h };
     ui.h.run_steps(10);
@@ -69,14 +69,14 @@ fn a_group_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_there() {
     let gap = stage0.top() - ui.rect_of("billing").bottom();
 
     ui.click_at(prod.center());
-    assert!(!ui.app().groups.group(PROD).unwrap().open);
+    assert!(!ui.app().core.groups.group(PROD).unwrap().open);
     ui.h.run_steps(2);
     let stage = ui.rect_of("Group Staging");
     assert!(stage.top() < stage0.top() - 1.0 && stage.top() > prod.bottom() + gap + 1.0, "Staging is on its way up: {stage:?}");
     // The press goes where Staging was last drawn, part way up, and folds Staging, not a member of Production.
     ui.click_at(stage.center());
-    assert!(!ui.app().groups.group(STAGE).unwrap().open, "the click folded Staging");
-    assert_eq!(ui.app().active, Some(11));
+    assert!(!ui.app().core.groups.group(STAGE).unwrap().open, "the click folded Staging");
+    assert_eq!(ui.app().core.active, Some(11));
 
     ui.h.run_steps(SETTLE);
     assert!(!ui.has("prod-us") && !ui.has("billing"), "a closed group's members are gone");
@@ -84,16 +84,16 @@ fn a_group_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_there() {
     // Where prod-us was, nothing activates it any more.
     ui.click_at(us.center());
     ui.h.run_steps(SETTLE);
-    assert_eq!(ui.app().active, Some(11));
-    assert_eq!(ui.app().prefs.side_mode(), SideMode::Connections);
+    assert_eq!(ui.app().core.active, Some(11));
+    assert_eq!(ui.app().core.prefs.side_mode(), SideMode::Connections);
 }
 
 #[test]
 fn a_library_folder_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_there() {
     let Some(mut ui) = animated(|a| {
-        a.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
         a.demo_library("panel");
-        a.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else {
         return;
     };
@@ -103,13 +103,13 @@ fn a_library_folder_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_th
     let row_h = reports.height();
 
     ui.click_at(reports.center());
-    assert!(!ui.app().lib_ui.panel.open.contains(&Node::Folder(1)));
+    assert!(!ui.app().core.lib_ui.panel.open.contains(&Node::Folder(1)));
     ui.h.run_steps(2);
     let maint = ui.rect_of("Maintenance");
     assert!(maint.top() < maint0.top() - 1.0 && maint.top() > reports.bottom() + 1.0, "Maintenance is on its way up: {maint:?}");
     ui.click_at(maint.center());
-    assert!(ui.app().lib_ui.panel.open.contains(&Node::Folder(3)), "the click opened Maintenance");
-    assert_eq!(ui.app().lib_ui.panel.sel, Some(Node::Folder(3)));
+    assert!(ui.app().core.lib_ui.panel.open.contains(&Node::Folder(3)), "the click opened Maintenance");
+    assert_eq!(ui.app().core.lib_ui.panel.sel, Some(Node::Folder(3)));
 
     ui.h.run_steps(SETTLE);
     assert!(!ui.has("Monthly revenue") && !ui.has("Weekly"), "a closed folder's rows are gone");
@@ -118,7 +118,7 @@ fn a_library_folder_folds_away_smoothly_and_a_click_below_it_lands_on_the_row_th
     assert!(near(ui.rect_of("Stale carts").top(), reports.top() + 2.0 * row_h));
     // Where Monthly revenue was, a click picks the row there now.
     ui.click_at(monthly.center());
-    assert_ne!(ui.app().lib_ui.panel.sel, Some(Node::Script(10)));
+    assert_ne!(ui.app().core.lib_ui.panel.sel, Some(Node::Script(10)));
 }
 
 #[test]
@@ -126,14 +126,14 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     let Some(mut ui) = animated(|a| {
         a.load_demo();
         for (id, name) in [(5, "alpha"), (6, "beta"), (7, "gamma")] {
-            a.conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
+            a.core.test_mut().conns.push(Conn::new(ConnMeta { id, name: name.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready));
         }
-        let gid = a.groups.new_group("Fleet");
+        let gid = a.core.test_mut().groups.new_group("Fleet");
         let all = a.conn_ids();
-        a.groups.place(6, Place::Into(gid, None), &all);
-        a.groups.place(7, Place::Into(gid, None), &all);
+        a.core.test_mut().groups.place(6, Place::Into(gid, None), &all);
+        a.core.test_mut().groups.place(7, Place::Into(gid, None), &all);
         // The folder first, so a tile sits right below it.
-        a.rail_order = vec![6, 7, 5];
+        a.core.test_mut().rail_order = vec![6, 7, 5];
     }) else {
         return;
     };
@@ -142,14 +142,14 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     assert!(!ui.has("Switch to beta"));
 
     ui.click_at(folder.center());
-    assert!(ui.app().groups.rail_open(1));
+    assert!(ui.app().core.groups.rail_open(1));
     ui.h.run_steps(2);
     let alpha = ui.rect_of("Switch to alpha");
     // Open, the shelf holds two member slots of 46 px where the closed folder holds one, so it is one slot taller.
     let grown = alpha0.top() + 46.0;
     assert!(alpha.top() > alpha0.top() + 1.0 && alpha.top() < grown - 1.0, "alpha is on its way down: {alpha:?}");
     ui.click_at(alpha.center());
-    assert_eq!(ui.app().active, Some(5), "the click picked alpha");
+    assert_eq!(ui.app().core.active, Some(5), "the click picked alpha");
 
     ui.h.run_steps(SETTLE);
     assert!(ui.has("Switch to beta") && ui.has("Switch to gamma"));
@@ -159,13 +159,13 @@ fn a_rail_folder_grows_into_its_capsule_and_a_click_below_it_lands_on_that_tile(
     let folder = ui.rect_of("Fleet folder");
     ui.click_at(folder.center());
     ui.h.run_steps(SETTLE);
-    assert!(!ui.app().groups.rail_open(1));
+    assert!(!ui.app().core.groups.rail_open(1));
     assert!(!ui.has("Switch to beta"), "a closed folder shows no member tiles");
     assert!(near(ui.rect_of("Switch to alpha").top(), alpha0.top()));
     // Where beta was, a click does not pick it.
     ui.click_at(beta.center());
     ui.h.run_steps(2);
-    assert_ne!(ui.app().active, Some(6));
+    assert_ne!(ui.app().core.active, Some(6));
 }
 
 #[test]
@@ -189,24 +189,24 @@ fn a_press_made_while_a_group_folds_still_clicks_when_let_go_after_it_settled() 
     ui.h.run_steps(SETTLE);
     ui.h.input_mut().events.push(button(false));
     ui.h.step();
-    assert!(!ui.app().groups.group(STAGE).unwrap().open, "the press and the release made one click on Staging");
+    assert!(!ui.app().core.groups.group(STAGE).unwrap().open, "the press and the release made one click on Staging");
 }
 
 #[test]
 fn a_folder_of_thousands_of_scripts_draws_only_the_rows_in_view_while_it_moves() {
     let Some(mut ui) = animated(|a| {
-        a.conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
+        a.core.test_mut().conns.push(Conn::new(ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() }, Status::Ready));
         a.demo_library("panel");
-        a.library.folders.push(crate::library::Folder { id: 5, name: "Bulk".into(), parent: None });
+        a.core.test_mut().library.folders.push(crate::library::Folder { id: 5, name: "Bulk".into(), parent: None });
         for i in 0..3000u64 {
-            a.library.scripts.push(crate::library::Script { id: 1000 + i, name: format!("bulk-{i:04}"), kind: "sql".into(), conn: 3, folder: Some(5), ..Default::default() });
+            a.core.test_mut().library.scripts.push(crate::library::Script { id: 1000 + i, name: format!("bulk-{i:04}"), kind: "sql".into(), conn: 3, folder: Some(5), ..Default::default() });
         }
-        a.lib_ui.panel.open.insert(Node::Folder(5));
-        a.lib_ui.panel.sel = None;
+        a.core.test_mut().lib_ui.panel.open.insert(Node::Folder(5));
+        a.core.test_mut().lib_ui.panel.sel = None;
     }) else {
         return;
     };
-    let cap = (ui.app().lib_ui.panel.view_h / ui.rect_of("Bulk").height()) as usize + 3;
+    let cap = (ui.app().core.lib_ui.panel.view_h / ui.rect_of("Bulk").height()) as usize + 3;
     let drawn = |ui: &UiApp| ui.h.query_all_by_label_contains("bulk-").count();
     let at_rest = drawn(&ui);
     assert!(at_rest > 0 && at_rest <= cap, "{at_rest} rows drawn for a view of {cap}");

@@ -28,9 +28,9 @@ fn explain_state(ui: &UiApp) -> &crate::app::sql::explain::SqlExplain {
     }
 }
 
-const PG_JOIN: &str = include_str!("../../db/sql/plan/fixtures/pg18-join-analyze.json");
-const PG_SPILL: &str = include_str!("../../db/sql/plan/fixtures/pg18-spill-analyze.json");
-const PG_STALE: &str = include_str!("../../db/sql/plan/fixtures/pg18-stale-analyze.json");
+const PG_JOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-join-analyze.json");
+const PG_SPILL: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-spill-analyze.json");
+const PG_STALE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-stale-analyze.json");
 
 /// Whether some widget holds `part` as its text, which a code editor keeps as its value and not as a label.
 fn has_value(ui: &UiApp, part: &str) -> bool {
@@ -92,10 +92,10 @@ fn a_plan_the_window_cannot_read_opens_on_its_raw_text_with_a_note() {
 #[test]
 fn show_rows_in_query_tab_opens_the_classic_explain_there() {
     let Some(mut ui) = explain_open(PLAN) else { return };
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.click("Show rows in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");
-    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "no Query tab was opened");
     let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
     assert_eq!(s.query, format!("EXPLAIN {STMT}"));
 }
@@ -107,8 +107,8 @@ fn query_with(script: &str) -> Option<UiApp> {
         a.sql_query_demo();
     })?;
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    if let Some(s) = app.tabs[cur].sql.as_mut() {
+    let cur = app.core.cur;
+    if let Some(s) = app.core.test_mut().tabs[cur].sql.as_mut() {
         s.query = script.into();
         s.caret = 0;
     }
@@ -118,28 +118,28 @@ fn query_with(script: &str) -> Option<UiApp> {
 
 /// Whether the status line now says the demo has no server, which is the answer of the call that would have asked for the plan.
 fn reached_server_call(ui: &UiApp) -> bool {
-    ui.app().status.contains("Offline demo")
+    ui.app().core.status.contains("Offline demo")
 }
 
 #[test]
 fn cmd_e_and_the_explain_buttons_reach_the_server_call_from_both_views() {
     // The Content view: the bar's button and the shortcut explain the SELECT of the last page.
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.click("Run options");
     ui.click("Explain");
     assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
     assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Content view");
     // The Query view: the button and the shortcut explain the statement under the caret.
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.click("Explain");
     assert!(reached_server_call(&ui), "the Explain button did not reach the server call");
     let Some(mut ui) = query_with("SELECT id FROM orders;") else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.key(egui::Modifiers::COMMAND, egui::Key::E);
     assert!(reached_server_call(&ui), "Cmd+E did not reach the server call on the Query view");
 }
@@ -179,13 +179,13 @@ fn analyze_columns_compare_the_estimate_with_what_ran() {
 #[test]
 fn a_fix_opens_as_a_draft_and_nothing_runs() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SPILL) else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     // The title is on the card and in the panel; the card is the first.
     ui.click_nth("Sort spilled to disk", 0);
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.click("Open in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");
-    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "no Query tab was opened");
     let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
     assert!(s.query.starts_with("SET work_mem = '16MB';\n"), "{}", s.query);
     assert!(s.query.ends_with(&format!("{STMT};")), "{}", s.query);
@@ -195,8 +195,8 @@ fn a_fix_opens_as_a_draft_and_nothing_runs() {
 /// The tab's run picker set to `database`, as before an explain that ran there.
 fn pick_db(ui: &mut UiApp, database: &str) {
     let a = ui.h.state_mut();
-    let c = a.cur;
-    a.tabs[c].sql.as_mut().unwrap().run_db = database.into();
+    let c = a.core.cur;
+    a.core.test_mut().tabs[c].sql.as_mut().unwrap().run_db = database.into();
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn a_draft_runs_in_the_database_the_plan_was_made_in() {
     pick_db(&mut ui, "billing");
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, PG_SPILL);
     ui.settle();
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     let schema = explain_state(&ui).schema.clone();
     ui.click_nth("Sort spilled to disk", 0);
     ui.click("Open in Query tab");
@@ -221,9 +221,9 @@ fn copy_puts_the_fix_on_the_clipboard_with_a_note() {
     assert!(ui.shows("Copied."), "copying said nothing");
 }
 
-const FIX_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before.json");
-const FIX_AFTER: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-after.json");
-const FIX_BEFORE_RUN: &str = include_str!("../../db/sql/plan/fixtures/pg18-fix-before-analyze.json");
+const FIX_BEFORE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-before.json");
+const FIX_AFTER: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-after.json");
+const FIX_BEFORE_RUN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-fix-before-analyze.json");
 
 /// The statement explained once on `before`, then again on `after`, as after creating an index.
 fn explain_twice(before: &'static str, after: &'static str) -> Option<UiApp> {
@@ -276,7 +276,9 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     // Plans of a connection that closed are forgotten.
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
     let conn = ui.app().t().map(|t| t.sel.conn).unwrap();
-    ui.h.state_mut().drop_session(conn);
+    ui.h.state_mut().core.test_mut().drop_session(conn);
+    // The close's ForgetPlans effect runs on the next frame, as it does after a real disconnect.
+    ui.settle();
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
     ui.settle();
     ui.show("Flame");
@@ -293,7 +295,7 @@ fn the_same_statement_in_another_database_is_not_compared() {
     assert!(ui.h.query_by_label("Compare").is_none(), "a plan from another database is compared");
 }
 
-const PG_DATEWRAP: &str = include_str!("../../db/sql/plan/fixtures/pg18-datewrap.json");
+const PG_DATEWRAP: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-datewrap.json");
 
 /// Whether the plan has the finding of an index its filter defeats, which rests on the catalog.
 fn defeated(p: &crate::db::sql::plan::Plan) -> bool {
@@ -342,7 +344,7 @@ fn a_flame_bar_selects_its_node_and_time_waits_for_analyze() {
     assert!(explain_state(&ui).flame_time, "Time did not switch the widths");
 }
 
-const PG_SCAN: &str = include_str!("../../db/sql/plan/fixtures/pg18-scan.json");
+const PG_SCAN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-scan.json");
 
 #[test]
 fn a_filtered_full_scan_shows_its_candidate_index_and_the_evidence() {
@@ -357,12 +359,12 @@ fn a_filtered_full_scan_shows_its_candidate_index_and_the_evidence() {
 #[test]
 fn the_candidate_index_opens_as_a_draft_and_nothing_runs() {
     let Some(mut ui) = explain_in(Dialect::Postgres, PG_SCAN) else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.show("CANDIDATE INDEX");
-    let before = ui.app().tabs.len();
+    let before = ui.app().core.tabs.len();
     ui.click("Open in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");
-    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "no Query tab was opened");
     let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
     assert_eq!(s.query, r#"CREATE INDEX CONCURRENTLY "bookings_provider_status_idx" ON "public"."bookings" ("provider", "status");"#);
     assert!(!reached_server_call(&ui), "opening the draft ran it");
@@ -384,8 +386,8 @@ fn a_mysql_estimate_alone_suggests_no_index_and_says_why() {
     assert!(ui.h.query_by_label("CANDIDATE INDEX").is_none(), "a guess gave a candidate");
 }
 
-const HYPO_TRIAL: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-trial.json");
-const HYPO_BEFORE: &str = include_str!("../../db/sql/plan/fixtures/pg18-hypo-before.json");
+const HYPO_TRIAL: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-hypo-trial.json");
+const HYPO_BEFORE: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-hypo-before.json");
 
 fn trial(plan: &str) -> crate::db::sql::pg::hypo::Trial {
     crate::db::sql::pg::hypo::Trial { plan: plan.into(), index: "<13640>btree_bookings_provider_status".into() }
@@ -394,7 +396,7 @@ fn trial(plan: &str) -> crate::db::sql::pg::hypo::Trial {
 #[test]
 fn the_hypopg_trial_is_off_in_the_demo_and_says_why() {
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
-    ui.h.state_mut().status = "idle".into();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
     ui.show("CANDIDATE INDEX");
     assert!(ui.disabled("Try it (nothing is created)"), "the trial is offered in the offline demo");
     assert!(ui.shows("The offline demo has no server to try the index on."), "the reason the trial is off is not given");
@@ -435,7 +437,7 @@ fn a_trial_the_planner_ignores_says_so() {
     assert!(ui.shows("The planner would not use this index."), "an unused index is not reported");
 }
 
-const PG_SUBJOIN: &str = include_str!("../../db/sql/plan/fixtures/pg18-subjoin.json");
+const PG_SUBJOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/pg18-subjoin.json");
 
 #[test]
 fn a_join_that_is_most_of_the_plan_is_explained_with_its_join_filter() {
@@ -478,7 +480,7 @@ fn the_compare_captions_end_on_their_columns_right_edge() {
 
 /// The statement of the design's MySQL frame, whose plan wraps an indexed column in DATE().
 const DATE_STMT: &str = "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND DATE(o.created_at) = '2026-11-01'";
-const MY_JOIN: &str = include_str!("../../db/sql/plan/fixtures/mysql-join.json");
+const MY_JOIN: &str = include_str!("../../../quarry-core/src/db/sql/plan/fixtures/mysql-join.json");
 
 #[test]
 fn a_filter_that_defeats_an_index_shows_it_rewritten_and_drafts_the_statement() {
@@ -488,11 +490,11 @@ fn a_filter_that_defeats_an_index_shows_it_rewritten_and_drafts_the_statement() 
     ui.show("REWRITTEN FILTER");
     assert!(ui.shows("Same rows, and o_created_at_idx can serve it."), "the rewrite does not say why it helps");
     assert!(ui.shows("Fix: Rewritten filter"), "the finding card does not name its fix");
-    ui.h.state_mut().status = "idle".into();
-    let before = ui.app().tabs.len();
+    ui.h.state_mut().core.test_mut().status = "idle".into();
+    let before = ui.app().core.tabs.len();
     ui.click("Open in Query tab");
     assert!(ui.app().modal.is_none(), "the dialog stayed open");
-    assert_eq!(ui.app().tabs.len(), before + 1, "no Query tab was opened");
+    assert_eq!(ui.app().core.tabs.len(), before + 1, "no Query tab was opened");
     let s = ui.app().t().and_then(|t| t.sql.as_ref()).expect("the new tab is a SQL tab");
     assert_eq!(s.query, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' AND o.created_at >= '2026-11-01' AND o.created_at < '2026-11-02'");
     assert!(!reached_server_call(&ui), "opening the draft ran it");

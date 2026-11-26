@@ -4,17 +4,11 @@
 //! tabs for the page and stays beside the table that calls it.
 
 use crate::app::*;
-use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Plan, Routine};
-use std::collections::{HashMap, HashSet};
+use quarry_core::action::{Action, RoutineA};
+use db::sql::routines::{self as rt, Arg, ArgMode, Detail, Kind, Routine};
+pub(crate) use quarry_core::state::sql::routines::*;
 
 const LINE_H: f32 = 20.0;
-
-/// What the sidebar knows of one schema's routines.
-pub(in crate::app) enum Loaded {
-    Wait,
-    Ok(Vec<Routine>),
-    Err(String),
-}
 
 /// What a click in the sidebar group asks for, done after the frame is drawn.
 pub(in crate::app) enum RAct {
@@ -29,95 +23,17 @@ pub(in crate::app) enum RAct {
     Drop(String, String, Routine),
 }
 
-#[derive(Default)]
-pub(in crate::app) struct Routines {
-    lists: HashMap<(u64, String), Loaded>,
-    folded: HashSet<(u64, String)>,
-    win: Option<RoutineWin>,
-}
-
-impl Routines {
-    pub(in crate::app) fn window_open(&self) -> bool {
-        self.win.is_some()
-    }
-}
-
-#[derive(Default, PartialEq, Clone, Copy)]
-enum Pane {
-    #[default]
-    View,
-    Run,
-    Drop,
-}
-
-/// The preview of what a save sends, kept while the text and the drop-and-create choice stay as they are.
-type Memo = (String, bool, Result<Plan, String>);
-
-pub(in crate::app) struct RoutineWin {
-    conn: u64,
-    /// The sidebar's database, and its namespace: the schema on PostgreSQL, the database again on MySQL.
-    db: String,
-    schema: String,
-    dialect: db::sql::Dialect,
-    /// A schema that belongs to the server: shown, never changed.
-    system: bool,
-    kind: Kind,
-    /// None while a new routine is being written.
-    routine: Option<Routine>,
-    detail: Option<Detail>,
-    /// The read in flight.
-    req: u64,
-    /// A save or a drop in flight.
-    busy: bool,
-    error: Option<String>,
-    text: String,
-    base: String,
-    editing: bool,
-    recreate: bool,
-    /// PostgreSQL refused to replace the routine in place, so the window offers a drop and create.
-    offer_recreate: bool,
-    /// The text before the last save and whether that save dropped and created, for Undo.
-    undo: Option<(String, bool)>,
-    pane: Pane,
-    typed: String,
-    args: Vec<Arg>,
-    memo: Option<Memo>,
-}
-
-impl RoutineWin {
-    fn is(&self, conn: u64, db: &str, schema: &str, r: &Routine) -> bool {
-        self.conn == conn && self.db == db && self.schema == schema && self.routine.as_ref().is_some_and(|x| x.key() == r.key())
-    }
-
-    fn dirty(&self) -> bool {
-        self.text.trim() != self.base.trim()
-    }
-
-    fn title(&self) -> String {
-        match &self.routine {
-            Some(r) => r.label(self.dialect),
-            None => format!("New {}", self.kind.noun()),
-        }
-    }
-}
-
 impl App {
     fn routines_key(&self, conn: u64, db: &str, schema: &str) -> (u64, String) {
-        (conn, ns_key(db, if self.is_pg(conn) { schema } else { "" }))
+        self.core.routines_key(conn, db, schema)
     }
 
     /// How many routines of a namespace match the sidebar's filter, so a database whose tables all miss it still shows.
     pub(in crate::app) fn routines_matching(&self, conn: u64, ns: &str, filter: &str) -> usize {
-        match self.routines.lists.get(&(conn, ns.to_string())) {
+        match self.core.routines.lists.get(&(conn, ns.to_string())) {
             Some(Loaded::Ok(l)) if !filter.is_empty() => l.iter().filter(|r| crate::app::sidebar::contains_ci(&r.name, filter)).count(),
             _ => 0,
         }
-    }
-
-    /// Forgets the lists of a database, so the next frame reads them again. Refresh on a database calls it.
-    pub(in crate::app) fn routines_forget(&mut self, conn: u64, db: &str) {
-        let pre = format!("{db}\u{1f}");
-        self.routines.lists.retain(|k, _| k.0 != conn || (k.1 != db && !k.1.starts_with(&pre)));
     }
 
     /// The items of the database menu and the group's menu that start a new routine. PostgreSQL's stay enabled on a locked
@@ -137,7 +53,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::app) fn routines_group(&self, ui: &mut egui::Ui, conn: u64, db_name: &str, schema: &str, filter: &str, pg: bool, writable: bool, system: bool, acts: &mut Vec<RAct>) {
         let key = self.routines_key(conn, db_name, schema);
-        let list = match self.routines.lists.get(&key) {
+        let list = match self.core.routines.lists.get(&key) {
             None => return acts.push(RAct::Load(db_name.into(), schema.into())),
             Some(Loaded::Wait) => return,
             Some(Loaded::Err(e)) => {
@@ -156,7 +72,7 @@ impl App {
             return;
         }
         // A filter shows the group open whatever its fold, and opens it at once rather than animating.
-        let open = !filter.is_empty() || !self.routines.folded.contains(&key);
+        let open = !filter.is_empty() || !self.core.routines.folded.contains(&key);
         let gid = egui::Id::unique(("side-routines", &key));
         let cap = crate::app::sidebar::side_group(ui, gid, "ROUTINES", "Routines", shown.len(), open, |ui| self.routine_rows(ui, conn, db_name, schema, pg, writable, system, shown, acts));
         if cap.clicked() {
@@ -173,7 +89,7 @@ impl App {
     fn routine_rows(&self, ui: &mut egui::Ui, conn: u64, db_name: &str, schema: &str, pg: bool, writable: bool, system: bool, shown: Vec<&Routine>, acts: &mut Vec<RAct>) {
         let dialect = self.dialect_of(conn);
         for r in shown {
-            let active = self.routines.win.as_ref().is_some_and(|w| w.is(conn, db_name, schema, r));
+            let active = self.core.routines.win.as_ref().is_some_and(|w| w.is(conn, db_name, schema, r));
             let label = r.label(dialect);
             let func = r.kind == Kind::Function;
             let row = side_row(ui, SIDE_ROW_H, 18.0, active, &label, |p, rect| {
@@ -211,219 +127,20 @@ impl App {
     }
 
     pub(in crate::app) fn routine_act(&mut self, conn: u64, a: RAct) {
-        match a {
-            RAct::Load(db, schema) => self.routines_load(conn, db, schema),
-            RAct::Reload(db, schema) => {
-                let key = self.routines_key(conn, &db, &schema);
-                self.routines.lists.remove(&key);
-                self.routines_load(conn, db, schema);
-            }
-            RAct::Fold(ns) => {
-                let key = (conn, ns);
-                if !self.routines.folded.remove(&key) {
-                    self.routines.folded.insert(key);
-                }
-            }
-            RAct::Open(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::View),
-            RAct::Run(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::Run),
-            RAct::New(db, schema, kind) => self.routine_new(conn, db, schema, kind),
-            RAct::Drop(db, schema, r) => self.routine_open(conn, db, schema, Some(r), Pane::Drop),
-        }
-    }
-
-    fn routines_load(&mut self, conn: u64, db: String, schema: String) {
-        let key = self.routines_key(conn, &db, &schema);
-        // A connection without a session (the offline demo) has no routines to read; an empty list ends the asking.
-        let Some(sql) = self.live_sql(conn) else {
-            self.routines.lists.entry(key).or_insert(Loaded::Ok(Vec::new()));
-            return;
+        let a = match a {
+            RAct::Load(db, schema) => RoutineA::Load { conn, db, schema },
+            RAct::Reload(db, schema) => RoutineA::Reload { conn, db, schema },
+            RAct::Fold(ns) => RoutineA::Fold { conn, ns },
+            RAct::Open(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::View },
+            RAct::Run(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::Run },
+            RAct::New(db, schema, kind) => RoutineA::New { conn, db, schema, kind },
+            RAct::Drop(db, schema, routine) => RoutineA::Open { conn, db, schema, routine, pane: Pane::Drop },
         };
-        self.routines.lists.insert(key, Loaded::Wait);
-        self.worker.sql_routines(conn, sql.at(&db), db, schema);
-    }
-
-    fn routine_window_for(&self, conn: u64, db: String, schema: String, kind: Kind, routine: Option<Routine>) -> RoutineWin {
-        let dialect = self.dialect_of(conn);
-        let system = super::ns::system_ns(dialect == db::sql::Dialect::Postgres, &schema, &db);
-        RoutineWin { conn, db, schema, dialect, system, kind, routine, detail: None, req: 0, busy: false, error: None, text: String::new(), base: String::new(), editing: false, recreate: false, offer_recreate: false, undo: None, pane: Pane::View, typed: String::new(), args: Vec::new(), memo: None }
-    }
-
-    fn routine_open(&mut self, conn: u64, db: String, schema: String, r: Option<Routine>, pane: Pane) {
-        let Some(r) = r else { return };
-        let mut w = self.routine_window_for(conn, db.clone(), schema.clone(), r.kind, Some(r.clone()));
-        w.pane = pane;
-        if let Some(sql) = self.live_sql(conn) {
-            self.req += 1;
-            w.req = self.req;
-            self.worker.sql_routine_detail(conn, self.req, sql.at(&db), schema, r);
-        }
-        self.routines.win = Some(w);
-    }
-
-    fn routine_new(&mut self, conn: u64, db: String, schema: String, kind: Kind) {
-        let mut w = self.routine_window_for(conn, db, schema.clone(), kind, None);
-        w.text = rt::template(w.dialect, kind, &schema);
-        w.editing = true;
-        self.routines.win = Some(w);
-    }
-
-    /// An answer of the worker. A read or a change answers the window that asked, by its request.
-    pub(in crate::app) fn routine_done(&mut self, conn: u64, req: u64, ans: rt::Answer) {
-        match ans {
-            rt::Answer::List { database, schema, res } => {
-                let key = self.routines_key(conn, &database, &schema);
-                // A list asked for before a Refresh forgot it is not put back.
-                if !matches!(self.routines.lists.get(&key), Some(Loaded::Wait)) {
-                    return;
-                }
-                self.routines.lists.insert(key, match res {
-                    Ok(l) => Loaded::Ok(l),
-                    Err(e) => Loaded::Err(e),
-                });
-            }
-            rt::Answer::Detail { res } => {
-                let Some(w) = self.routines.win.as_mut().filter(|w| w.req == req) else { return };
-                w.req = 0;
-                match res {
-                    Ok(d) => {
-                        // Typing in the editor is kept when the read arrives after it started.
-                        let typing = w.editing && w.dirty();
-                        w.base = d.source.clone();
-                        if !typing {
-                            w.text = d.source.clone();
-                        }
-                        w.args = rt::inputs(&d).iter().map(|_| Arg::default()).collect();
-                        w.detail = Some(*d);
-                        w.error = None;
-                    }
-                    Err(e) => w.error = Some(e),
-                }
-            }
-            rt::Answer::Changed { res } => {
-                let Some(w) = self.routines.win.as_mut().filter(|w| w.req == req) else { return };
-                w.req = 0;
-                w.busy = false;
-                match res {
-                    Ok(r) => self.routine_changed(r),
-                    Err(f) => {
-                        w.offer_recreate = f.recreate;
-                        w.error = Some(f.why);
-                    }
-                }
-            }
-        }
-    }
-
-    /// A save or a drop went through. `r` is the routine as it is now, None after a drop.
-    fn routine_changed(&mut self, r: Option<Routine>) {
-        let Some(mut w) = self.routines.win.take() else { return };
-        let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let list_key = self.routines_key(conn, &db, &schema);
-        self.routines.lists.remove(&list_key);
-        match r {
-            None => self.ok(format!("Dropped the {}", w.kind.noun())),
-            Some(r) => {
-                let was = w.routine.is_some();
-                if was && let Some(old) = &w.detail {
-                    w.undo = Some((old.source.clone(), w.recreate));
-                } else {
-                    w.undo = None;
-                }
-                self.ok(if was { format!("Saved the {}", w.kind.noun()) } else { format!("Created the {}", w.kind.noun()) });
-                w.routine = Some(r.clone());
-                w.kind = r.kind;
-                w.editing = false;
-                w.recreate = false;
-                w.offer_recreate = false;
-                w.error = None;
-                w.memo = None;
-                // Read again, so the view shows what the server holds now and Undo has the current routine to work on.
-                w.base = String::new();
-                w.detail = None;
-                if let Some(sql) = self.live_sql(conn) {
-                    self.req += 1;
-                    w.req = self.req;
-                    self.worker.sql_routine_detail(conn, self.req, sql.at(&db), schema, r);
-                }
-                self.routines.win = Some(w);
-            }
-        }
-    }
-
-    /// Starts a save, asking to unlock first when the connection is locked.
-    fn routine_save(&mut self, restore: bool) {
-        let Some(w) = self.routines.win.as_ref() else { return };
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        if !self.conn_writable(w.conn) {
-            let conn = w.conn;
-            return self.ask_unlock_on(conn, move |a| a.routine_save(restore));
-        }
-        let Some(w) = self.routines.win.as_mut() else { return };
-        // Undo writes the text from before the last save, on the routine as it is now, the way the save went.
-        let (text, recreate) = match (restore, w.undo.clone()) {
-            (true, Some((old, recreate))) => (old, recreate),
-            _ => (w.text.clone(), w.recreate),
-        };
-        let (conn, db, schema, old) = (w.conn, w.db.clone(), w.schema.clone(), w.detail.clone());
-        // An edit waits for the read of the routine it changes.
-        if w.routine.is_some() && old.is_none() {
-            return;
-        }
-        w.recreate = recreate;
-        w.busy = true;
-        w.error = None;
-        self.req += 1;
-        w.req = self.req;
-        let (req, read_only) = (self.req, !self.conn_writable(conn));
-        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
-        self.worker.sql_routine_save(conn, req, sql.at(&db), schema, old, text, recreate, read_only);
-    }
-
-    fn routine_drop(&mut self) {
-        let Some(w) = self.routines.win.as_ref() else { return };
-        let (conn, db, schema, Some(r)) = (w.conn, w.db.clone(), w.schema.clone(), w.routine.clone()) else { return };
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        if !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, |a| a.routine_drop());
-        }
-        self.req += 1;
-        let (req, read_only) = (self.req, !self.conn_writable(conn));
-        let Some(sql) = self.live_sql(conn) else { return self.warn_offline() };
-        if let Some(w) = self.routines.win.as_mut() {
-            (w.req, w.busy, w.error) = (req, true, None);
-        }
-        self.worker.sql_routine_drop(conn, req, sql.at(&db), schema, r, read_only);
-    }
-
-    /// Runs the call in a new Query tab, where its results show. A routine that may write needs the connection unlocked; a PostgreSQL
-    /// function declared STABLE or IMMUTABLE runs on a locked one, on the session's read-only guard, which refuses it if it writes anyway.
-    fn routine_run(&mut self) {
-        let Some(w) = self.routines.win.as_ref() else { return };
-        let Some(detail) = w.detail.as_ref() else { return };
-        let (conn, db, schema) = (w.conn, w.db.clone(), w.schema.clone());
-        let bs = self.sql_bs_of(conn);
-        let Some(script) = rt::run_script(w.dialect, &schema, detail, &w.args, bs) else { return };
-        if !detail.read_only && !self.conn_writable(conn) {
-            return self.ask_unlock_on(conn, move |a| a.routine_run_script(conn, db, script));
-        }
-        self.routine_run_script(conn, db, script);
-    }
-
-    fn routine_run_script(&mut self, conn: u64, db: String, script: String) {
-        self.sql_new_query(conn, db);
-        if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
-            s.query = script;
-        }
-        self.sql_run(true, false);
-        self.routines.win = None;
+        self.exec(Action::Routines(a));
     }
 
     pub(in crate::app) fn routine_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.routines.win.take() else { return };
+        let Some(w) = self.core.routines.win.as_ref() else { return };
         let writable = self.conn_writable(w.conn);
         let session_mode = self.conn(w.conn).and_then(|c| c.sql.as_ref()).map(|s| s.sql_mode.clone());
         let conn_name = self.conn(w.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -434,33 +151,50 @@ impl App {
             let ns = if w.dialect == db::sql::Dialect::Postgres { format!("{} / {}", w.db, w.schema) } else { w.db.clone() };
             let sub = format!("{conn_name} · {} · {ns}", w.kind.noun());
             dialog_head(ui, &Head::new(w.title()).sub(sub).glyph(glyphs::code));
+            // The plan of the text as edited this frame, which the footer's Save reads too.
+            let mut plan = None;
             dialog_pane(ui, |ui| match w.pane {
-                Pane::View => view_pane(ui, &mut w, writable, session_mode.as_deref(), screen.height()),
-                Pane::Run => run_pane(ui, &mut w, writable),
-                Pane::Drop => drop_pane(ui, &mut w),
+                Pane::View => view_pane(ui, w, writable, session_mode.as_deref(), screen.height(), &mut acts, &mut plan),
+                Pane::Run => run_pane(ui, w, writable, &mut acts),
+                Pane::Drop => drop_pane(ui, w, &mut acts),
             });
-            foot(ui, &mut w, writable, &mut acts)
+            foot(ui, w, writable, &mut acts, plan.as_ref())
         });
-        if let Some(i) = acts.pane {
-            w.pane = i;
-            w.typed.clear();
-        }
         let keep = r.inner && !(r.should_close() && self.modal.is_none());
         let (save, undo, drop, run) = (acts.save, acts.undo, acts.drop, acts.run);
-        if keep {
-            self.routines.win = Some(w);
+        let mut next = Vec::new();
+        next.extend(acts.text.map(RoutineA::Text));
+        next.extend(acts.arg.map(|(i, a)| RoutineA::Arg { i, value: a.value, null: a.null }));
+        next.extend(acts.typed.map(RoutineA::Typed));
+        if acts.recreate {
+            next.push(RoutineA::Recreate);
+        }
+        if acts.edit {
+            next.push(RoutineA::Edit);
+        }
+        if acts.revert {
+            next.push(RoutineA::Revert);
+        }
+        if let Some(i) = acts.pane {
+            next.push(RoutineA::Pane(i));
         }
         if save {
-            self.routine_save(false);
+            next.push(RoutineA::Save { restore: false });
         }
         if undo {
-            self.routine_save(true);
+            next.push(RoutineA::Save { restore: true });
         }
         if drop {
-            self.routine_drop();
+            next.push(RoutineA::Drop);
         }
         if run {
-            self.routine_run();
+            next.push(RoutineA::Run);
+        }
+        if !keep {
+            next.push(RoutineA::Close);
+        }
+        for a in next {
+            self.exec(Action::Routines(a));
         }
     }
 
@@ -469,10 +203,10 @@ impl App {
         let dialect = self.dialect_of(conn);
         let list = demo_list(pg);
         let key = self.routines_key(conn, db, schema);
-        self.routines.lists.insert(key, Loaded::Ok(list.clone()));
-        self.open_dbs.insert((conn, db.to_string()));
+        self.core.setup().routines.lists.insert(key, Loaded::Ok(list.clone()));
+        self.core.setup().open_dbs.insert((conn, db.to_string()));
         let pick = if view == "new" { None } else { list.iter().find(|r| r.kind == if view == "run" { Kind::Procedure } else { Kind::Function }).cloned() };
-        let mut w = self.routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
+        let mut w = self.core.setup().routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
         match pick {
             Some(r) => {
                 let d = demo_detail(dialect, &r);
@@ -492,7 +226,7 @@ impl App {
                 w.editing = true;
             }
         }
-        self.routines.win = Some(w);
+        self.core.setup().routines.win = Some(w);
     }
 }
 
@@ -503,6 +237,12 @@ struct WinActs {
     drop: bool,
     run: bool,
     pane: Option<Pane>,
+    text: Option<String>,
+    arg: Option<(usize, Arg)>,
+    typed: Option<String>,
+    edit: bool,
+    revert: bool,
+    recreate: bool,
 }
 
 /// One row of the facts card: a caption and the value in monospace.
@@ -568,7 +308,7 @@ fn code_editor(ui: &mut egui::Ui, text: &mut String, dialect: db::sql::Dialect, 
     changed
 }
 
-fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode: Option<&str>, screen_h: f32) {
+fn view_pane(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, session_mode: Option<&str>, screen_h: f32, acts: &mut WinActs, plan_out: &mut Option<Result<rt::Plan, String>>) {
     if w.routine.is_some() && w.detail.is_none() && w.error.is_none() {
         ui.horizontal(|ui| {
             spin(ui);
@@ -592,33 +332,31 @@ fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode
     let can_edit = !w.system && !blind;
     let height = (screen_h - 560.0).clamp(160.0, 520.0);
     let editable = w.editing && can_edit;
-    let changed = code_editor(ui, &mut w.text, w.dialect, editable, height);
+    let mut text = w.text.clone();
+    let changed = code_editor(ui, &mut text, w.dialect, editable, height);
     if changed {
-        w.error = None;
+        acts.text = Some(text.clone());
     }
-    if let Some(e) = w.error.clone() {
+    let error = if changed { None } else { w.error.clone() };
+    if let Some(e) = error {
         ui.add_space(8.0);
         let lead = if w.offer_recreate { "PostgreSQL cannot replace it in place." } else { "Not done." };
         if banner(ui, if w.offer_recreate { Notice::Warn } else { Notice::Danger }, lead, &e, w.offer_recreate.then_some("Drop and create instead")) {
-            w.recreate = true;
-            w.offer_recreate = false;
-            w.error = None;
+            acts.recreate = true;
         }
     }
     if !w.editing {
         return;
     }
-    if let (Some(d), Some(now)) = (w.detail.as_ref().filter(|_| w.dirty()), session_mode) && !d.sql_mode.is_empty() && !db::sql::ddl::same_modes(&d.sql_mode, now) {
+    let dirty = text.trim() != w.base.trim();
+    if let (Some(d), Some(now)) = (w.detail.as_ref().filter(|_| dirty), session_mode) && !d.sql_mode.is_empty() && !db::sql::ddl::same_modes(&d.sql_mode, now) {
         ui.add_space(8.0);
         ui.label(RichText::new(format!("It was created with sql_mode {:?}. Saving creates it with this session's {:?}, which can change how its body runs.", d.sql_mode, now)).size(TXT_SMALL).color(WARNING()));
     }
-    if !w.dirty() && w.routine.is_some() {
+    if !dirty && w.routine.is_some() {
         return;
     }
-    if !w.memo.as_ref().is_some_and(|m| m.0 == w.text && m.1 == w.recreate) {
-        w.memo = Some((w.text.clone(), w.recreate, rt::plan(w.dialect, &w.schema, w.detail.as_ref(), &w.text, w.recreate)));
-    }
-    let Some((_, _, plan)) = &w.memo else { return };
+    let plan = plan_out.insert(rt::plan(w.dialect, &w.schema, w.detail.as_ref(), &text, w.recreate));
     ui.add_space(8.0);
     caption(ui, "SQL TO RUN");
     ui.add_space(4.0);
@@ -640,7 +378,7 @@ fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode
     }
 }
 
-fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
+fn run_pane(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, acts: &mut WinActs) {
     let Some(d) = w.detail.clone() else {
         ui.horizontal(|ui| {
             spin(ui);
@@ -652,13 +390,17 @@ fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
     if inputs.is_empty() {
         ui.label(RichText::new("It takes no arguments.").color(MUTED()));
     }
-    for (p, a) in inputs.iter().zip(w.args.iter_mut()) {
+    for (i, (p, shown)) in inputs.iter().zip(w.args.iter()).enumerate() {
+        let mut a = shown.clone();
         ui.horizontal(|ui| {
             ui.set_min_height(BUTTON_H);
             ui.add_sized([180.0, BUTTON_H], egui::Label::new(RichText::new(format!("{} {}", if p.name.is_empty() { "(unnamed)" } else { &p.name }, p.mode.label())).size(TXT_SMALL).color(MUTED())).truncate());
             ui.add_enabled(!a.null, egui::TextEdit::singleline(&mut a.value).font(egui::TextStyle::Monospace).desired_width(260.0).hint_text(p.ty.as_str())).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, format!("Argument {}", p.name)));
             ui.checkbox(&mut a.null, "NULL");
         });
+        if a != *shown {
+            acts.arg = Some((i, a));
+        }
     }
     for p in d.params.iter().filter(|p| p.mode == ArgMode::Out) {
         ui.label(RichText::new(format!("{} {} comes back in the result.", p.name, p.ty)).size(TXT_SMALL).color(FAINT()));
@@ -678,16 +420,20 @@ fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
     }
 }
 
-fn drop_pane(ui: &mut egui::Ui, w: &mut RoutineWin) {
+fn drop_pane(ui: &mut egui::Ui, w: &RoutineWin, acts: &mut WinActs) {
     let name = w.routine.as_ref().map(|r| r.label(w.dialect)).unwrap_or_default();
     banner(ui, Notice::Danger, "This cannot be undone.", &format!("{name} is dropped for good. Grants made on it go with it, and whatever calls it fails afterwards."), None);
     ui.add_space(10.0);
     let expect = w.routine.as_ref().map(|r| r.name.clone()).unwrap_or_default();
-    crate::app::modals::typed_confirm(ui, &expect, &mut w.typed);
+    let mut typed = w.typed.clone();
+    crate::app::modals::typed_confirm(ui, &expect, &mut typed);
+    if typed != w.typed {
+        acts.typed = Some(typed);
+    }
 }
 
 /// The footer. Returns whether the window stays open.
-fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinActs) -> bool {
+fn foot(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, acts: &mut WinActs, plan: Option<&Result<rt::Plan, String>>) -> bool {
     let mut open = true;
     let busy = w.busy || (w.routine.is_some() && w.detail.is_none() && w.error.is_none());
     let blind = w.detail.as_ref().is_some_and(|d| d.header_missing.is_some());
@@ -695,20 +441,13 @@ fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinAct
     dialog_foot(ui, |ui| {
         match w.pane {
             Pane::View if w.editing => {
-                let ok = !busy && w.dirty() && w.memo.as_ref().is_some_and(|m| m.2.is_ok());
+                let ok = !busy && w.dirty() && plan.is_some_and(|p| p.is_ok());
                 let label = if w.busy { "Saving..." } else if w.routine.is_some() { "Save routine" } else { "Create routine" };
                 if ui.add_enabled(ok, primary_button(ui, label, PRIMARY())).on_disabled_hover_text(if busy { "Working" } else { "Nothing to save yet" }).clicked() {
                     acts.save = true;
                 }
                 if quiet_enabled(ui, !w.busy, if w.routine.is_some() { "Revert" } else { "Cancel" }).clicked() {
-                    if w.routine.is_none() {
-                        open = false;
-                    }
-                    w.text = w.base.clone();
-                    w.editing = false;
-                    w.recreate = false;
-                    w.offer_recreate = false;
-                    w.error = None;
+                    acts.revert = true;
                 }
             }
             Pane::View => {
@@ -717,7 +456,7 @@ fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinAct
                 }
                 if w.routine.is_some() {
                     if quiet_enabled(ui, can_edit && !busy, "Edit").on_disabled_hover_text(if w.system { "Belongs to the server" } else { "The definition could not be read in full" }).clicked() {
-                        w.editing = true;
+                        acts.edit = true;
                     }
                     if quiet_enabled(ui, w.detail.is_some() && !w.busy, "Run…").clicked() {
                         acts.pane = Some(Pane::Run);

@@ -7,57 +7,16 @@ use crate::db;
 use eframe::egui::{self, Color32, FontId, Key, text::LayoutJob};
 use mongodb::bson::Bson;
 use std::collections::{HashMap, HashSet};
+pub(crate) use quarry_core::state::complete::*;
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum FieldKind {
-    Query,
-    Sort,
-    Project,
+/// The parts of the suggestion list that move the caret or match the input go through egui.
+pub(crate) trait AcUi {
+    fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize);
+    fn shown(&self, id: egui::Id) -> bool;
 }
 
-/// One autocomplete suggestion: what is shown, a short note, what is inserted and where the
-/// caret lands inside it (in characters).
-pub(crate) struct Sug {
-    /// SQL only: what the row shows at the right instead of the kind, and the footer line while it is selected.
-    pub(crate) sql: Option<SqlInfo>,
-    /// Characters before the typed word that the insert also replaces, like the dot before `["my-field"]`.
-    pub(crate) back: usize,
-    pub(crate) text: String,
-    pub(crate) note: &'static str,
-    pub(crate) insert: String,
-    pub(crate) caret: usize,
-}
-
-pub(crate) struct SqlInfo {
-    pub(crate) detail: String,
-    pub(crate) foot: String,
-}
-
-/// Open suggestion list of one query input.
-#[derive(Default)]
-pub(crate) struct Ac {
-    pub(crate) id: Option<egui::Id>,
-    /// Length in characters of the word being completed, just before `cursor`.
-    pub(crate) token: usize,
-    pub(crate) items: Vec<Sug>,
-    pub(crate) sel: usize,
-    pub(crate) cursor: usize,
-    pub(crate) rect: Option<egui::Rect>,
-    /// Signature and docs of the item at this index, shown beside the list.
-    pub(crate) doc: Option<(usize, db::JsDoc)>,
-    /// The field's values are being fetched from the server; the list stays open and says so.
-    pub(crate) loading: bool,
-    /// Why the server was not asked for values matching the typed text, shown under the list.
-    pub(crate) note: Option<&'static str>,
-    /// SQL only: the heading row above the list and the footer when the selected row has none.
-    pub(crate) title: String,
-    pub(crate) foot: String,
-    /// SQL only: the "table.column" whose values the list is waiting for.
-    pub(crate) want: String,
-}
-
-impl Ac {
-    pub(crate) fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize) {
+impl AcUi for Ac {
+    fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize) {
         let Some(s) = self.items.get(i) else { return };
         let start = self.cursor.saturating_sub(self.token + s.back);
         let byte = |c: usize| text.char_indices().nth(c).map(|(b, _)| b).unwrap_or(text.len());
@@ -70,15 +29,16 @@ impl Ac {
         self.close();
     }
 
-    pub(crate) fn close(&mut self) {
-        self.items.clear();
-        self.loading = false;
-        self.note = None;
+    fn shown(&self, id: egui::Id) -> bool {
+        self.id == Some(id.value()) && (!self.items.is_empty() || self.loading || self.note.is_some())
     }
+}
 
-    pub(crate) fn shown(&self, id: egui::Id) -> bool {
-        self.id == Some(id) && (!self.items.is_empty() || self.loading || self.note.is_some())
-    }
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FieldKind {
+    Query,
+    Sort,
+    Project,
 }
 
 /// Query operators offered inside a field's own object, as in the original (renderer line 95668).
@@ -163,17 +123,6 @@ fn snippet(name: &str, template: &str, note: &'static str) -> Sug {
     let caret = template[..template.find('|').unwrap_or(template.len())].chars().count();
     Sug { sql: None, back: 0, text: name.to_string(), note, insert: template.replace('|', ""), caret }
 }
-
-/// What the loaded documents hold in one field: its most common kind and its most common values.
-#[derive(Default, Clone)]
-pub(crate) struct FieldInfo {
-    pub(crate) kind: &'static str,
-    pub(crate) values: Vec<Bson>,
-    /// SQL only: how many rows hold each of `values`, in the same order.
-    pub(crate) freq: Vec<u64>,
-}
-
-pub(crate) type Fields = HashMap<String, FieldInfo>;
 
 /// Paths kept per page, so very wide documents stay fast.
 const MAX_PATHS: usize = 2000;
@@ -275,28 +224,7 @@ pub(crate) fn ts_type(fields: &Fields) -> String {
     obj(fields, &kids, "").unwrap_or_else(|| "import(\"mongodb\").Document".into())
 }
 
-/// Whether a value is worth suggesting: short text, numbers and booleans, as `field_info` keeps.
-pub(crate) fn suggestible(v: &Bson) -> bool {
-    match v {
-        Bson::String(s) => s.chars().count() <= 80,
-        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Boolean(_) => true,
-        _ => false,
-    }
-}
-
-/// Adds values fetched from the server after the page's own, which come first because they are
-/// counted. A field missing from the page gets an entry typed by its first value.
-pub(crate) fn merge_values(fields: &mut Fields, server: &HashMap<String, Vec<Bson>>) {
-    for (p, vals) in server {
-        let Some(first) = vals.first() else { continue };
-        let f = fields.entry(p.clone()).or_insert_with(|| FieldInfo { kind: db::type_name(first), values: Vec::new(), freq: Vec::new() });
-        for v in vals {
-            if !f.values.contains(v) {
-                f.values.push(v.clone());
-            }
-        }
-    }
-}
+pub(crate) use quarry_core::action::replies::merge_values;
 
 /// The field whose value starts at the end of `before`: `status` in `{ status: "dr`. Operators
 /// like `$in` are left out, their field is further back.
@@ -581,10 +509,10 @@ pub(crate) fn ac_input_with(
     show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
 ) -> (egui::text_edit::TextEditOutput, bool, bool) {
     // Esc into Vim's Normal mode closes the list too: nothing is typed there for it to complete.
-    if ac.id == Some(id) && crate::ui::vim::normal(ui.ctx(), id) {
+    if ac.id == Some(id.value()) && crate::ui::vim::normal(ui.ctx(), id) {
         ac.close();
     }
-    let mut open = ac.id == Some(id) && !ac.items.is_empty();
+    let mut open = ac.id == Some(id.value()) && !ac.items.is_empty();
     // egui drops focus on a bare Esc before widgets run, so an open list takes Esc and gives the focus back.
     if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         ac.close();
@@ -620,17 +548,17 @@ pub(crate) fn ac_input_with(
         if out.response.changed() || force {
             let before: String = text.chars().take(ci).collect();
             match compute(&before, force) {
-                Some((token, items)) => *ac = Ac { id: Some(id), token, items, cursor: ci, ..Default::default() },
-                None if ac.id == Some(id) => ac.close(),
+                Some((token, items)) => *ac = Ac { id: Some(id.value()), token, items, cursor: ci, ..Default::default() },
+                None if ac.id == Some(id.value()) => ac.close(),
                 None => {}
             }
-        } else if ac.id == Some(id) && ci != ac.cursor {
+        } else if ac.id == Some(id.value()) && ci != ac.cursor {
             ac.close();
         }
     }
     let test_shot = std::env::var("QUARRY_TEST_AC").is_ok() || std::env::var("QUARRY_TEST_SHELL_SIG").is_ok() || std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v.starts_with("ac") || v == "shellac");
-    let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
-    if !focused && ac.id == Some(id) && !pointer_on_list {
+    let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|([x0, y0, x1, y1], p)| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)).contains(p));
+    if !focused && ac.id == Some(id.value()) && !pointer_on_list {
         ac.close();
     }
     (out, false, moved)
@@ -655,7 +583,7 @@ pub(crate) fn ac_list(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &m
             }
         })
         .response;
-    ac.rect = Some(r.rect);
+    ac.rect = Some([r.rect.min.x, r.rect.min.y, r.rect.max.x, r.rect.max.y]);
     let Some(i) = click else { return false };
     ac.apply(ui.ctx(), id, text, i);
     ui.memory_mut(|m| m.request_focus(id));
@@ -822,22 +750,7 @@ pub(crate) const CONSOLE_METHODS: [&str; 4] = ["log", "warn", "error", "info"];
 
 /// Shell autocomplete: methods after `db.`, a collection or a cursor; fields and operators inside a
 /// call's object; otherwise keywords, globals and collection names.
-/// The variable a package is loaded as: camelCase of its name without scope. Must match
-/// packageIdent() in shell_runner.mjs.
-pub(crate) fn package_ident(spec: &str) -> String {
-    let name = db::package_spec(spec).0;
-    let base = name.strip_prefix('@').and_then(|r| r.split_once('/')).map(|(_, n)| n.to_string()).unwrap_or(name);
-    let mut id: String = base
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|p| !p.is_empty())
-        .enumerate()
-        .map(|(i, p)| if i == 0 { p.to_string() } else { p[..1].to_ascii_uppercase() + &p[1..] })
-        .collect();
-    if id.starts_with(|c: char| c.is_ascii_digit()) {
-        id.insert(0, '_');
-    }
-    if id.is_empty() { "pkg".into() } else { id }
-}
+pub(crate) use quarry_core::action::agents::open_shell::package_ident;
 
 /// A character of a JavaScript identifier, as far as completion cares.
 pub(crate) fn is_js_ident(c: char) -> bool {

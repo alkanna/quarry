@@ -2,12 +2,14 @@
 //! Larger dialogs live with their feature and are called from here.
 
 use super::*;
+use quarry_core::action::{Action, ConfirmA, ConnA, DocsA, ShellA};
+use quarry_core::core::TextRef;
 
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
         self.value_dialog(ctx);
         let into = self.t().map(|t| format!("into {}", t.sel.ns())).unwrap_or_default();
-        if let Some(text) = &mut self.insert {
+        if let Some(text) = self.core.text_mut(TextRef::Insert) {
             let mut close = false;
             let mut submit = false;
             let r = banded(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
@@ -30,16 +32,11 @@ impl App {
                 });
             });
             if submit {
-                match db::parse_doc(text) {
-                    Ok(d) => {
-                        if let Some((conn, target)) = self.writable_target() {
-                            self.worker.insert(conn, target, d, self.insert.take());
-                        }
-                    }
-                    Err(e) => self.err(e),
+                if let Some(tab) = self.cur_uid() {
+                    self.exec(Action::Docs(DocsA::InsertRun { tab }));
                 }
             } else if close || r.should_close() {
-                self.insert = None;
+                self.exec(Action::Docs(DocsA::InsertClose));
             }
         }
 
@@ -47,7 +44,7 @@ impl App {
             self.modal = Some(self.late_modals.remove(0));
         }
         // Settings looks for gcloud each time it opens, so it forgets the answer once closed.
-        if self.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
+        if self.core.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
             self.gcloud_forget();
         }
         if matches!(self.modal, Some(Modal::Palette { .. })) {
@@ -83,10 +80,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Allow writes", ALERT()).clicked() {
-                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *id) {
-                                c.writable = true;
-                            }
-                            self.ok(format!("Writes allowed on {name} for this session"));
+                            self.exec(Action::Conn(ConnA::Unlock { conn: *id }));
                             keep = false;
                             if let Some(then) = then.take() {
                                 then(self);
@@ -107,7 +101,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Save", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                            self.write_draft(tag);
+                            self.exec(Action::Docs(DocsA::Write { keys: vec![tag.clone()] }));
                             keep = false;
                         }
                         if ui.button("Keep editing").on_hover_text("Esc").clicked() {
@@ -177,12 +171,7 @@ impl App {
                     dialog_foot(ui, |ui| {
                         let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
                         if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
-                            if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
-                                let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
-                                let (c, d, k) = (*conn, db.clone(), coll.clone());
-                                self.remove_tabs(|t| t.sel.conn == c && t.sel.db == d && t.sel.coll == k);
-                                self.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
-                            }
+                            self.exec(Action::Side(SideA::Rename { conn: *conn, db: db.clone(), coll: coll.clone(), to: name.trim().to_string() }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -200,9 +189,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if primary(ui, "Import", PRIMARY()).clicked() {
-                            if let Some((conn, target)) = self.writable_target() && let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
-                                self.worker.import(conn, target, docs, None);
-                                self.ok("Importing…");
+                            if let Some(tab) = self.cur_uid() {
+                                self.exec(Action::Mongo(quarry_core::action::MongoA::Import(quarry_core::action::ImportA::Insert { tab })));
                             }
                             keep = false;
                         }
@@ -221,16 +209,16 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run").clicked() {
-                            let stmt = std::mem::take(stmt);
+                            let (what, tab) = (*what, self.core.tabs[self.core.cur].uid);
                             keep = false;
-                            self.sql_maintain_run(stmt);
+                            self.exec(Action::Structure(quarry_core::action::StructA::RunMaint { tab, what }));
                         }
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
                     });
                 }
-                Modal::ShellWrite(ops) => {
+                Modal::ShellWrite { tab, ops } => {
                     ui.set_width(480.0);
                     dialog_head(ui, &Head::new("Execute this command?").sub("Shell").glyph(glyphs::warn).tone(ALERT()));
                     dialog_body(ui, |ui| {
@@ -240,7 +228,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Execute").clicked() {
-                            self.start_shell();
+                            let tab = *tab;
+                            self.exec(Action::Shell(ShellA::Start { tab }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -256,11 +245,8 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if danger_solid(ui, true, "Run it").clicked() {
-                            if let Some((_, target)) = self.writable_target() {
-                                self.req += 1;
-                                let req = self.req;
-                                self.tm().unwrap().agg_req = req;
-                                self.worker.aggregate(req, target, p.clone());
+                            if let Some(tab) = self.cur_uid() {
+                                self.exec(Action::Confirm(ConfirmA::AggWrite { tab, pipeline: p.clone() }));
                             }
                             keep = false;
                         }
@@ -282,8 +268,7 @@ impl App {
                     });
                     dialog_foot(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "Save", PRIMARY())).clicked() {
-                            let fields = self.t().map(|t| if *agg { t.agg_source().1.to_vec() } else { t.fields.clone() }).unwrap_or_default();
-                            self.apply_col_acts(key, &fields, vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: path.trim().to_string() }]);
+                            self.exec(Action::Grid(quarry_core::action::GridA::Cols { key: key.clone(), agg: *agg, acts: vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: path.trim().to_string() }] }));
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -343,14 +328,13 @@ impl App {
             self.modal = Some(m);
         } else if let Modal::SqlExplain(mut x) = m {
             // Closing must not leave an ANALYZE running: it holds the locks of the statement it executes.
-            self.sql_explain_stop(&mut x);
+            self.explain_stop(&mut x);
         } else if matches!(m, Modal::PgNewRole(_) | Modal::PgPassword(_)) {
             // Esc closes without the dialog's own buttons, so the password fields are forgotten here; dropping the form wipes them.
             super::sql::pg_roles::forget_pg_secrets(ctx, &m);
         } else if matches!(m, Modal::Conn(_)) {
             // A Test still running when the form closes must not show in the next form.
-            self.conn_test = None;
-            self.test_info = None;
+            self.exec(Action::Conn(ConnA::ForgetTest));
         }
     }
 
@@ -375,19 +359,7 @@ impl App {
                 self.on_tab(&at.clone(), |a| a.sql_delete(docs));
                 *keep = false;
             } else if del {
-                let docs = docs.to_vec();
-                self.on_tab(&at.clone(), |a| {
-                    if let Some((conn, target)) = a.writable_target() {
-                        match docs.as_slice() {
-                            [d] => a.worker.delete(conn, target, d.clone(), true),
-                            _ => a.worker.delete_docs(conn, target, docs.clone()),
-                        }
-                        // The reload drops deleted rows from the checks; others stay checked.
-                        if let Some(t) = a.tm() {
-                            t.selected = None;
-                        }
-                    }
-                });
+                self.exec(Action::Docs(DocsA::DeleteRun { at: at.clone(), docs: docs.to_vec() }));
                 *keep = false;
             }
             if ui.button("Cancel").clicked() {
@@ -429,17 +401,20 @@ impl App {
         dialog_foot(ui, |ui| {
             let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
             if ui.add_enabled(ok, primary_button(ui, if *view { "Create view" } else { "Create" }, PRIMARY())).clicked() {
-                let cmd = match &parsed {
-                    Some(p) => p.clone().map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p }),
-                    None => Ok(doc! { "create": name.trim() }),
+                let view = match &parsed {
+                    Some(p) => p.clone().map(|p| Some((source.clone(), p))),
+                    None => Ok(None),
                 };
-                match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
-                    (Ok(cmd), Some(client)) => {
-                        self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
-                        *keep = false;
+                match view {
+                    // An offline refusal keeps the dialog and what was typed in it.
+                    Ok(view) => {
+                        let done = self.core.execute(Action::Side(SideA::MongoCreateView { conn: *conn, db: db.clone(), name: name.trim().to_string(), view })).is_ok();
+                        self.run_fx();
+                        if done {
+                            *keep = false;
+                        }
                     }
-                    (Err(e), _) => self.err(e),
-                    (_, None) => self.warn_offline(),
+                    Err(e) => self.err(e),
                 }
             }
             if ui.button("Cancel").clicked() {
@@ -461,7 +436,7 @@ impl App {
         let cname = self.conn_name(*conn);
         dialog_head(ui, &Head::new(format!("Duplicate {coll}")).sub(format!("in {db} on {cname}")).glyph(glyphs::copy));
         let to = name.trim().to_string();
-        let taken = self.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| *n == to));
+        let taken = self.core.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| *n == to));
         dialog_body(ui, |ui| {
             stacked_field(ui, "New collection", "Copies every document, index and setting (validator, collation).", |ui| ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY)));
             if taken {
@@ -470,14 +445,7 @@ impl App {
         });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
-                match self.conn(*conn).and_then(|c| c.client.clone()) {
-                    Some(client) => {
-                        // The sidebar shows it with a spinner until the copy ends.
-                        self.copying.insert((*conn, db.clone(), to.clone()));
-                        self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.clone());
-                    }
-                    None => self.warn_offline(),
-                }
+                self.exec(Action::Side(SideA::Duplicate { conn: *conn, db: db.clone(), coll: coll.clone(), to: to.clone() }));
                 *keep = false;
             }
             if ui.button("Cancel").clicked() {
@@ -488,7 +456,7 @@ impl App {
 
     fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &[String], keep: &mut bool) {
         let sql = self.t().is_some_and(|t| t.sql.is_some());
-        let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
+        let n: usize = keys.iter().filter_map(|k| self.core.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
         ui.set_width(480.0);
         let (title, note) = if sql {
             (format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }), "They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.")
@@ -504,9 +472,7 @@ impl App {
                 if sql {
                     self.write_sql_drafts(keys.to_vec());
                 } else {
-                    for k in keys.iter() {
-                        self.write_draft(k);
-                    }
+                    self.exec(Action::Docs(DocsA::Write { keys: keys.to_vec() }));
                 }
                 *keep = false;
             }
@@ -556,15 +522,7 @@ impl App {
             // Values counted from pipeline or script results have no pipeline to reopen.
             // A SQL table has no pipeline to open.
             if !sql && ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
-                let mut t = Tab::new(sel.clone());
-                t.view = View::Aggregate;
-                t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
-                // Next to the current tab, like the original's nextToActive.
-                let at = (self.cur + 1).min(self.tabs.len());
-                self.tabs.insert(at, t);
-                self.set_cur(at);
-                self.reset_doc_state();
-                self.run_pipeline(pipeline.to_vec());
+                self.exec(Action::Confirm(ConfirmA::OpenGrouped { sel: sel.clone(), pipeline: pipeline.to_vec() }));
                 *keep = false;
             }
             if ui.button("Close").on_hover_text("Esc").clicked() {
@@ -594,8 +552,9 @@ impl App {
         dialog_foot(ui, |ui| {
             if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                 let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
-                let base = d.clone();
-                self.stage(&base, new);
+                if let Some(tab) = self.cur_uid() {
+                    self.exec(Action::Docs(DocsA::Stage { tab, doc: d.clone(), new }));
+                }
                 *keep = false;
             }
             // $rename cannot reach into arrays, so this is offered only for plain paths.
@@ -675,8 +634,8 @@ impl App {
                 });
                 *keep = false;
             }
-            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(t)) = (&stages, self.target()) {
-                self.worker.update_preview(t, scope.clone(), st.clone());
+            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(tab)) = (&stages, self.cur_uid()) {
+                self.exec(Action::Confirm(ConfirmA::UpdatePreview { tab, scope: scope.clone(), stages: st.clone() }));
             }
             if ui.button("Cancel").clicked() {
                 *keep = false;
@@ -689,14 +648,14 @@ impl App {
         dialog_head(ui, &Head::new("Recent changes").sub(format!("The last {} actions from the past 24 hours", db::UNDO_MAX)).glyph(glyphs::undo));
         let mut pick = None;
         dialog_pane(ui, |ui| {
-            if self.undo.is_empty() {
+            if self.core.undo.is_empty() {
                 ui.label(RichText::new("Nothing to undo.").color(MUTED()));
                 return;
             }
             table_card(ui, |ui| {
                 let w = ui.available_width();
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                    for (i, a) in self.undo.iter().enumerate() {
+                    for (i, a) in self.core.undo.iter().enumerate() {
                         if i > 0 {
                             table_sep(ui);
                         }

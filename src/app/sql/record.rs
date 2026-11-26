@@ -81,7 +81,7 @@ impl App {
         let rid = ui.scope_id().with(("sql-record", i));
         let key = docs.id(i);
         // The Vim cursor's line, scrolled into view after a Vim key moved it.
-        let cur = self.prefs.vim.then(|| self.t().map_or(0, |t| t.vline).min(names.len().saturating_sub(1)));
+        let cur = self.core.prefs.vim.then(|| self.vline().min(names.len().saturating_sub(1)));
         let scroll = cur.is_some() && std::mem::take(&mut self.vnav.scroll);
         self.vnav.lines = names.len();
         for (li, (c, col)) in names.iter().zip(&cols).enumerate() {
@@ -101,7 +101,7 @@ impl App {
             }
             let kind = col.as_ref().map_or(Kind::Text, |c| c.kind);
             let val = egui::Rect::from_min_max(egui::pos2(line.left() + name_w, line.top()), egui::pos2(line.right() - type_w, line.bottom()));
-            if !agg && self.sql_cell.as_ref().is_some_and(|e| e.is_at(key.clone(), c)) {
+            if !agg && self.core.sql_cell.as_ref().is_some_and(|e| e.is_at(key.clone(), c)) {
                 self.sql_cell_editor(ui, val);
                 tree_room(ui, tree_h);
                 continue;
@@ -240,20 +240,17 @@ impl App {
     /// Tab on a selected SQL row opens or closes its record. Read before anything draws: egui has already turned the Tab
     /// into a focus move, which would give the focus to the first button of the top bar.
     pub(in crate::app) fn record_key(&mut self, ctx: &egui::Context) {
-        // The record belongs to a selected row: whatever let the row go (a view switch, a reload, a delete) ends it too.
-        if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
-            t.record = false;
-        }
         // A filter panel with a selected row has the keys, as its arrows and Enter do. Without one, Tab is the grid's.
         let panel = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open && s.bar.panel.sel.is_some());
-        if self.window_open() || self.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || panel {
+        if self.window_open() || self.core.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || panel {
             return;
         }
-        let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.record_row()) else { return };
+        let Some(tab) = self.t().filter(|t| t.sql.is_some() && t.record_row()).map(|t| t.uid) else { return };
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
-            t.record = !t.record;
+            self.exec(Action::Sql(SqlA::Record { tab }));
             // The record's cursor starts on the field of the grid's cursor.
-            t.vline = t.vcol;
+            let col = self.vcol();
+            self.set_vline(col);
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         }
     }

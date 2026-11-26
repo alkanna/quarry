@@ -13,13 +13,13 @@ fn loading_then_failure_and_retry(var: &str, db: &str, fail: impl Fn(&App) -> Ms
     // draws the open database before any answer can have come back.
     ui.h.run_steps(2);
     assert!(ui.h.query_by_label("Loading…").is_some(), "{var}: no loading row while the list is on its way");
-    ui.wait("the list", |a| a.side_err.is_empty() && a.h_loaded(db));
+    ui.wait("the list", |a| a.core.side_err.is_empty() && a.h_loaded(db));
     assert!(ui.h.query_by_label("Loading…").is_none(), "{var}: the loading row stays after the list arrived");
     let m = fail(ui.app());
-    ui.app().worker.send(m);
+    ui.app().core.test_worker().send(m);
     ui.show("Could not list. Retry");
     ui.click("Could not list. Retry");
-    ui.wait("the retried list", |a| a.side_err.is_empty() && a.h_loaded(db));
+    ui.wait("the retried list", |a| a.core.side_err.is_empty() && a.h_loaded(db));
     assert!(ui.h.query_by_label("Could not list. Retry").is_none(), "{var}: the failure row stays after the retry");
 }
 
@@ -59,23 +59,23 @@ fn an_open_mysql_database_shows_loading_then_a_failure_with_retry() {
 #[test]
 fn the_identity_card_menu_opens_the_server_window() {
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    let name = ui.app().conn(ui.app().active.expect("an active connection")).map(|c| c.meta.name.clone()).unwrap_or_default();
+    let name = ui.app().conn(ui.app().core.active.expect("an active connection")).map(|c| c.meta.name.clone()).unwrap_or_default();
     ui.show(&format!("Connection {name}"));
     ui.click("Connection menu");
     ui.click("Server status");
-    assert!(ui.app().sql_server.is_some(), "Server status in the card menu opened nothing");
+    assert!(ui.app().core.sql_server.is_some(), "Server status in the card menu opened nothing");
 }
 
 #[test]
 fn database_menus_open_a_mongo_shell_and_the_sql_server_window() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
-    let conn = ui.app().tabs[0].sel.conn;
+    let conn = ui.app().core.tabs[0].sel.conn;
     ui.h.state_mut().side_act(conn, SideAct::NewShell("shop".into()));
     ui.settle();
-    let t = &ui.app().tabs[ui.app().cur];
+    let t = &ui.app().core.tabs[ui.app().core.cur];
     assert!(t.view == View::Shell && t.sel.db == "shop" && t.sel.coll.is_empty(), "New shell did not open a Shell on shop");
     let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
-    let conn = ui.app().tabs[0].sel.conn;
+    let conn = ui.app().core.tabs[0].sel.conn;
     ui.h.state_mut().side_act(conn, SideAct::Server);
-    assert!(ui.app().sql_server.is_some(), "Server status on a SQL database opened nothing");
+    assert!(ui.app().core.sql_server.is_some(), "Server status on a SQL database opened nothing");
 }

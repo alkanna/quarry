@@ -2,317 +2,21 @@
 //! Settings, Activity and Locks. It follows the MySQL window (`sql_server.rs`): it asks only while it is open and Quarry is
 //! focused, keeps errors in the window, and offers Cancel and Terminate only on an unlocked connection, after a second click.
 
-use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, prev_of, retry_after, tile, up_text, PAD, POLL};
+use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, tile, up_text, PAD};
 use crate::app::*;
-use db::sql::pg::server::{carry_blockers, chains, metrics, Activity, Answer, Counters, Overview, Role, Session, Setting, Settings, Sizes, Target};
+use db::sql::pg::server::{chains, metrics, Role, Session, Setting};
+use quarry_core::action::{Action, PgServerA, PgText, ServerA};
 use std::collections::HashMap;
-use std::time::Instant;
+pub(crate) use quarry_core::state::sql::pg_server::*;
+pub(crate) use quarry_core::state::sql::pg_server::confirm_ok;
 
-/// Database sizes walk the data directory, so the Overview asks for them this often and not on every poll.
-const SIZES_EVERY: Duration = Duration::from_secs(30);
-/// Each pg_blocking_pids call takes every lock manager partition lock, so blockers are asked this often; the polls between
-/// keep the last ones for sessions that still wait.
-const BLOCKERS_EVERY: Duration = Duration::from_secs(5);
 const ROW2_H: f32 = 40.0;
 const HEAD_H: f32 = 50.0;
-
-#[derive(Clone, Copy, PartialEq, Default, Debug)]
-pub(in crate::app) enum PgTab {
-    #[default]
-    Overview,
-    Settings,
-    Activity,
-    Locks,
-    Counters,
-}
-
-/// A Cancel or Terminate waiting for its second click, with the row as the list showed it.
-#[derive(Clone)]
-pub(in crate::app) struct PgConfirm {
-    s: Session,
-    terminate: bool,
-    /// `arm_time` when it was armed: the confirm ignores clicks for a moment after.
-    at: f64,
-}
-
-#[derive(Default)]
-pub(in crate::app) struct PgServerWin {
-    pub(in crate::app) conn: u64,
-    tab: PgTab,
-    /// The settings Quarry gives every session of this connection, lower case.
-    quarry: Vec<String>,
-    /// When to ask for the Overview, and for Activity and Locks, again; None asks on the next frame. One per read, so an
-    /// answer of one tab never delays the other's polling.
-    ov_next: Option<Instant>,
-    act_next: Option<Instant>,
-    refresh: bool,
-    ov_req: u64,
-    ov_wait: bool,
-    ov: Option<db::Res<(Instant, Overview)>>,
-    ov_prev: Option<(f64, Overview)>,
-    /// The last sizes that came in; a failed read keeps them and says why next to them.
-    sizes: Option<Sizes>,
-    sizes_err: Option<String>,
-    sizes_at: Option<Instant>,
-    sz_req: u64,
-    sz_wait: bool,
-    set_req: u64,
-    set_wait: bool,
-    settings: Option<db::Res<Settings>>,
-    cnt_req: u64,
-    cnt_wait: bool,
-    counters: Option<db::Res<Vec<Counters>>>,
-    set_filter: String,
-    changed_only: bool,
-    set_sel: Option<String>,
-    act_req: u64,
-    act_wait: bool,
-    act: Option<db::Res<Activity>>,
-    /// When blockers were last asked for (BLOCKERS_EVERY).
-    blk_at: Option<Instant>,
-    /// Copy query of a cut query: the request for its whole text, and the text to put on the clipboard on the next frame.
-    copy_req: u64,
-    copy: Option<String>,
-    auto: bool,
-    hide_idle: bool,
-    filter: String,
-    sel: Option<u64>,
-    confirm: Option<PgConfirm>,
-    /// Whether the connection is unlocked, read each frame.
-    writable: bool,
-    /// Quarry's sessions that Stop ends (a Query run, an export, an import, the shell's relays) by pid, read each frame.
-    own: HashMap<u64, String>,
-    unlock: bool,
-}
-
-impl PgServerWin {
-    pub(in crate::app) fn new(conn: u64, quarry: Vec<String>) -> Self {
-        Self { conn, quarry, auto: true, hide_idle: true, changed_only: true, ..Default::default() }
-    }
-
-    /// Canned answers for the offline demo (QUARRY_TEST_PG=server...), with the numbers of the design.
-    pub(in crate::app) fn demo(conn: u64, which: &str) -> Self {
-        use db::sql::pg::server::Standby;
-        let mut s = Self::new(conn, vec!["application_name".into(), "statement_timeout".into()]);
-        s.tab = match which {
-            "server-settings" => PgTab::Settings,
-            "server-locks" => PgTab::Locks,
-            "server-counters" => PgTab::Counters,
-            "server" => PgTab::Overview,
-            _ => PgTab::Activity,
-        };
-        let gb = |x: f64| Some((x * 1024.0 * 1024.0 * 1024.0) as u64);
-        let sample = |n: f64| Overview {
-            version: "PostgreSQL 18.1 (Debian 18.1-1.pgdg13+1)".into(),
-            short_version: "18.1".into(),
-            uptime: Some(41 * 86_400 + 3 * 3600),
-            started: "2026-10-02 06:14 UTC".into(),
-            connections: Some(38.0),
-            max_connections: Some(200.0),
-            active: Some(6.0),
-            waiting: Some(2.0),
-            commits: Some(88_412_000.0 - n * 2470.0),
-            rollbacks: Some(354_000.0 - n * 10.0),
-            hits: Some(994.0e6),
-            reads: Some(6.0e6),
-            shared_buffers: Some(4.0 * 1024.0 * 1024.0 * 1024.0),
-            role: Some(Role::Primary { standbys: vec![Standby { name: "replica-a".into(), addr: "10.0.4.21".into(), state: "streaming".into(), sync: "async".into(), lag: Some(0.4) }, Standby { name: "replica-b".into(), addr: "10.0.4.22".into(), state: "streaming".into(), sync: "sync".into(), lag: Some(0.0) }], visible: true }),
-            host: "10.0.4.20".into(),
-            port: "5432".into(),
-            data_dir: "/var/lib/postgresql/18/main".into(),
-            encoding: "UTF8".into(),
-            collate: "en_US.UTF-8".into(),
-            time_zone: "UTC".into(),
-            tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(),
-            read_all: true,
-            user: "analyst".into(),
-        };
-        s.ov = Some(Ok((Instant::now(), sample(0.0))));
-        s.ov_prev = Some((2.0, sample(1.0)));
-        s.sizes = Some(vec![("analytics".into(), gb(61.8)), ("shop".into(), gb(18.9)), ("staging".into(), gb(3.4)), ("postgres".into(), Some(7_969_177))]);
-        s.sizes_at = Some(Instant::now());
-        let set = |name: &str, value: &str, source: &str, pending: bool| Setting { name: name.into(), lower: name.to_lowercase(), value: value.into(), source: source.into(), pending, context: "user".into(), ..Default::default() };
-        let mut rows = vec![
-            set("application_name", "Quarry", "client", false),
-            set("idle_in_transaction_session_timeout", "10min", "configuration file", false),
-            set("log_min_duration_statement", "500ms", "configuration file", false),
-            Setting { context: "postmaster".into(), desc: "Sets the maximum number of concurrent connections.".into(), min: "1".into(), max: "262143".into(), boot: "100".into(), file: "/etc/postgresql/18/main/postgresql.conf:64".into(), after_restart: Some("250".into()), ..set("max_connections", "200", "configuration file", true) },
-            set("search_path", "reporting, public", "user", false),
-            Setting { unit: "8kB".into(), boot: "16384".into(), ..set("shared_buffers", "4GB", "configuration file", false) },
-            set("statement_timeout", "30s", "client", false),
-            set("work_mem", "64MB", "database", false),
-        ];
-        for n in ["autovacuum", "checkpoint_timeout", "default_statistics_target", "effective_cache_size", "jit", "lock_timeout", "log_line_prefix", "maintenance_work_mem", "max_wal_size", "random_page_cost", "temp_buffers", "wal_level"] {
-            rows.push(set(n, "on", "default", false));
-        }
-        rows.sort_by(|a, b| a.name.cmp(&b.name));
-        s.settings = Some(Ok(Settings { rows, user: "reporting".into(), database: "analytics".into() }));
-        s.set_sel = Some("max_connections".into());
-        let cnt = |db: &str, n: [u64; 10]| Counters { db: db.into(), sessions: Some(n[0]), commits: Some(n[1]), rollbacks: Some(n[2]), reads: Some(n[3]), hits: Some(n[4]), inserted: Some(n[5]), updated: Some(n[6]), deleted: Some(n[7]), deadlocks: Some(n[8]), temp_bytes: Some(n[9]), reset: if db == "shop" { "2026-11-01".into() } else { String::new() } };
-        s.counters = Some(Ok(vec![
-            cnt("shop", [34, 18_204_311, 4_120, 2_310_544, 912_004_118, 3_401_220, 1_288_419, 40_118, 2, 734_003_200]),
-            cnt("analytics", [6, 2_481_007, 311, 48_220_931, 401_118_220, 12_004, 2_104, 88, 0, 18_253_611_008]),
-            cnt("postgres", [1, 40_112, 3, 1_204, 2_210_871, 0, 0, 0, 0, 0]),
-        ]));
-        let limited = which == "server-limited";
-        let sess = |pid: u64, user: &str, client: &str, db: &str, app: &str, state: &str, query: &str, xact: Option<f64>| {
-            let mut x = Session::new(pid, user, client, db, app, state, query, "client backend");
-            (x.backend_start, x.query_start, x.signal, x.xact_secs, x.query_secs, x.state_secs) = ("2026-11-12 09:00:00+00".into(), "2026-11-12 09:30:00+00".into(), true, xact, xact, xact);
-            x
-        };
-        let mut act = vec![
-            Session { wait_type: "Client".into(), wait: "ClientRead".into(), ..sess(41877, "app_writer", "10.0.2.31", "shop", "orders-api", "idle in transaction", "UPDATE orders SET status = 'paid' WHERE id = 90211", Some(724.0)) },
-            Session { wait_type: "Lock".into(), wait: "transactionid".into(), blockers: vec![41877], lock_mode: "ShareLock".into(), lock_on: "transaction 88412".into(), ..sess(41915, "app_writer", "10.0.2.32", "shop", "orders-api", "active", "UPDATE orders SET status = 'shipped' WHERE id = 90211", Some(48.0)) },
-            Session { wait_type: "IO".into(), wait: "DataFileRead".into(), ..sess(41888, "reporting", "10.0.4.12", "analytics", "metabase", "active", "SELECT customer_id, sum(total) FROM reporting.daily_sales GROUP BY 1", Some(142.0)) },
-            sess(41930, "jane", "10.0.8.5", "analytics", "psql", "active", "SELECT * FROM reporting.daily_sales WHERE day > now() - interval '7 days'", Some(0.0)),
-            Session { ours: true, ..sess(41950, "app_reader", "10.0.2.40", "analytics", "Quarry", "active", "SELECT pid, usename, datname, application_name FROM pg_stat_activity", Some(0.0)) },
-            Session { kind: "autovacuum worker".into(), client: String::new(), ..sess(312, "autovacuum", "", "analytics", "", "active", "autovacuum: VACUUM public.events", Some(4.0)) },
-        ];
-        act.extend((0..30).map(|i| sess(42000 + i, "app_writer", &format!("10.0.2.{}", 50 + i), "shop", "orders-api", "idle", "COMMIT", None)));
-        if which == "server-locks" {
-            act.push(Session { wait_type: "Lock".into(), wait: "relation".into(), blockers: vec![41877, 41915], lock_mode: "AccessExclusiveLock".into(), lock_on: "public.orders".into(), ..sess(41940, "jane", "10.0.8.5", "shop", "psql", "active", "ALTER TABLE orders ADD COLUMN note text", Some(31.0)) });
-            act.push(Session { wait_type: "Lock".into(), wait: "relation".into(), blockers: vec![41940], lock_mode: "AccessShareLock".into(), lock_on: "public.orders".into(), ..sess(41944, "reporting", "10.0.4.12", "shop", "metabase", "active", "SELECT count(*) FROM orders", Some(29.0)) });
-            act.push(Session { wait_type: "Lock".into(), wait: "relation".into(), blockers: vec![41888], lock_mode: "AccessExclusiveLock".into(), lock_on: "reporting.daily_sales".into(), ..sess(41961, "jane", "10.0.8.5", "analytics", "psql", "active", "TRUNCATE reporting.daily_sales", Some(65.0)) });
-        }
-        if limited {
-            // Without pg_read_all_stats other roles keep user, database and application only.
-            for x in act.iter_mut().filter(|x| !x.ours) {
-                *x = Session { signal: false, ..Session::new(x.pid, &x.user, "", &x.db, &x.app, "", "<insufficient privilege>", "") };
-            }
-        }
-        act.sort_by_key(|x| match x.pid {
-            41877 => 0,
-            41915 => 1,
-            41888 => 2,
-            p => p,
-        });
-        s.act = Some(Ok(Activity { rows: act, user: if limited { "app_reader".into() } else { "analyst".into() }, read_all: !limited, server: String::new(), own_app: None, blockers: true }));
-        s.sel = Some(match which {
-            "server-confirm" => 41877,
-            "server-limited" => 41950,
-            _ => 41888,
-        });
-        if which == "server-confirm" {
-            s.confirm = s.rows().iter().find(|r| r.pid == 41877).map(|r| PgConfirm { s: r.clone(), terminate: true, at: f64::NEG_INFINITY });
-        }
-        s
-    }
-
-    /// The pid of a running session whose query carries `tag`, for the UI test.
-    #[cfg(test)]
-    pub(in crate::app) fn listed(&self, tag: &str) -> Option<u64> {
-        self.rows().iter().find(|r| r.query.contains(tag) && r.active()).map(|r| r.pid)
-    }
-
-    /// Asks for the list on the next frame, past the poll interval and the backoff after a failed read, for a UI test that
-    /// waits on a session the server may not have started yet.
-    #[cfg(test)]
-    pub(in crate::app) fn refresh_now(&mut self) {
-        (self.refresh, self.act_next) = (true, None);
-    }
-
-    /// What the Activity tab holds, for a UI test that waits on it: the error of the last read, or how many sessions it listed.
-    #[cfg(test)]
-    pub(in crate::app) fn activity_state(&self) -> String {
-        match &self.act {
-            None => format!("no answer yet (tab {:?}, waiting {})", self.tab, self.act_wait),
-            Some(Err(e)) => format!("the last read failed: {e:?}"),
-            Some(Ok(a)) => format!("{} sessions listed, {} running", a.rows.len(), a.rows.iter().filter(|r| r.active()).count()),
-        }
-    }
-
-    /// Whether a Cancel or Terminate waits for its second click, for the UI test.
-    #[cfg(test)]
-    pub(in crate::app) fn armed(&self) -> bool {
-        self.confirm.is_some()
-    }
-
-    fn server(&self) -> &str {
-        match &self.act {
-            Some(Ok(a)) => &a.server,
-            _ => "",
-        }
-    }
-
-    /// Applies an answer to a read of the window, and returns why a Copy query failed. Signals are told by the App, since they
-    /// outlive the window.
-    fn take(&mut self, req: u64, ans: Answer, now: Instant) -> Option<String> {
-        match ans {
-            Answer::Overview(r) if req == self.ov_req => {
-                self.ov_wait = false;
-                self.ov_next = Some(now + retry_after(r.is_ok()));
-                self.ov_prev = prev_of(self.ov.take(), now);
-                self.ov = Some(r.map(|o| (now, o)));
-            }
-            Answer::Sizes(r) if req == self.sz_req => {
-                self.sz_wait = false;
-                match r {
-                    Ok(v) => (self.sizes, self.sizes_err) = (Some(v), None),
-                    Err(e) => self.sizes_err = Some(e),
-                }
-            }
-            Answer::Counters(r) if req == self.cnt_req => {
-                self.cnt_wait = false;
-                self.counters = Some(r);
-            }
-            Answer::Settings(r) if req == self.set_req => {
-                self.set_wait = false;
-                self.settings = Some(r);
-            }
-            Answer::Activity(mut r) if req == self.act_req => {
-                self.act_wait = false;
-                self.act_next = Some(now + retry_after(r.is_ok()));
-                match &mut r {
-                    Ok(a) => {
-                        if !a.blockers && let Some(Ok(old)) = &self.act {
-                            carry_blockers(&mut a.rows, &old.rows);
-                        }
-                        self.sel = self.sel.filter(|p| a.rows.iter().any(|x| x.pid == *p));
-                        self.confirm = self.confirm.take().filter(|c| confirm_ok(c, &a.rows));
-                    }
-                    Err(_) => {
-                        // Nothing is left to carry blockers from, so the next read asks for them.
-                        (self.confirm, self.blk_at) = (None, None);
-                    }
-                }
-                self.act = Some(r);
-            }
-            Answer::Query(r) if req == self.copy_req => {
-                self.copy_req = 0;
-                match r {
-                    Ok(q) => self.copy = Some(q),
-                    Err(e) => return Some(e),
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn overview(&self) -> Option<&Overview> {
-        match &self.ov {
-            Some(Ok((_, o))) => Some(o),
-            _ => None,
-        }
-    }
-
-    fn rows(&self) -> &[Session] {
-        match &self.act {
-            Some(Ok(a)) => &a.rows,
-            _ => &[],
-        }
-    }
-}
 
 /// Whether the row may get a Cancel (`terminate` false) or a Terminate: a session the role may signal and could see, of a kind
 /// that takes the signal, never one of Quarry's own; a cancel only while a statement runs.
 fn can_signal(own: &HashMap<u64, String>, s: &Session, terminate: bool) -> bool {
     s.signal && !s.ours && !own.contains_key(&s.pid) && !s.hidden && !s.backend_start.is_empty() && s.signalable() && (terminate || s.active())
-}
-
-/// Whether a pending confirmation still points at the row it was armed on.
-fn confirm_ok(c: &PgConfirm, rows: &[Session]) -> bool {
-    rows.iter().any(|r| c.s.same(r))
 }
 
 /// The Activity rows the filter and "Hide idle" leave.
@@ -436,113 +140,14 @@ fn ask_unlock(ui: &egui::Ui, r: &egui::Response, conn_name: &str, what: &str) ->
     unlock
 }
 
-/// What the person asked for this frame.
-#[derive(Default)]
-struct Acts {
-    /// A second click went through: send it.
-    send: Option<PgConfirm>,
-    unlock: bool,
-    /// Copy query on a row whose text the list cut: ask for the whole of it.
-    fetch: Option<Session>,
-}
-
 impl App {
-    /// Asks for the tab on screen. Overview, Activity and Locks repeat every POLL while Quarry is focused; Settings is read once.
-    fn pg_server_poll(&mut self, ctx: &egui::Context, s: &mut PgServerWin, db: &db::sql::Db) {
-        if !ctx.input(|i| i.focused) {
-            return;
-        }
-        let now = Instant::now();
-        match s.tab {
-            PgTab::Overview => {
-                ctx.request_repaint_after(POLL);
-                let sizes = !s.sz_wait && (s.refresh || s.sizes_at.is_none_or(|t| now.duration_since(t) >= SIZES_EVERY));
-                if sizes {
-                    self.req += 1;
-                    (s.sz_req, s.sz_wait, s.sizes_at) = (self.req, true, Some(now));
-                    self.worker.pg_server_sizes(db.clone(), self.req);
-                }
-                let due = s.refresh || s.ov.is_none() || s.ov_next.is_none_or(|t| now >= t);
-                if s.ov_wait || !due {
-                    return;
-                }
-                self.req += 1;
-                (s.ov_req, s.ov_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_overview(db.clone(), self.req);
-            }
-            PgTab::Settings => {
-                if s.set_wait || !(s.refresh || s.settings.is_none()) {
-                    return;
-                }
-                self.req += 1;
-                (s.set_req, s.set_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_settings(db.clone(), self.req);
-            }
-            PgTab::Counters => {
-                if s.cnt_wait || !(s.refresh || s.counters.is_none()) {
-                    return;
-                }
-                self.req += 1;
-                (s.cnt_req, s.cnt_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_counters(db.clone(), self.req);
-            }
-            PgTab::Activity | PgTab::Locks => {
-                if s.auto {
-                    ctx.request_repaint_after(POLL);
-                }
-                let due = s.refresh || s.act.is_none() || (s.auto && s.act_next.is_none_or(|t| now >= t));
-                if s.act_wait || !due {
-                    return;
-                }
-                let blockers = s.refresh || s.blk_at.is_none_or(|t| now.duration_since(t) >= BLOCKERS_EVERY);
-                if blockers {
-                    s.blk_at = Some(now);
-                }
-                self.req += 1;
-                (s.act_req, s.act_wait, s.refresh) = (self.req, true, false);
-                self.worker.pg_server_activity(db.clone(), self.req, blockers);
-            }
-        }
-    }
-
-    pub(in crate::app) fn pg_server_done(&mut self, req: u64, ans: Answer) {
-        // A Cancel or Terminate is told even when the window is gone, and only once.
-        if let Answer::Signal(res) = &ans {
-            if !self.sql_kills.remove(&req) {
-                return;
-            }
-            if let (Ok(_), Some(s)) = (res, self.pg_server.as_mut()) {
-                (s.refresh, s.act_next) = (true, None);
-            }
-            match res.clone() {
-                Ok(m) => self.ok(m),
-                Err(e) => self.err(e),
-            }
-            return;
-        }
-        let Some(s) = self.pg_server.as_mut() else { return };
-        if let Some(e) = s.take(req, ans, Instant::now()) {
-            self.err(e);
-        }
-    }
-
     pub(in crate::app) fn pg_server_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.pg_server.take() else { return };
+        let Some(s) = self.core.pg_server.as_ref() else { return };
         let conn = s.conn;
-        let db = self.conn(conn).and_then(|c| c.sql.clone());
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| format!("{} {}", c.server.product, c.server.version)).unwrap_or_default();
-        if let (Some(db), false) = (&db, self.demo) {
-            self.pg_server_poll(ctx, &mut s, db);
-        }
-        let live = db.is_some() || self.demo;
-        s.writable = self.conn(conn).map_or(self.demo, |c| c.writable);
-        s.own = self.own_sessions(conn);
-        // A confirmation armed before the lock is dropped.
-        if !s.writable {
-            s.confirm = None;
-        }
-        let mut acts = Acts::default();
+        let live = self.conn(conn).is_some_and(|c| c.sql.is_some()) || self.core.demo;
+        let mut acts: Vec<PgServerA> = Vec::new();
         let screen = ctx.content_rect();
         let r = banded(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
             ui.set_width(fit_width(ctx, (screen.width() * 0.7).clamp(760.0, 1100.0)));
@@ -551,20 +156,7 @@ impl App {
             let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
             let picked = dialog_head(ui, &Head::new("Server").sub(subtitle(&s, &name, product.trim())).glyph(glyphs::server).tabs(&labels, active));
             if let Some(i) = picked && TABS[i].0 != s.tab {
-                let tab = TABS[i].0;
-                s.tab = tab;
-                match tab {
-                    PgTab::Overview => s.ov_next = None,
-                    PgTab::Activity | PgTab::Locks => s.act_next = None,
-                    PgTab::Settings => {}
-                    // The counters only grow, so each visit reads them again.
-                    PgTab::Counters => s.refresh = true,
-                }
-                // Locks is about the blockers, so it asks for them at once.
-                if tab == PgTab::Locks {
-                    s.blk_at = None;
-                }
-                s.confirm = None;
+                acts.push(PgServerA::Tab(TABS[i].0));
             }
             let max = screen.height() - 400.0;
             dialog_pane(ui, |ui| {
@@ -572,41 +164,27 @@ impl App {
                     ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
                 } else {
                     match s.tab {
-                        PgTab::Overview => overview_view(ui, &mut s),
-                        PgTab::Settings => settings_view(ui, &mut s, max),
-                        PgTab::Activity => activity_view(ui, &mut s, max, &name, &mut acts),
-                        PgTab::Locks => locks_view(ui, &mut s, max, &name, &mut acts),
-                        PgTab::Counters => counters_view(ui, &mut s, max),
+                        PgTab::Overview => overview_view(ui, s, &mut acts),
+                        PgTab::Settings => settings_view(ui, s, max, &mut acts),
+                        PgTab::Activity => activity_view(ui, s, max, &name, &mut acts),
+                        PgTab::Locks => locks_view(ui, s, max, &name, &mut acts),
+                        PgTab::Counters => counters_view(ui, s, max, &mut acts),
                     }
                 }
             });
             if dialog_done(ui) {
-                s.unlock = false;
-                acts.send = None;
+                // Done wins over a second click in the same frame.
+                acts.retain(|a| !matches!(a, PgServerA::Signal { .. }));
                 return false;
             }
             true
         });
         let open = r.inner;
-        if acts.unlock || std::mem::take(&mut s.unlock) {
-            self.modal = Some(Modal::Unlock(conn, None));
+        for a in acts {
+            self.exec(Action::Server(ServerA::Pg(a)));
         }
-        if let Some(t) = s.copy.take() {
-            ctx.copy_text(t);
-            self.ok("Copied the query");
-        }
-        if let (Some(r), Some(db)) = (acts.fetch, &db) {
-            self.req += 1;
-            s.copy_req = self.req;
-            self.worker.pg_server_query(db.clone(), self.req, &r);
-        }
-        if let (Some(c), Some(db)) = (acts.send, db) {
-            self.req += 1;
-            self.sql_kills.insert(self.req);
-            self.worker.pg_server_signal(db, self.req, Target::of(&c.s, s.server()), c.terminate, !s.writable);
-        }
-        if open && !(r.should_close() && self.modal.is_none()) {
-            self.pg_server = Some(s);
+        if !open || (r.should_close() && self.modal.is_none()) {
+            self.exec(Action::Server(ServerA::Pg(PgServerA::Close)));
         }
     }
 }
@@ -633,12 +211,12 @@ fn subtitle(s: &PgServerWin, name: &str, product: &str) -> String {
     }
 }
 
-fn overview_view(ui: &mut egui::Ui, s: &mut PgServerWin) {
+fn overview_view(ui: &mut egui::Ui, s: &PgServerWin, acts: &mut Vec<PgServerA>) {
     let o = match &s.ov {
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not read the server status: {e}")) {
-                s.refresh = true;
+                acts.push(PgServerA::Refresh);
             }
             return;
         }
@@ -785,12 +363,12 @@ fn replication(ui: &mut egui::Ui, w: f32, role: Option<&Role>) {
 }
 
 /// pg_stat_database per database: what each one did since its counters were reset.
-fn counters_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
+fn counters_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, acts: &mut Vec<PgServerA>) {
     let v = match &s.counters {
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not read the counters: {e}")) {
-                s.refresh = true;
+                acts.push(PgServerA::Refresh);
             }
             return;
         }
@@ -823,7 +401,7 @@ fn counters_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
     ui.label(RichText::new("Totals since each database's statistics were last reset, or since the server started.").size(TXT_SMALL).color(MUTED()));
 }
 
-fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
+fn settings_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, acts: &mut Vec<PgServerA>) {
     let total = match &s.settings {
         Some(Ok(v)) => v.rows.len(),
         _ => 0,
@@ -833,8 +411,15 @@ fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
         _ => 0,
     };
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.set_filter).hint_text("Filter settings").desired_width(260.0));
-        ui.checkbox(&mut s.changed_only, "Changed only");
+        let mut text = s.set_filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter settings").desired_width(260.0)).changed() {
+            acts.push(PgServerA::Text(PgText::Settings, text));
+        }
+        let mut changed = s.changed_only;
+        ui.checkbox(&mut changed, "Changed only");
+        if changed != s.changed_only {
+            acts.push(PgServerA::ChangedOnly(changed));
+        }
         ui.add_space(8.0);
         let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
         ui.painter().circle_filled(dot.center(), 3.5, WARNING());
@@ -850,7 +435,7 @@ fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not read the settings: {e}")) {
-                s.refresh = true;
+                acts.push(PgServerA::Refresh);
             }
             return;
         }
@@ -911,7 +496,9 @@ fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32) {
         ui.add_space(10.0);
         setting_detail(ui, r);
     }
-    s.set_sel = sel;
+    if sel != s.set_sel {
+        acts.push(PgServerA::Setting(sel));
+    }
 }
 
 fn setting_detail(ui: &mut egui::Ui, r: &Setting) {
@@ -948,17 +535,16 @@ fn setting_detail(ui: &mut egui::Ui, r: &Setting) {
 }
 
 /// The right end of the Activity toolbar: Cancel query and Terminate for the selected row, or the second step of one.
-fn act_buttons(ui: &mut egui::Ui, s: &mut PgServerWin, sel: Option<&Session>, name: &str, acts: &mut Acts) {
+fn act_buttons(ui: &mut egui::Ui, s: &PgServerWin, confirm: Option<&PgConfirm>, sel: Option<&Session>, name: &str, acts: &mut Vec<PgServerA>) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if let Some(c) = s.confirm.clone() {
+        if let Some(c) = confirm {
             // Drawn where Terminate was, so the guard keeps a double click from sending it.
             let r = primary(ui, if c.terminate { "Terminate" } else { "Cancel query" }, ALERT());
             if confirmed(ui, &r, c.at) {
-                acts.send = Some(c.clone());
-                s.confirm = None;
+                acts.push(PgServerA::Signal { pid: c.s.pid });
             }
             if ui.button("Keep").clicked() {
-                s.confirm = None;
+                acts.push(PgServerA::Disarm);
             }
             ui.label(RichText::new(if c.terminate { format!("End session {}?", c.s.pid) } else { format!("Cancel the query of {}?", c.s.pid) }).color(ALERT()));
             return;
@@ -970,10 +556,10 @@ fn act_buttons(ui: &mut egui::Ui, s: &mut PgServerWin, sel: Option<&Session>, na
             for (resp, terminate) in [(&term, true), (&cancel, false)] {
                 if s.writable {
                     if resp.clicked() {
-                        s.confirm = Some(PgConfirm { s: r.clone(), terminate, at: arm_time(ui) });
+                        acts.push(PgServerA::ArmSignal { pid: r.pid, terminate, at: arm_time(ui) });
                     }
                 } else if ask_unlock(ui, resp, name, &if terminate { format!("terminate session {}", r.pid) } else { format!("cancel the query of {}", r.pid) }) {
-                    acts.unlock = true;
+                    acts.push(PgServerA::Unlock);
                 }
             }
         }
@@ -983,13 +569,13 @@ fn act_buttons(ui: &mut egui::Ui, s: &mut PgServerWin, sel: Option<&Session>, na
 const PID_W: f32 = 64.0;
 const ACT_COLS: [(&str, f32); 6] = [("Pid", PID_W), ("User · client", 150.0), ("Database · app", 150.0), ("State", 180.0), ("Wait event", 180.0), ("Xact age", 80.0)];
 
-fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, acts: &mut Acts) {
+fn activity_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, name: &str, acts: &mut Vec<PgServerA>) {
     let (read_all, user, own_app) = match &s.act {
         Some(Ok(a)) => (a.read_all, a.user.clone(), a.own_app.clone()),
         _ => (true, String::new(), None),
     };
     if !s.writable && locked_banner(ui) {
-        acts.unlock = true;
+        acts.push(PgServerA::Unlock);
     }
     let hidden = s.rows().iter().any(|r| r.hidden);
     if !read_all && hidden {
@@ -1003,25 +589,37 @@ fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str,
     let rows: Vec<Session> = shown(s.rows(), &s.filter, s.hide_idle).into_iter().cloned().collect();
     let idle_hidden = if s.hide_idle { s.rows().iter().filter(|r| r.idle()).count() } else { 0 };
     // A pending action whose row the filter hid or that changed is dropped.
-    if s.confirm.as_ref().is_some_and(|c| !confirm_ok(c, &rows)) {
-        s.confirm = None;
+    let mut confirm = s.confirm.clone();
+    if confirm.as_ref().is_some_and(|c| !confirm_ok(c, &rows)) {
+        confirm = None;
+        acts.push(PgServerA::Disarm);
     }
     let sel_row = s.sel.and_then(|p| rows.iter().find(|r| r.pid == p)).cloned();
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text("Filter by user, database or query").desired_width(240.0));
-        ui.checkbox(&mut s.hide_idle, "Hide idle");
-        ui.checkbox(&mut s.auto, "Refresh every 2 s");
-        if !s.auto && quiet(ui, "Refresh").clicked() {
-            s.refresh = true;
+        let mut text = s.filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter by user, database or query").desired_width(240.0)).changed() {
+            acts.push(PgServerA::Text(PgText::Activity, text));
         }
-        act_buttons(ui, s, sel_row.as_ref(), name, acts);
+        let (mut hide, mut auto) = (s.hide_idle, s.auto);
+        ui.checkbox(&mut hide, "Hide idle");
+        ui.checkbox(&mut auto, "Refresh every 2 s");
+        if hide != s.hide_idle {
+            acts.push(PgServerA::HideIdle(hide));
+        }
+        if auto != s.auto {
+            acts.push(PgServerA::Auto(auto));
+        }
+        if !s.auto && quiet(ui, "Refresh").clicked() {
+            acts.push(PgServerA::Refresh);
+        }
+        act_buttons(ui, s, confirm.as_ref(), sel_row.as_ref(), name, acts);
     });
     ui.add_space(8.0);
     match &s.act {
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not list the sessions: {e}")) {
-                s.refresh = true;
+                acts.push(PgServerA::Refresh);
             }
             return;
         }
@@ -1038,8 +636,8 @@ fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str,
         ui.label(RichText::new(if s.filter.trim().is_empty() { "No session is running." } else { "No session matches." }).color(MUTED()));
     } else {
         let mut sel = s.sel;
-        let mut arm: Option<PgConfirm> = None;
-        let mut fetch: Option<Session> = None;
+        let mut arm: Option<(u64, bool)> = None;
+        let mut fetch: Option<u64> = None;
         let own = s.own.clone();
         let writable = s.writable;
         let now = arm_time(ui);
@@ -1061,16 +659,16 @@ fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str,
                 resp.context_menu(|ui| {
                     menu_look(ui);
                     if ui.add_enabled(writable && can_signal(&own, r, false), egui::Button::new("Cancel query").frame_when_inactive(false)).clicked() {
-                        arm = Some(PgConfirm { s: r.clone(), terminate: false, at: now });
+                        arm = Some((r.pid, false));
                         ui.close();
                     }
                     if ui.add_enabled_ui(writable && can_signal(&own, r, true), |ui| danger_item(ui, "Terminate session")).inner.clicked() {
-                        arm = Some(PgConfirm { s: r.clone(), terminate: true, at: now });
+                        arm = Some((r.pid, true));
                         ui.close();
                     }
                     if ui.add_enabled(!r.query.is_empty() && !r.hidden, egui::Button::new("Copy query").frame_when_inactive(false)).clicked() {
                         if r.cut {
-                            fetch = Some(r.clone());
+                            fetch = Some(r.pid);
                         } else {
                             ui.ctx().copy_text(r.query.clone());
                         }
@@ -1080,11 +678,15 @@ fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str,
             }
         });
         ui.spacing_mut().item_spacing.y = gap;
-        s.sel = sel;
-        if arm.is_some() {
-            s.confirm = arm;
+        if let Some(pid) = sel.filter(|p| s.sel != Some(*p)) {
+            acts.push(PgServerA::Select(pid));
         }
-        acts.fetch = fetch;
+        if let Some((pid, terminate)) = arm {
+            acts.push(PgServerA::ArmSignal { pid, terminate, at: now });
+        }
+        if let Some(pid) = fetch {
+            acts.push(PgServerA::FetchQuery { pid });
+        }
     }
     ui.add_space(8.0);
     // Ownership is per server: every Quarry connection to it is known, or behind a pooler only the application name is.
@@ -1173,14 +775,18 @@ fn session_row(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, r: &Sessi
 const LOCK_COLS: [(&str, f32); 5] = [("Pid", 120.0), ("User", 120.0), ("Database", 110.0), ("Waits for", 200.0), ("Relation", 200.0)];
 const WAIT_W: f32 = 70.0;
 
-fn locks_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, acts: &mut Acts) {
+fn locks_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, name: &str, acts: &mut Vec<PgServerA>) {
     if !s.writable && locked_banner(ui) {
-        acts.unlock = true;
+        acts.push(PgServerA::Unlock);
     }
     ui.horizontal(|ui| {
-        ui.checkbox(&mut s.auto, "Refresh every 2 s");
+        let mut auto = s.auto;
+        ui.checkbox(&mut auto, "Refresh every 2 s");
+        if auto != s.auto {
+            acts.push(PgServerA::Auto(auto));
+        }
         if !s.auto && quiet(ui, "Refresh").clicked() {
-            s.refresh = true;
+            acts.push(PgServerA::Refresh);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(RichText::new("From pg_locks and pg_blocking_pids()").color(FAINT()));
@@ -1191,7 +797,7 @@ fn locks_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, ac
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not read the locks: {e}")) {
-                s.refresh = true;
+                acts.push(PgServerA::Refresh);
             }
             return;
         }
@@ -1199,8 +805,10 @@ fn locks_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, ac
     }
     let rows = s.rows().to_vec();
     let ch = chains(&rows);
-    if s.confirm.as_ref().is_some_and(|c| !confirm_ok(c, &rows) || !ch.iter().any(|x| x.head == c.s.pid)) {
-        s.confirm = None;
+    let mut confirm = s.confirm.clone();
+    if confirm.as_ref().is_some_and(|c| !confirm_ok(c, &rows) || !ch.iter().any(|x| x.head == c.s.pid)) {
+        confirm = None;
+        acts.push(PgServerA::Disarm);
     }
     let w = ui.available_width();
     let fixed: f32 = LOCK_COLS.iter().map(|c| c.1).sum::<f32>() + WAIT_W;
@@ -1221,7 +829,7 @@ fn locks_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, ac
         for c in &ch {
             let gone = Session { pid: c.head, ..Default::default() };
             let head = by_pid.get(&c.head).copied().unwrap_or(&gone);
-            blocker_row(ui, s, head, w, query_w, name, acts);
+            blocker_row(ui, s, &mut confirm, head, w, query_w, name, acts);
             let mut parents: Vec<u64> = vec![c.head];
             for (pid, depth) in &c.waiting {
                 parents.truncate(*depth);
@@ -1240,7 +848,8 @@ fn locks_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, ac
     ui.label(RichText::new(format!("{lead}Terminating a blocker rolls back its transaction and frees every session under it.")).size(TXT_SMALL).color(FAINT()));
 }
 
-fn blocker_row(ui: &mut egui::Ui, s: &mut PgServerWin, r: &Session, w: f32, query_w: f32, name: &str, acts: &mut Acts) {
+#[allow(clippy::too_many_arguments)]
+fn blocker_row(ui: &mut egui::Ui, s: &PgServerWin, confirm: &mut Option<PgConfirm>, r: &Session, w: f32, query_w: f32, name: &str, acts: &mut Vec<PgServerA>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, HEAD_H), Sense::hover());
     let warn = r.idle_in_tx();
     let p = ui.painter();
@@ -1275,16 +884,17 @@ fn blocker_row(ui: &mut egui::Ui, s: &mut PgServerWin, r: &Session, w: f32, quer
     let _ = query_w;
     let area = egui::Rect::from_min_max(egui::pos2(rect.right() - buttons_w, rect.top() + 9.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 9.0));
     let mut k = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    match s.confirm.clone().filter(|c| c.s.pid == r.pid) {
+    match confirm.clone().filter(|c| c.s.pid == r.pid) {
         Some(c) => {
             // Drawn where Terminate was, so the guard keeps a double click from sending it.
             let b = primary(&mut k, if c.terminate { "Terminate" } else { "Cancel query" }, ALERT());
             if confirmed(&k, &b, c.at) {
-                acts.send = Some(c.clone());
-                s.confirm = None;
+                acts.push(PgServerA::Signal { pid: r.pid });
+                *confirm = None;
             }
             if k.button("Keep").clicked() {
-                s.confirm = None;
+                acts.push(PgServerA::Disarm);
+                *confirm = None;
             }
             k.label(RichText::new(if c.terminate { format!("End session {}?", r.pid) } else { format!("Cancel the query of {}?", r.pid) }).size(TXT_SMALL).color(ALERT()));
         }
@@ -1294,11 +904,12 @@ fn blocker_row(ui: &mut egui::Ui, s: &mut PgServerWin, r: &Session, w: f32, quer
             for (resp, terminate) in [(&term, true), (&cancel, false)] {
                 if s.writable {
                     if resp.clicked() {
-                        s.confirm = Some(PgConfirm { s: r.clone(), terminate, at: arm_time(&k) });
-                        s.sel = Some(r.pid);
+                        *confirm = Some(PgConfirm { s: r.clone(), terminate, at: arm_time(&k) });
+                        acts.push(PgServerA::ArmSignal { pid: r.pid, terminate, at: arm_time(&k) });
+                        acts.push(PgServerA::Select(r.pid));
                     }
                 } else if ask_unlock(&k, resp, name, &if terminate { format!("terminate session {}", r.pid) } else { format!("cancel the query of {}", r.pid) }) {
-                    acts.unlock = true;
+                    acts.push(PgServerA::Unlock);
                 }
             }
         }
@@ -1340,6 +951,9 @@ fn waiter_row(ui: &mut egui::Ui, r: &Session, depth: usize, w: f32, query_w: f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use db::sql::pg::server::Answer;
+    use quarry_core::state::sql::server::POLL;
+    use std::time::Instant;
 
     fn row(pid: u64, user: &str, state: &str, query: &str) -> Session {
         let mut s = Session::new(pid, user, "10.0.0.1", "shop", "app", state, query, "client backend");

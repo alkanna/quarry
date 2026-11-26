@@ -2,20 +2,8 @@
 
 use super::*;
 
-/// Bun for the Shell: the path from Settings, else the usual install places. Apps opened from
-/// Finder do not get the terminal's PATH, so the common folders are checked directly.
-pub(super) fn find_bun(setting: &str) -> Option<PathBuf> {
-    find_exe("bun", setting)
-}
-
-/// A program from its Settings path, else from PATH and the usual install folders.
-pub(super) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
-    let mut extra = crate::cloudsql::brew_dirs();
-    if let Some(h) = dirs::home_dir() {
-        extra.push(h.join(".bun").join("bin"));
-    }
-    crate::cloudsql::find_program(&format!("{name}{}", std::env::consts::EXE_SUFFIX), setting, &extra)
-}
+pub(super) use quarry_core::action::tools::{find_bun, find_exe};
+use quarry_core::action::{Action, Refusal, RefusalKind, ToolsA};
 
 impl App {
     /// Progress and output of mongodump or mongorestore.
@@ -23,8 +11,8 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        let Some(t) = &mut self.tool else { return };
-        let mut close = false;
+        let Some(t) = &self.core.tool else { return };
+        let (mut close, mut stop) = (false, false);
         let running = t.done.is_none();
         let r = banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
             ui.set_width(660.0);
@@ -56,9 +44,7 @@ impl App {
             });
             dialog_foot(ui, |ui| {
                 if t.done.is_none() {
-                    if danger(ui, "Stop").clicked() && let Some(c) = t.cancel.take() {
-                        let _ = c.send(());
-                    }
+                    stop = danger(ui, "Stop").clicked();
                 } else {
                     close = primary(ui, "Close", PRIMARY()).clicked();
                 }
@@ -72,38 +58,24 @@ impl App {
                 });
             });
         });
-        if close || (!running && r.should_close()) {
-            self.tool = None;
+        if stop {
+            self.exec(Action::Tools(ToolsA::Stop));
         }
-    }
-
-    pub(super) fn install_tools(&mut self) {
-        if !self.tools_installing {
-            self.tools_installing = true;
-            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
+        if close || (!running && r.should_close()) {
+            self.exec(Action::Tools(ToolsA::Close));
         }
     }
 
     /// The Install button, or a spinner while the download runs.
     pub(super) fn install_tools_button(&mut self, ui: &mut egui::Ui) {
-        if self.tools_installing {
+        if self.core.tools_installing {
             ui.horizontal(|ui| {
                 spin(ui);
                 ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED()));
             });
         } else if ui.button("Install the MongoDB Database Tools").on_hover_text(format!("Downloads MongoDB's official build into {}", tools_dir().display())).clicked() {
-            self.install_tools();
+            self.exec(Action::Tools(ToolsA::Install));
         }
-    }
-
-    pub(super) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
-        let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
-        let Some(exe) = find_exe(name, setting) else {
-            return self.warn_settings(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });
-        self.worker.tool(exe, args, rx);
     }
 }
 
@@ -118,7 +90,7 @@ impl App {
         let ui = &mut b.content_ui;
         let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
         let tool = if f.restore { "mongorestore" } else { "mongodump" };
-        let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
+        let exe = find_exe(tool, if f.restore { &self.core.prefs.mongorestore } else { &self.core.prefs.mongodump });
         ui.label(RichText::new(match &exe {
             Some(p) => format!("Runs {} with this connection's address.", p.display()),
             None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),
@@ -168,18 +140,22 @@ impl App {
         dialog_foot(ui, |ui| {
             let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
             if ui.add_enabled(ok, primary_button(ui, if f.restore { "Restore…" } else { "Dump" }, if f.restore { WARNING() } else { PRIMARY() })).clicked() {
-                match stored_uri(f.conn) {
-                    Err(e) => self.err(uri_err(e)),
-                    Ok(uri) => {
-                        let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());
-                        let path = f.path.trim();
-                        if f.restore {
-                            let args = db::restore_args(&uri, path, f.from_db.trim(), coll, &f.db, f.drop, f.gzip);
+                let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());
+                let path = f.path.trim();
+                if f.restore {
+                    match stored_uri(f.conn) {
+                        Err(e) => self.err(uri_err(e)),
+                        Ok(_) => {
                             let what = if f.drop { "Existing collections with the same names are dropped first. " } else { "" };
-                            self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, args } });
-                        } else {
-                            self.start_tool(false, format!("Dump {name}"), db::dump_args(&uri, &f.db, coll, path, f.gzip));
+                            self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, archive: path.to_string(), from_db: f.from_db.trim().to_string(), coll: coll.map(str::to_string), to_db: f.db.clone(), drop: f.drop, gzip: f.gzip } });
+                            *keep = false;
                         }
+                    }
+                } else {
+                    let r = self.core.execute(Action::Tools(ToolsA::Dump { conn: f.conn, db: f.db.clone(), coll: coll.map(str::to_string), path: path.to_string(), gzip: f.gzip }));
+                    self.run_fx();
+                    // Only an address that could not be read keeps the dialog, as before.
+                    if !matches!(r, Err(Refusal { kind: RefusalKind::Invalid, .. })) {
                         *keep = false;
                     }
                 }

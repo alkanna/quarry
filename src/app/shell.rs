@@ -1,42 +1,13 @@
 //! The JS shell view and running scripts.
 
 use super::*;
+use quarry_core::action::{Action, LibA, Pref, PrefsA, ShellA};
 use crate::ui::sql_complete::{Wants, analyze, split_statement};
 use crate::app::library::snippet_strip::{self as snip, Src};
 use crate::library::snippet::Lang;
 use std::cell::RefCell;
 
-/// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
-/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
-/// which writes to a collection from a pipeline just like `$out`.
-pub(super) fn dangerous_words(code: &str, sql: bool) -> Vec<String> {
-    let lower = code.to_lowercase();
-    if sql {
-        // Whole words only: SQL scripts name columns like created_at and updated_at all the time.
-        const WORDS: [&str; 16] = ["drop", "replace", "update", "delete", "insert", "rename", "truncate", "alter", "create", "grant", "revoke", "merge", "call", "load", "lock", "kill"];
-        let found: Vec<&str> = lower.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-        return WORDS.iter().filter(|w| found.contains(w)).map(|w| w.to_string()).collect();
-    }
-    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
-}
-
-/// The words to confirm before a script runs. A script that reaches both engines is checked for both, since
-/// it cannot be told which handle a word belongs to.
-pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<Item = bool>) -> Vec<String> {
-    let (mut mongo, mut sql) = (!main_sql, main_sql);
-    for s in attached_sql {
-        (mongo, sql) = (mongo || !s, sql || s);
-    }
-    let mut out = if mongo { dangerous_words(code, false) } else { Vec::new() };
-    if sql {
-        for w in dangerous_words(code, true) {
-            if !out.contains(&w) {
-                out.push(w);
-            }
-        }
-    }
-    out
-}
+pub(super) use quarry_core::action::shell::shell_ops;
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
@@ -57,13 +28,7 @@ pub(super) fn cursor_chain(q: &db::Query) -> String {
     proj.unwrap_or_default() + &db::mongosh_chain(q)
 }
 
-/// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
-/// would not resolve to the collection inside run(). Must match RESERVED in shell_runner.mjs.
-pub(super) const JS_RESERVED: [&str; 48] = [
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
-    "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
-    "with", "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await", "arguments", "eval",
-];
+pub(super) use crate::db::JS_RESERVED;
 
 /// The Shell's reference: how scripts work, every name the runner provides, the main methods and
 /// examples that can be loaded into the editor. Returns an example to load, if one was picked.
@@ -279,8 +244,9 @@ const LINE_H: f32 = 20.0;
 /// Height of the Console and Queries panel under the result, tab row included.
 const SHELL_PANEL_H: f32 = 150.0;
 
-/// The panel under the result: the script's console output, or every query it ran.
-fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(String, bool, Color32)]) {
+/// The panel under the result: the script's console output, or every query it ran. Returns the tab picked, if any.
+fn shell_panel(ui: &mut egui::Ui, sh: &ShellTab, conn: &str, kinds: &[(String, bool, Color32)]) -> Option<bool> {
+    let mut pick = None;
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_min_height(SHELL_PANEL_H - 12.0);
@@ -288,10 +254,10 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             ui.spacing_mut().item_spacing.x = 14.0;
             let (n_log, n_q) = (sh.logs.len() + sh.logs_dropped, sh.queries.len());
             if view_tab(ui, &format!("Console  {n_log}"), !sh.queries_tab).clicked() {
-                sh.queries_tab = false;
+                pick = Some(false);
             }
             if view_tab(ui, &format!("Queries  {n_q}"), sh.queries_tab).clicked() {
-                sh.queries_tab = true;
+                pick = Some(true);
             }
         });
         let line = ui.min_rect().bottom();
@@ -352,6 +318,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(Strin
             });
         });
     });
+    pick
 }
 
 /// The Shell's reference for a SQL tab.
@@ -406,173 +373,21 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
 }
 
 impl App {
-    /// Switches the current tab to the Shell with `code` ready to review and run.
     pub(super) fn open_in_shell(&mut self, code: String) {
-        let Some(t) = self.tm() else { return };
-        t.shell.code = code;
-        t.view = View::Shell;
-        t.selected = None;
+        self.exec(Action::Shell(ShellA::OpenIn { code }));
     }
 
-    /// The script that runs: the editor's text with its `{{...}}` values filled in, or why it can't be.
-    pub(super) fn shell_code(&self) -> Result<String, String> {
-        let Some(t) = self.t() else { return Ok(String::new()) };
-        snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true)
-    }
-
+    /// Runs the current tab's script, after the write confirm when it may write.
     pub(super) fn run_shell_script(&mut self) {
-        // The confirm judges what will run, and a value that does not read stops the run before it.
-        let code = match self.shell_code() {
-            Ok(c) => c,
-            Err(e) => return self.warn(e),
-        };
-        let Some(t) = self.t() else { return };
-        let ops = shell_ops(&code, t.sql.is_some(), t.shell.attached.iter().filter_map(|a| self.conn(a.conn)).map(|c| c.meta.engine.is_sql()));
-        // Same check as the original; on a read-only connection the runner refuses writes anyway.
-        if !ops.is_empty() && self.shell_writable() {
-            self.modal = Some(Modal::ShellWrite(ops));
-        } else {
-            self.start_shell();
+        if let Some(tab) = self.cur_uid() {
+            self.exec(Action::Shell(ShellA::Run { tab }));
         }
     }
 
+    /// Runs the current tab's script without the confirm.
     pub(super) fn start_shell(&mut self) {
-        if self.demo {
-            return self.ok("Offline demo: the shell needs a real connection.");
-        }
-        let Some(runtime) = find_bun(&self.prefs.shell_runtime) else {
-            return self.warn_settings("Bun is needed for the Shell. Install it from bun.sh, or set its path in Settings.");
-        };
-        let Some(t) = self.t() else { return };
-        let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
-        // Every run passes here: the editor, the library and the write confirm. History keeps the text as written.
-        let filled = match self.shell_code() {
-            Ok(c) => c,
-            Err(e) => return self.warn(e),
-        };
-        let collections: Vec<String> = self.tables_of(&sel);
-        let schema = self.sel_schema(&sel);
-        let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
-        let read_only = !self.sel_writable();
-        // A PostgreSQL attachment's tables are not saved with the tab, so a restored one lists them again. They arrive
-        // while the script starts, and a table helper missing on this run is there on the next (table('name') always works).
-        let unlisted: Vec<(u64, String)> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.tables.is_empty() && self.conn(a.conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)).map(|a| (a.conn, a.db.clone())).collect()).unwrap_or_default();
-        for (c, d) in unlisted {
-            self.attach_load(c, &d);
-        }
-        let (mut mongo, mut sql_entries, mut sql) = match self.shell_attachments() {
-            Ok(v) => v,
-            Err(e) => {
-                self.tabs[self.cur].shell.error = Some(e);
-                return;
-            }
-        };
-        // The tab's own connection is the main entry. A SQL script gets no address and no password: its queries come back to this app.
-        let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        if main_sql {
-            let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-            if db.dialect == db::sql::Dialect::Postgres {
-                // The tab's database picks the pool, and the script starts in the tab's schema.
-                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "postgres" }));
-                sql.insert(0, (name.clone(), db::SqlRelay { db: db.at(&sel.db), schema, read_only, conn_id: Default::default() }));
-            } else {
-                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "mysql" }));
-                sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
-            }
-        } else {
-            // Without a live client there is no SSH tunnel either, and the stored address would then reach whatever answers locally.
-            if self.conn(sel.conn).is_none_or(|c| c.client.is_none()) {
-                return self.warn_offline();
-            }
-            let uri = match stored_uri(sel.conn) {
-                Ok(u) => u,
-                Err(e) => return self.err(uri_err(e)),
-            };
-            mongo.insert(0, serde_json::json!({ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }));
-        }
-        let mut input = serde_json::json!({ "mongo": mongo, "sql": sql_entries });
-        input["code"] = filled.into();
-        input["packages"] = packages.into();
-        input["timeoutMs"] = self.prefs.timeout_ms.into();
-        input["maxBytes"] = db::SHELL_MAX.into();
-        input["main"] = name.into();
-        let input = input.to_string();
-        // The original's NodeShell.addHistory (renderer line 196411): skip scripts over 1000
-        // characters, move a repeat to the top, keep MAX_HISTORY_LENGTH = 50 per database.
-        const MAX_HISTORY_LENGTH: usize = 50;
-        const MAX_HISTORY_SCRIPT: usize = 1000;
-        if code.chars().count() <= MAX_HISTORY_SCRIPT {
-            let h = self.prefs.shell_histories.entry(format!("{}/{}", sel.conn, sel.db)).or_default();
-            h.retain(|x| *x != code);
-            h.insert(0, code);
-            h.truncate(MAX_HISTORY_LENGTH);
-        }
-        self.save_prefs();
-        // A table added since the editor types were built shows up in the next ones.
-        if main_sql {
-            self.sql_columns_ask(true);
-        }
-        for a in self.tabs[self.cur].shell.attached.clone() {
-            if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
-                // A PostgreSQL schema is read on a session of its own database and cached under that database and schema.
-                let (key, space, db) = if db.dialect == db::sql::Dialect::Postgres {
-                    let s = super::shell_attach::pg_schema(&a.schema).to_string();
-                    (ns_key(&a.db, &s), s, db.at(&a.db))
-                } else {
-                    (a.db.clone(), a.db.clone(), db)
-                };
-                self.sql_schema_asked.insert((a.conn, key));
-                self.worker.sql_schema(a.conn, db, space);
-            }
-        }
-        self.req += 1;
-        let req = self.req;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        // The floating selection bar is not disabled with the result, so stale checks could still be exported.
-        self.tabs[self.cur].shell_checked.clear();
-        let sh = &mut self.tabs[self.cur].shell;
-        // Only the script and the last result are kept, so a field added to ShellTab later starts fresh.
-        let old = std::mem::take(sh);
-        *sh = ShellTab {
-            code: old.code,
-            attached: old.attached,
-            agent_code: old.agent_code,
-            queries_tab: old.queries_tab,
-            value: old.value,
-            docs: old.docs,
-            fields: old.fields,
-            page: old.page,
-            raw: old.raw,
-            raw_text: old.raw_text,
-            count: old.count,
-            cut: old.cut,
-            ms: old.ms,
-            query_ms: old.query_ms,
-            req,
-            cancel: Some(tx),
-            started: Some(std::time::Instant::now()),
-            ..Default::default()
-        };
-        let packages = self.prefs.shell_packages.clone();
-        self.tabs[self.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
-        self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
-    }
-
-    /// The Shell runs in its own process, so it reaches SSH-only servers through this app's
-    /// tunnel (a local SOCKS5 port) or through the connection's own proxy.
-    pub(super) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
-        let Some(c) = self.conn(conn) else { return serde_json::Value::Null };
-        match &c.tunnel {
-            Some(db::Way::Ssh(t)) => return serde_json::json!({ "host": "127.0.0.1", "port": t.port }),
-            // The Cloud SQL proxy is plain TCP and only serves PostgreSQL, which the shell reaches through the app, not SOCKS.
-            Some(db::Way::CloudSql(_)) => return serde_json::Value::Null,
-            // A SQL connection's own proxy is dialed by the app, and the shell reaches SQL through the app's relay.
-            Some(db::Way::Proxy(_)) => return serde_json::Value::Null,
-            None => {}
-        }
-        match &c.meta.proxy {
-            Some(p) => serde_json::json!({ "host": p.host, "port": if p.port == 0 { 1080 } else { p.port }, "user": p.user, "password": secret(conn, "proxy-password") }),
-            None => serde_json::Value::Null,
+        if let Some(tab) = self.cur_uid() {
+            self.exec(Action::Shell(ShellA::Start { tab }));
         }
     }
 
@@ -587,32 +402,32 @@ impl App {
         let att_pills = self.attached_pills();
         let kinds = self.shell_kinds();
         let (mut detach, mut open_attach) = (None, false);
-        if sql {
-            self.sql_columns_ask(false);
-        }
-        let history = self.t().and_then(|t| self.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
-        let mut packages = self.prefs.shell_packages.clone();
+        let history = self.t().and_then(|t| self.core.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
+        let mut packages = self.core.prefs.shell_packages.clone();
         let mut pkg_names: Vec<String> = packages.iter().map(|p| package_ident(p)).collect();
         if packages.iter().any(|p| db::package_spec(p).0 == "lodash") {
             pkg_names.push("_".into());
         }
-        let mut new_pkg = std::mem::take(&mut self.new_pkg);
+        let mut new_pkg = self.ui.new_pkg.clone();
         let pick = self.pick_data(ui.ctx(), PickKind::Shell);
         let (mut pick_acts, mut demo_pick) = (Vec::new(), None);
         let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
-        let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone(), self.sel_schema(&self.tabs[self.cur].sel)));
-        let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, s, None));
+        let sql_cx = sql.then(|| (self.core.tabs[self.core.cur].sel.conn, self.core.tabs[self.core.cur].sel.db.clone(), self.sel_schema(&self.core.tabs[self.core.cur].sel)));
+        let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.core.conns, &self.core.sql_schema, &self.core.views, *c, d, s, None));
         let none = Fields::new();
-        let values = sql_cx.as_ref().and_then(|(c, d, s)| self.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
+        let values = sql_cx.as_ref().and_then(|(c, d, s)| self.core.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
         let strip = self.strip_of(Src::Shell);
         let (mut make_default, mut make_value) = (false, None);
-        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
-        if t.shell.code.is_empty() {
-            t.shell.code = default_script(&coll, sql);
-        }
+        let (t, ac) = (&self.core.tabs[self.core.cur], &mut self.ui.ac);
+        // Edited on a copy and sent back as one action when it changed, the starter script when there is none yet.
+        let mut code = if t.shell.code.is_empty() { default_script(&coll, sql) } else { t.shell.code.clone() };
         let running = t.shell.started;
+        let uid = t.uid;
+        // Clicks become actions, run after drawing.
+        let mut acts: Vec<ShellA> = Vec::new();
+        let mut snip_acts: Vec<Action> = Vec::new();
         let (mut run, mut stop, mut editor, mut fmt) = (false, false, None, false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -643,13 +458,13 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 fmt = quiet(ui, "Format").on_hover_text("Indent the script by its brackets and break long lines (Shift+Alt+F)").clicked();
                 if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
-                    t.shell.help = !t.shell.help;
+                    acts.push(ShellA::Help { tab: uid, on: !t.shell.help });
                 }
                 ui.menu_button("History", |ui| {
                     menu_look(ui);
                     ui.set_max_width(520.0);
                     if ui.button("Reset to the starter script").clicked() {
-                        t.shell.code = default_script(&coll, sql);
+                        acts.push(ShellA::Code { tab: uid, code: default_script(&coll, sql) });
                         ui.close();
                     }
                     ui.separator();
@@ -659,7 +474,7 @@ impl App {
                     for h in &history {
                         let first: String = h.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("async function")).take(1).collect();
                         if ui.button(RichText::new(first.chars().take(80).collect::<String>()).monospace()).on_hover_text(h.as_str()).clicked() {
-                            t.shell.code = h.clone();
+                            acts.push(ShellA::Code { tab: uid, code: h.clone() });
                             ui.close();
                         }
                     }
@@ -677,7 +492,11 @@ impl App {
             ui.add_space(8.0);
         }
         if let Some(s) = &strip {
-            make_default = snip::strip_ui(ui, s, &mut t.snip, true);
+            let mut edited = Snip { vals: t.snip.vals.clone(), filled: t.snip.filled, off: t.snip.off };
+            make_default = snip::strip_ui(ui, s, &mut edited, true);
+            if (&edited.vals, edited.filled) != (&t.snip.vals, t.snip.filled) {
+                snip_acts.push(Action::Library(LibA::Snip { tab: uid, vals: edited.vals, filled: edited.filled }));
+            }
         }
         let filled_view = strip.is_some() && t.snip.filled;
         // The editor: line numbers, token colors, and the same frame for both engines.
@@ -687,9 +506,10 @@ impl App {
         let esc = ui.input(|i| i.key_pressed(Key::Escape));
         // The editor keeps three lines, and the results below it the Console, the header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, ui.available_height() - SHELL_PANEL_H - 3.0 * ROW_H - TABLE_HEAD_H - 70.0);
-        let pref = self.prefs.shell_editor_h;
+        // While the bar is dragged the height lives in the app, and is saved when the drag ends.
+        let pref = self.ui.shell_h.unwrap_or(self.core.prefs.shell_editor_h);
         let custom = pref > 0.0;
-        let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
+        let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
             crate::ui::editor::memo_galley(ui, if sql { 3 } else { 2 }, buf.as_str(), wrap, || {
                 let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
@@ -704,7 +524,7 @@ impl App {
             })
         };
         // Inside sql`...` the suggestions are SQL ones; elsewhere the built-in and server ones stay.
-        let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &t.shell.code) } else { String::new() };
+        let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &code) } else { String::new() };
         let (meta, need): (RefCell<Option<(String, String)>>, RefCell<Option<crate::ui::sql_complete::Need>>) = Default::default();
         let compute = |b: &str, force: bool| -> Option<(usize, Vec<Sug>)> {
             let tpl = scope.as_ref().and_then(|_| sql_at(b, b.len()));
@@ -716,21 +536,21 @@ impl App {
             (!o.sugs.is_empty()).then(|| (sb[o.from..].chars().count(), o.sugs))
         };
         if let (Some(scope), true) = (&scope, std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac")) {
-            shell_ls::shell_ac_demo(ui, id, &t.shell.code, ac, scope, values);
+            shell_ls::shell_ac_demo(ui, id, &code, ac, scope, values);
         }
-        shell_ls::shell_sig_demo(ui, id, &t.shell.code, ac, &mut self.js);
+        shell_ls::shell_sig_demo(ui, id, &code, ac, &mut self.js);
         let mut sql_need = None;
         if fmt || crate::ui::editor::format_key(ui, id) {
-            crate::ui::editor::format_in(ui.ctx(), id, &mut t.shell.code);
+            crate::ui::editor::format_in(ui.ctx(), id, &mut code);
         }
         if filled_view {
-            let out = snip::fill_tab(t, &t.shell.code, Src::Shell, Lang::Shell, true);
+            let out = snip::fill_tab(t, &code, Src::Shell, Lang::Shell, true);
             snip::preview_ui(ui, out, 11, |c| if sql { shell_ls::js_sql_job(c) } else { js_job(c) });
         }
         let framed = (!filled_view).then(|| egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
-                crate::ui::vim::demo(ui, id, &t.shell.code);
-                let (out, picked) = crate::ui::vim::wrap_with(ui, id, &mut t.shell.code, |ui, code| {
+                crate::ui::vim::demo(ui, id, &code);
+                let (out, picked) = crate::ui::vim::wrap_with(ui, id, &mut code, |ui, code| {
                     ac_field(ui, id, code, ac, &compute, |ui, text, _open| {
                     egui::TextEdit::multiline(text)
                         .id(id)
@@ -744,16 +564,12 @@ impl App {
                     })
                 });
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "Shell editor"));
-                // A script the Cmd+K form filled reads its braces as placeholders again once the person edits it.
-                if out.response.changed() {
-                    t.snip.off = false;
-                }
                 out.response.context_menu(|ui| {
                     menu_list(ui);
                     let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
                         let (a, b) = (r.primary.index.0, r.secondary.index.0);
-                        let (a, b) = (crate::ui::editor::byte_at(&t.shell.code, a.min(b)), crate::ui::editor::byte_at(&t.shell.code, a.max(b)));
-                        snip::literal_at(&t.shell.code, a..b.max(a + 1), Lang::Shell)
+                        let (a, b) = (crate::ui::editor::byte_at(&code, a.min(b)), crate::ui::editor::byte_at(&code, a.max(b)));
+                        snip::literal_at(&code, a..b.max(a + 1), Lang::Shell)
                     });
                     let mut acts = Vec::new();
                     if let Some(r) = picked {
@@ -763,12 +579,12 @@ impl App {
                     }
                     make_value = acts.pop();
                 });
-                if ac.id == Some(id) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
+                if ac.id == Some(id.value()) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
                     (ac.title, ac.foot) = (title, foot);
                 }
                 sql_need = need.borrow_mut().take();
                 let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
-                let cur_line = caret.map_or(0, |c| t.shell.code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
+                let cur_line = caret.map_or(0, |c| code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
                 paint_gutter(ui, &out, Some(cur_line));
                 let hover = out.response.hover_pos().and_then(|p| {
                     // The character under the pointer, not just the nearest gap between two.
@@ -792,7 +608,11 @@ impl App {
             });
         }));
         let bar = splitter(ui);
-        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut self.prefs.shell_editor_h, f.response.rect.height(), lo, hi));
+        let mut live_h = pref;
+        let saved = framed.is_some_and(|f| resize_editor(&bar, &mut live_h, f.response.rect.height(), lo, hi));
+        if code != t.shell.code {
+            acts.push(ShellA::Edit { tab: uid, code });
+        }
         ui.add_space(2.0);
         if let Some(e) = &t.shell.error {
             egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
@@ -882,55 +702,45 @@ impl App {
                         });
                     });
                     if !t.shell.docs.is_empty() {
-                        segmented(ui, &mut t.shell.raw, &[(false, "Table"), (true, "JSON")]);
+                        let mut raw = t.shell.raw;
+                        segmented(ui, &mut raw, &[(false, "Table"), (true, "JSON")]);
+                        if raw != t.shell.raw {
+                            acts.push(ShellA::Raw { tab: uid, on: raw });
+                        }
                     }
                 });
             });
             ui.add_space(4.0);
             if !has_table {
-                // Very large results are cut for display; Export writes everything.
-                const RAW_MAX: usize = 300_000;
-                if t.shell.raw_text.is_none() {
-                    let mut s = t.shell.json_text(RAW_MAX);
-                    if s.len() > RAW_MAX {
-                        let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
-                        s.truncate(cut);
-                        s.push_str("\n… cut for display. Use Export to save the whole result.");
-                    }
-                    t.shell.raw_text = Some(s);
-                }
-                let text = t.shell.raw_text.as_ref().unwrap();
+                // Very large results are cut for display (by Core); Export writes everything.
+                let mut text: &str = t.shell.raw_text.as_deref().unwrap_or_default();
                 let raw_h = (ui.available_height() - SHELL_PANEL_H - 30.0).max(80.0);
                 toolbar(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("shell-raw").max_height(raw_h).auto_shrink([false, true]).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
+                        ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
                     });
                 });
             }
-        }
-        if let Some(p) = page_to {
-            t.shell.page = p;
-            // Checks are positions in the page on screen.
-            t.shell_checked.clear();
         }
         if let Some(n) = too_big {
             self.warn(format!("The result is {} MB, too big to copy. Use Export to save it to a file.", n >> 20));
         }
         if export {
-            if self.tabs[self.cur].shell.docs.is_empty() {
+            if self.core.tabs[self.core.cur].shell.docs.is_empty() {
                 self.export_shell();
             } else {
                 let sel = self.checked_rows();
                 self.open_export(sel, false);
             }
         }
-        if page_to.is_some() {
-            self.drop_agg_row();
+        // Before the table below draws, so it shows the new page.
+        if let Some(page) = page_to {
+            self.exec(Action::Shell(ShellA::Page { tab: uid, page }));
         }
         if has_table {
             // The result table is the same one documents use: open, colours, right-click menu.
             // Sized to its rows so the Console sits right under a short result, not at the bottom.
-            let rows = self.tabs[self.cur].shell.docs.len().min(PAGE_SIZE as usize) as f32;
+            let rows = self.core.tabs[self.core.cur].shell.docs.len().min(PAGE_SIZE as usize) as f32;
             let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
@@ -940,18 +750,23 @@ impl App {
         }
         let ui = outer;
         ui.add_space(8.0);
-        shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name, &kinds);
-        if let Some(code) = use_example {
-            self.tabs[self.cur].shell.code = code;
+        if let Some(on) = shell_panel(ui, &self.core.tabs[self.core.cur].shell, &conn_name, &kinds) {
+            acts.push(ShellA::Queries { tab: uid, on });
         }
-        self.new_pkg = new_pkg;
-        if packages != self.prefs.shell_packages {
-            self.prefs.shell_packages = packages;
-            self.save_prefs();
+        if let Some(code) = use_example {
+            acts.push(ShellA::Code { tab: uid, code });
+        }
+        self.ui.new_pkg = new_pkg;
+        if packages != self.core.prefs.shell_packages {
+            acts.push(ShellA::Packages(packages));
+            // Package changes need a fresh language server, which installs them so their types load.
             self.js_restart();
         }
         if saved {
-            self.save_prefs();
+            self.ui.shell_h = None;
+            self.exec(Action::Prefs(PrefsA::Set(Pref::ShellEditorH(live_h))));
+        } else if live_h != pref {
+            self.ui.shell_h = Some(live_h);
         }
         if let (Some(n), Some((c, d, s))) = (sql_need, &sql_cx) {
             self.sql_serve(*c, d, s, Wants { schema: false, values: Some(n) });
@@ -960,10 +775,19 @@ impl App {
             self.js_editor(ui.ctx(), f, &colls);
         }
         if stop {
-            self.tabs[self.cur].shell.stop();
+            acts.push(ShellA::Stop { tab: uid });
         }
-        if let Some(i) = detach {
-            self.tabs[self.cur].shell.attached.remove(i);
+        if let Some(name) = detach.and_then(|i| self.core.tabs[self.core.cur].shell.attached.get(i)).map(|a| a.name.clone()) {
+            acts.push(ShellA::Detach { tab: uid, name });
+        }
+        if !acts.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        for a in acts {
+            self.exec(Action::Shell(a));
+        }
+        for a in snip_acts {
+            self.exec(a);
         }
         if open_attach {
             self.open_attach();
@@ -986,7 +810,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=shell: the SQL shell of the design, with a finished run and its Queries panel.
     pub(super) fn sql_shell_demo(&mut self) {
-        let t = &mut self.tabs[0];
+        let t = &mut self.core.setup().tabs[0];
         t.view = View::Shell;
         t.selected = None;
         let ac_demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac");
@@ -1015,11 +839,11 @@ impl App {
 
     /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
     pub(super) fn export_shell(&mut self) {
-        let t = &self.tabs[self.cur].shell;
+        let t = &self.core.tabs[self.core.cur].shell;
         let Some(v) = t.result() else { return };
         // Documents for CSV and TSV, decoded only for this save.
         let docs: Vec<Document> = t.docs.iter().map(db::Row::owned).collect();
-        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", self.tabs[self.cur].sel.coll)).add_filter("JSON", &["json"]);
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", self.core.tabs[self.core.cur].sel.coll)).add_filter("JSON", &["json"]);
         if !docs.is_empty() {
             dialog = dialog.add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]);
         }
@@ -1072,14 +896,5 @@ mod tests {
         t.proj_txt = "{ at: { $gt: #today } }".into();
         assert!(!chain(&t).contains('#'), "shortcuts are expanded");
         assert!(query_script("x", "db.x.aggregate([])", ".sort({ a: 1 })").ends_with("db.x.aggregate([])\n}"));
-        assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
-        assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
-        assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);
-        assert_eq!(dangerous_words("sql`CALL p(); LOCK TABLES t READ; KILL 5; LOAD DATA INFILE 'x' INTO TABLE t`", true), ["call", "load", "lock", "kill"]);
-        assert!(dangerous_words("sql`SELECT created_at, updated_at FROM orders`", true).is_empty());
-        // A script with both engines is checked for both, each word once.
-        assert_eq!(shell_ops("x.deleteMany({}); sql`DELETE FROM t`", false, [true].into_iter()), ["delete"]);
-        assert_eq!(shell_ops("db.x.aggregate([{ $out: 'y' }]); sql`TRUNCATE t`", true, [false].into_iter()), ["$out", "truncate"]);
-        assert!(shell_ops("sql`SELECT 1`", true, std::iter::empty()).is_empty());
     }
 }

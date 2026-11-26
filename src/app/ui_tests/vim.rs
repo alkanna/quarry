@@ -4,15 +4,15 @@ use super::*;
 
 fn shell(a: &mut App) {
     a.load_demo();
-    a.prefs.vim = true;
-    let t = &mut a.tabs[1];
+    a.core.test_mut().prefs.vim = true;
+    let t = &mut a.core.test_mut().tabs[1];
     t.view = View::Shell;
     t.shell.code = "let a = foo;".into();
-    a.cur = 1;
+    a.core.test_mut().cur = 1;
 }
 
 fn code(ui: &UiApp) -> String {
-    ui.app().tabs[1].shell.code.clone()
+    ui.app().core.tabs[1].shell.code.clone()
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn vim_keys_edit_the_shell_and_esc_leaves_insert_before_the_editor() {
 fn with_vim_off_the_shell_types_as_before() {
     let Some(mut ui) = demo_ui(|a| {
         shell(a);
-        a.prefs.vim = false;
+        a.core.test_mut().prefs.vim = false;
     }) else {
         return;
     };
@@ -58,7 +58,7 @@ fn ctrl_shortcuts_still_reach_the_app_in_normal_mode() {
     // On macOS Ctrl is not the command key, so Vim must let Ctrl+Tab through as well as Cmd shortcuts.
     ui.h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
     ui.settle();
-    assert_ne!(ui.app().cur, 1, "Ctrl+Tab did not switch tabs from a Vim editor");
+    assert_ne!(ui.app().core.cur, 1, "Ctrl+Tab did not switch tabs from a Vim editor");
 }
 
 #[test]
@@ -67,10 +67,10 @@ fn esc_into_normal_mode_closes_the_suggestions() {
     ui.mouse_hold("Shell editor", 0);
     ui.type_text("A");
     ui.type_text(" orders.");
-    assert!(ui.app().ac.id.is_some() && !ui.app().ac.items.is_empty(), "typing orders. opened no suggestions");
+    assert!(ui.app().ui.ac.id.is_some() && !ui.app().ui.ac.items.is_empty(), "typing orders. opened no suggestions");
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
-    assert!(ui.app().ac.id.is_none() || ui.app().ac.items.is_empty(), "the suggestions stayed open in Normal mode");
+    assert!(ui.app().ui.ac.id.is_none() || ui.app().ui.ac.items.is_empty(), "the suggestions stayed open in Normal mode");
     assert!(ui.h.ctx.memory(|m| m.focused().is_some()), "Esc with suggestions open left the editor");
 }
 
@@ -107,26 +107,26 @@ fn ctrl_r_redoes_only_where_ctrl_is_not_the_command_key() {
 fn a_vim_edit_counts_as_an_edit_of_the_stage() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
-        a.prefs.vim = true;
-        let t = &mut a.tabs[1];
+        a.core.test_mut().prefs.vim = true;
+        let t = &mut a.core.test_mut().tabs[1];
         t.view = View::Aggregate;
         t.stages = vec![Stage::new("$sort", "{ a: 1 }", true)];
         t.agg_txt = text_from_stages(&t.stages);
         t.stages_src = t.agg_txt.clone();
-        a.cur = 1;
+        a.core.test_mut().cur = 1;
     }) else {
         return;
     };
-    let before = ui.app().tabs[1].agg_txt.clone();
+    let before = ui.app().core.tabs[1].agg_txt.clone();
     ui.mouse_hold("Stage 1 editor", 0);
     ui.type_text("0x");
-    assert_eq!(ui.app().tabs[1].stages[0].text, " a: 1 }");
-    assert_ne!(ui.app().tabs[1].agg_txt, before, "the pipeline text missed the Vim edit of its stage");
+    assert_eq!(ui.app().core.tabs[1].stages[0].text, " a: 1 }");
+    assert_ne!(ui.app().core.tabs[1].agg_txt, before, "the pipeline text missed the Vim edit of its stage");
 }
 
 fn sql_vim(a: &mut App) {
     a.load_sql_demo();
-    a.prefs.vim = true;
+    a.core.test_mut().prefs.vim = true;
 }
 
 fn sel(ui: &UiApp) -> Option<usize> {
@@ -134,11 +134,11 @@ fn sel(ui: &UiApp) -> Option<usize> {
 }
 
 fn vline(ui: &UiApp) -> usize {
-    ui.app().t().map_or(0, |t| t.vline)
+    ui.app().vline()
 }
 
 fn vcol(ui: &UiApp) -> usize {
-    ui.app().t().map_or(0, |t| t.vcol)
+    ui.app().vcol()
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn vim_keys_move_the_grid_cursor_by_row_and_column() {
 fn i_edits_the_cell_under_the_cursor() {
     let Some(mut ui) = demo_ui(sql_vim) else { return };
     ui.type_text("j5li");
-    ui.wait("the cell editor on note", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
+    ui.wait("the cell editor on note", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
 }
 
 #[test]
@@ -190,9 +190,9 @@ fn in_the_record_j_and_k_walk_its_lines_and_tab_goes_back_to_the_grid() {
     assert_eq!((sel(&ui), vline(&ui), vcol(&ui)), (Some(0), 6, 1), "walking the record moved the grid's cursor");
     // i edits the record's line, drawn in the record.
     ui.type_text("ki");
-    ui.wait("the cell editor on note", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
+    ui.wait("the cell editor on note", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
     ui.h.key_press(egui::Key::Escape);
-    ui.wait("the editor to close", |a| a.sql_cell.is_none());
+    ui.wait("the editor to close", |a| a.core.sql_cell.is_none());
     ui.h.key_press(egui::Key::Tab);
     ui.settle();
     assert!(ui.app().t().is_some_and(|t| !t.record), "Tab did not close the record");
@@ -247,7 +247,7 @@ fn ctrl_k_focuses_the_views_editor_and_ctrl_j_leaves_it() {
 fn ctrl_k_focuses_the_mongo_query() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_demo();
-        a.prefs.vim = true;
+        a.core.test_mut().prefs.vim = true;
     }) else {
         return;
     };
@@ -267,11 +267,11 @@ fn modal_title(ui: &UiApp) -> Option<String> {
 fn ctrl_l_leaves_an_open_cell_editor_alone() {
     let Some(mut ui) = demo_ui(sql_vim) else { return };
     ui.type_text("j5li");
-    ui.wait("the cell editor on note", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
+    ui.wait("the cell editor on note", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
     ui.type_text("Side gate");
     ui.h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::L);
     ui.settle();
-    assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.col == "note"), "Ctrl+L closed the cell editor and dropped what was typed");
+    assert!(ui.app().core.sql_cell.as_ref().is_some_and(|e| e.col == "note"), "Ctrl+L closed the cell editor and dropped what was typed");
 }
 
 #[test]
@@ -291,10 +291,12 @@ fn the_query_record_opens_on_the_pinned_column_the_grid_cursor_is_on() {
     let Some(mut ui) = demo_ui(|a| {
         a.load_sql_demo();
         a.sql_query_demo();
-        a.prefs.vim = true;
-        let s = a.tm().and_then(|t| t.sql.as_mut()).unwrap();
+        a.core.test_mut().prefs.vim = true;
+        let cur = a.core.cur;
+        let uid = a.uid_of(cur).unwrap();
+        let s = a.core.tabs[cur].sql.as_ref().unwrap();
         let keys = crate::app::sql::query::result_keys(&s.sets[0].cols);
-        s.qprefs.insert(keys, ColPrefs { pinned: vec!["email".into()], ..Default::default() });
+        a.ui.qprefs.entry(uid).or_default().insert(keys, ColPrefs { pinned: vec!["email".into()], ..Default::default() });
     }) else {
         return;
     };

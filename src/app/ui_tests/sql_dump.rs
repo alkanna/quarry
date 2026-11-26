@@ -39,7 +39,7 @@ fn a_table_is_dumped_from_the_dialog_and_the_file_runs_back_from_the_other() {
         ui.settle();
         ui.show("Export");
         press(ui, "Export");
-        ui.wait("the dump to finish", |a| a.export_job.is_none());
+        ui.wait("the dump to finish", |a| a.core.export_job.is_none());
         let text = std::fs::read_to_string(&path).unwrap_or_else(|x| panic!("no dump file: {x}; last error: {}", ui.app().last_problem()));
         assert!(text.contains("CREATE TABLE") && text.contains("alpha") && text.contains("gamma"), "{text}");
         if fx.place().1 == "public" {
@@ -53,7 +53,7 @@ fn a_table_is_dumped_from_the_dialog_and_the_file_runs_back_from_the_other() {
         ui.settle();
         ui.show("Run SQL file");
         press(ui, "Run file");
-        ui.wait("the script to finish", |a| a.sql_job.is_none());
+        ui.wait("the script to finish", |a| a.core.sql_job.is_none());
         fx.expect(ui, &table, ORIGINAL);
         let _ = std::fs::remove_file(path);
     });

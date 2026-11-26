@@ -2,90 +2,14 @@
 //! deletes, Set value, and the "Copy as" actions that Mongo documents share.
 
 use crate::app::*;
+use quarry_core::action::{Action, SqlA};
+use quarry_core::action::sql::edit::has_key;
 use db::copy::{self, CopyCol, Fmt, Sheet};
 use db::sql::check;
 use db::sql::value::{self, Kind};
 use db::sql::write::{self, NewRow, RowEdit};
 use db::sql::Col;
-
-/// A cell being edited in place. `done` is set by the editor: Some(true) to commit, Some(false) to cancel.
-#[derive(Default)]
-pub(in crate::app) struct CellEdit {
-    /// The row's key, because a reload while the editor is open moves rows around.
-    pub(in crate::app) id: Option<Bson>,
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) err: Option<String>,
-    pub(in crate::app) focus: bool,
-    pub(in crate::app) done: Option<bool>,
-    /// Shown in the large editor instead of over the cell.
-    pub(in crate::app) big: bool,
-    /// Edited since it opened, so the side panel must not drop it for another value.
-    pub(in crate::app) dirty: bool,
-    /// The large editor's live check of a JSON column: None until the text is checked again after an edit.
-    pub(in crate::app) json_err: Option<Option<String>>,
-    /// The calendar is open, holding the text from before it opened for Cancel.
-    pub(in crate::app) pick: Option<String>,
-    /// The row of the value list the arrows moved to, None until they are used.
-    pub(in crate::app) hl: Option<usize>,
-    /// What the helpers under the cell covered last frame, so a click in them is not a click outside the editor.
-    pub(in crate::app) pop: Option<egui::Rect>,
-    /// Give the text box focus back without selecting its text, after a helper button took it.
-    pub(in crate::app) refocus: bool,
-    /// A helper reads plain keys (arrows, Space, letters) with no text box focused, so the page must not.
-    pub(in crate::app) grabs_keys: bool,
-    pub(in crate::app) keys: Option<KeyLook>,
-}
-
-/// Rows of the table a foreign key column points at, looked up as the key is typed.
-#[derive(Default)]
-pub(in crate::app) struct KeyLook {
-    /// The single-column foreign key of the edited column, found once the table structure is loaded.
-    pub(in crate::app) fk: Option<db::sql::structure::ForeignKey>,
-    pub(in crate::app) req: u64,
-    /// The text the last lookup was for, and whether its answer is still on its way.
-    pub(in crate::app) asked: Option<String>,
-    pub(in crate::app) busy: bool,
-    /// What the first answer learned about the referenced table, sent with the next lookups.
-    pub(in crate::app) table: Option<db::sql::KeyTable>,
-    pub(in crate::app) rows: Vec<(String, String)>,
-}
-
-impl CellEdit {
-    /// Whether this editor belongs to the cell. A missing key never matches: two keyless rows are not the same row.
-    pub(in crate::app) fn is_at(&self, id: Option<Bson>, col: &str) -> bool {
-        self.id.is_some() && self.id == id && self.col == col
-    }
-}
-
-/// The "Set value on N rows" dialog.
-pub(in crate::app) struct SetForm {
-    pub(in crate::app) rows: Vec<Document>,
-    pub(in crate::app) col: String,
-    pub(in crate::app) text: String,
-    pub(in crate::app) null: bool,
-    pub(in crate::app) err: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub(in crate::app) enum Mode {
-    Default,
-    Null,
-    Value,
-}
-
-pub(in crate::app) struct RowField {
-    col: Col,
-    mode: Mode,
-    text: String,
-}
-
-/// The "+ Row" dialog: one line per column.
-pub(in crate::app) struct RowForm {
-    title: String,
-    fields: Vec<RowField>,
-    err: Option<String>,
-}
+pub(crate) use quarry_core::state::sql::edit::*;
 
 /// What a cell's context menu asked for, besides the row actions.
 #[derive(Clone, Copy)]
@@ -94,25 +18,6 @@ pub(in crate::app) enum CellAct {
     View,
     SetNull,
     FilterValue,
-}
-
-pub(in crate::app) fn is_numeric(k: Kind) -> bool {
-    matches!(k, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal)
-}
-
-/// Text for the editor of a `kind` column: what the cell shows, as typed back it parses to the same value.
-pub(in crate::app) fn edit_text(b: &Bson, kind: Kind) -> String {
-    match b {
-        Bson::Null => "NULL".into(),
-        Bson::String(s) if value::text_like(kind) && value::null_like(s) => format!("'{s}'"),
-        Bson::String(s) if kind == Kind::Json && s.trim() == "null" => "'null'".into(),
-        Bson::String(s) => s.clone(),
-        Bson::Int32(n) => n.to_string(),
-        Bson::Int64(n) => n.to_string(),
-        Bson::Double(f) => f.to_string(),
-        Bson::Binary(x) => format!("0x{}", x.bytes.iter().map(|b| format!("{b:02X}")).collect::<String>()),
-        other => db::short(other),
-    }
 }
 
 /// The menu of a SQL cell: the value actions first. Returns the one picked.
@@ -234,7 +139,7 @@ fn sql_bool_cell(ui: &mut egui::Ui, e: &mut CellEdit, col: &Col, rect: egui::Rec
     let keyed = pickers::bool_keys(ui, cur, col.nullable);
     let label = format!("{} · {}", col.src, col.ty.to_uppercase());
     let (clicked, r) = pickers::bool_pick(ui.ctx(), egui::Id::unique("sql-bool-cell"), below, cur, col.nullable, &label);
-    e.pop = Some(r);
+    e.pop = Some([r.min.x, r.min.y, r.max.x, r.max.y]);
     e.grabs_keys = true;
     if let Some(m) = &e.err {
         pickers::callout(ui.ctx(), egui::Id::unique("sql-bool-err"), rect.left_top() - egui::vec2(0.0, 4.0), egui::Align2::LEFT_BOTTOM, m, Some(crate::app::errors::paint_alert as fn(&egui::Painter, egui::Pos2, Color32)), None);
@@ -252,109 +157,55 @@ fn sql_bool_cell(ui: &mut egui::Ui, e: &mut CellEdit, col: &Col, rect: egui::Rec
 }
 
 impl App {
-    /// The table, columns and key of the open SQL tab.
     fn sql_ctx(&self) -> Option<(Sel, Arc<Vec<Col>>, Vec<String>)> {
-        let t = self.t()?;
-        let s = t.sql.as_ref()?;
-        Some((t.sel.clone(), s.cols.clone(), s.pk.clone()))
+        self.core.sql_ctx()
     }
 
-    /// Whether the open connection's server reads backslash escapes in strings.
     pub(in crate::app) fn sql_bs(&self) -> bool {
-        self.t().is_none_or(|t| self.sql_bs_of(t.sel.conn))
+        self.core.sql_bs()
     }
 
-    /// Whether connection `conn` reads backslashes in string literals as escapes.
     pub(in crate::app) fn sql_bs_of(&self, conn: u64) -> bool {
-        self.conn(conn).and_then(|c| c.sql.as_ref()).is_none_or(|d| d.backslash_escapes())
+        self.core.sql_bs_of(conn)
     }
 
-    /// Why the open table cannot be edited at all, if so.
     pub(in crate::app) fn sql_edit_block(&self) -> Option<&'static str> {
-        let s = self.t()?.sql.as_ref()?;
-        if s.matched.is_some() {
-            Some("Grouped rows are summaries, not table rows. Ungroup to edit.")
-        } else if self.sel_is_view() {
-            Some("Views cannot be edited.")
-        } else if s.pk.is_empty() {
-            Some("This table has no primary key or unique key, so its rows cannot be edited.")
-        } else {
-            None
-        }
+        self.core.sql_edit_block()
     }
 
-    /// Why row `i` of the open table cannot be edited, if so. A unique key lets rows hold NULL, and such a row has no `_id`:
-    /// its draft would be shared with every other keyless row and could never be saved.
-    pub(in crate::app) fn sql_row_block(&self, i: usize) -> Option<&'static str> {
-        let t = self.t()?;
-        Rows::Raw(&t.docs).id(i).is_none().then_some("This row has no key value, so it cannot be edited here.")
-    }
-
-    /// A column of the open SQL table, by its key in the row documents.
     pub(in crate::app) fn sql_col(&self, name: &str) -> Option<&Col> {
-        self.t()?.sql.as_ref()?.cols.iter().find(|c| c.name == name)
+        self.core.sql_col(name)
     }
 
-    /// Why one column cannot be edited in place, if so.
     pub(in crate::app) fn sql_col_block(&self, col: &str) -> Option<&'static str> {
-        let s = self.t()?.sql.as_ref()?;
-        if s.pk.iter().any(|p| p == col) {
-            return Some("Key columns can't be edited inline, because changing the key would break undo for this row. Use a query instead.");
-        }
-        let c = self.sql_col(col)?;
-        if c.generated {
-            return Some("Generated columns are computed by the server and cannot be written.");
-        }
-        (c.kind == Kind::Geometry).then_some("Geometry values cannot be edited as text yet.")
-    }
-
-    /// Everything a write needs, or None with the reason shown. The one gate for SQL writes.
-    fn writable_sql(&mut self) -> Option<(u64, db::sql::Db, Sel, Arc<Vec<Col>>, Vec<String>)> {
-        let (sel, cols, pk) = self.sql_ctx()?;
-        if self.demo {
-            self.ok("Offline demo: no database is connected.");
-            return None;
-        }
-        if !self.sel_writable() {
-            self.warn_ro();
-            return None;
-        }
-        let Some((db, _)) = self.sql_target(&sel) else {
-            self.warn_offline();
-            return None;
-        };
-        Some((sel.conn, db, sel, cols, pk))
+        self.core.sql_col_block(col)
     }
 
     /// Double-click on a cell: opens the editor, after asking for write access when it is locked.
-    pub(in crate::app) fn sql_open_cell(&mut self, i: usize, col: String) {
-        if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
-            return self.warn(why);
-        }
-        if !self.sel_writable() {
-            return self.ask_unlock_then(move |a| a.sql_open_cell(i, col));
-        }
-        if self.panel_dirty() {
-            return self.warn("Apply or cancel the value in the side panel first.");
-        }
-        let Some(t) = self.t() else { return };
-        let rows = Rows::Raw(&t.docs);
-        if let Some(why) = self.sql_row_block(i) {
-            return self.warn(why);
-        }
-        let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
-        let kind = self.sql_col(&col).map_or(Kind::Text, |c| c.kind);
-        let text = edit_text(&v, kind);
-        // With the panel open, a double-click loads the new cell into it, so the panel follows the selection.
-        let big = value_edit::is_long(&text) || self.value_in_panel();
-        self.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big, ..Default::default() });
+    pub(in crate::app) fn sql_open_cell(&mut self, row: usize, col: String) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::OpenCell { tab, row, col }));
     }
 
     /// Draws the editor over a cell and records Enter, Esc and a click elsewhere. Under it goes the helper the column
     /// type wants: the calendar for dates, a list for ENUM, SET and foreign key columns, a switch for booleans, and
     /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
-        let Some(mut e) = self.sql_cell.take() else { return };
+        let Some(before) = self.core.sql_cell.clone() else { return };
+        let e = self.sql_cell_draw(ui, cell, before.clone());
+        if e != before {
+            self.sql_cell_set(Some(e));
+        }
+    }
+
+    /// Hands the editor as a frame left it, or its close, to Core.
+    fn sql_cell_set(&mut self, edit: Option<CellEdit>) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::CellEdit { tab, edit: edit.map(Box::new) }));
+    }
+
+    /// Draws the editor on its own copy of the state, which is handed back for Core to keep.
+    fn sql_cell_draw(&mut self, ui: &mut egui::Ui, cell: egui::Rect, mut e: CellEdit) -> CellEdit {
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
         let d = self.sql_dialect();
@@ -366,20 +217,18 @@ impl App {
         ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if bad { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
         // The large editor has the text, so the cell only keeps its outline.
         if e.big {
-            self.sql_cell = Some(e);
-            return;
+            return e;
         }
         let ctx = ui.ctx().clone();
         let below = rect.left_bottom() + egui::vec2(0.0, 4.0);
-        let last_pop = e.pop.take();
+        let last_pop = e.pop.take().map(|[a, b, c, d]| egui::Rect::from_min_max(egui::pos2(a, b), egui::pos2(c, d)));
         let ours = |p: egui::Pos2| rect.contains(p) || last_pop.is_some_and(|r| r.contains(p));
         let click = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
         let click_out = click.is_some_and(|p| !ours(p));
         let nullable = col.nullable || col.auto_increment;
         if check::is_bool(d, &col) {
             sql_bool_cell(ui, &mut e, &col, rect, below, click_out);
-            self.sql_cell = Some(e);
-            return;
+            return e;
         }
         let date = matches!(col.kind, Kind::Date | Kind::DateTime);
         let choices = if matches!(col.kind, Kind::Enum | Kind::Set) { db::sql::schema::enum_values(&col.ty) } else { Vec::new() };
@@ -514,9 +363,9 @@ impl App {
             }
             e.done = Some(true);
         }
-        e.pop = pop;
+        e.pop = pop.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
         e.grabs_keys = e.pick.is_some() || list_n > 0;
-        self.sql_cell = Some(e);
+        e
     }
 
     /// The clock in the zone `col` is read in, as milliseconds of that wall clock. None for a TIMESTAMP column under
@@ -545,11 +394,8 @@ impl App {
         let t = e.text.trim();
         let q = if t.eq_ignore_ascii_case("null") { "" } else { t };
         // One lookup at a time; the answer for older text asks again with the newest.
-        if !look.busy && look.asked.as_deref() != Some(q) && !self.demo && let Some((db, space)) = self.t().map(|t| t.sel.clone()).and_then(|s| self.sql_target(&s)) {
-            self.req += 1;
-            (look.req, look.busy, look.asked) = (self.req, true, Some(q.to_string()));
-            let schema = if fk.ref_db.is_empty() { space } else { fk.ref_db.clone() };
-            self.worker.sql_key_search(self.req, db, schema, fk.ref_table.clone(), key.clone(), q.to_string(), look.table.clone());
+        if !look.busy && look.asked.as_deref() != Some(q) && let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::KeySearch { fk: fk.clone(), q: q.to_string(), known: look.table.clone() })) {
+            (look.req, look.busy, look.asked) = (req, true, Some(q.to_string()));
         }
         let title = format!("{} references {} ({key})", col.src, fk.ref_table);
         let saves = look.rows.get(e.hl.unwrap_or(0)).map(|r| format!(" Picking one saves {}.", r.0)).unwrap_or_default();
@@ -563,68 +409,43 @@ impl App {
         Some((look.rows.clone(), look.asked.is_some().then_some(title), foot))
     }
 
-    pub(in crate::app) fn sql_keys_done(&mut self, req: u64, res: db::Res<(db::sql::KeyTable, Vec<(String, String)>)>) {
-        let Some(k) = self.sql_cell.as_mut().and_then(|e| e.keys.as_mut()).filter(|k| k.req == req) else { return };
-        k.busy = false;
-        // A lookup the server refuses leaves the list empty; the key can still be typed and saved.
-        match res {
-            Ok((t, rows)) => (k.table, k.rows) = (Some(t), rows),
-            // Treated as a big table with no name column, so later lookups skip the catalog and only match exact keys.
-            Err(_) => (k.table, k.rows) = (Some(db::sql::KeyTable { label: None, big: true }), Vec::new()),
-        }
-    }
-
     /// After the table is drawn: stage the edit, or keep the editor open with its error.
     pub(in crate::app) fn sql_cell_finish(&mut self) {
-        let Some(mut e) = self.sql_cell.take() else { return };
+        let Some(mut e) = self.core.sql_cell.clone() else { return };
         match e.done {
-            None => self.sql_cell = Some(e),
-            Some(false) => {}
+            None => {}
+            Some(false) => self.sql_cell_set(None),
             Some(true) => {
                 let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
                 match check::check(self.sql_dialect(), &col, &e.text, self.sql_clock(&col)).value {
-                    Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
-                    Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
+                    Ok(_) if row.is_none() => {
+                        self.sql_cell_set(None);
+                        self.warn("That row is no longer in the table, so the edit was cancelled.");
+                    }
+                    Ok(v) => {
+                        // Closed before the stage, as the editor was taken out before.
+                        self.sql_cell_set(None);
+                        self.sql_set_cell(row.unwrap_or_default(), &e.col, v);
+                    }
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
-                        self.sql_cell = Some(e);
+                        self.sql_cell_set(Some(e));
                     }
                 }
             }
         }
     }
 
-    /// Stages `v` as the value of a cell of the open page.
     pub(in crate::app) fn sql_set_cell(&mut self, i: usize, col: &str, v: Bson) {
-        let Some(t) = self.t() else { return };
-        let rows = Rows::Raw(&t.docs);
-        let Some(orig) = rows.owned(i) else { return };
-        if let Some(why) = self.sql_row_block(i) {
-            return self.warn(why);
-        }
-        let cur = self.shown_row(rows, i, false).unwrap_or(orig);
-        let mut new = cur.clone();
-        new.insert(col, v);
-        self.sql_stage(&cur, new);
-    }
-
-    fn sql_stage(&mut self, d: &Document, new: Document) {
-        let key = self.draft_key(d);
-        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
-        let n = stage_draft(&mut self.drafts, &key, &sel, d, new);
-        if n == 0 {
-            self.ok("No changes left on this row");
-        } else if self.prefs.auto_save && self.sel_writable() {
-            self.write_sql_drafts(vec![key]);
-        } else {
-            self.ok(format!("{n} cell{} staged. Save writes them, Discard drops them.", if n == 1 { "" } else { "s" }));
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::SetCell { tab, row: i, col: col.to_string(), value: v }));
         }
     }
 
     /// The columns of row `i` that have unsaved edits, for tinting.
     pub(in crate::app) fn sql_staged_cols(&self, rows: Rows, i: usize) -> Vec<String> {
-        let Some(dr) = self.drafts.get(&self.draft_key_of_row(rows, i)) else { return Vec::new() };
+        let Some(dr) = self.core.drafts.get(&self.draft_key_of_row(rows, i)) else { return Vec::new() };
         db::diff(&dr.original, &dr.current).into_iter().map(|c| c.0).filter(|p| p != "_id").collect()
     }
 
@@ -633,49 +454,9 @@ impl App {
         format!("{s}#{}", rows.id(i).map(|v| db::compact(&v)).unwrap_or_default())
     }
 
-    /// One transaction for the given drafts. A failure keeps every one of them staged.
     pub(in crate::app) fn write_sql_drafts(&mut self, keys: Vec<String>) {
-        let drafts: Vec<(String, Draft)> = keys.into_iter().filter_map(|k| self.drafts.remove(&k).map(|d| (k, d))).collect();
-        let Some(first) = drafts.first().map(|d| Sel { conn: d.1.conn, db: d.1.db.clone(), schema: d.1.schema.clone(), coll: d.1.coll.clone() }) else { return };
-        let put_back = |a: &mut App, drafts: Vec<(String, Draft)>, why: &str| {
-            a.drafts.extend(drafts);
-            a.err(why.to_string());
-        };
-        let Some((db, space)) = self.sql_target(&first) else { return put_back(self, drafts, "Not connected.") };
-        let read_only = !self.conn_writable(first.conn);
-        let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
-        // A row without its key could address any row, so it is never sent; its edits stay staged.
-        let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| has_key(&d.current));
-        let skipped = keyless.len();
-        self.drafts.extend(keyless);
-        if skipped > 0 {
-            self.err(format!("{skipped} row{} without a key value {} not saved.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
-        }
-        let drafts = keyed;
-        if drafts.is_empty() {
-            return;
-        }
-        let edits: Vec<RowEdit> = drafts
-            .iter()
-            .map(|(_, d)| RowEdit {
-                pk: d.current.get_document("_id").cloned().unwrap_or_default(),
-                changes: db::diff(&d.original, &d.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
-            })
-            .collect();
-        let tags: Vec<String> = drafts.iter().map(|d| d.0.clone()).collect();
-        self.saving.extend(drafts);
-        self.worker.sql_save(tags, first.conn, db, space, first.coll, cols, pk, edits, read_only);
-    }
-
-    /// Cmd+S, the bar's Save: asks for write access first, then confirms like Mongo's Save all when the setting says so.
-    pub(in crate::app) fn sql_save_all(&mut self, keys: Vec<String>) {
-        if !self.sel_writable() {
-            return self.ask_unlock_then(move |a| a.sql_save_all(keys));
-        }
-        if self.prefs.confirm_save && !self.prefs.always_writable {
-            self.modal = Some(Modal::SaveAll(keys));
-        } else {
-            self.write_sql_drafts(keys);
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::WriteDrafts { tab, keys }));
         }
     }
 
@@ -698,7 +479,7 @@ impl App {
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         let (mut cells, mut summary) = (0, String::new());
         for k in &keys {
-            let Some(dr) = self.drafts.get(k) else { continue };
+            let Some(dr) = self.core.drafts.get(k) else { continue };
             let ch: Vec<_> = db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").collect();
             cells += ch.len();
             if summary.is_empty() {
@@ -729,12 +510,12 @@ impl App {
             });
         });
         // Any window over the page owns Cmd+S, as do the value and cell editors.
-        let free = !self.window_open() && self.json_edit.is_none() && self.sql_cell.is_none();
+        let free = !self.window_open() && self.core.json_edit.is_none() && self.core.sql_cell.is_none();
         save |= free && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S));
         if show {
             let mut body = Vec::new();
             for k in &keys {
-                let Some(dr) = self.drafts.get(k) else { continue };
+                let Some(dr) = self.core.drafts.get(k) else { continue };
                 let edit = RowEdit {
                     pk: dr.current.get_document("_id").cloned().unwrap_or_default(),
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
@@ -744,14 +525,12 @@ impl App {
             }
             self.modal = Some(Modal::Text { title: "SQL that Save will run".into(), body: body.join("\n"), code: false });
         }
+        let tab = self.core.tabs[self.core.cur].uid;
         if discard {
-            for k in &keys {
-                self.drafts.remove(k);
-            }
-            self.ok("Discarded the staged edits");
+            self.exec(Action::Sql(SqlA::Discard { tab }));
         }
         if save {
-            self.sql_save_all(keys);
+            self.exec(Action::Sql(SqlA::Save { tab }));
         }
     }
 
@@ -822,26 +601,8 @@ impl App {
 
     /// Opens the insert form, filled from `from` for a duplicate.
     fn sql_new_row(&mut self, from: Option<Document>) {
-        if !self.sel_writable() {
-            return self.ask_unlock_then(move |a| a.sql_new_row(from));
-        }
-        let Some((_, cols, pk)) = self.sql_ctx() else { return };
-        // A single integer key is almost always generated, so a copy leaves it to the server.
-        let auto = pk.len() == 1 && cols.iter().any(|c| c.src == pk[0] && matches!(c.kind, Kind::Int | Kind::UInt));
-        let fields = cols
-            .iter()
-            .map(|col| {
-                let v = from.as_ref().and_then(|d| d.get(&col.name)).filter(|_| !(auto && col.src == pk[0]));
-                let (mode, text) = match v {
-                    None => (Mode::Default, String::new()),
-                    Some(Bson::Null) => (Mode::Null, String::new()),
-                    Some(v) => (Mode::Value, edit_text(v, col.kind)),
-                };
-                RowField { col: col.clone(), mode, text }
-            })
-            .collect();
-        let title = if from.is_some() { "Duplicate row" } else { "Insert a row" };
-        self.modal = Some(Modal::SqlRow(Box::new(RowForm { title: title.into(), fields, err: None })));
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::NewRow { tab, from }));
     }
 
     pub(in crate::app) fn sql_row_dialog(&mut self, ui: &mut egui::Ui, f: &mut RowForm, keep: &mut bool) {
@@ -902,9 +663,8 @@ impl App {
     }
 
     fn sql_insert_rows(&mut self, rows: Vec<NewRow>) {
-        let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
-        let read_only = !self.conn_writable(conn);
-        self.worker.sql_insert(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::Insert { tab, rows }));
     }
 
     /// Rows are the loaded documents of the checked or clicked rows, each with its key in `_id`.
@@ -949,10 +709,7 @@ impl App {
                     return self.warn("This table has no primary key or unique key to filter by.");
                 }
                 let text = key_list();
-                let t = self.tm().unwrap();
-                t.filter_txt = text;
-                t.page = 0;
-                self.reload();
+                self.exec(Action::Tab(TabA::FilterText { sel: None, text }));
             }
             DocsAct::EditQuery => {
                 if pk.is_empty() {
@@ -972,11 +729,9 @@ impl App {
                     sets.push(format!("{0} = {0}", d.quote_ident(&c.src)));
                 }
                 let text = format!("UPDATE {}\nSET {}\nWHERE {};", d.qualified(sel.space(), &sel.coll), sets.join(",\n    "), key_list());
-                let t = self.tm().unwrap();
-                if let Some(s) = t.sql.as_mut() {
-                    s.query = text;
+                if let Some(tab) = self.uid_of(self.core.cur) {
+                    self.exec(Action::Sql(SqlA::SetQuery { tab, text, run_db: None, run_schema: None, caret: None, show: true }));
                 }
-                t.view = View::Sql;
             }
             DocsAct::Export => self.open_export(rows, false),
             DocsAct::Duplicate => {
@@ -1007,16 +762,8 @@ impl App {
 
     /// Deletes rows by key once confirmed. Their staged edits go with them.
     pub(in crate::app) fn sql_delete(&mut self, rows: Vec<Document>) {
-        let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
-        for r in &rows {
-            let key = self.draft_key(r);
-            self.drafts.remove(&key);
-        }
-        if let Some(t) = self.tm() {
-            t.selected = None;
-        }
-        let read_only = !self.conn_writable(conn);
-        self.worker.sql_delete_rows(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Sql(SqlA::DeleteRows { tab, rows }));
     }
 
     pub(in crate::app) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {
@@ -1090,16 +837,9 @@ impl App {
             if primary(ui, &format!("Stage {n} edit{}", if n == 1 { "" } else { "s" }), PRIMARY()).clicked() {
                 match parsed {
                     Ok(v) => {
-                        for r in &f.rows {
-                            let key = self.draft_key(r);
-                            let sel = sel.clone();
-                            // Staged on top of any earlier edit of the same row, which keeps its original.
-                            let cur = self.drafts.get(&key).map(|x| x.current.clone()).unwrap_or_else(|| r.clone());
-                            let mut new = cur.clone();
-                            new.insert(col.name.clone(), v.clone());
-                            stage_draft(&mut self.drafts, &key, &sel, &cur, new);
+                        if let Some(tab) = self.uid_of(self.core.cur) {
+                            self.exec(Action::Sql(SqlA::StageValue { tab, rows: f.rows.clone(), col: col.name.clone(), value: v }));
                         }
-                        self.ok(format!("Staged {n} edit{}. Save writes them.", if n == 1 { "" } else { "s" }));
                         *keep = false;
                     }
                     Err(m) => f.err = Some(m),
@@ -1114,7 +854,7 @@ impl App {
     /// The visible columns in the order shown, for the copy formats.
     pub(in crate::app) fn copy_cols(&self, rows: &[Document]) -> Vec<CopyCol> {
         let Some(t) = self.t() else { return Vec::new() };
-        let prefs = self.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
+        let prefs = self.core.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
         table::visible_cols(Some(&prefs), &t.fields, self.default_cols())
             .into_iter()
             .map(|name| {
@@ -1181,25 +921,14 @@ impl App {
                 }
                 CellAct::View => self.sql_view_value(&col, &v),
                 CellAct::SetNull => {
-                    if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
-                        return self.warn(why);
-                    }
-                    if let Some(why) = self.sql_row_block(i) {
-                        return self.warn(why);
-                    }
-                    if !self.sel_writable() {
-                        return self.ask_unlock_then(move |a| a.sql_set_cell(i, &col, Bson::Null));
-                    }
-                    self.sql_set_cell(i, &col, Bson::Null);
+                    let tab = self.core.tabs[self.core.cur].uid;
+                    self.exec(Action::Sql(SqlA::SetNull { tab, row: i, col }));
                 }
                 CellAct::FilterValue => {
                     let numeric = self.sql_col(&col).is_some_and(|c| is_numeric(c.kind));
                     let q = self.sql_dialect().quote_ident(&col);
                     let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(self.sql_dialect(), Some(&v), numeric, self.sql_bs())) };
-                    let t = self.tm().unwrap();
-                    t.filter_txt = text;
-                    t.page = 0;
-                    self.reload();
+                    self.exec(Action::Tab(TabA::FilterText { sel: None, text }));
                 }
             }
         }
@@ -1207,7 +936,8 @@ impl App {
 
     /// The offline demo of `QUARRY_TEST_SQL=edit`: two cells of row 3 staged.
     pub(in crate::app) fn sql_demo_stage(&mut self) {
-        let Some(t) = self.tabs.get_mut(0) else { return };
+        let core = self.core.setup();
+        let Some(t) = core.tabs.get_mut(0) else { return };
         let Some(orig) = t.docs.get(2).map(db::Row::owned) else { return };
         let mut old = orig.clone();
         old.insert("status", "pending");
@@ -1217,23 +947,17 @@ impl App {
         }
         let sel = t.sel.clone();
         let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
-        stage_draft(&mut self.drafts, &key, &sel, &old, orig);
+        stage_draft(&mut core.drafts, &key, &sel, &old, orig);
     }
 }
 
 /// Height of the staged-edits bar, with its padding.
 const STAGED_H: f32 = 40.0;
 
-/// Whether a loaded or staged row carries its whole key in `_id`.
-fn has_key(d: &Document) -> bool {
-    d.get_document("_id").is_ok_and(|k| !k.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::sql::Dialect;
-
 
     #[test]
     fn edit_text_round_trips_through_parse_edit() {

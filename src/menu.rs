@@ -1,10 +1,11 @@
-//! The macOS menu bar. An item with a shortcut replays that shortcut as an egui key event, so
-//! App::keys stays the one place that acts on it; the menu makes every shortcut discoverable and
-//! clickable. macOS hands a menu's key equivalents to the menu instead of the window, which is
-//! why even Cut, Copy and Paste go through here.
+//! The macOS menu bar, built from the command registry (`quarry_core::cmd::CMDS`). A pick calls its command, except
+//! where a view, an editor or a text field reads the key itself (`Scope::View` and `Scope::Native`): macOS hands a menu's
+//! key equivalents to the menu instead of the window, so those picks replay the key as an egui event for them to get it.
+//! That is also why Cut, Copy and Paste go through here.
 
 use eframe::egui::{self, Key, Modifiers};
 use muda::{AboutMetadata, Icon, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu, accelerator::Accelerator};
+use quarry_core::cmd::{Cmd, CmdSpec, Menu as M, Scope, menu_items};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -14,52 +15,27 @@ pub enum Act {
     Cut,
     Copy,
     Paste,
-    Quit,
-    CheckUpdates,
-    Export,
-    Insert,
-    Url(&'static str),
+    Cmd(Cmd),
 }
 
-const CMD: Modifiers = Modifiers::COMMAND;
-const CMD_SHIFT: Modifiers = Modifiers { shift: true, ..Modifiers::COMMAND };
-const CMD_ALT: Modifiers = Modifiers { alt: true, ..Modifiers::COMMAND };
-
-/// One custom menu entry; None is a separator.
-type Item = Option<(&'static str, Act)>;
-
-fn key(m: Modifiers, k: Key) -> Act {
-    Act::Key(m, k)
+fn act(s: &CmdSpec) -> Act {
+    match s.cmd {
+        Cmd::Cut => Act::Cut,
+        Cmd::Copy => Act::Copy,
+        Cmd::Paste => Act::Paste,
+        // Quit is the menu's own; it closes the window through eframe, so the app shuts down normally.
+        Cmd::Quit => Act::Cmd(Cmd::Quit),
+        c if matches!(s.scope, Scope::View | Scope::Native) => match s.keys.first().map(crate::app::shortcut) {
+            Some(k) => Act::Key(k.modifiers, k.logical_key),
+            None => Act::Cmd(c),
+        },
+        c => Act::Cmd(c),
+    }
 }
 
 /// muda's spelling of a shortcut, for the label macOS draws next to the item.
-fn accel(a: &Act) -> Option<Accelerator> {
-    let (m, k) = match *a {
-        Act::Key(m, k) => (m, k),
-        Act::Cut => (CMD, Key::X),
-        Act::Copy => (CMD, Key::C),
-        Act::Paste => (CMD, Key::V),
-        Act::Quit => (CMD, Key::Q),
-        _ => return None,
-    };
-    let name = match k {
-        Key::Comma => ",".to_string(),
-        Key::Slash => "/".into(),
-        Key::OpenBracket => "[".into(),
-        Key::CloseBracket => "]".into(),
-        Key::Equals => "=".into(),
-        Key::Minus => "-".into(),
-        Key::Num0 => "0".into(),
-        other => other.name().to_string(),
-    };
-    let mut s = String::from("Cmd+");
-    if m.shift {
-        s += "Shift+";
-    }
-    if m.alt {
-        s += "Alt+";
-    }
-    (s + &name).parse().ok()
+fn accel(s: &CmdSpec) -> Option<Accelerator> {
+    s.keys.first()?.text().parse().ok()
 }
 
 pub struct MenuBar {
@@ -74,12 +50,12 @@ impl MenuBar {
     pub fn new(ctx: &egui::Context) -> Self {
         let menu = Menu::new();
         let mut acts: HashMap<MenuId, Act> = HashMap::new();
-        let mut add = |sub: &Submenu, items: &[Item]| {
-            for it in items {
+        let mut add = |sub: &Submenu, m: M, groups: std::ops::RangeInclusive<u8>| {
+            for it in menu_items(m, groups) {
                 match it {
-                    Some((label, a)) => {
-                        let item = MenuItem::new(*label, true, accel(a));
-                        acts.insert(item.id().clone(), *a);
+                    Some(s) => {
+                        let item = MenuItem::new(s.menu.map_or("", |p| p.title), true, accel(s));
+                        acts.insert(item.id().clone(), act(s));
                         let _ = sub.append(&item);
                     }
                     None => {
@@ -88,11 +64,13 @@ impl MenuBar {
                 }
             }
         };
+        let all = 0..=u8::MAX;
 
         let app = Submenu::new("Quarry", true);
         let _ = app.append(&PredefinedMenuItem::about(Some("About Quarry"), Some(about())));
-        add(&app, &[Some(("Check for Updates…", Act::CheckUpdates)), None, Some(("Settings…", key(CMD, Key::Comma))), None]);
+        add(&app, M::App, 0..=1);
         let _ = app.append_items(&[
+            &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::services(None),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::hide(Some("Hide Quarry")),
@@ -100,87 +78,31 @@ impl MenuBar {
             &PredefinedMenuItem::show_all(None),
             &PredefinedMenuItem::separator(),
         ]);
-        // Our own Quit closes the window through eframe, so the app shuts down normally.
-        add(&app, &[Some(("Quit Quarry", Act::Quit))]);
+        add(&app, M::App, 2..=2);
 
         let file = Submenu::new("File", true);
-        add(&file, &[
-            Some(("New Connection…", key(CMD, Key::N))),
-            Some(("New Tab…", key(CMD, Key::T))),
-            Some(("Open Collection…", key(CMD, Key::K))),
-            Some(("Reopen Closed Tab", key(CMD_SHIFT, Key::T))),
-            None,
-            Some(("Save to library", key(CMD, Key::S))),
-            None,
-            Some(("Insert Document…", Act::Insert)),
-            Some(("Export…", Act::Export)),
-            None,
-            Some(("Close Tab", key(CMD, Key::W))),
-        ]);
+        add(&file, M::File, all.clone());
 
         let edit = Submenu::new("Edit", true);
-        add(&edit, &[
-            Some(("Undo", key(CMD, Key::Z))),
-            Some(("Redo", key(CMD_SHIFT, Key::Z))),
-            None,
-            Some(("Cut", Act::Cut)),
-            Some(("Copy", Act::Copy)),
-            Some(("Paste", Act::Paste)),
-            Some(("Select All", key(CMD, Key::A))),
-            None,
-            Some(("Find in Query", key(CMD, Key::F))),
-            Some(("Find Collection", key(CMD_SHIFT, Key::F))),
-        ]);
+        add(&edit, M::Edit, all.clone());
 
+        // View items name the view of both engines in that position, since menu labels are fixed when the bar is built.
         let view = Submenu::new("View", true);
-        add(&view, &[
-            // Menu labels are fixed when the bar is built, so each item names the view of both engines in that position.
-            Some(("Documents or Content", key(CMD_ALT, Key::Num1))),
-            Some(("Aggregate or Structure", key(CMD_ALT, Key::Num2))),
-            Some(("Indexes or Relations", key(CMD_ALT, Key::Num3))),
-            Some(("Schema or Triggers", key(CMD_ALT, Key::Num4))),
-            Some(("Import or Info", key(CMD_ALT, Key::Num5))),
-            Some(("Compare or Query", key(CMD_ALT, Key::Num6))),
-            Some(("Shell", key(CMD_ALT, Key::Num7))),
-            Some(("Watch", key(CMD_ALT, Key::Num8))),
-            None,
-            Some(("Query Log", key(CMD, Key::L))),
-            None,
-            Some(("Bigger Interface", key(CMD, Key::Equals))),
-            Some(("Smaller Interface", key(CMD, Key::Minus))),
-            Some(("Actual Size", key(CMD, Key::Num0))),
-            None,
-        ]);
+        add(&view, M::View, all.clone());
+        let _ = view.append(&PredefinedMenuItem::separator());
         let _ = view.append(&PredefinedMenuItem::fullscreen(None));
 
         let query = Submenu::new("Query", true);
-        add(&query, &[
-            Some(("Run Pipeline or Script", key(CMD, Key::Enter))),
-            Some(("Explain", key(CMD, Key::E))),
-            None,
-            Some(("Reload Tab", key(CMD, Key::R))),
-            Some(("Refresh Connection", key(CMD_SHIFT, Key::R))),
-        ]);
+        add(&query, M::Query, all.clone());
 
         let window = Submenu::new("Window", true);
         let _ = window.append_items(&[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(Some("Zoom")), &PredefinedMenuItem::separator()]);
-        add(&window, &[
-            Some(("Show Next Tab", key(CMD_SHIFT, Key::CloseBracket))),
-            Some(("Show Previous Tab", key(CMD_SHIFT, Key::OpenBracket))),
-            Some(("Back", key(CMD, Key::OpenBracket))),
-            Some(("Forward", key(CMD, Key::CloseBracket))),
-            None,
-        ]);
+        add(&window, M::Window, all.clone());
+        let _ = window.append(&PredefinedMenuItem::separator());
         let _ = window.append(&PredefinedMenuItem::bring_all_to_front(None));
 
         let help = Submenu::new("Help", true);
-        add(&help, &[
-            Some(("Keyboard Shortcuts", key(CMD, Key::Slash))),
-            None,
-            Some(("Quarry on GitHub", Act::Url("https://github.com/alkanna/quarry"))),
-            Some(("Release Notes", Act::Url("https://github.com/alkanna/quarry/releases"))),
-            Some(("Report an Issue", Act::Url("https://github.com/alkanna/quarry/issues"))),
-        ]);
+        add(&help, M::Help, all);
 
         let _ = menu.append_items(&[&app, &file, &edit, &view, &query, &window, &help]);
         menu.init_for_nsapp();
@@ -199,8 +121,8 @@ impl MenuBar {
         Self { _menu: menu, pending, restore: None }
     }
 
-    /// Turns pending menu picks into input for this frame; returns the ones the app handles itself.
-    pub fn feed(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) -> Vec<Act> {
+    /// Turns pending menu picks into input for this frame; returns the commands the app runs itself.
+    pub fn feed(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) -> Vec<Cmd> {
         if let Some(m) = self.restore.take() {
             raw.events.push(egui::Event::ModifiersChanged(m));
         }
@@ -223,7 +145,7 @@ impl MenuBar {
                         raw.events.push(egui::Event::Paste(text));
                     }
                 }
-                other => rest.push(other),
+                Act::Cmd(c) => rest.push(c),
             }
         }
         rest

@@ -119,7 +119,7 @@ fn a_locked_connection_asks_to_unlock_before_applying() {
         stage_new_column(ui, "extra");
         assert_eq!(ui.app().staged().len(), 1);
         // locked again with a change staged: Apply asks, and staying read-only runs nothing
-        ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.click("Apply");
         ui.show("Stay read-only");
         ui.click("Stay read-only");
@@ -159,7 +159,7 @@ fn apply_now_on_a_connection_locked_after_the_dialog_opened_asks_to_unlock() {
         ui.click("+ Column");
         replace(ui, "Column name", "extra");
         // locked while the dialog is open: the button must still work, and ask, as the Apply bar does
-        ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.state_mut().core.test_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
         ui.h.run_steps(2);
         assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now is disabled on a locked connection");
         ui.click("Apply now");
@@ -216,8 +216,9 @@ fn alt_down_moves_the_focused_column_row() {
 #[test]
 fn index_columns_drag_to_reorder_in_the_index_dialog() {
     let Some(mut ui) = demo_structure() else { return };
-    let i = ui.app().structure().and_then(|s| s.indexes.iter().position(|x| x.cols.len() == 2)).expect("an index on two columns");
-    ui.h.state_mut().open_idx_form(Some(i));
+    let index = ui.app().structure().and_then(|s| s.indexes.iter().find(|x| x.cols.len() == 2)).map(|x| x.name.clone()).expect("an index on two columns");
+    let tab = ui.app().core.tabs[ui.app().core.cur].uid;
+    ui.h.state_mut().exec(quarry_core::action::Action::Structure(quarry_core::action::StructA::EditIndex { tab, index: Some(index) }));
     ui.settle();
     let cols = |ui: &UiApp| match &ui.app().modal {
         Some(Modal::IdxEdit(f)) => f.def.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),

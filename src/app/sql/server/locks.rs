@@ -6,6 +6,7 @@ use super::*;
 use db::sql::server::locks::{LockWait, Locks};
 use db::sql::server::{one_line, Proc};
 use std::borrow::Cow;
+use quarry_core::action::sql_server::confirm_still_ok;
 use std::sync::Arc;
 
 const LOCK_COLS: [(&str, f32); 5] = [("Id", ID_W), ("User", 110.0), ("Db", 100.0), ("Lock", 150.0), ("On", 210.0)];
@@ -26,11 +27,6 @@ pub(super) fn dur(secs: f64) -> String {
     }
 }
 
-/// Whether the armed Kill still points at the same statement of the same connection on the same server.
-pub(super) fn confirm_still_ok(c: &Confirm, l: &Locks) -> bool {
-    c.identity == l.identity && l.procs.get(&c.p.id).is_some_and(|p| c.p.same_thread(p))
-}
-
 /// The statement a thread shows: what it runs now, or the one its transaction is stuck on when the process list has none.
 fn statement(l: &Locks, id: u64) -> Cow<'_, str> {
     match l.procs.get(&id) {
@@ -39,16 +35,16 @@ fn statement(l: &Locks, id: u64) -> Cow<'_, str> {
     }
 }
 
-pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Option<Confirm>) {
-    if !s.writable {
-        s.unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill queries or connections.", Some("Unlock…"));
+pub(super) fn locks_view(ui: &mut egui::Ui, s: &SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
+    if !s.writable && banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill queries or connections.", Some("Unlock…")) {
+        acts.push(SqlServerA::Unlock);
     }
     ui.horizontal(|ui| {
         if chip(ui, "Refresh every 2 s", PRIMARY(), s.auto).clicked() {
-            s.auto = !s.auto;
+            acts.push(SqlServerA::Auto(!s.auto));
         }
         if !s.auto && quiet(ui, "Refresh").clicked() {
-            s.refresh = true;
+            acts.push(SqlServerA::Refresh);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(Ok(l)) = &s.locks {
@@ -61,7 +57,7 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
         None => return spin(ui),
         Some(Err(e)) => {
             if error_row(ui, format!("Could not read the locks: {e}")) {
-                s.refresh = true;
+                acts.push(SqlServerA::Refresh);
             }
             return;
         }
@@ -71,8 +67,10 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
     // The thread that read the list is Quarry's too.
     let mut own = s.own.clone();
     own.entry(l.me).or_insert_with(|| "Server window".to_string());
-    if s.confirm.as_ref().is_some_and(|c| !confirm_still_ok(c, &l) || !ch.iter().any(|x| x.head == c.p.id)) {
-        s.confirm = None;
+    let mut confirm = s.confirm.clone();
+    if confirm.as_ref().is_some_and(|c| !confirm_still_ok(c, &l) || !ch.iter().any(|x| x.head == c.p.id)) {
+        confirm = None;
+        acts.push(SqlServerA::Disarm);
     }
     let w = ui.available_width();
     let query_w = (w - LOCK_COLS.iter().map(|c| c.1).sum::<f32>() - WAIT_W).max(140.0);
@@ -88,7 +86,7 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
         egui::ScrollArea::vertical().id_salt("sql-locks").max_height(max_h - 30.0).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for c in ch.iter() {
-                blocker_row(ui, s, &l, &own, c.head, w, kill);
+                blocker_row(ui, s.writable, &mut confirm, &l, &own, c.head, w, acts);
                 let mut parents: Vec<u64> = vec![c.head];
                 for (id, depth) in &c.waiting {
                     parents.truncate(*depth);
@@ -112,7 +110,8 @@ pub(super) fn locks_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, ki
     }
 }
 
-fn blocker_row(ui: &mut egui::Ui, s: &mut SqlServerWin, l: &Locks, own: &HashMap<u64, String>, id: u64, w: f32, kill: &mut Option<Confirm>) {
+#[allow(clippy::too_many_arguments)]
+fn blocker_row(ui: &mut egui::Ui, writable: bool, confirm: &mut Option<Confirm>, l: &Locks, own: &HashMap<u64, String>, id: u64, w: f32, acts: &mut Vec<SqlServerA>) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, HEAD_H), Sense::hover());
     let proc = l.procs.get(&id);
     let trx = l.trx.get(&id);
@@ -152,26 +151,28 @@ fn blocker_row(ui: &mut egui::Ui, s: &mut SqlServerWin, l: &Locks, own: &HashMap
     let area = egui::Rect::from_min_max(egui::pos2(rect.right() - BTNS_W, rect.top() + 9.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 9.0));
     let mut k = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
     let Some(p) = proc else { return };
-    match s.confirm.clone().filter(|c| c.p.id == id) {
+    match confirm.clone().filter(|c| c.p.id == id) {
         Some(c) => {
             // Drawn where the button was, so the guard keeps a double click from sending it.
             let b = danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" });
             if confirmed(&k, &b, c.at) {
-                *kill = Some(c.clone());
-                s.confirm = None;
+                acts.push(SqlServerA::Kill { id });
+                *confirm = None;
             }
             if quiet(&mut k, "Keep").clicked() {
-                s.confirm = None;
+                acts.push(SqlServerA::Disarm);
+                *confirm = None;
             }
             k.label(RichText::new(if c.whole { format!("End connection {id}?") } else { format!("Stop the statement of {id}?") }).size(TXT_SMALL).color(ALERT()));
         }
         None => {
-            let whole = k.add_enabled_ui(can_kill(s.writable, own, p, true), |ui| danger(ui, "Kill connection")).inner;
-            let query = k.add_enabled(can_kill(s.writable, own, p, false), egui::Button::new("Kill query"));
+            let whole = k.add_enabled_ui(can_kill(writable, own, p, true), |ui| danger(ui, "Kill connection")).inner;
+            let query = k.add_enabled(can_kill(writable, own, p, false), egui::Button::new("Kill query"));
             for (resp, whole_conn) in [(&whole, true), (&query, false)] {
                 if resp.clicked() {
-                    s.confirm = Some(Confirm { p: p.clone(), identity: l.identity.clone(), whole: whole_conn, at: arm_time(&k) });
-                    s.sel = Some(id);
+                    *confirm = Some(Confirm { p: p.clone(), identity: l.identity.clone(), whole: whole_conn, at: arm_time(&k) });
+                    acts.push(SqlServerA::ArmKill { id, whole: whole_conn, at: arm_time(&k) });
+                    acts.push(SqlServerA::Select(id));
                 }
             }
         }

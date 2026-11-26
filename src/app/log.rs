@@ -28,15 +28,15 @@ impl App {
                 db::LogEntry::finished(3, 12, "shop", "DELETE", "DELETE FROM `shop`.`shipments` WHERE `id` <=> ? LIMIT 1", 3, Some("Cannot delete or update a parent row: a foreign key constraint fails (`shop`.`tracking`, CONSTRAINT `fk_tracking_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipments` (`id`))")),
             ]);
         }
-        self.log.open = true;
+        self.ui.log.open = true;
     }
 
     pub(super) fn query_log(&mut self, ui: &mut egui::Ui) {
-        if !self.log.open {
+        if !self.ui.log.open {
             return;
         }
         let frame = egui::Frame::new().fill(BG()).inner_margin(egui::Margin::symmetric(12, 6));
-        if !self.log.detached {
+        if !self.ui.log.detached {
             egui::Panel::bottom("query-log").resizable(true).default_size(200.0).min_size(90.0).frame(frame).show(ui, |ui| self.log_body(ui));
             return;
         }
@@ -44,14 +44,14 @@ impl App {
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("query-log"), egui::ViewportBuilder::default().with_title("Query log").with_inner_size([960.0, 420.0]), |ui, _| {
             egui::CentralPanel::default_margins().frame(frame).show(ui, |ui| self.log_body(ui));
             if ui.input(|i| i.viewport().close_requested()) {
-                self.log.open = false;
+                self.ui.log.open = false;
             }
         });
     }
 
     pub(super) fn log_body(&mut self, ui: &mut egui::Ui) {
         let mut copied = false;
-        let (log, conns) = (&mut self.log, &self.conns);
+        let (log, conns) = (&mut self.ui.log, &self.core.conns);
         ui.horizontal(|ui| {
             caption(ui, "QUERY LOG");
             ui.add(egui::TextEdit::singleline(&mut log.filter).hint_text("filter").desired_width(200.0).font(FontId::monospace(TXT_SMALL)));

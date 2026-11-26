@@ -12,8 +12,8 @@ fn bar(ui: &UiApp) -> &crate::app::sql::bar::Bar {
 
 pub(super) fn bar_mut(ui: &mut UiApp) -> &mut crate::app::sql::bar::Bar {
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    &mut app.tabs[cur].sql.as_mut().expect("a SQL tab").bar
+    let cur = app.core.cur;
+    &mut app.core.test_mut().tabs[cur].sql.as_mut().expect("a SQL tab").bar
 }
 
 fn filter_txt(ui: &UiApp) -> String {
@@ -140,8 +140,8 @@ fn cmd_enter_applies_and_closes() {
     assert!(ui.app().t().is_some_and(query_dirty), "turning a row off did not mark the line edited");
     // The demo reads no rows, so the run shows as the page going back to the first.
     let app = ui.h.state_mut();
-    let cur = app.cur;
-    app.tabs[cur].page = 3;
+    let cur = app.core.cur;
+    app.core.test_mut().tabs[cur].page = 3;
     ui.key(egui::Modifiers::COMMAND, egui::Key::Enter);
     ui.settle();
     assert!(!bar(&ui).panel.open, "Cmd+Enter left the panel open");

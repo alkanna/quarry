@@ -1,7 +1,9 @@
 //! The column header popover: sort, alignment, width presets, data actions and writes sent to the Shell.
 
 use super::*;
-use crate::db::{COL_VALUES_CAP, ColOp, ColOut, col_op_result};
+use crate::db::{ColOp, ColOut, col_op_result};
+use quarry_core::action::GridA;
+use quarry_core::action::mongo::col_title;
 
 pub(super) const COL_MIN_W: f32 = 50.0;
 pub(super) const COL_MAX_W: f32 = 900.0;
@@ -39,11 +41,6 @@ fn with_exists(filter: Document, c: &str) -> Document {
 /// True when a segment is an array position, which $rename and aggregation paths cannot reach.
 fn indexed(c: &str) -> bool {
     c.split('.').any(|s| s.parse::<usize>().is_ok())
-}
-
-/// Names the collection the values came from, not whichever tab is current when a result arrives.
-fn col_title(agg: bool, op: ColOp, coll: &str, path: &str) -> String {
-    if agg { format!("{}: {path} in the results", op.label()) } else { format!("{}: {coll}.{path}", op.label()) }
 }
 
 /// `scope` is the query's, so the script changes the documents the table shows.
@@ -281,44 +278,30 @@ fn item(ui: &mut egui::Ui, label: &str, act: HeadAct, acts: &mut Vec<HeadAct>) {
 
 impl App {
     /// Applies one popover action for column `c` of the current table.
-    pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: Rows, fields: &[String], c: &str, act: HeadAct) {
+    pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: Rows, c: &str, act: HeadAct) {
         let key = self.col_key(agg);
         let Some(t) = self.t() else { return };
         let dialect = self.sql_dialect();
-        let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
+        let label = self.core.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
             HeadAct::AddSort if t.sql.is_some() => {
-                let t = self.tm().unwrap();
-                t.sort_txt = super::sql::bar::add_sort_key(&t.sort_txt, c, dialect);
-                t.page = 0;
-                self.reload();
+                let (tab, text) = (t.uid, super::sql::bar::add_sort_key(&t.sort_txt, c, dialect));
+                self.exec(Action::Grid(GridA::Sort { tab, text, sort: None }));
             }
             HeadAct::AddSort => {}
             HeadAct::Sort(next) => {
                 let sql = t.sql.is_some();
-                let t = self.tm().unwrap();
-                t.sort_txt = sort_text(sql.then_some(dialect), c, next);
-                // Only Mongo keeps an applied sort besides the text; ran_sort reads the text, so it comes after.
-                if !sql {
-                    t.query.sort = mongo_sort(c, next);
-                    t.ran_sort();
-                }
-                t.page = 0;
-                self.reload();
+                let (tab, text, sort) = (t.uid, sort_text(sql.then_some(dialect), c, next), mongo_sort(c, next));
+                self.exec(Action::Grid(GridA::Sort { tab, text, sort }));
             }
-            HeadAct::Col(a) => self.apply_col_acts(&key, fields, vec![a]),
+            HeadAct::Col(a) => self.exec(Action::Grid(GridA::Cols { key, agg, acts: vec![a] })),
             HeadAct::Width(wp) => {
                 let w = match wp {
                     WidthPreset::Min => Some(COL_MIN_W),
                     WidthPreset::Optimal => None,
-                    WidthPreset::Max => Some(super::table::optimal_width(ui, docs, c, &label, !self.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
+                    WidthPreset::Max => Some(super::table::optimal_width(ui, docs, c, &label, !self.core.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
                 };
-                let widths = &mut self.prefs.cols.entry(key).or_default().widths;
-                match w {
-                    Some(w) => widths.insert(c.into(), w),
-                    None => widths.remove(c),
-                };
-                self.save_prefs();
+                self.exec(Action::Grid(GridA::Widths { key, set: vec![(c.into(), w)], save: true }));
             }
             HeadAct::Data(op) => self.col_data(ui.ctx(), agg, docs, c, op),
             HeadAct::Rename(filtered) => {
@@ -339,7 +322,7 @@ impl App {
                 let code = update_script(&t.sel.coll, db::Scope { filter: with_exists(t.query.filter.clone(), c), ..t.query.scope() }, Bson::Array(vec![Bson::Document(stage)]), &note);
                 self.open_in_shell(code);
             }
-            HeadAct::Update if t.sql.is_some() => self.open_bulk_with(true, Some(c.into())),
+            HeadAct::Update if t.sql.is_some() => self.exec(Action::SqlOps(quarry_core::action::SqlOpsA::Bulk { tab: t.uid, update: true, col: Some(c.into()) })),
             HeadAct::Update => {
                 let note = format!("Replace null with the new value of {c}, then run.");
                 let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
@@ -375,18 +358,18 @@ impl App {
                 self.sql_sort_page(keys);
             }
             HeadAct::Col(a) => {
-                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    super::table::col_acts_on(s.qprefs.entry(names.clone()).or_default(), usize::MAX, &names, vec![a]);
+                if let Some(uid) = self.uid_of(self.core.cur) {
+                    super::table::col_acts_on(self.ui.qprefs.entry(uid).or_default().entry(names.clone()).or_default(), usize::MAX, &names, vec![a]);
                 }
             }
             HeadAct::Width(wp) => {
                 let w = match wp {
                     WidthPreset::Min => Some(COL_MIN_W),
                     WidthPreset::Optimal => None,
-                    WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
+                    WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.core.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
                 };
-                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    let widths = &mut s.qprefs.entry(names).or_default().widths;
+                if let Some(uid) = self.uid_of(self.core.cur) {
+                    let widths = &mut self.ui.qprefs.entry(uid).or_default().entry(names).or_default().widths;
                     match w {
                         Some(w) => widths.insert(key.into(), w),
                         None => widths.remove(key),
@@ -411,7 +394,7 @@ impl App {
         });
         let is_sql = sql.is_some();
         let noun = if is_sql { "rows" } else { "documents" };
-        if agg || !self.col_scope_query {
+        if agg || !self.core.col_scope_query {
             // As the table shows them, unsaved edits included.
             let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match (self.shown_row(docs, i, agg), is_sql) {
                 (Some(mut d), true) => d.remove(c),
@@ -431,17 +414,11 @@ impl App {
             };
         }
         if is_sql {
-            let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
-            // The query the grid shows, not bar text typed since.
-            let q = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.ran.clone()).unwrap_or_default();
-            self.ok(format!("Reading {c} from every matching row…"));
-            let src = col.map_or_else(|| c.to_string(), |x| x.src);
-            return self.worker.sql_column_values(sel.conn, db, sel.db, space, sel.coll, q, op, c.into(), src);
+            let tab = self.core.tabs[self.core.cur].uid;
+            return self.exec(Action::SqlOps(quarry_core::action::SqlOpsA::ReadColumn { tab, col: c.into(), op }));
         }
-        let Some(target) = self.target() else { return self.warn_offline() };
-        let sort = self.t().unwrap().query.sort.clone();
-        self.ok(format!("Reading {c} from every matching document…"));
-        self.worker.column_values(sel.conn, target, op, c.into(), matched, sort);
+        let tab = self.t().unwrap().uid;
+        self.exec(Action::Grid(GridA::Values { tab, col: c.into(), op }));
     }
 
     /// Copies or shows a data action's result. Groups never get here: they open `Modal::Grouped`.
@@ -453,17 +430,6 @@ impl App {
             }
             ColOut::Notice(body) => self.modal = Some(Modal::Text { title: title.into(), body: format!("{body}\n\n{scope}"), code: false }),
             ColOut::Groups(_) => {}
-        }
-    }
-
-    pub(super) fn column_values_done(&mut self, ctx: &egui::Context, conn: u64, op: ColOp, coll: String, path: String, res: db::Res<(ColOut, bool)>) {
-        let (noun, one) = if self.is_sql(conn) { ("rows", "row") } else { ("documents", "document") };
-        match res {
-            Ok((out, capped)) => {
-                let scope = if capped { format!("From the first {COL_VALUES_CAP} {noun} of the query, in its sort order.") } else { format!("From every {one} matching the query.") };
-                self.col_result(ctx, &col_title(false, op, &coll, &path), &path, out, &scope);
-            }
-            Err(e) => self.err(e),
         }
     }
 }

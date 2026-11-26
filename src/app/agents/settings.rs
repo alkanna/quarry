@@ -4,16 +4,7 @@
 use super::*;
 use crate::app::sql::create::plural;
 use crate::agents::config::{Action, ConnPolicy, Mode, PresetMode, Tri};
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(in crate::app) enum ClientKind {
-    #[default]
-    ClaudeCode,
-    ClaudeDesktop,
-    Cursor,
-    Codex,
-    Json,
-}
+pub(crate) use quarry_core::state::agents::settings::*;
 
 const CLIENTS: [(ClientKind, &str); 5] = [(ClientKind::ClaudeCode, "Claude Code"), (ClientKind::ClaudeDesktop, "Claude Desktop"), (ClientKind::Cursor, "Cursor"), (ClientKind::Codex, "Codex"), (ClientKind::Json, "JSON")];
 
@@ -87,12 +78,6 @@ pub(super) fn summary(p: Option<&ConnPolicy>) -> String {
         parts.push(format!("{} of its own", plural(p.rules.len() as u64, "rule")));
     }
     parts.join(", ")
-}
-
-/// Whether this frame brought any input. Settings widgets change only on input, so the windows that save on change
-/// copy and compare their config only then.
-pub(super) fn had_input(ctx: &egui::Context) -> bool {
-    ctx.input(|i| !i.events.is_empty() || i.pointer.any_pressed() || i.pointer.any_released())
 }
 
 /// A small tinted label painted in its own color, for engine marks and environment tags.
@@ -196,16 +181,16 @@ const AUDIT: [(u64, &str); 3] = [(10 << 20, "10 MB"), (50 << 20, "50 MB"), (200 
 
 impl App {
     pub(in crate::app) fn agents_settings(&mut self, ui: &mut egui::Ui) {
-        if let Some(id) = self.agents.page {
-            if self.conn(id).is_some() && self.agents.cfg.enabled {
+        if let Some(id) = self.core.agents.page {
+            if self.conn(id).is_some() && self.core.agents.cfg.enabled {
                 return self.agents_conn_page(ui, id);
             }
-            self.agents.page = None;
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Page(None)));
         }
-        if let Some(t) = self.agents.distrust {
+        if let Some(t) = self.core.agents.distrust {
             self.agents_tampered_banner(ui, t);
         }
-        let mut on = self.agents.cfg.enabled;
+        let mut on = self.core.agents.cfg.enabled;
         settings_section(ui, "MCP SERVER", |ui| {
             let desc = if on { "Agents connect through MCP and see only the connections you share below." } else { "Agents such as Claude Code connect through MCP and work only with the connections you share with them. Off until you turn it on." };
             setting_row(ui, "Let AI agents use Quarry", desc, |ui| {
@@ -216,7 +201,7 @@ impl App {
                 self.agents_status(ui);
             }
         });
-        if on != self.agents.cfg.enabled {
+        if on != self.core.agents.cfg.enabled {
             self.set_agents_enabled(on);
         }
         if !on {
@@ -224,8 +209,12 @@ impl App {
             return;
         }
         settings_section(ui, "CONNECT A CLIENT", |ui| {
-            segmented(ui, &mut self.agents.client, &CLIENTS);
-            let (how, text) = snippet(self.agents.client, &bridge_path(self.demo), cfg!(windows));
+            let mut client = self.core.agents.client;
+            segmented(ui, &mut client, &CLIENTS);
+            if client != self.core.agents.client {
+                self.exec(quarry_core::action::Action::Agents(AgentsA::Client(client)));
+            }
+            let (how, text) = snippet(client, &bridge_path(self.core.demo), cfg!(windows));
             ui.add(egui::Label::new(RichText::new(how).size(TXT_SMALL).color(MUTED())).wrap());
             let w = ui.available_width();
             egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
@@ -280,11 +269,11 @@ impl App {
     }
 
     fn agents_status(&mut self, ui: &mut egui::Ui) {
-        let n = self.agents.sessions.len();
-        let (dot, title, sub) = match &self.agents.link {
+        let n = self.core.agents.sessions.len();
+        let (dot, title, sub) = match &self.core.agents.link {
             LinkState::Listening | LinkState::Idle => {
                 let title = if n == 0 { "Running, no client connected".to_string() } else { format!("Running, {} connected", plural(n as u64, "client")) };
-                let sub = self.agents.sessions.iter().map(|s| format!("{}, {}", if s.client.is_empty() { "An agent" } else { &s.client }, plural(s.calls as u64, "call"))).collect::<Vec<_>>().join("; ");
+                let sub = self.core.agents.sessions.iter().map(|s| format!("{}, {}", if s.client.is_empty() { "An agent" } else { &s.client }, plural(s.calls as u64, "call"))).collect::<Vec<_>>().join("; ");
                 (SUCCESS(), title, sub)
             }
             LinkState::Starting => (FAINT(), "Starting".to_string(), String::new()),
@@ -316,7 +305,7 @@ impl App {
             });
         });
         if open {
-            self.agents.activity_open = true;
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Activity { open: true, filter: None }));
         }
     }
 
@@ -324,7 +313,7 @@ impl App {
         let mut picked = None;
         let mut page = None;
         settings_section(ui, "CONNECTIONS", |ui| {
-            if self.conns.is_empty() {
+            if self.core.conns.is_empty() {
                 ui.label(RichText::new("No saved connections yet.").size(TXT_SMALL).color(MUTED()));
             }
             ui.horizontal(|ui| {
@@ -337,10 +326,10 @@ impl App {
                     ui.allocate_ui_with_layout(egui::vec2(ACCESS_W, ui.available_height()), egui::Layout::left_to_right(egui::Align::Center), |ui| caption(ui, "AGENTS CAN"));
                 });
             });
-            for c in &self.conns {
+            for c in &self.core.conns {
                 ui.separator();
                 let id = c.meta.id;
-                let p = self.agents.cfg.conn(id);
+                let p = self.core.agents.cfg.conn(id);
                 let mut cur = p.map_or(Access::NotShared, |p| p.access);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -381,28 +370,21 @@ impl App {
         ui.label(RichText::new("Open a connection to choose what agents may do on it. New connections start Not shared.").size(TXT_SMALL).color(FAINT()));
         ui.add_space(10.0);
         if let Some((id, a)) = picked {
-            self.set_agent_access(id, a);
+            self.exec(quarry_core::action::Action::Agents(AgentsA::SetAccess { conn: id, access: a }));
         }
         if let Some(id) = page {
             self.agents_open_page(id);
         }
     }
 
-    /// Shares a connection with the defaults the first time, then only changes its access.
-    pub(super) fn set_agent_access(&mut self, id: u64, a: Access) {
-        let defaults = self.agents.cfg.defaults.clone();
-        self.agents.cfg.conns.entry(id).or_insert(defaults).access = a;
-        self.save_agents();
-    }
-
     fn agents_protection(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| (self.agents.cfg.presets.clone(), self.agents.cfg.binary_as_size));
+        let mut cfg = self.core.agents.cfg.clone();
         let mut edit = false;
         let (n_secrets, n_pii) = (crate::agents::presets::secrets().len(), crate::agents::presets::pii().len());
-        let custom = self.agents.cfg.rules.len();
-        let own: Vec<(String, usize)> = self.conns.iter().filter_map(|c| self.agents.cfg.conns.get(&c.meta.id).filter(|p| !p.rules.is_empty()).map(|p| (c.meta.name.clone(), p.rules.len()))).collect();
+        let custom = self.core.agents.cfg.rules.len();
+        let own: Vec<(String, usize)> = self.core.conns.iter().filter_map(|c| self.core.agents.cfg.conns.get(&c.meta.id).filter(|p| !p.rules.is_empty()).map(|p| (c.meta.name.clone(), p.rules.len()))).collect();
         settings_section(ui, "DATA PROTECTION", |ui| {
-            let presets = &mut self.agents.cfg.presets;
+            let presets = &mut cfg.presets;
             for (i, (title, what, n, p)) in [("Secrets", "Passwords, tokens, API and cloud keys, private keys, and passwords inside connection strings.", n_secrets, &mut presets.secrets), ("Personal data", "Names, emails, phones, addresses, birth dates, national and tax IDs, cards and bank accounts.", n_pii, &mut presets.pii)].into_iter().enumerate() {
                 if i > 0 {
                     ui.separator();
@@ -430,22 +412,22 @@ impl App {
             });
             ui.separator();
             setting_row(ui, "Binary values", "Sent as their size only, like <binary 2,048 bytes>.", |ui| {
-                named_toggle(ui, &mut self.agents.cfg.binary_as_size, "Binary values");
+                named_toggle(ui, &mut cfg.binary_as_size, "Binary values");
             });
         });
         ui.add(egui::Label::new(RichText::new("Checked on everything that leaves Quarry: rows, schema samples, plans and error messages. The tester in Edit rules shows what an agent would get.").size(TXT_SMALL).color(FAINT())).wrap());
         ui.add_space(10.0);
-        if before.is_some_and(|b| b != (self.agents.cfg.presets.clone(), self.agents.cfg.binary_as_size)) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if edit {
-            self.agents.rules = Some(RulesWin::default());
+            self.exec(quarry_core::action::Action::Agents(AgentsA::EditRules));
         }
     }
 
     fn agents_limits(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| self.agents.cfg.limits.clone());
-        let l = &mut self.agents.cfg.limits;
+        let mut cfg = self.core.agents.cfg.clone();
+        let l = &mut cfg.limits;
         settings_section(ui, "LIMITS", |ui| {
             setting_row(ui, "Rows per answer", "Longer results are cut, and the agent is told how many were left out.", |ui| {
                 pick(ui, "agent-rows", "Rows per answer", 90.0, &mut l.rows, &ROWS);
@@ -468,15 +450,15 @@ impl App {
                 }
             });
         });
-        if before.is_some_and(|b| b != self.agents.cfg.limits) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
     }
 
     fn agents_audit(&mut self, ui: &mut egui::Ui) {
-        let before = had_input(ui.ctx()).then(|| self.agents.cfg.audit.clone());
+        let mut cfg = self.core.agents.cfg.clone();
         let mut reveal = false;
-        let a = &mut self.agents.cfg.audit;
+        let a = &mut cfg.audit;
         settings_section(ui, "AUDIT LOG", |ui| {
             setting_row(ui, "Keep an audit log", "Every call, its decision and a summary of the answer, never the data itself.", |ui| {
                 named_toggle(ui, &mut a.on, "Keep an audit log");
@@ -495,8 +477,8 @@ impl App {
                 });
             });
         });
-        if before.is_some_and(|b| b != self.agents.cfg.audit) {
-            self.save_agents();
+        if cfg != self.core.agents.cfg {
+            self.exec(quarry_core::action::Action::Agents(AgentsA::Config(Box::new(cfg))));
         }
         if reveal {
             self.agents_reveal();
@@ -518,11 +500,11 @@ mod tests {
         let (_, cc) = snippet(ClientKind::ClaudeCode, win, true);
         assert_eq!(cc, r#"claude mcp add --scope user quarry -- "C:\Program Files\Quarry\quarry.exe" mcp"#);
         for kind in [ClientKind::ClaudeDesktop, ClientKind::Cursor] {
-            let v: Value = serde_json::from_str(&snippet(kind, win, true).1).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&snippet(kind, win, true).1).unwrap();
             assert_eq!(v["mcpServers"]["quarry"]["command"], win);
             assert_eq!(v["mcpServers"]["quarry"]["args"], json!(["mcp"]));
         }
-        let v: Value = serde_json::from_str(&snippet(ClientKind::Json, win, true).1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&snippet(ClientKind::Json, win, true).1).unwrap();
         assert_eq!(v["command"], win);
         let (_, toml) = snippet(ClientKind::Codex, win, true);
         assert_eq!(toml, "[mcp_servers.quarry]\ncommand = \"C:\\\\Program Files\\\\Quarry\\\\quarry.exe\"\nargs = [\"mcp\"]");

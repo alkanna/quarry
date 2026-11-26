@@ -3,6 +3,7 @@
 use super::results_bar::BarInfo;
 use super::sql::bar::{line_frame, line_ring, LINE_GAP};
 use super::*;
+use quarry_core::action::{Action, BarField, DocsA, TabA};
 
 #[derive(Clone, Copy)]
 pub(super) enum DocsAct {
@@ -20,15 +21,6 @@ pub(super) enum DocsAct {
     SetValue,
     /// SQL rows: open an UPDATE for these rows in the Query view.
     EditQuery,
-}
-
-/// Positions in `new` of the documents at `rows` in `old`, matched by _id.
-pub(super) fn follow_ids(old: &[db::Row], new: &[db::Row], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
-    let ids: HashSet<String> = rows.filter_map(|i| old.get(i)?.id().map(|v| db::compact(&v))).collect();
-    if ids.is_empty() {
-        return BTreeSet::new();
-    }
-    new.iter().enumerate().filter(|(_, d)| d.id().is_some_and(|v| ids.contains(&db::compact(&v)))).map(|(i, _)| i).collect()
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
@@ -203,7 +195,7 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() && t.view != View::Shell {
             return self.sql_query_view(ui);
         }
-        let (coll, view) = (t.sel.coll.clone(), t.view);
+        let (coll, view, uid) = (t.sel.coll.clone(), t.view, t.uid);
         let nidx = t.stats.map(|s| s.2);
         let sql = t.sql.is_some();
         // The collection's name and place are in the tab and the breadcrumb, and its size is in the results bar.
@@ -213,7 +205,7 @@ impl App {
             // A tab with no collection (a Shell script opened from the library) has only the views that need none.
             for (v, label) in if sql { &SQL_VIEWS[..] } else { &MONGO_VIEWS[..] }.iter().copied().filter(|(v, _)| !coll.is_empty() || matches!(v, View::Shell | View::Sql)) {
                 if view_tab(ui, label, view == v).clicked() {
-                    self.set_view(v);
+                    self.exec(Action::Tab(TabA::View { tab: uid, view: v }));
                 }
                 if let (View::Indexes, Some(n)) = (v, nidx) {
                     ui.add_space(-16.0);
@@ -228,14 +220,13 @@ impl App {
             if !sql && matches!(view, View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
-                    if self.prefs.table {
+                    if self.core.prefs.table {
                         self.columns_menu(ui, true);
                     }
-                    let mut table = self.prefs.table;
+                    let mut table = self.core.prefs.table;
                     segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
-                    if table != self.prefs.table {
-                        self.prefs.table = table;
-                        self.save_prefs();
+                    if table != self.core.prefs.table {
+                        self.exec(Action::Docs(DocsA::Layout { table }));
                     }
                 });
             }
@@ -264,25 +255,19 @@ impl App {
     }
 
     pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
-        // Loaded with another page size, set from another tab: its page numbers no longer line up.
-        let size = self.page_size();
-        if let Some(t) = self.tm().filter(|t| t.size != 0 && t.size != size && !t.loading) {
-            t.page = 0;
-            self.reload();
-        }
         self.snippet_strip(ui, crate::app::library::snippet_strip::Src::Bar);
         let mut run = false;
         let (mut explain, mut help) = (false, false);
         let mut code_lang = None;
         let mut demo_pick = None;
         let key = self.col_key(false);
-        let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
+        let hist = self.core.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
         let pick = self.pick_data(ui.ctx(), PickKind::Query);
         let (mut qacts, mut pick_acts) = (Vec::new(), Vec::new());
-        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
+        let (t, ac) = (&self.core.tabs[self.core.cur], &mut self.ui.ac);
         // Not asked yet (it is, right after this frame) or asked and not back.
-        let (asked, waiting, notes) = (&self.values_asked, &self.values_pending, &self.values_note);
+        let (asked, waiting, notes) = (&self.core.values_asked, &self.core.values_pending, &self.core.values_note);
         let lookup = |p: &str| {
             let k = (key.clone(), p.to_string());
             if !asked.contains(&(k.0.clone(), k.1.clone(), None)) || waiting.contains(&k) {
@@ -291,10 +276,10 @@ impl App {
                 notes.get(&k).map_or(Lookup::Done, |n| Lookup::Skipped(n))
             }
         };
-        let paths = std::mem::take(&mut t.paths);
-        let fields = std::mem::take(&mut t.field_info);
-        // A filter the Cmd+K form filled reads its braces as placeholders again once the person edits it.
-        let was_filled = t.snip.off.then(|| [t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone()]);
+        let (paths, fields) = (&t.paths, &t.field_info);
+        // The boxes are edited on copies and sent back as actions when they changed.
+        let mut txt = [t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone()];
+        let [filter_txt, sort_txt, proj_txt, limit_txt, skip_txt, hint_txt, collation_txt] = &mut txt;
         let mut typed = Typed::default();
         let shell = db::is_shell(&t.filter_txt);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
@@ -344,9 +329,9 @@ impl App {
                     ui.spacing_mut().item_spacing = LINE_GAP;
                     // As wide as its longest line, up to most of the line, so the options can follow it on the same row.
                     let hint = "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])";
-                    let longest = if t.filter_txt.is_empty() { hint } else { t.filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
+                    let longest = if filter_txt.is_empty() { hint } else { filter_txt.lines().max_by_key(|l| l.len()).unwrap_or("") };
                     let w = (text_w(ui, longest, mono.clone()) + 24.0).clamp(220.0, (left_w * 0.6).max(220.0)).min(left_w);
-                    run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, hint, w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
+                    run |= Self::query_field(ui, "QUERY", filter_txt, hint, w, FieldKind::Query, paths, fields, ac, &mut typed, &lookup);
                     // A pasted shell query carries its own sort, projection, limit and skip.
                     if shell {
                         return;
@@ -359,12 +344,12 @@ impl App {
                     // keys are written like a sort. None is a plain one-line box. An option shows as a chip while it is set
                     // or its editor has focus, which is how the "+" menu starts an empty one.
                     for (name, label, kind, text, hint) in [
-                        ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
-                        ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
-                        ("limit", "limit", None, &mut t.limit_txt, "0"),
-                        ("skip", "skip", None, &mut t.skip_txt, "0"),
-                        ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
-                        ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
+                        ("sort", "SORT", Some(FieldKind::Sort), &mut *sort_txt, "{ _id: -1 }"),
+                        ("project", "PROJECT", Some(FieldKind::Project), &mut *proj_txt, "{ name: 1 }"),
+                        ("limit", "limit", None, &mut *limit_txt, "0"),
+                        ("skip", "skip", None, &mut *skip_txt, "0"),
+                        ("hint", "HINT", Some(FieldKind::Sort), &mut *hint_txt, "{ field: 1 } or index name"),
+                        ("collation", "COLLATION", None, &mut *collation_txt, "{ locale: 'fr', strength: 2 }"),
                     ] {
                         let id = query_id(label);
                         if text.is_empty() && !ui.memory(|m| m.has_focus(id)) {
@@ -373,7 +358,7 @@ impl App {
                         run |= opt_chip(ui, name, id, text, |ui, text| {
                             let w = fit(ui, text, hint);
                             if let Some(kind) = kind {
-                                return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                                return Self::query_field(ui, label, text, hint, w, kind, paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
                             }
                             let r = crate::ui::editor::show_paired(ui, egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout)).response;
                             if r.changed() && matches!(name, "limit" | "skip") {
@@ -407,10 +392,15 @@ impl App {
             ui.add_space(8.0);
             run |= super::sql::bar::stale_note(ui);
         }
-        t.paths = paths;
-        t.field_info = fields;
-        if was_filled.is_some_and(|w| w != [t.filter_txt.as_str(), t.sort_txt.as_str(), t.proj_txt.as_str()]) {
-            t.snip.off = false;
+        let tab = t.uid;
+        let bar_acts: Vec<DocsA> = [(BarField::Filter, &t.filter_txt), (BarField::Sort, &t.sort_txt), (BarField::Project, &t.proj_txt), (BarField::Limit, &t.limit_txt), (BarField::Skip, &t.skip_txt), (BarField::Hint, &t.hint_txt), (BarField::Collation, &t.collation_txt)]
+            .into_iter()
+            .zip(txt)
+            .filter(|((_, old), new)| *old != new)
+            .map(|((field, _), text)| DocsA::Bar { tab, field, text })
+            .collect();
+        for a in bar_acts {
+            self.exec(Action::Docs(a));
         }
         // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
         // otherwise the next frame comes only with the answer.
@@ -418,33 +408,26 @@ impl App {
         if let Some(f) = &typed.field {
             sent |= self.want_values(key.clone(), f.clone(), None);
         }
-        // Typing in a string asks for the values starting with it, once typing pauses.
-        let now = std::time::Instant::now();
+        // Typing in a string asks for the values starting with it, once typing pauses (Core's tick waits it out).
         if let Some(prefix) = typed.edit {
-            let due = now + std::time::Duration::from_millis(400);
-            self.values_typed = typed.field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key.clone(), f, p));
-        }
-        if let Some((_, k, f, p)) = self.values_typed.take_if(|(due, ..)| *due <= now) {
-            sent |= self.want_values(k, f, Some(p));
-        } else if let Some((due, ..)) = &self.values_typed {
-            ui.ctx().request_repaint_after(*due - now);
+            self.exec(Action::Docs(DocsA::TypedValues { key: key.clone(), field: typed.field.clone(), prefix }));
         }
         if sent {
             ui.ctx().request_repaint();
         }
         for a in qacts {
-            let t = &mut self.tabs[self.cur];
-            match a {
-                QAct::Filter(v) => t.filter_txt = v,
-                QAct::Sort(v) => t.sort_txt = v,
-                QAct::Project(v) => t.proj_txt = v,
-            }
+            let (field, text) = match a {
+                QAct::Filter(v) => (BarField::Filter, v),
+                QAct::Sort(v) => (BarField::Sort, v),
+                QAct::Project(v) => (BarField::Project, v),
+            };
+            self.exec(Action::Docs(DocsA::History { tab, field, text }));
         }
         if let Some(b) = demo_pick {
             self.demo_open_picker(ui.ctx(), &b, "picker-docs");
         }
         if run {
-            self.run_query();
+            self.exec(Action::Docs(DocsA::Run { tab }));
         }
         if explain {
             self.explain();
@@ -468,7 +451,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Open query in Shell").clicked() {
-                    let t = &app.tabs[app.cur];
+                    let t = &app.core.tabs[app.core.cur];
                     // A pasted shell command carries its own options.
                     match super::run::find_query(t) {
                         Ok(q) => app.open_in_shell(query_script(&t.sel.coll, &t.filter_txt, &cursor_chain(&q))),
@@ -508,83 +491,54 @@ impl App {
             .on_hover_text("More actions");
             // The button shows only painted dots, so screen readers and the UI tests need a name.
             a11y(&more, egui::Role::Button, "Document actions");
-            if app.prefs.table {
+            if app.core.prefs.table {
                 app.columns_menu(ui, false);
             }
-            let mut table = app.prefs.table;
+            let mut table = app.core.prefs.table;
             segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
-            if table != app.prefs.table {
-                app.prefs.table = table;
-                app.save_prefs();
+            if table != app.core.prefs.table {
+                app.exec(Action::Docs(DocsA::Layout { table }));
             }
             if quiet(ui, "+ Insert").clicked() {
-                let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
-                if app.sel_writable() { open(app) } else { app.ask_unlock_then(open) }
+                app.exec(Action::Docs(DocsA::Insert { tab }));
             }
             let pending = app.tab_drafts();
             if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
-                if !app.sel_writable() {
-                    app.ask_unlock();
-                } else if app.prefs.confirm_save && !app.prefs.always_writable {
-                    app.modal = Some(Modal::SaveAll(pending));
-                } else {
-                    for k in &pending {
-                        app.write_draft(k);
-                    }
-                }
+                app.exec(Action::Docs(DocsA::SaveAll { tab }));
             }
         });
-        if let Some(p) = out.go {
-            self.tm().unwrap().page = p;
-            self.reload();
+        if let Some(page) = out.go {
+            self.exec(Action::Docs(DocsA::Page { tab, page }));
         }
         ui.add_space(4.0);
         self.results(ui, false);
         // Last, since opening a script may change the tab this frame was drawn for.
+        self.take_repaint(ui.ctx());
         self.pick_acts(pick_acts);
     }
 
     /// Table or JSON list of the current results, with the open document shown under its row.
     pub(super) fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
-        let cur = self.cur;
+        let cur = self.core.cur;
         let size = self.page_size();
-        let t = self.tm().unwrap();
-        // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
+        let Some(t) = self.t() else { return };
         let view = t.view;
-        let (mut all, mut raw) = (Vec::new(), Vec::new());
-        let (fields, base, range, is_raw) = if agg {
-            let (_, fields, page, _) = t.agg_source();
-            let fields = fields.to_vec();
-            let is_raw = match t.agg_store(view) {
-                Some(Store::Docs(v)) => {
-                    all = std::mem::take(v);
-                    false
-                }
-                Some(Store::Raw(v)) => {
-                    raw = std::mem::take(v);
-                    true
-                }
-                None => false,
-            };
-            let (range, base) = page_window(page, if is_raw { raw.len() } else { all.len() });
-            (fields, base, range, is_raw)
-        } else {
-            raw = std::mem::take(&mut t.docs);
-            (t.fields.clone(), t.page * size, 0..raw.len(), true)
-        };
-        // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
-        if is_raw {
-            for (i, r) in raw[range.clone()].iter_mut().enumerate() {
-                if t.selected != Some((agg, i)) && !t.expanded.contains(&(agg, i)) {
-                    r.forget();
-                }
+        // The window on screen is held for the frame, so the open document can be edited through `self`. Rows share their
+        // bytes, so holding them copies none.
+        let (all, raw, fields, base, is_raw): (Vec<Document>, Vec<db::Row>, Vec<String>, u64, bool) = if agg {
+            let (rows, fields, base) = t.agg_page();
+            match rows {
+                Rows::Docs(d) => (d.to_vec(), Vec::new(), fields.to_vec(), base, false),
+                Rows::Raw(r) => (Vec::new(), r.to_vec(), fields.to_vec(), base, true),
             }
-        }
-        let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
+        } else {
+            (Vec::new(), t.docs.clone(), t.fields.clone(), t.page * size, true)
+        };
+        let docs = if is_raw { Rows::Raw(&raw[..]) } else { Rows::Docs(&all[..]) };
         let mut after = None;
         let loading = t.loading;
-        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
+        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.core.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
         let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some() || super::run::query_dirty(t));
         if let (true, true, Some((id, ..))) = (docs.is_empty(), conn_failed, &closed) {
@@ -600,7 +554,7 @@ impl App {
                 }
                 ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED()));
                 if primary(ui, "Connect", PRIMARY()).clicked() {
-                    self.active = Some(id);
+                    self.exec(Action::Conn(ConnA::Switch { conn: id }));
                     self.connect(id);
                 }
             });
@@ -616,24 +570,15 @@ impl App {
                 if stale {
                     ui.multiply_opacity(0.45);
                 }
-                if self.prefs.table || sql {
+                if self.core.prefs.table || sql {
                     after = Some(self.doc_table(ui, agg, docs, &fields, base));
                 } else {
                     self.doc_list(ui, agg, docs);
                 }
             });
         }
-        if let Some(t) = self.tabs.get_mut(cur) {
-            match (agg, t.agg_store(view)) {
-                (false, _) => t.docs = raw,
-                (true, Some(Store::Docs(v))) => *v = all,
-                (true, Some(Store::Raw(v))) => *v = raw,
-                (true, None) => {}
-            }
-        }
-        // Only now does the tab hold its page again, and SQL cell work finds its rows there. A link followed while
-        // drawing may have moved to another tab, whose rows these indexes are not.
-        if let Some(a) = after.filter(|_| self.cur == cur) {
+        // A link followed while drawing may have moved to another tab, whose rows these indexes are not.
+        if let Some(a) = after.filter(|_| self.core.cur == cur) {
             self.sql_after(ui.ctx(), a);
         }
     }
@@ -641,62 +586,12 @@ impl App {
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
     pub(super) fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
         let m = ui.input(|i| i.modifiers);
-        if (!agg || self.t().is_some_and(|t| t.view == View::Shell)) && (m.command || m.shift) {
-            self.toggle_check(i, m.shift);
-        } else if self.prefs.open_inline {
-            // Rows open and close on their own; the last one opened takes edits and keys.
-            let t = self.tm().unwrap();
-            let key = (agg, i);
-            if t.expanded.remove(&key) || t.selected == Some(key) {
-                self.close_row(key);
-            } else {
-                t.expanded.insert(key);
-                self.select(agg, i, false);
-            }
-        } else {
-            self.select(agg, i, true);
-        }
+        let Some(tab) = self.cur_uid() else { return };
+        self.exec(Action::Docs(DocsA::Click { tab, agg, row: i, cmd: m.command, shift: m.shift }));
     }
 
-    pub(super) fn close_row(&mut self, key: (bool, usize)) {
-        let t = self.tm().unwrap();
-        t.expanded.remove(&key);
-        if t.selected == Some(key) {
-            t.selected = None;
-            self.reset_doc_state();
-        }
-    }
-
-    /// The checked rows of the grid the current view shows: Content, a Query result or the Shell's result.
     pub(super) fn checks(&self) -> &BTreeSet<usize> {
-        let t = self.t().unwrap();
-        match (t.view, t.sql.as_ref()) {
-            (View::Shell, _) => &t.shell_checked,
-            (View::Sql, Some(s)) => &s.qchecked,
-            _ => &t.checked,
-        }
-    }
-
-    pub(super) fn checks_mut(&mut self) -> (&mut BTreeSet<usize>, &mut Option<usize>) {
-        let t = self.tm().unwrap();
-        match (t.view, t.sql.as_mut()) {
-            (View::Shell, _) => (&mut t.shell_checked, &mut t.check_anchor),
-            (View::Sql, Some(s)) => (&mut s.qchecked, &mut s.qanchor),
-            _ => (&mut t.checked, &mut t.check_anchor),
-        }
-    }
-
-    pub(super) fn toggle_check(&mut self, i: usize, range: bool) {
-        let (checked, anchor) = self.checks_mut();
-        match anchor.filter(|_| range) {
-            Some(a) => checked.extend(a.min(i)..=a.max(i)),
-            None => {
-                if !checked.insert(i) {
-                    checked.remove(&i);
-                }
-            }
-        }
-        *anchor = Some(i);
+        self.core.checks()
     }
 
     /// The documents a row action applies to: every checked one when the row is checked, else that row.
@@ -711,14 +606,15 @@ impl App {
     pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: Rows) {
         let n = self.checks().len();
         // Hidden under dialogs, which would otherwise sit behind it.
-        let hidden = self.modal.is_some() || self.insert.is_some();
+        let hidden = self.modal.is_some() || self.core.insert.is_some();
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let grouped = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         // Query and Shell results are read only: no edit or delete actions.
         let results_view = self.t().is_some_and(|t| matches!(t.view, View::Sql | View::Shell));
         let (cancel, act) = selection_area(ui, n, hidden, results_view, sql, grouped);
         if cancel {
-            self.checks_mut().0.clear();
+            let tab = self.t().unwrap().uid;
+            self.exec(Action::Docs(DocsA::ClearChecks { tab }));
         } else if let Some(a) = act {
             let sel = Self::checked_docs(self.checks(), docs);
             self.docs_act(ui.ctx(), a, sel);
@@ -732,13 +628,12 @@ impl App {
         if self.t().is_some_and(|t| t.sql.is_some()) {
             return self.sql_docs_act(ctx, act, docs);
         }
-        if matches!(act, DocsAct::Duplicate | DocsAct::Delete) && self.projected() {
-            return;
-        }
-        // Asked before the dialog opens, like an inline edit, rather than refused after the user confirmed it.
-        if matches!(act, DocsAct::Duplicate | DocsAct::Delete) && !self.sel_writable() {
-            let ctx = ctx.clone();
-            return self.ask_unlock_then(move |a| a.docs_act(&ctx, act, docs));
+        let tab = self.t().unwrap().uid;
+        match act {
+            DocsAct::Duplicate => return self.exec(Action::Docs(DocsA::Duplicate { tab, docs })),
+            DocsAct::Delete => return self.exec(Action::Docs(DocsA::Delete { tab, docs })),
+            DocsAct::Filter => return self.exec(Action::Docs(DocsA::Filter { tab, docs })),
+            _ => {}
         }
         let what = if docs.len() == 1 { "1 document".to_string() } else { format!("{} documents", docs.len()) };
         let value = || if docs.len() == 1 { Bson::Document(docs[0].clone()) } else { Bson::Array(docs.iter().cloned().map(Bson::Document).collect()) };
@@ -761,24 +656,7 @@ impl App {
                 ctx.copy_text(lines.join("\n"));
                 self.ok(format!("Copied {what} as JSON lines"));
             }
-            DocsAct::Duplicate => {
-                let copies: Vec<Document> = docs.into_iter().map(|mut d| {
-                    d.remove("_id");
-                    d
-                }).collect();
-                // One copy opens the insert editor to tweak it first; many are written straight away.
-                if let [c] = copies.as_slice() {
-                    self.insert = Some(db::to_edit_json(c));
-                } else if let Some((conn, target)) = self.writable_target() {
-                    self.worker.import(conn, target, copies, None);
-                }
-            }
             DocsAct::Export => self.open_export(docs, false),
-            DocsAct::Filter => {
-                let t = self.tm().unwrap();
-                t.filter_txt = db::shell_text(&by_id());
-                self.run_query();
-            }
             DocsAct::Update => {
                 let coll = &self.t().unwrap().sel.coll;
                 let code = format!(
@@ -788,26 +666,19 @@ impl App {
                 );
                 self.open_in_shell(code);
             }
-            DocsAct::Delete => {
-                if let Some(sel) = self.t().map(|t| t.sel.clone()) {
-                    self.modal = Some(Modal::Delete(sel, docs));
-                }
-            }
-            DocsAct::SetValue | DocsAct::EditQuery => {}
+            DocsAct::Duplicate | DocsAct::Delete | DocsAct::Filter | DocsAct::SetValue | DocsAct::EditQuery => {}
         }
     }
 
+    #[cfg(test)]
     pub(super) fn select(&mut self, agg: bool, i: usize, toggle: bool) {
-        let t = self.tm().unwrap();
-        let same = t.selected == Some((agg, i));
-        t.selected = if same && toggle { None } else { Some((agg, i)) };
-        if !same || toggle {
-            self.reset_doc_state();
-        }
+        let Some(tab) = self.cur_uid() else { return };
+        self.exec(Action::Docs(DocsA::Select { tab, agg, row: i, toggle }));
     }
 
     pub(super) fn export(&mut self) {
         let Some(target) = self.target() else { return self.warn_offline() };
+        let tab = self.t().unwrap().uid;
         let file = rfd::FileDialog::new()
             .set_file_name(format!("{}.json", target.coll))
             .add_filter("JSON", &["json"])
@@ -815,9 +686,7 @@ impl App {
             .add_filter("TSV", &["tsv"])
             .save_file();
         if let Some(path) = file {
-            self.ok(format!("Exporting to {}…", path.display()));
-            let q = self.t().unwrap().query.clone();
-            self.worker.export(target, q, path);
+            self.exec(Action::Mongo(quarry_core::action::MongoA::Import(quarry_core::action::ImportA::Export { tab, path })));
         }
     }
 }

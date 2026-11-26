@@ -5,7 +5,9 @@ use super::*;
 #[test]
 fn format_lays_out_the_shell_script() {
     let Some(mut ui) = demo_ui(|a| a.load_demo()) else { return };
-    let t = ui.h.state_mut().tm().unwrap();
+    let a = ui.h.state_mut();
+    let cur = a.core.cur;
+    let t = &mut a.core.test_mut().tabs[cur];
     t.view = View::Shell;
     t.shell.code = "async function run() {\nreturn await orders.find({ status: 'paid' }).toArray();\n}".into();
     ui.h.run_steps(2);

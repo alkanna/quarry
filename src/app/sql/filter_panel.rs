@@ -4,112 +4,50 @@
 use super::filter_cells::{rule_editor, Hints};
 use crate::app::*;
 use crate::db::sql::{
-    facts::{FilterCount, FilterErr},
+    facts::FilterErr,
     filter::{self, Block, Cond, Item, Match, Tree},
-    rules::Rule,
     Col, Dialect,
 };
 use crate::ui::dnd::{drag_cancelled, drag_source_with, grip_dots, paint_spot, y_frac, zone_at, Spot, Zone};
 use crate::ui::fold;
+pub(crate) use quarry_core::state::sql::filter_panel::*;
+use quarry_core::action::sql::filter::FilterA as Act;
 
-/// The pause after the last edit before a count is asked again, as long as the Query editor's live check waits.
-const PAUSE: f64 = 0.6;
-/// Counts of single rows kept while the panel is used, so hovering back and forth asks once per row.
-const HOVER_CACHE: usize = 64;
-
-pub(in crate::app) type Counted = Result<FilterCount, FilterErr>;
-
-/// What a count slot should do this frame.
-pub(in crate::app) enum Tick {
-    Ask,
-    /// Look again after this many seconds.
-    Wait(f32),
-    Idle,
+/// Opening and closing the panel animate its fold, which lives in egui's memory.
+pub(in crate::app) trait PanelFold {
+    fn toggle(&mut self, ctx: &egui::Context);
+    fn show(&mut self, ctx: &egui::Context, at: Option<u32>);
+    fn close(&mut self, ctx: &egui::Context);
 }
 
-/// One count the panel shows: the text last asked about under which request, and the answer with the text it is for.
-#[derive(Default)]
-pub(in crate::app) struct Count {
-    pub(in crate::app) req: u64,
-    pub(in crate::app) asked: Option<String>,
-    /// The text seen last and since when, for the pause before asking.
-    seen: String,
-    since: f64,
-    pub(in crate::app) res: Option<(String, Counted)>,
-}
-
-impl Count {
-    /// Whether to ask about `text` now: once it has rested PAUSE seconds and was not asked yet.
-    pub(in crate::app) fn tick(&mut self, text: &str, now: f64) -> Tick {
-        if text != self.seen {
-            self.seen = text.to_string();
-            self.since = now;
-        }
-        if self.asked.as_deref() == Some(text) {
-            return Tick::Idle;
-        }
-        let left = PAUSE - (now - self.since);
-        if left > 0.0 { Tick::Wait(left as f32) } else { Tick::Ask }
-    }
-
-    pub(in crate::app) fn ask(&mut self, req: u64, text: &str) {
-        self.req = req;
-        self.asked = Some(text.to_string());
-    }
-
-    /// Keeps the answer to request `req` when it is this slot's latest, and says whether it was.
-    pub(in crate::app) fn answer(&mut self, req: u64, res: &Counted) -> bool {
-        match &self.asked {
-            Some(text) if req == self.req => {
-                self.res = Some((text.clone(), res.clone()));
-                true
-            }
-            _ => false,
+impl PanelFold for Panel {
+    fn toggle(&mut self, ctx: &egui::Context) {
+        self.open = !self.open;
+        fold::start(ctx, fold_id(), self.open);
+        // The rows may have changed while it was closed, so counts are asked again.
+        if self.open {
+            self.forget_counts();
         }
     }
 
-    /// The answer for `text`, never one for an older text.
-    fn shown(&self, text: &str) -> Option<&Counted> {
-        self.res.as_ref().filter(|(t, _)| t == text).map(|(_, r)| r)
+    /// Opens the panel, if it is not, on node `at`.
+    fn show(&mut self, ctx: &egui::Context, at: Option<u32>) {
+        if !self.open {
+            self.toggle(ctx);
+        }
+        self.sel = at;
+    }
+
+    fn close(&mut self, ctx: &egui::Context) {
+        if self.open {
+            self.toggle(ctx);
+        }
     }
 }
 
-#[derive(Default)]
-pub(in crate::app) struct Panel {
-    pub(in crate::app) open: bool,
-    /// The selected row or group.
-    pub(in crate::app) sel: Option<u32>,
-    /// A row just added, whose column picker opens on its first frame.
-    pub(in crate::app) pick: Option<u32>,
-    /// A row whose operator menu opens on its first frame; only the demo of the menu sets it.
-    pub(in crate::app) ops: Option<u32>,
-    /// How many rows the whole WHERE matches.
-    pub(in crate::app) count: Count,
-    /// The row under the pointer, whose own count shows at its end.
-    pub(in crate::app) hover: Option<u32>,
-    pub(in crate::app) hover_count: Count,
-    pub(in crate::app) hover_cache: HashMap<String, Counted>,
-    /// Where the counts are from (connection, database, schema and table), since a tab can move.
-    pub(in crate::app) place: (u64, String, String, String),
-}
-
-impl Panel {
-    /// Keeps the answer to request `req` in the slot that asked. False when neither did.
-    pub(in crate::app) fn counted(&mut self, req: u64, res: &Counted) -> bool {
-        if self.count.answer(req, res) {
-            return true;
-        }
-        match self.hover_count.asked.clone().filter(|_| self.hover_count.req == req) {
-            Some(text) => {
-                if self.hover_cache.len() >= HOVER_CACHE {
-                    self.hover_cache.clear();
-                }
-                self.hover_cache.insert(text, res.clone());
-                true
-            }
-            None => false,
-        }
-    }
+/// Starts the fold of the panel, for an open the core already made.
+pub(in crate::app) fn start_fold(ctx: &egui::Context, open: bool) {
+    fold::start(ctx, fold_id(), open);
 }
 
 /// A count with its thousands separated.
@@ -130,36 +68,6 @@ fn fold_id() -> egui::Id {
     egui::Id::unique("sql-filter-panel")
 }
 
-impl Panel {
-    pub(in crate::app) fn toggle(&mut self, ctx: &egui::Context) {
-        self.open = !self.open;
-        fold::start(ctx, fold_id(), self.open);
-        // The rows may have changed while it was closed, so counts are asked again.
-        if self.open {
-            self.forget_counts();
-        }
-    }
-
-    pub(in crate::app) fn forget_counts(&mut self) {
-        (self.count, self.hover_count) = (Count::default(), Count::default());
-        self.hover_cache.clear();
-    }
-
-    /// Opens the panel, if it is not, on node `at`.
-    pub(in crate::app) fn show(&mut self, ctx: &egui::Context, at: Option<u32>) {
-        if !self.open {
-            self.toggle(ctx);
-        }
-        self.sel = at;
-    }
-
-    fn close(&mut self, ctx: &egui::Context) {
-        if self.open {
-            self.toggle(ctx);
-        }
-    }
-}
-
 /// What the panel asks of the bar after a frame.
 #[derive(Default)]
 pub(super) struct Out {
@@ -170,6 +78,8 @@ pub(super) struct Out {
     pub(super) save: bool,
     /// Edit as SQL was clicked.
     pub(super) as_sql: bool,
+    /// Structural edits of the tree, made as actions once the frame is drawn.
+    pub(super) acts: Vec<Act>,
     /// Where a dragged node may land, gathered while the rows draw.
     targets: Vec<Target>,
 }
@@ -204,49 +114,11 @@ enum Place {
     End,
 }
 
-enum Act {
-    Remove(u32),
-    Toggle(u32),
-    /// A row, or a group holding one, added at the end of a group (0 the root).
-    Add(u32, bool),
-    /// A row added right after this one.
-    After(u32),
-    Duplicate(u32),
-    Negate(u32),
-    Wrap(u32),
-    Ungroup(u32),
-    MoveBy(u32, isize),
-    /// A row taken out of its group to just after it.
-    Unwrap(u32),
-    /// A dragged node dropped into group `parent` before the child at `index`.
-    Move(u32, u32, usize),
-}
-
-/// The word a new group takes inside `parent`: the other one than its parent's, so wrapping says something.
-fn other_word(tree: &Tree, parent: u32) -> Match {
-    let outer = if parent == 0 { Some(tree.root.mode) } else { tree.find(parent).and_then(|n| if let Item::Group(g) = &n.item { Some(g.mode) } else { None }) };
-    if outer == Some(Match::All) { Match::Any } else { Match::All }
-}
 
 const MODES: [(Match, &str); 3] = [(Match::All, "all"), (Match::Any, "any"), (Match::None, "none")];
 /// The SQL pane's width beside the conditions; under `WIDE` it goes below them.
 const PANE: f32 = 300.0;
 const WIDE: f32 = 760.0;
-
-/// A new row on the table's first column, or a group of the other word than `parent` holding one, at the end of `parent`
-/// (0 the root), selected with its column picker open.
-pub(super) fn add(tree: &mut Tree, p: &mut Panel, parent: u32, group: bool, cols: &[Col], d: Dialect) {
-    let Some(c) = cols.first() else { return };
-    let row = Item::Cond(Cond { rule: Rule::new(&c.name, c.kind, d), on: true });
-    let id = if group {
-        let mode = other_word(tree, parent);
-        tree.push(parent, Item::Group(Block { mode, kids: vec![] })).and_then(|g| tree.push(g, row))
-    } else {
-        tree.push(parent, row)
-    };
-    p.sel = id;
-    p.pick = id;
-}
 
 /// Draws the panel while it is open or folding, and handles its keys. The tree is edited in place; structural edits are
 /// queued while it is drawn and made after.
@@ -301,9 +173,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
                 ui.spacing_mut().item_spacing.x = 8.0;
                 out.save |= quiet(ui, RichText::new("Save as filter…").size(TXT_SMALL).color(PRIMARY())).on_hover_text("Save the WHERE to the script library").clicked();
                 if quiet(ui, RichText::new("Clear").size(TXT_SMALL).color(MUTED())).on_hover_text("Remove every condition").clicked() {
-                    tree.root.kids.clear();
-                    (p.sel, p.pick) = (None, None);
-                    out.changed = true;
+                    acts.push(Act::Clear);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     apply |= primary(ui, "Apply", PRIMARY()).on_hover_text("Run the filter and close the panel (⌘↵)").clicked();
@@ -334,51 +204,7 @@ pub(super) fn panel(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cols: &[C
             row_keys(ui, tree, p, &mut acts);
         }
     }
-    for a in acts {
-        match a {
-            Act::Remove(id) => {
-                // The selection moves on to the next row, so Cmd+Backspace can be pressed again.
-                let order = tree.rows_in_order();
-                let next = order.iter().position(|x| *x == id).and_then(|i| order.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| order.get(j)))).copied();
-                tree.remove(id);
-                if p.sel == Some(id) {
-                    p.sel = next.filter(|n| tree.find(*n).is_some());
-                }
-            }
-            Act::Toggle(id) => {
-                tree.toggle(id);
-            }
-            Act::Add(parent, group) => add(tree, p, parent, group, cols, d),
-            Act::After(id) => {
-                if let Some(c) = cols.first() {
-                    let new = tree.insert_after(id, Item::Cond(Cond { rule: Rule::new(&c.name, c.kind, d), on: true }));
-                    (p.sel, p.pick) = (new, new);
-                }
-            }
-            Act::Duplicate(id) => p.sel = tree.duplicate(id).or(p.sel),
-            Act::Negate(id) => {
-                tree.negate(id, d);
-            }
-            Act::Wrap(id) => {
-                let mode = other_word(tree, tree.parent_of(id).unwrap_or(0));
-                p.sel = tree.wrap(id, mode).or(p.sel);
-            }
-            Act::Ungroup(id) => {
-                tree.ungroup(id);
-            }
-            Act::MoveBy(id, by) => {
-                tree.move_by(id, by);
-            }
-            Act::Unwrap(id) => {
-                tree.unwrap(id);
-            }
-            Act::Move(id, parent, index) => {
-                tree.move_to(id, parent, index);
-                p.sel = Some(id);
-            }
-        }
-        out.changed = true;
-    }
+    out.acts = acts;
     if apply {
         out.run = true;
         p.close(ui.ctx());
@@ -395,9 +221,11 @@ fn conditions(ui: &mut egui::Ui, tree: &mut Tree, p: &mut Panel, cx: &Cx, acts: 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new("Match").size(TXT_SMALL).color(MUTED()));
-        let before = tree.root.mode;
-        segmented(ui, &mut tree.root.mode, &MODES);
-        out.changed |= tree.root.mode != before;
+        let mut mode = tree.root.mode;
+        segmented(ui, &mut mode, &MODES);
+        if mode != tree.root.mode {
+            acts.push(Act::Mode(0, mode));
+        }
         ui.label(RichText::new("of these conditions").size(TXT_SMALL).color(MUTED()));
     });
     ui.add_space(6.0);
@@ -619,9 +447,11 @@ fn card(ui: &mut egui::Ui, id: u32, g: &mut Block, at: Target, p: &mut Panel, cx
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let before = g.mode;
-            segmented(ui, &mut g.mode, &MODES);
-            out.changed |= g.mode != before;
+            let mut mode = g.mode;
+            segmented(ui, &mut mode, &MODES);
+            if mode != g.mode {
+                acts.push(Act::Mode(id, mode));
+            }
             ui.label(RichText::new("of these").size(TXT_SMALL).color(MUTED()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 dots_menu(ui, |ui| {

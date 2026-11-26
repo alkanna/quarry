@@ -167,8 +167,8 @@ fn editor_opens_again_after_esc() {
         let t = open_unlocked(fx, ui);
         ui.open_cell("name", 1);
         ui.h.key_press(egui::Key::Escape);
-        ui.wait("the editor to close", |a| a.sql_cell.is_none());
-        assert!(ui.app().drafts.is_empty(), "Esc staged something");
+        ui.wait("the editor to close", |a| a.core.sql_cell.is_none());
+        assert!(ui.app().core.drafts.is_empty(), "Esc staged something");
         ui.edit_cell("name", 1, "zeta");
         ui.save();
         fx.expect(ui, &t, "1:zeta:10,2:beta:20,3:gamma:30");
@@ -183,7 +183,7 @@ fn edits_on_several_rows_save_together() {
         ui.edit_cell("qty", 2, "99");
         ui.edit_cell("name", 3, "eta");
         ui.edit_cell("qty", 3, "7");
-        assert_eq!(ui.app().drafts.len(), 3, "three rows are staged");
+        assert_eq!(ui.app().core.drafts.len(), 3, "three rows are staged");
         fx.expect_unchanged(ui, &t, ORIGINAL);
         ui.save();
         fx.expect(ui, &t, "1:zeta:10,2:beta:99,3:eta:7");
@@ -291,11 +291,11 @@ fn switching_the_view_stages_the_edit_and_closes_the_editor() {
         ui.type_text("zeta");
         ui.click("Structure");
         ui.wait("the view to change", |a| a.t().is_some_and(|t| t.view == View::Structure));
-        assert!(ui.app().sql_cell.is_none(), "the editor stayed open");
-        assert!(ui.app().drafts.len() == 1 && ui.app().drafts.values().all(|d| d.coll == t), "the edit was not staged for its table");
+        assert!(ui.app().core.sql_cell.is_none(), "the editor stayed open");
+        assert!(ui.app().core.drafts.len() == 1 && ui.app().core.drafts.values().all(|d| d.coll == t), "the edit was not staged for its table");
         ui.click("Content");
         ui.show("name row 1");
-        assert!(ui.app().sql_cell.is_none(), "the editor came back");
+        assert!(ui.app().core.sql_cell.is_none(), "the editor came back");
         fx.expect_unchanged(ui, &t, ORIGINAL);
     });
 }
@@ -311,8 +311,8 @@ fn switching_the_table_stages_the_edit_for_the_first_table() {
         ui.type_text("zeta");
         ui.click(&second);
         ui.wait("the other table", |a| a.t().is_some_and(|t| t.sel.coll == second));
-        assert!(ui.app().sql_cell.is_none(), "the editor stayed open");
-        assert!(ui.app().drafts.len() == 1 && ui.app().drafts.values().all(|d| d.coll == first), "the edit was not staged for the first table");
+        assert!(ui.app().core.sql_cell.is_none(), "the editor stayed open");
+        assert!(ui.app().core.drafts.len() == 1 && ui.app().core.drafts.values().all(|d| d.coll == first), "the edit was not staged for the first table");
         fx.expect_unchanged(ui, &first, ORIGINAL);
         fx.expect_unchanged(ui, &second, ORIGINAL);
     });
@@ -329,7 +329,7 @@ fn a_locked_connection_asks_before_any_write() {
             ui.click("Stay read-only");
             assert!(ui.app().modal.is_none(), "{what}: the dialog stayed");
             assert!(!ui.app().conn(CONN).unwrap().writable, "{what}: the connection was unlocked");
-            assert!(ui.app().sql_cell.is_none() && ui.app().drafts.is_empty(), "{what}: something was opened or staged");
+            assert!(ui.app().core.sql_cell.is_none() && ui.app().core.drafts.is_empty(), "{what}: something was opened or staged");
             fx.expect_unchanged(ui, &t, ORIGINAL);
         };
         ui.double_click_cell("name", 1);
@@ -347,7 +347,7 @@ fn apply_in_editor(ui: &mut UiApp, text: &str) {
     ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     ui.type_text(text);
     ui.click("Apply");
-    ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+    ui.wait("the edit to be staged", |a| a.core.sql_cell.is_none() && !a.core.drafts.is_empty());
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn expand_button_opens_the_dialog_and_applies() {
         let t = open_unlocked(fx, ui);
         ui.open_cell("name", 1);
         ui.click("Open in editor");
-        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big) && a.window_open());
+        ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big) && a.window_open());
         apply_in_editor(ui, "a longer name");
         ui.save();
         fx.expect(ui, &t, "1:a longer name:10,2:beta:20,3:gamma:30");
@@ -378,10 +378,10 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         }
         ui.open_cell("doc", 1);
         ui.click("Open in editor");
-        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+        ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
         // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection. An edit clears the check too.
         let put = |ui: &mut UiApp, s: &str| {
-            let e = ui.h.state_mut().sql_cell.as_mut().unwrap();
+            let e = ui.h.state_mut().core.test_mut().sql_cell.as_mut().unwrap();
             (e.text, e.json_err) = (s.into(), None);
         };
         put(ui, "{\"a\": ");
@@ -389,12 +389,12 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         assert!(ui.h.query_by_label_contains("A value is missing").is_some(), "no error while the JSON is incomplete");
         ui.click("Apply");
         ui.h.run_steps(4);
-        assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.big) && ui.app().drafts.is_empty(), "bad JSON was applied");
+        assert!(ui.app().core.sql_cell.as_ref().is_some_and(|e| e.big) && ui.app().core.drafts.is_empty(), "bad JSON was applied");
         put(ui, "{\"a\": 1}");
         ui.h.run_steps(2);
         assert!(ui.h.query_by_label_contains("A value is missing").is_none(), "the error stayed after the JSON was fixed");
         ui.click("Apply");
-        ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+        ui.wait("the edit to be staged", |a| a.core.sql_cell.is_none() && !a.core.drafts.is_empty());
         ui.save();
         let t0 = std::time::Instant::now();
         while !fx.one(&format!("SELECT doc FROM {q} WHERE id = 1")).contains("\"a\"") {
@@ -410,11 +410,11 @@ fn shift_enter_opens_the_dialog_and_esc_cancels() {
         let t = open_unlocked(fx, ui);
         ui.open_cell("name", 1);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
-        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
-        assert!(ui.app().drafts.is_empty(), "Shift+Enter staged the inline text");
+        ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
+        assert!(ui.app().core.drafts.is_empty(), "Shift+Enter staged the inline text");
         ui.click("Cancel");
-        ui.wait("the dialog to close", |a| a.sql_cell.is_none());
-        assert!(ui.app().drafts.is_empty(), "Cancel staged something");
+        ui.wait("the dialog to close", |a| a.core.sql_cell.is_none());
+        assert!(ui.app().core.drafts.is_empty(), "Cancel staged something");
         fx.expect_unchanged(ui, &t, ORIGINAL);
     });
 }
@@ -428,7 +428,7 @@ fn a_value_with_a_line_break_opens_the_dialog_directly() {
         fx.open(ui, &t);
         ui.unlock();
         ui.open_cell("name", 1);
-        let e = ui.app().sql_cell.as_ref().unwrap();
+        let e = ui.app().core.sql_cell.as_ref().unwrap();
         assert!(e.big, "the inline editor opened");
         assert_eq!(e.text, "one\ntwo");
     });
@@ -440,9 +440,9 @@ fn set_null_in_the_dialog_writes_null() {
         let t = open_unlocked(fx, ui);
         ui.open_cell("name", 2);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
-        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+        ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
         ui.click("Set NULL");
-        ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+        ui.wait("the edit to be staged", |a| a.core.sql_cell.is_none() && !a.core.drafts.is_empty());
         ui.save();
         let q = fx.qualified(&t);
         let t0 = std::time::Instant::now();
@@ -457,14 +457,14 @@ fn set_null_in_the_dialog_writes_null() {
 fn the_side_panel_follows_the_double_clicked_cell() {
     every_engine("the side panel follows the cell", |fx, ui| {
         let t = open_unlocked(fx, ui);
-        ui.h.state_mut().prefs.value_panel = true;
+        ui.h.state_mut().core.test_mut().prefs.value_panel = true;
         ui.open_cell("name", 1);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
         ui.wait("the panel", |a| a.value_in_panel());
         assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");
         ui.double_click_cell("name", 3);
-        ui.wait("the panel to load row 3", |a| a.value_in_panel() && a.sql_cell.as_ref().is_some_and(|e| e.text == "gamma"));
-        ui.h.state_mut().sql_cell.as_mut().unwrap().focus = true;
+        ui.wait("the panel to load row 3", |a| a.value_in_panel() && a.core.sql_cell.as_ref().is_some_and(|e| e.text == "gamma"));
+        ui.h.state_mut().core.test_mut().sql_cell.as_mut().unwrap().focus = true;
         ui.settle();
         apply_in_editor(ui, "omega");
         ui.save();
@@ -476,7 +476,7 @@ fn the_side_panel_follows_the_double_clicked_cell() {
 fn the_side_panel_keeps_text_not_applied_yet() {
     every_engine("the side panel keeps unapplied text", |fx, ui| {
         let t = open_unlocked(fx, ui);
-        ui.h.state_mut().prefs.value_panel = true;
+        ui.h.state_mut().core.test_mut().prefs.value_panel = true;
         ui.open_cell("name", 1);
         ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
         ui.wait("the panel", |a| a.value_in_panel());
@@ -484,7 +484,7 @@ fn the_side_panel_keeps_text_not_applied_yet() {
         ui.type_text("changed");
         ui.double_click_cell("name", 3);
         ui.settle();
-        assert_eq!(ui.app().sql_cell.as_ref().map(|e| e.text.as_str()), Some("changed"), "the panel lost its text");
+        assert_eq!(ui.app().core.sql_cell.as_ref().map(|e| e.text.as_str()), Some("changed"), "the panel lost its text");
         fx.expect_unchanged(ui, &t, ORIGINAL);
     });
 }

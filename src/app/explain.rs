@@ -1,6 +1,7 @@
 //! The explain dialog: a readable summary of how the server ran a query, with the raw output.
 
 use super::*;
+use quarry_core::action::MongoA;
 
 impl App {
     pub(super) fn explain_dialog(&mut self, ui: &mut egui::Ui, summary: &mut db::ExplainSummary, raw: &str, show_raw: &mut bool, keep: &mut bool) {
@@ -71,21 +72,7 @@ impl App {
             let text = s.ran.select_sql(self.dialect_of(t.sel.conn), t.sel.space(), &t.sel.coll, &s.pk, None);
             return self.sql_explain(text);
         }
-        let what = match t.view {
-            View::Documents if !db::is_shell(&t.filter_txt) => Ok(db::ExplainOf::Find(Box::new(t.query.clone()))),
-            View::Aggregate if !db::is_shell(&t.agg_txt) => db::parse_pipeline(&t.agg_txt).and_then(|p| if db::has_write_stage(&p) { Err("Explain would run the write stage.".into()) } else { Ok(db::ExplainOf::Aggregate(p)) }),
-            View::Documents | View::Aggregate => Err("Run the pasted query first, then explain it.".into()),
-            _ => return,
-        };
-        match (what, self.target()) {
-            _ if self.demo => self.ok("Offline demo: nothing to explain."),
-            (Err(e), _) => self.err(e),
-            (Ok(w), Some(target)) => {
-                self.req += 1;
-                self.explain_req = self.req;
-                self.worker.explain(self.req, target, w, self.page_size());
-            }
-            _ => self.warn_offline(),
-        }
+        let tab = t.uid;
+        self.exec(Action::Mongo(MongoA::Explain { tab }));
     }
 }

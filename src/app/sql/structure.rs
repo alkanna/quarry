@@ -3,57 +3,16 @@
 //! indexes are edited here through staged changes (`sql_alter.rs`); the other three views stay read-only.
 
 use crate::app::*;
+use quarry_core::action::{Action, StructA};
 use crate::ui::dnd;
 use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
 use db::sql::Maint;
 use db::sql::structure::{CheckConstraint, Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
+pub(crate) use quarry_core::state::sql::structure::*;
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
-
-/// What the four views keep per tab.
-#[derive(Default)]
-pub(in crate::app) struct StructState {
-    pub(in crate::app) load: Load,
-    pub(in crate::app) data: Option<Structure>,
-    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers, checks.
-    pub(in crate::app) sel: [Option<usize>; 6],
-    /// Column and index changes waiting to become one ALTER TABLE.
-    pub(in crate::app) staged: Vec<Change>,
-    /// The statement and warnings of `staged`, kept between frames.
-    pub(in crate::app) bar: Option<crate::app::sql::alter::PlanMemo>,
-    /// The ALTER or trigger statement is running.
-    pub(in crate::app) applying: bool,
-    /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
-    pub(in crate::app) trig: HashMap<String, db::sql::ddl::TrigDef>,
-    /// The editor shows the new trigger instead of the selected one.
-    pub(in crate::app) trig_new: bool,
-    /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
-    pub(in crate::app) trig_made: Option<String>,
-    /// The draft key of a trigger edit on its way, dropped once the server took it: the draft is the live trigger then,
-    /// and left behind it would show an Undo or someone else's later change as a pending edit of ours.
-    pub(in crate::app) trig_saving: Option<String>,
-    /// What the trigger editor shows for the draft, kept between frames.
-    pub(in crate::app) trig_memo: Option<sql::trig::TrigMemo>,
-}
-
-#[derive(Default)]
-pub(in crate::app) enum Load {
-    #[default]
-    Idle,
-    Loading,
-    Failed(String),
-}
-
-impl StructState {
-    pub(in crate::app) fn finish(&mut self, res: db::Res<Structure>) {
-        match res {
-            Ok(s) => (self.data, self.load) = (Some(s), Load::Idle),
-            Err(e) => self.load = Load::Failed(e),
-        }
-    }
-}
 
 /// What a frame of drawing asks the app to do afterwards.
 pub(in crate::app) enum Act {
@@ -74,6 +33,11 @@ pub(in crate::app) enum Act {
     DropRelation(usize),
     NewTrigger,
     DropTrigger(String),
+    /// Saves the draft of this trigger, or of the new one when empty.
+    SaveTrigger(String),
+    RevertTrigger(String),
+    /// The trigger editor changed the draft of this trigger.
+    TrigDraft(String, db::sql::ddl::TrigDef),
     NewIndex,
     EditIndex(usize),
     DropIndex(usize),
@@ -87,41 +51,33 @@ pub(in crate::app) enum Act {
 }
 
 impl App {
-    /// Asks for the current tab's structure. The answer is matched back by `idx_req`.
     fn request_structure(&mut self) {
-        let i = self.cur;
-        let Some((db, space)) = self.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
-        self.req += 1;
-        let req = self.req;
-        let t = &mut self.tabs[i];
-        t.idx_req = req;
-        if let Some(s) = t.sql.as_mut() {
-            s.st.load = Load::Loading;
-        }
-        self.worker.sql_structure(req, db, space, t.sel.coll.clone());
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.exec(Action::Structure(StructA::Load { tab }));
     }
 
     /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
     /// they are wanted and kept until a change to it clears it.
     pub(in crate::app) fn sql_fks(&mut self) -> Vec<db::sql::structure::ForeignKey> {
-        let Some(st) = self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()).map(|s| &s.st) else { return Vec::new() };
-        if st.data.is_none() && matches!(st.load, Load::Idle) && !self.demo {
+        let Some(st) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()).map(|s| &s.st) else { return Vec::new() };
+        if st.data.is_none() && matches!(st.load, Load::Idle) && !self.core.demo {
             self.request_structure();
             return Vec::new();
         }
-        self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()).and_then(|s| s.st.data.as_ref()).map(|d| d.foreign_keys.clone()).unwrap_or_default()
+        self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()).and_then(|s| s.st.data.as_ref()).map(|d| d.foreign_keys.clone()).unwrap_or_default()
     }
 
-    /// The loaded structure, taken out of the tab while the view draws it (put back with `keep`).
+    /// The loaded structure, copied for the frame (it is small) with the selected row of each grid, which the app keeps.
     /// Draws the wait or the error and returns None until there is data.
     fn take_structure(&mut self, ui: &mut egui::Ui) -> Option<(Structure, [Option<usize>; 6])> {
-        let st = &self.tabs[self.cur].sql.as_ref()?.st;
+        let tab = self.core.tabs[self.core.cur].uid;
+        let st = &self.core.tabs[self.core.cur].sql.as_ref()?.st;
         if st.data.is_none() && matches!(st.load, Load::Idle) {
             self.request_structure();
         }
-        let st = &mut self.tabs[self.cur].sql.as_mut()?.st;
-        match (st.data.take(), &st.load) {
-            (Some(d), _) => Some((d, st.sel)),
+        let st = &self.core.tabs[self.core.cur].sql.as_ref()?.st;
+        match (&st.data, &st.load) {
+            (Some(d), _) => Some((d.clone(), self.ui.struct_sel.get(&tab).copied().unwrap_or_default())),
             (None, Load::Failed(e)) => {
                 let e = e.clone();
                 ui.add_space(24.0);
@@ -139,91 +95,116 @@ impl App {
         }
     }
 
-    /// The staged changes and their kept plan, moved out of the tab for the frame so the draw reads them without a
-    /// copy. `hold_staged` puts them back before the frame's actions run.
+    /// The staged changes, copied for the frame, and their kept plan, which the app holds. `hold_staged` puts the plan back.
     fn take_staged(&mut self) -> (Vec<Change>, Option<crate::app::sql::alter::PlanMemo>, bool) {
-        self.tabs[self.cur].sql.as_mut().map_or((Vec::new(), None, false), |s| (std::mem::take(&mut s.st.staged), s.st.bar.take(), s.st.applying))
+        let tab = self.core.tabs[self.core.cur].uid;
+        let memo = self.ui.plan_memo.remove(&tab);
+        let (staged, applying) = self.core.tabs[self.core.cur].sql.as_ref().map_or((Vec::new(), false), |s| (s.st.staged.clone(), s.st.applying));
+        (staged, memo, applying)
     }
 
-    fn hold_staged(&mut self, staged: Vec<Change>, memo: Option<crate::app::sql::alter::PlanMemo>) {
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-            (s.st.staged, s.st.bar) = (staged, memo);
+    fn hold_staged(&mut self, _staged: Vec<Change>, memo: Option<crate::app::sql::alter::PlanMemo>) {
+        if let Some(m) = memo {
+            let tab = self.core.tabs[self.core.cur].uid;
+            self.ui.plan_memo.insert(tab, m);
         }
     }
 
-    fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 6], acts: Vec<Act>) {
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-            (s.st.data, s.st.sel) = (Some(data), sel);
-        }
+    fn keep(&mut self, ctx: &egui::Context, _data: Structure, sel: [Option<usize>; 6], acts: Vec<Act>) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        self.ui.struct_sel.insert(tab, sel);
         for a in acts {
             self.act(ctx, a);
         }
     }
 
     fn act(&mut self, ctx: &egui::Context, a: Act) {
+        let tab = self.core.tabs[self.core.cur].uid;
+        // Columns are named in actions, by their place in the structure the grid drew.
+        let cols: Vec<String> = self.structure().map(|s| s.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
+        let name = |cols: &[String], i: usize| cols.get(i).cloned();
+        let st = |f: fn(&Structure) -> Vec<String>, i: usize| self.structure().map(f).and_then(|v| v.get(i).cloned());
+        let fk = |s: &Structure| s.foreign_keys.iter().map(|k| k.name.clone()).collect();
+        let ix = |s: &Structure| s.indexes.iter().map(|k| k.name.clone()).collect();
+        let ck = |s: &Structure| s.checks.iter().map(|k| k.name.clone()).collect();
         match a {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
-                let base = self.tabs[self.cur].sel.clone();
+                let base = self.core.tabs[self.core.cur].sel.clone();
                 // A link: without a per-tab Back, the table it was followed from stays in its tab.
-                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::Link);
+                let sel = sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table);
+                self.exec(Action::Tab(quarry_core::action::TabA::Open { sel, how: Open::Link }));
             }
-            Act::Refresh => {
-                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-                    s.st.load = Load::Idle;
-                }
-                self.request_structure();
-            }
-            Act::Maintain(what) => self.sql_maintain(what),
+            Act::Refresh => self.exec(Action::Structure(StructA::Refresh { tab })),
+            Act::Maintain(what) => self.exec(Action::Structure(StructA::Maintain { tab, what })),
             Act::Truncate => {
-                let sel = self.tabs[self.cur].sel.clone();
-                self.sql_drop_ask(sel.conn, sel.db, sel.coll, super::create::DropKind::Truncate);
+                let sel = self.core.tabs[self.core.cur].sel.clone();
+                self.exec(Action::Ddl(quarry_core::action::DdlA::Drop { conn: sel.conn, db: sel.db, name: sel.coll, kind: super::create::DropKind::Truncate }));
             }
-            Act::NewColumn => self.open_col_form(None),
-            Act::EditColumn(i) => self.open_col_form(Some(i)),
-            Act::DuplicateColumn(i) => self.duplicate_column(i),
-            Act::DropColumn(i) => self.stage_drop_column(i),
-            Act::MoveColumnTo(i, to) => self.stage_move_column_to(i, to),
-            Act::NewRelation => self.open_fk_form(None),
-            Act::EditRelation(i) => self.open_fk_form(Some(i)),
-            Act::DropRelation(i) => self.stage_drop_fk(i),
-            Act::NewTrigger => self.trig_new(),
-            Act::DropTrigger(n) => self.trig_ask_drop(n),
-            Act::NewIndex => self.open_idx_form(None),
-            Act::EditIndex(i) => self.open_idx_form(Some(i)),
-            Act::DropIndex(i) => self.stage_drop_index(i),
-            Act::NewCheck => self.open_check_form(None),
-            Act::EditCheck(i) => self.open_check_form(Some(i)),
-            Act::DropCheck(i) => self.stage_drop_check(i),
-            Act::EditTable => self.open_table_opts(),
-            Act::Unstage(i) => self.unstage(i),
-            Act::Discard => self.discard_staged(),
-            Act::Apply => self.request_alter_apply(),
+            Act::NewColumn => self.exec(Action::Structure(StructA::EditColumn { tab, col: None })),
+            Act::EditColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::EditColumn { tab, col: Some(col) }));
+                }
+            }
+            Act::DuplicateColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::DuplicateColumn { tab, col }));
+                }
+            }
+            Act::DropColumn(i) => {
+                if let Some(col) = name(&cols, i) {
+                    self.exec(Action::Structure(StructA::DropColumn { tab, col }));
+                }
+            }
+            Act::MoveColumnTo(i, to) => {
+                if let (Some(col), Some(to)) = (name(&cols, i), name(&cols, to)) {
+                    self.exec(Action::Structure(StructA::MoveColumn { tab, col, to }));
+                }
+            }
+            Act::NewRelation => self.exec(Action::Structure(StructA::EditFk { tab, fk: None })),
+            Act::EditRelation(i) => {
+                if let Some(fk) = st(fk, i) {
+                    self.exec(Action::Structure(StructA::EditFk { tab, fk: Some(fk) }));
+                }
+            }
+            Act::DropRelation(i) => {
+                if let Some(fk) = st(fk, i) {
+                    self.exec(Action::Structure(StructA::DropFk { tab, fk }));
+                }
+            }
+            Act::NewTrigger => self.exec(Action::Structure(StructA::TrigNew { tab })),
+            Act::DropTrigger(name) => self.exec(Action::Structure(StructA::TrigAskDrop { tab, name })),
+            Act::SaveTrigger(key) => self.exec(Action::Structure(StructA::TrigSave { tab, key })),
+            Act::RevertTrigger(key) => self.exec(Action::Structure(StructA::TrigRevert { tab, key })),
+            Act::TrigDraft(key, def) => self.exec(Action::Structure(StructA::TrigDraft { tab, key, def })),
+            Act::NewIndex => self.exec(Action::Structure(StructA::EditIndex { tab, index: None })),
+            Act::EditIndex(i) => {
+                if let Some(index) = st(ix, i) {
+                    self.exec(Action::Structure(StructA::EditIndex { tab, index: Some(index) }));
+                }
+            }
+            Act::DropIndex(i) => {
+                if let Some(index) = self.structure().and_then(|s| s.indexes.get(i)).map(|x| x.name.clone()) {
+                    self.exec(Action::Structure(StructA::DropIndex { tab, index }));
+                }
+            }
+            Act::NewCheck => self.exec(Action::Structure(StructA::EditCheck { tab, check: None })),
+            Act::EditCheck(i) => {
+                if let Some(check) = st(ck, i) {
+                    self.exec(Action::Structure(StructA::EditCheck { tab, check: Some(check) }));
+                }
+            }
+            Act::DropCheck(i) => {
+                if let Some(check) = st(ck, i) {
+                    self.exec(Action::Structure(StructA::DropCheck { tab, check }));
+                }
+            }
+            Act::EditTable => self.exec(Action::Structure(StructA::EditTable { tab })),
+            Act::Unstage(at) => self.exec(Action::Structure(StructA::Unstage { tab, at })),
+            Act::Discard => self.exec(Action::Structure(StructA::Discard { tab })),
+            Act::Apply => self.exec(Action::Structure(StructA::Apply { tab })),
         }
-    }
-
-    /// Runs a maintenance statement of the Info page. All of them count as writes: ANALYZE and CHECK are refused by a read-only session
-    /// on some servers, and the Query view's read-only gate would turn them away anyway. The heavy ones ask first.
-    pub(in crate::app) fn sql_maintain(&mut self, what: Maint) {
-        let sel = self.tabs[self.cur].sel.clone();
-        if !self.conn_writable(sel.conn) {
-            return self.warn_ro();
-        }
-        let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) else { return };
-        if what.heavy() {
-            self.modal = Some(Modal::SqlMaintain { what, stmt });
-        } else {
-            self.sql_maintain_run(stmt);
-        }
-    }
-
-    /// The Query view runs each statement on its own outside any transaction, so VACUUM works, and it logs the statement and shows the server's rows.
-    pub(in crate::app) fn sql_maintain_run(&mut self, stmt: String) {
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-            s.query = format!("{stmt};");
-        }
-        self.tabs[self.cur].view = View::Sql;
-        self.sql_run(true, false);
     }
 
     /// The count shown beside a view's tab once the structure is known.
@@ -524,14 +505,14 @@ impl App {
             ui.add_space(8.0);
         }
         // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
-        let (conn, base_db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
+        let (conn, base_db) = (self.core.tabs[self.core.cur].sel.conn, self.core.tabs[self.core.cur].sel.db.clone());
         let dialect = self.dialect_of(conn);
         let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
         for ns in dbs {
             let (db, schema) = sql::ns::split_ns(dialect, &base_db, &ns);
             self.sql_serve(conn, &db, &schema, crate::ui::sql_complete::Wants { schema: true, values: None });
         }
-        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql::ns::split_ns(dialect, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql::ns::split_ns(dialect, &base_db, &fk.db); self.core.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
@@ -623,17 +604,22 @@ impl App {
         let editable = self.trig_editable();
         let why = "Views cannot be changed here";
         // A trigger that was just created is listed now, so its draft has done its job.
-        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-            let made = s.st.trig_made.clone();
-            if let Some(i) = s.st.trig.get(sql::trig::NEW).and_then(|nd| d.triggers.iter().position(|t| (t.name == nd.name && sql::trig::same(&sql::trig::def_of(t), nd)) || made.as_deref() == Some(t.name.as_str()))) {
-                s.st.trig.remove(sql::trig::NEW);
-                (s.st.trig_new, sel[4], s.st.trig_made) = (false, Some(i), None);
-            }
-            sql::trig::prune_drafts(&mut s.st.trig, &d.triggers);
+        let tab = self.core.tabs[self.core.cur].uid;
+        let (made_at, stale) = self.core.tabs[self.core.cur].sql.as_ref().map_or((None, false), |s| {
+            let made = s.st.trig_made.as_deref();
+            let at = s.st.trig.get(sql::trig::NEW).and_then(|nd| d.triggers.iter().position(|t| (t.name == nd.name && sql::trig::same(&sql::trig::def_of(t), nd)) || made == Some(t.name.as_str())));
+            (at, s.st.trig.keys().any(|k| k != sql::trig::NEW && !d.triggers.iter().any(|t| t.name == *k)))
+        });
+        if let Some(i) = made_at {
+            sel[4] = Some(i);
+            self.exec(Action::Structure(StructA::TrigDone { tab }));
         }
-        let creating = self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
+        if stale {
+            self.exec(Action::Structure(StructA::TrigPrune { tab }));
+        }
+        let creating = self.core.tabs[self.core.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
         let no_drafts = HashMap::new();
-        let drafts = self.tabs[self.cur].sql.as_ref().map_or(&no_drafts, |s| &s.st.trig);
+        let drafts = self.core.tabs[self.core.cur].sql.as_ref().map_or(&no_drafts, |s| &s.st.trig);
         let key = self.trig_key(&d, sel[4]);
         let existing = key.as_ref().filter(|k| !k.is_empty()).cloned();
         let mut left = Vec::new();
@@ -651,13 +637,14 @@ impl App {
                 acts.push(Act::Refresh);
             }
             if let Some(t) = existing.as_ref().and_then(|n| d.triggers.iter().find(|t| &t.name == n)) && quiet(ui, "Copy CREATE").clicked() {
-                acts.push(Act::Copy(t.create_sql(&self.tabs[self.cur].sel.coll)));
+                acts.push(Act::Copy(t.create_sql(&self.core.tabs[self.core.cur].sel.coll)));
             }
         });
         acts.extend(left);
         ui.add_space(8.0);
         let heads = [gc("Name", 2.0), gc("Timing", 0.9), gc("Event", 0.9), gc("Definer", 1.5), gc("Statement", 4.0)];
         let hl = if creating { None } else { sel[4] };
+        let mut picked = false;
         if let Some(r) = grid(ui, "triggers", &heads, d.triggers.len(), hl, |ui, rect, r, c| {
             let t = &d.triggers[r];
             match c {
@@ -672,13 +659,14 @@ impl App {
             }
         }) {
             sel[4] = Some(r);
-            if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-                s.st.trig_new = false;
-            }
+            picked = true;
+        }
+        if picked {
+            self.exec(Action::Structure(StructA::TrigPick { tab }));
         }
         ui.add_space(12.0);
         match &key {
-            Some(k) => self.trig_editor(ui, &d, k, editable),
+            Some(k) => self.trig_editor(ui, &d, k, editable, &mut acts),
             None => {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| ui.label(RichText::new("This table has no triggers").size(TXT_SMALL).color(FAINT())));
@@ -693,7 +681,7 @@ impl App {
         let s = &d.status;
         let none = || "-".to_string();
         let bytes = |n: Option<u64>| n.map_or_else(none, size);
-        let pg = self.is_pg(self.tabs[self.cur].sel.conn);
+        let pg = self.is_pg(self.core.tabs[self.core.cur].sel.conn);
         let no_stats = matches!(s.kind.as_str(), "v" | "f" | "p");
         let rows: Vec<(&str, String)> = if pg {
             // PostgreSQL has no engine, row format or auto increment to report: the sizes come from the catalog.
@@ -728,7 +716,7 @@ impl App {
             ]
         };
         let (is_view, writable) = (self.sel_is_view(), self.sel_writable());
-        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&self.tabs[self.cur].sel.db.as_str());
+        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&self.core.tabs[self.core.cur].sel.db.as_str());
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -1270,13 +1258,14 @@ impl App {
             create: create.into(),
             ..Default::default()
         };
-        let Some(t) = self.tabs.first_mut() else { return };
+        let Some(t) = self.core.setup().tabs.first_mut() else { return };
         t.view = view;
         t.selected = None;
+        let uid = t.uid;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(d);
-            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
+        self.ui.struct_sel.insert(uid, [Some(3), None, Some(0), None, Some(0), None]);
     }
 }
 

@@ -1,6 +1,7 @@
 //! The query bar: query inputs and history. The script library's quick picker is in library/picker.rs.
 
 use super::*;
+pub(crate) use quarry_core::state::query::*;
 
 /// Recent Query, Sort and Project inputs of this collection; picking one fills that box.
 /// Like the original's history menu (onHistory, renderer line 96157): each list can clear its box,
@@ -102,7 +103,7 @@ fn one_line(s: &str) -> String {
 impl App {
     /// In the offline demo with QUARRY_TEST_SQL=library, holds the library menu open for the picture.
     pub(super) fn demo_open_library(&self, ctx: &egui::Context, button: &egui::Response) {
-        if self.demo && std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
+        if self.core.demo && std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
             egui::Popup::open_id(ctx, egui::Popup::default_response_id(button));
         }
     }
@@ -128,15 +129,6 @@ pub(super) enum Lookup {
     Skipped(&'static str),
 }
 
-/// Where the query box's caret is, for the server lookups of field values.
-#[derive(Default)]
-pub(super) struct Typed {
-    /// The field whose value the caret is in.
-    pub(super) field: Option<String>,
-    /// Set when the box was edited this frame: the text typed so far in a string value, if any.
-    pub(super) edit: Option<Option<String>>,
-}
-
 impl App {
     /// A query input that grows with its content, with highlighting and autocomplete. It has no
     /// frame or label: the find bar and option chips draw those around it.
@@ -151,7 +143,7 @@ impl App {
             let date = std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date");
             let before = if date { "{ createdAt: " } else { "{ status: { $i" };
             if let Some((token, items)) = suggest(before, kind, paths, fields) {
-                *ac = Ac { id: Some(id), token, items, cursor: before.chars().count(), ..Default::default() };
+                *ac = Ac { id: Some(id.value()), token, items, cursor: before.chars().count(), ..Default::default() };
             }
         }
         // Suggestions are recomputed on every edit, even with no list open, so this sees every edit.
@@ -193,12 +185,12 @@ impl App {
             Lookup::Skipped(n) => Some(n),
             _ => None,
         };
-        let was_loading = ac.id == Some(id) && ac.loading;
+        let was_loading = ac.id == Some(id.value()) && ac.loading;
         if let Some((_, ci)) = &here
             && (state == Lookup::Pending || note.is_some() && (ac.shown(id) || typed.edit.is_some()))
         {
-            if ac.id != Some(id) || ac.items.is_empty() {
-                *ac = Ac { id: Some(id), cursor: *ci, ..Default::default() };
+            if ac.id != Some(id.value()) || ac.items.is_empty() {
+                *ac = Ac { id: Some(id.value()), cursor: *ci, ..Default::default() };
             }
             (ac.loading, ac.note) = (state == Lookup::Pending, note);
         }

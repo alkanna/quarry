@@ -15,11 +15,11 @@ fn tab_opens_the_record_where_values_edit_and_esc_closes_it() {
     // A double click on a record value opens the grid's editor there, and Enter stages the edit.
     let at = ui.h.get_by_label("note record").rect().center();
     ui.press_at(at, egui::PointerButton::Primary, 2);
-    ui.wait("the cell editor", |a| a.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
+    ui.wait("the cell editor", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.col == "note"));
     ui.type_text("Back door");
     ui.h.key_press(egui::Key::Enter);
-    ui.wait("the edit to be staged", |a| a.sql_cell.is_none());
-    assert!(!ui.app().drafts.is_empty(), "the record edit was not staged");
+    ui.wait("the edit to be staged", |a| a.core.sql_cell.is_none());
+    assert!(!ui.app().core.drafts.is_empty(), "the record edit was not staged");
     // Esc closes the record first and keeps the row selected.
     ui.h.key_press(egui::Key::Escape);
     ui.settle();
@@ -90,7 +90,7 @@ fn query_with_editor_focused() -> Option<UiApp> {
         a.load_sql_demo();
         a.sql_query_demo();
     })?;
-    let cur = ui.app().cur;
+    let cur = ui.app().core.cur;
     ui.h.ctx.memory_mut(|m| m.request_focus(App::sql_editor_id(cur)));
     ui.settle();
     Some(ui)
@@ -142,8 +142,8 @@ fn the_run_tip_lists_every_statement_of_the_script() {
 #[test]
 fn tab_leaves_the_record_closed_while_the_result_shows_as_text() {
     let Some(mut ui) = query_with_editor_focused() else { return };
-    let cur = ui.app().cur;
-    if let Some(s) = ui.h.state_mut().tabs[cur].sql.as_mut() {
+    let cur = ui.app().core.cur;
+    if let Some(s) = ui.h.state_mut().core.test_mut().tabs[cur].sql.as_mut() {
         (s.qsel, s.text_mode) = (Some(1), true);
     }
     ui.h.ctx.memory_mut(|m| m.surrender_focus(App::sql_editor_id(cur)));

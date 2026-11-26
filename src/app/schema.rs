@@ -1,29 +1,26 @@
 //! The schema view.
 
 use super::*;
+use quarry_core::action::{MongoA, SchemaA};
 
 impl App {
     pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
-        let mut analyze = false;
-        let mut acts: Vec<(String, u8)> = Vec::new();
-        let key = self.tabs[self.cur].coll_key();
-        let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
-        let sel = &self.tabs[self.cur].sel;
+        let mut acts: Vec<SchemaA> = Vec::new();
+        let key = self.core.tabs[self.core.cur].coll_key();
+        let maps = self.core.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
+        let sel = &self.core.tabs[self.core.cur].sel;
         // Views refuse a $natural sort, so they only offer the first documents.
-        let view = self.views.has(sel.conn, &sel.db, &sel.coll);
-        let t = &mut self.tabs[self.cur];
-        if view {
-            t.schema.last = false;
-        }
-        // Analyze once when the view opens; the limit keeps it light on big collections.
-        if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() && t.schema.err.is_none() {
-            analyze = true;
-        }
+        let view = self.core.views.has(sel.conn, &sel.db, &sel.coll);
+        let t = &self.core.tabs[self.core.cur];
+        let tab = t.uid;
+        let mut vtext = t.schema.vtext.clone();
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
                 caption(ui, "SCHEMA  ·  fields of the documents matching the current query");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    analyze |= primary(ui, "Analyze", PRIMARY()).clicked();
+                    if primary(ui, "Analyze", PRIMARY()).clicked() {
+                        acts.push(SchemaA::Analyze { tab });
+                    }
                     let label = |(n, last): (i64, bool)| if n == 0 { "all documents".to_string() } else { format!("{} {}", if last { "last" } else { "first" }, group(&n.to_string())) };
                     let mut pick = (t.schema.limit, t.schema.last);
                     egui::ComboBox::from_id_salt("schema-limit").selected_text(label(pick)).show_ui(ui, |ui| {
@@ -40,7 +37,9 @@ impl App {
                         }
                         ui.selectable_value(&mut pick, (0, false), label((0, false)));
                     });
-                    (t.schema.limit, t.schema.last) = pick;
+                    if pick != (t.schema.limit, t.schema.last) {
+                        acts.push(SchemaA::Limit { tab, limit: pick.0, last: pick.1 });
+                    }
                     if t.schema.running {
                         spin(ui);
                     }
@@ -50,29 +49,38 @@ impl App {
             ui.label(RichText::new(format!("Query: {filter}")).monospace().size(TXT_SMALL).color(FAINT()));
         });
         ui.add_space(6.0);
-        let (mut apply, mut generate, mut reload) = (false, false, false);
         // QUARRY_TEST_VALIDATOR opens it in the demo picture.
         egui::CollapsingHeader::new(caption_text("VALIDATOR")).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
-            let s = &mut t.schema;
+            let s = &t.schema;
             ui.horizontal(|ui| {
+                let (mut level, mut warn) = (s.vlevel, s.vwarn);
                 ui.label(RichText::new("Level").color(MUTED()));
-                segmented(ui, &mut s.vlevel, &[(0, "off"), (1, "moderate"), (2, "strict")]);
+                segmented(ui, &mut level, &[(0, "off"), (1, "moderate"), (2, "strict")]);
                 ui.add_space(12.0);
                 ui.label(RichText::new("Action").color(MUTED()));
-                segmented(ui, &mut s.vwarn, &[(false, "error"), (true, "warn")]);
+                segmented(ui, &mut warn, &[(false, "error"), (true, "warn")]);
+                if (level, warn) != (s.vlevel, s.vwarn) {
+                    acts.push(SchemaA::Rules { tab, level, warn });
+                }
             });
             let id = ui.make_persistent_id("validator-editor");
             // A generated validator can run to hundreds of lines; scroll inside a capped box so the
             // Apply buttons and the field list stay in the window.
             let max_h = (ui.ctx().content_rect().height() * 0.4).clamp(160.0, 420.0);
             egui::ScrollArea::vertical().id_salt("validator-scroll").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                crate::ui::editor::format_on_key(ui, id, &mut s.vtext);
-                crate::ui::vim::wrap(ui, id, &mut s.vtext, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
+                crate::ui::editor::format_on_key(ui, id, &mut vtext);
+                crate::ui::vim::wrap(ui, id, &mut vtext, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             });
             ui.horizontal(|ui| {
-                apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked();
-                generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
-                reload = ui.button("Reload").clicked();
+                if primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked() {
+                    acts.push(SchemaA::Apply { tab });
+                }
+                if ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked() {
+                    acts.push(SchemaA::Generate { tab });
+                }
+                if ui.button("Reload").clicked() {
+                    acts.push(SchemaA::Reload { tab });
+                }
             });
         });
         ui.add_space(6.0);
@@ -80,27 +88,27 @@ impl App {
         if t.schema.err.is_some() {
             self.failed_panel(ui, View::Schema);
         }
-        let t = &mut self.tabs[self.cur];
+        let t = &self.core.tabs[self.core.cur];
+        if vtext != t.schema.vtext {
+            acts.push(SchemaA::VText { tab, text: vtext });
+        }
         if t.schema.err.is_some() {
         } else if let Some(ms) = t.schema.ms {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
                 // Fields followed by a deeper row are the ones that fold.
-                let s = &mut t.schema;
-                let parents: Vec<String> = s.stats.windows(2).filter(|w| w[1].depth > w[0].depth).map(|w| w[0].path.clone()).collect();
-                if !parents.is_empty() {
+                if t.schema.stats.windows(2).any(|w| w[1].depth > w[0].depth) {
                     ui.add_space(12.0);
                     if quiet(ui, "Expand all").clicked() {
-                        s.closed.clear();
+                        acts.push(SchemaA::FoldAll { tab, closed: false });
                     }
                     if quiet(ui, "Collapse all").clicked() {
-                        s.closed.extend(parents);
+                        acts.push(SchemaA::FoldAll { tab, closed: true });
                     }
                 }
             });
         }
         let n = t.schema.docs.max(1) as f32;
-        let mut toggle = None;
         egui::ScrollArea::both().id_salt("schema").auto_shrink(false).show(ui, |ui| {
             if t.schema.err.is_some() {
                 return;
@@ -130,7 +138,7 @@ impl App {
                         let (color, tip) = if name == db::DYNAMIC_KEY { (MUTED(), "Keys that are data rather than names (ids, numbers, dates, keys sharing one pattern, varying keys holding alike objects, or keys of an object marked as a map), merged into one row") } else { (BRIGHT(), f.path.as_str()) };
                         let label = ui.add(egui::Label::new(RichText::new(name).monospace().color(color)).sense(Sense::click())).on_hover_text(tip);
                         if parent && (arrow.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() || label.clicked()) {
-                            toggle = Some(f.path.clone());
+                            acts.push(SchemaA::Fold { tab, path: f.path.clone() });
                         }
                     });
                     // Merged map keys have no single path to filter on or show as a column.
@@ -140,20 +148,20 @@ impl App {
                             menu_look(ui);
                             ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Add as column").clicked() {
-                                acts.push((f.path.clone(), 0));
+                                acts.push(SchemaA::AddColumn { tab, path: f.path.clone() });
                             }
                             if ui.button("Filter: has this field").clicked() {
-                                acts.push((f.path.clone(), 1));
+                                acts.push(SchemaA::FilterHas { tab, path: f.path.clone(), exists: true });
                             }
                             if ui.button("Filter: missing this field").clicked() {
-                                acts.push((f.path.clone(), 2));
+                                acts.push(SchemaA::FilterHas { tab, path: f.path.clone(), exists: false });
                             }
                             // Some maps, like labels keyed by name, look like fields to every guess.
                             if f.types.iter().any(|(t, _)| *t == "object") {
                                 ui.separator();
                                 let label = if maps.contains(&f.path) { "Show its keys as fields" } else { "Treat its keys as map entries" };
                                 if ui.button(label).on_hover_text("Saved for this collection; analyzes again").clicked() {
-                                    acts.push((f.path.clone(), 3));
+                                    acts.push(SchemaA::Map { tab, path: f.path.clone() });
                                 }
                             }
                         });
@@ -189,81 +197,8 @@ impl App {
                 }
             });
         });
-        if generate {
-            let s = &mut self.tabs[self.cur].schema;
-            s.vtext = db::to_edit_json(&db::schema_from_stats(&s.stats, s.docs));
-        }
-        if reload {
-            self.tabs[self.cur].schema.vloaded = false;
-        }
-        if apply {
-            let t = &self.tabs[self.cur];
-            match db::parse_doc(&t.schema.vtext) {
-                Ok(v) => {
-                    let level = ["off", "moderate", "strict"][t.schema.vlevel as usize];
-                    let cmd = doc! { "collMod": &t.sel.coll, "validator": v, "validationLevel": level, "validationAction": if t.schema.vwarn { "warn" } else { t.schema.vaction.as_deref().unwrap_or("error") } };
-                    self.modal = Some(Modal::Typed { title: format!("Change the validator of {}? Writes that fail it may be rejected.", t.sel.coll), expect: t.sel.coll.clone(), typed: String::new(), action: self.pinned(Danger::Validator(cmd)) });
-                }
-                Err(e) => self.err(e),
-            }
-        }
-        if !self.tabs[self.cur].schema.vloaded && let Some(target) = self.target() {
-            self.req += 1;
-            let (req, coll) = (self.req, target.coll.clone());
-            let s = &mut self.tabs[self.cur].schema;
-            (s.vloaded, s.vreq) = (true, req);
-            self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
-        }
-        if let Some(p) = toggle {
-            let closed = &mut self.tabs[self.cur].schema.closed;
-            if !closed.remove(&p) {
-                closed.insert(p);
-            }
-        }
-        for (path, what) in acts {
-            match what {
-                0 => {
-                    let key = self.col_key(false);
-                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
-                    self.apply_col_acts(&key, &fields, vec![ColAct::Show(path)]);
-                    self.ok("Column added; open Documents to see it");
-                }
-                3 => {
-                    let list = self.prefs.schema_maps.entry(key.clone()).or_default();
-                    match list.iter().position(|p| *p == path) {
-                        Some(i) => _ = list.remove(i),
-                        None => list.push(path),
-                    }
-                    if list.is_empty() {
-                        self.prefs.schema_maps.remove(&key);
-                    }
-                    self.save_prefs();
-                    analyze = true;
-                }
-                _ => {
-                    let t = &mut self.tabs[self.cur];
-                    t.filter_txt = db::shell_text(&Bson::Document(doc! { path: { "$exists": what == 1 } }));
-                    t.view = View::Documents;
-                    self.run_query();
-                }
-            }
-        }
-        if analyze {
-            // Read again: a toggle above changed the saved list after `maps` was taken.
-            let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
-            if let Some(target) = self.target() {
-                self.req += 1;
-                let req = self.req;
-                let t = &mut self.tabs[self.cur];
-                t.schema.req = req;
-                t.schema.running = true;
-                t.schema.err = None;
-                self.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last, maps.clone());
-            } else if self.demo {
-                let t = &mut self.tabs[self.cur];
-                t.schema.stats = db::analyze_schema(&t.decoded_docs(), &maps);
-                (t.schema.docs, t.schema.ms) = (t.docs.len(), Some(3));
-            }
+        for a in acts {
+            self.exec(Action::Mongo(MongoA::Schema(a)));
         }
     }
 }

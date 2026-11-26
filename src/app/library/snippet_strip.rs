@@ -5,70 +5,14 @@ use crate::app::*;
 use crate::app::sql::query::{run_db, run_schema_of};
 use crate::library::snippet::{self, Lang, Parsed, Ty};
 use std::ops::Range;
-
-/// The text of a tab that holds values: the SQL Query editor, the Shell editor, or the Documents bar's filter, sort and
-/// projection, read as one.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::app) enum Src {
-    Query,
-    Shell,
-    Bar,
-}
-
-pub(in crate::app) struct MakeValue {
-    pub uid: u64,
-    pub src: Src,
-    pub range: Range<usize>,
-    pub literal: String,
-    pub name: String,
-    pub ty: String,
-    pub default: Option<String>,
-    pub keep: bool,
-}
+use quarry_core::action::{Action, LibA};
+pub(crate) use quarry_core::state::library::snippet_strip::*;
 
 /// What a strip shows: the values, where they run, and the script whose default target Make default would change.
 pub(in crate::app) struct Strip {
     pub p: Parsed,
     pub target: String,
     pub make_default: Option<(u64, u64, String, String)>,
-}
-
-pub(in crate::app) fn texts(t: &Tab, src: Src) -> Vec<&str> {
-    match src {
-        Src::Query => t.sql.as_ref().map(|s| vec![s.query.as_str()]).unwrap_or_default(),
-        Src::Shell => vec![t.shell.code.as_str()],
-        Src::Bar => vec![&t.filter_txt, &t.sort_txt, &t.proj_txt],
-    }
-}
-
-fn text_mut(t: &mut Tab, src: Src) -> Option<&mut String> {
-    match src {
-        Src::Query => t.sql.as_mut().map(|s| &mut s.query),
-        Src::Shell => Some(&mut t.shell.code),
-        Src::Bar => None,
-    }
-}
-
-/// The values of `src`, or None when it has none or holds a snippet the Cmd+K form already filled. Text without `{{`,
-/// most tabs, costs one scan per text.
-pub(in crate::app) fn parsed(t: &Tab, src: Src, l: Lang) -> Option<Parsed> {
-    let texts = texts(t, src);
-    if t.snip.off || !texts.iter().any(|s| s.contains("{{")) {
-        return None;
-    }
-    Some(snippet::merge(texts.into_iter().map(|s| snippet::parse(s, l)))).filter(Parsed::is_snippet)
-}
-
-/// `text`, all or part of `src`, with the tab's values filled in, or why it can't be. Each placeholder takes the type the
-/// whole of `src` gives its name.
-pub(in crate::app) fn fill_tab(t: &Tab, text: &str, src: Src, l: Lang, bs: bool) -> Result<String, String> {
-    if !text.contains("{{") {
-        return Ok(text.to_string());
-    }
-    match parsed(t, src, l) {
-        Some(full) => snippet::fill_named(text, &full, &t.snip.vals, l, bs),
-        None => Ok(text.to_string()),
-    }
 }
 
 /// The strip: where the script runs, Make default, Filled or Template unless `toggle` is off, and a field per value.
@@ -170,7 +114,7 @@ impl App {
         let target = if db.is_empty() { self.conn_name(conn) } else { format!("{} \u{b7} {db}", self.conn_name(conn)) };
         // A tab of a saved script offers to make where it runs now that script's default.
         let saved = t.script.as_ref().and_then(|b| match b.r {
-            crate::library::ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == id),
+            crate::library::ScriptRef::Saved(id) => self.core.library.scripts.iter().find(|s| s.id == id),
             _ => None,
         });
         let make_default = saved.filter(|s| !self.runs_at(s, conn, &db, &schema, &t.sel.schema)).map(|s| (s.id, conn, db, schema));
@@ -180,17 +124,24 @@ impl App {
     /// The strip, drawn when `src` on the current tab has values. Returns whether the editor shows them filled in.
     pub(in crate::app) fn snippet_strip(&mut self, ui: &mut egui::Ui, src: Src) -> bool {
         let Some(strip) = self.strip_of(src) else { return false };
-        let Some(t) = self.tabs.get_mut(self.cur) else { return false };
+        let Some(t) = self.core.tabs.get(self.core.cur) else { return false };
         let toggle = src != Src::Bar;
-        if strip_ui(ui, &strip, &mut t.snip, toggle) {
+        // Edited on a copy, since the values are the tab's: what changed goes back as one action.
+        let mut snip = Snip { vals: t.snip.vals.clone(), filled: t.snip.filled, off: t.snip.off };
+        let (tab, before) = (t.uid, (t.snip.vals.clone(), t.snip.filled));
+        let make_default = strip_ui(ui, &strip, &mut snip, toggle);
+        if (snip.vals.clone(), snip.filled) != before {
+            self.exec(Action::Library(LibA::Snip { tab, vals: snip.vals, filled: snip.filled }));
+        }
+        if make_default {
             self.make_snippet_default(&strip);
         }
-        toggle && self.tabs[self.cur].snip.filled
+        toggle && self.core.tabs[self.core.cur].snip.filled
     }
 
     pub(in crate::app) fn make_snippet_default(&mut self, s: &Strip) {
         if let Some((id, conn, db, schema)) = &s.make_default {
-            self.set_snippet_default(*id, *conn, db, schema);
+            self.exec(Action::Library(LibA::SnippetDefault { id: *id, conn: *conn, db: db.clone(), schema: schema.clone() }));
         }
     }
 
@@ -203,10 +154,8 @@ impl App {
         preview_ui(ui, out, 10, |t| crate::ui::editor::sql_job_in(t, TXT_SMALL, d));
     }
 
-    /// The text a Query run sends: `text` with the tab's values filled in, or why it can't be.
     pub(in crate::app) fn snippet_fill_run(&self, text: String) -> Result<String, String> {
-        let Some(t) = self.t() else { return Ok(text) };
-        fill_tab(t, &text, Src::Query, self.sql_dialect().into(), self.sql_bs_of(t.sel.conn))
+        self.core.snippet_fill_run(text)
     }
 
     /// Make it a value... on the selected literal of the Query or Shell editor, from its context menu.
@@ -267,17 +216,9 @@ impl App {
                 });
             }
         });
-        if apply && let Some(ph) = ph {
+        if apply && let Some(placeholder) = ph {
             *keep = false;
-            let Some(t) = self.tabs.iter_mut().find(|t| t.uid == f.uid) else { return };
-            t.snip.filled = false;
-            let Some(text) = text_mut(t, f.src) else { return };
-            // The text may have changed under the dialog; only the literal it was opened on is replaced.
-            if text.get(f.range.clone()) == Some(f.literal.as_str()) {
-                text.replace_range(f.range.clone(), &ph);
-            } else {
-                self.warn("The statement changed, so the literal was not replaced.");
-            }
+            self.exec(Action::Library(LibA::MakeValue { tab: f.uid, src: f.src, range: f.range.clone(), literal: f.literal.clone(), placeholder }));
         }
     }
 }
