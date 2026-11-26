@@ -36,11 +36,22 @@ pub(crate) struct UiState {
     pub lib_focus_tree: bool,
     /// What the Connections panel and the rail's Connect popover remember: filters, the group being named, demo states.
     pub conns: quarry_core::state::conns_panel::ConnsUi,
+    /// Alignment, widths, pins, hidden columns and highlights of Query results, by the column names of a result, for each SQL
+    /// tab by uid. Kept for the tab only: ad hoc results have no table to save them under.
+    pub qprefs: HashMap<u64, HashMap<Vec<String>, ColPrefs>>,
+    /// The selected row of each grid of the Structure views, by tab uid: columns, indexes, keys out, keys in, triggers, checks.
+    pub struct_sel: HashMap<u64, [Option<usize>; 6]>,
+    /// The statement and warnings of a tab's staged changes, kept between frames.
+    pub plan_memo: HashMap<u64, crate::app::sql::alter::PlanMemo>,
+    /// What the trigger editor shows for a tab's draft, kept between frames.
+    pub trig_memo: HashMap<u64, crate::app::sql::trig::TrigMemo>,
+    /// The suggestion list of each Query tab's script editor, by tab uid.
+    pub sql_ac: HashMap<u64, quarry_core::state::complete::Ac>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default() }
+        Self { scroll_sel: false, tab_seen: None, win_buttons: false, frame_ms: 0.0, usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None), fps: (0.0, 0, 0.0), errors_open: false, upd_popup: false, log: LogUi::default(), open_picker: false, lib_focus_tree: false, conns: Default::default(), qprefs: HashMap::new(), struct_sel: HashMap::new(), plan_memo: HashMap::new(), trig_memo: HashMap::new(), sql_ac: HashMap::new() }
     }
 }
 

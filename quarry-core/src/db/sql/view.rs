@@ -25,7 +25,7 @@ const D: Dialect = Dialect::Postgres;
 const NEEDS_DROP: &str = "view columns changed";
 
 /// What the server holds of a view, or what a dialog asks to make of one.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ViewDef {
     pub schema: String,
     pub name: String,
@@ -45,7 +45,7 @@ pub struct ViewDef {
     pub options: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ViewSpec {
     pub def: ViewDef,
     /// CREATE OR REPLACE, for an edit.

@@ -200,7 +200,7 @@ impl App {
             let ready = n > 0 && stmt.is_ok() && f.typed == table;
             if danger_solid(ui, ready, &label).clicked() && let Ok(p) = plan.clone() {
                 *keep = false;
-                self.core.sql_bulk_run(f, p);
+                self.exec(Action::SqlOps(SqlOpsA::BulkRun { sel: f.sel.clone(), ns: f.ns.clone(), plan: p }));
             }
             if ui.button("Cancel").clicked() {
                 *keep = false;

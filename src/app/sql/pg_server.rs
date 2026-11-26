@@ -2,10 +2,10 @@
 //! Settings, Activity and Locks. It follows the MySQL window (`sql_server.rs`): it asks only while it is open and Quarry is
 //! focused, keeps errors in the window, and offers Cancel and Terminate only on an unlocked connection, after a second click.
 
-use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, tile, up_text, PAD, POLL};
+use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, tile, up_text, PAD};
 use crate::app::*;
 use db::sql::pg::server::{chains, metrics, Role, Session, Setting};
-use quarry_core::action::{Action, PgServerA, ServerA};
+use quarry_core::action::{Action, PgServerA, PgText, ServerA};
 use std::collections::HashMap;
 pub(crate) use quarry_core::state::sql::pg_server::*;
 pub(crate) use quarry_core::state::sql::pg_server::confirm_ok;
@@ -142,11 +142,7 @@ fn ask_unlock(ui: &egui::Ui, r: &egui::Response, conn_name: &str, what: &str) ->
 
 impl App {
     pub(in crate::app) fn pg_server_window(&mut self, ctx: &egui::Context) {
-        if self.core.pg_server.is_some() && ctx.input(|i| i.focused) && self.core.pg_server_poll() {
-            ctx.request_repaint_after(POLL);
-        }
-        self.core.server_windows_frame();
-        let Some(mut s) = self.core.pg_server.take() else { return };
+        let Some(s) = self.core.pg_server.as_ref() else { return };
         let conn = s.conn;
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| format!("{} {}", c.server.product, c.server.version)).unwrap_or_default();
@@ -168,11 +164,11 @@ impl App {
                     ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
                 } else {
                     match s.tab {
-                        PgTab::Overview => overview_view(ui, &s, &mut acts),
-                        PgTab::Settings => settings_view(ui, &mut s, max, &mut acts),
-                        PgTab::Activity => activity_view(ui, &mut s, max, &name, &mut acts),
-                        PgTab::Locks => locks_view(ui, &s, max, &name, &mut acts),
-                        PgTab::Counters => counters_view(ui, &s, max, &mut acts),
+                        PgTab::Overview => overview_view(ui, s, &mut acts),
+                        PgTab::Settings => settings_view(ui, s, max, &mut acts),
+                        PgTab::Activity => activity_view(ui, s, max, &name, &mut acts),
+                        PgTab::Locks => locks_view(ui, s, max, &name, &mut acts),
+                        PgTab::Counters => counters_view(ui, s, max, &mut acts),
                     }
                 }
             });
@@ -184,12 +180,6 @@ impl App {
             true
         });
         let open = r.inner;
-        // shortcut: the clipboard text of a cut query is drained here, not through a UI effect; move it once UiFx can copy.
-        if let Some(t) = s.copy.take() {
-            ctx.copy_text(t);
-            self.ok("Copied the query");
-        }
-        self.core.pg_server = Some(s);
         for a in acts {
             self.exec(Action::Server(ServerA::Pg(a)));
         }
@@ -411,7 +401,7 @@ fn counters_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, acts: &mut Vec<
     ui.label(RichText::new("Totals since each database's statistics were last reset, or since the server started.").size(TXT_SMALL).color(MUTED()));
 }
 
-fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, acts: &mut Vec<PgServerA>) {
+fn settings_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, acts: &mut Vec<PgServerA>) {
     let total = match &s.settings {
         Some(Ok(v)) => v.rows.len(),
         _ => 0,
@@ -421,7 +411,10 @@ fn settings_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, acts: &mut 
         _ => 0,
     };
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.set_filter).hint_text("Filter settings").desired_width(260.0));
+        let mut text = s.set_filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter settings").desired_width(260.0)).changed() {
+            acts.push(PgServerA::Text(PgText::Settings, text));
+        }
         let mut changed = s.changed_only;
         ui.checkbox(&mut changed, "Changed only");
         if changed != s.changed_only {
@@ -576,7 +569,7 @@ fn act_buttons(ui: &mut egui::Ui, s: &PgServerWin, confirm: Option<&PgConfirm>, 
 const PID_W: f32 = 64.0;
 const ACT_COLS: [(&str, f32); 6] = [("Pid", PID_W), ("User · client", 150.0), ("Database · app", 150.0), ("State", 180.0), ("Wait event", 180.0), ("Xact age", 80.0)];
 
-fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str, acts: &mut Vec<PgServerA>) {
+fn activity_view(ui: &mut egui::Ui, s: &PgServerWin, max_h: f32, name: &str, acts: &mut Vec<PgServerA>) {
     let (read_all, user, own_app) = match &s.act {
         Some(Ok(a)) => (a.read_all, a.user.clone(), a.own_app.clone()),
         _ => (true, String::new(), None),
@@ -603,7 +596,10 @@ fn activity_view(ui: &mut egui::Ui, s: &mut PgServerWin, max_h: f32, name: &str,
     }
     let sel_row = s.sel.and_then(|p| rows.iter().find(|r| r.pid == p)).cloned();
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text("Filter by user, database or query").desired_width(240.0));
+        let mut text = s.filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter by user, database or query").desired_width(240.0)).changed() {
+            acts.push(PgServerA::Text(PgText::Activity, text));
+        }
         let (mut hide, mut auto) = (s.hide_idle, s.auto);
         ui.checkbox(&mut hide, "Hide idle");
         ui.checkbox(&mut auto, "Refresh every 2 s");
@@ -956,6 +952,7 @@ fn waiter_row(ui: &mut egui::Ui, r: &Session, depth: usize, w: f32, query_w: f32
 mod tests {
     use super::*;
     use db::sql::pg::server::Answer;
+    use quarry_core::state::sql::server::POLL;
     use std::time::Instant;
 
     fn row(pid: u64, user: &str, state: &str, query: &str) -> Session {

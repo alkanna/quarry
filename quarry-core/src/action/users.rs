@@ -21,6 +21,17 @@ pub enum UsersA {
     Mongo(MongoUsersA),
 }
 
+/// The text fields of the Users and privileges window.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersText {
+    Filter,
+    Name,
+    Host,
+    Days,
+    /// One of the four resource limits, by position.
+    Limit(usize),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SqlUsersA {
     /// Opens the window, or the Roles and privileges window on PostgreSQL.
@@ -60,6 +71,8 @@ pub enum SqlUsersA {
     /// The + Database field.
     DbAdd(Option<String>),
     DbAddDone,
+    /// A text field changed to this text.
+    Text(UsersText, String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -263,6 +276,17 @@ impl Core {
                 }
                 w.adding = None;
             }
+            SqlUsersA::Text(f, t) => match f {
+                UsersText::Filter => w.filter = t,
+                UsersText::Name => w.name = t,
+                UsersText::Host => w.host = t,
+                UsersText::Days => w.days = t,
+                UsersText::Limit(i) => {
+                    if let Some(x) = w.limits.get_mut(i) {
+                        *x = t;
+                    }
+                }
+            },
             SqlUsersA::Open { .. } | SqlUsersA::DropRun { .. } | SqlUsersA::Create { .. } | SqlUsersA::SetPassword { .. } => {}
         }
         Ok(Reply::Done)

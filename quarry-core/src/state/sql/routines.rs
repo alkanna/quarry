@@ -1,6 +1,6 @@
 //! State behind src/app/sql/routines.rs, which draws it.
 
-use crate::db::sql::routines::{Arg, Detail, Kind, Plan, Routine};
+use crate::db::sql::routines::{Arg, Detail, Kind, Routine};
 use std::collections::{HashMap, HashSet};
 use crate::db;
 
@@ -33,7 +33,6 @@ pub enum Pane {
 }
 
 /// The preview of what a save sends, kept while the text and the drop-and-create choice stay as they are.
-pub type Memo = (String, bool, Result<Plan, String>);
 
 pub struct RoutineWin {
     pub conn: u64,
@@ -63,7 +62,6 @@ pub struct RoutineWin {
     pub pane: Pane,
     pub typed: String,
     pub args: Vec<Arg>,
-    pub memo: Option<Memo>,
 }
 
 impl RoutineWin {

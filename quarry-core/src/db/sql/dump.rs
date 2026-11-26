@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// One table or view of the dialog's list and what to write of it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DumpTable {
     pub name: String,
     pub view: bool,
@@ -34,7 +34,7 @@ pub struct DumpTable {
     pub drop: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DumpPlan {
     pub schema: String,
     pub tables: Vec<DumpTable>,

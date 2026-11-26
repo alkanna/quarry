@@ -38,13 +38,20 @@ pub(super) fn sql_actions() -> Vec<SqlA> {
         SqlA::DeleteRows { tab, rows: vec![mongodb::bson::doc! { "_id": { "id": 1 } }] },
         SqlA::CrumbDb { tab, db: "shop".into(), schema: String::new() },
         SqlA::CrumbSchema { tab, schema: "public".into() },
+        SqlA::SetQuery { tab, text: "SELECT 1".into(), run_db: Some("shop".into()), run_schema: None, caret: Some(1), show: false },
+        SqlA::SetCell { tab, row: 0, col: "a".into(), value: mongodb::bson::Bson::Null },
+        SqlA::StageValue { tab, rows: Vec::new(), col: "a".into(), value: mongodb::bson::Bson::Null },
+        SqlA::WriteDrafts { tab, keys: Vec::new() },
+        SqlA::Record { tab },
+        SqlA::PageSize { tab },
+        SqlA::BuildText { tab },
     ]
 }
 
 /// No wildcard, so a variant missing from `sql_actions` fails to compile here first.
 pub(super) fn sql_variant(a: &SqlA) {
     match a {
-        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } | SqlA::CrumbDb { .. } | SqlA::CrumbSchema { .. } => {}
+        SqlA::Run { .. } | SqlA::RunText { .. } | SqlA::Stop { .. } | SqlA::PickSet { .. } | SqlA::TextMode { .. } | SqlA::GotoPage { .. } | SqlA::SortPage { .. } | SqlA::Check { .. } | SqlA::CheckAll { .. } | SqlA::ClearChecks { .. } | SqlA::SelectRow { .. } | SqlA::Apply { .. } | SqlA::Page { .. } | SqlA::Ungroup { .. } | SqlA::Drill { .. } | SqlA::WhereMode { .. } | SqlA::Filter { .. } | SqlA::OpenCell { .. } | SqlA::SetNull { .. } | SqlA::Save { .. } | SqlA::Discard { .. } | SqlA::NewRow { .. } | SqlA::Insert { .. } | SqlA::DeleteRows { .. } | SqlA::CrumbDb { .. } | SqlA::CrumbSchema { .. } | SqlA::SetQuery { .. } | SqlA::Record { .. } | SqlA::PageSize { .. } | SqlA::BuildText { .. } | SqlA::SetCell { .. } | SqlA::StageValue { .. } | SqlA::WriteDrafts { .. } => {}
     }
 }
 
@@ -141,7 +148,7 @@ fn an_answer_to_an_older_run_is_dropped() {
     core.inject(Msg::SqlRan { req: 5, sets: vec![set_of(2, "SELECT 5"), set_of(1, "SELECT 6")] });
     assert_eq!((st(&core).run_req, st(&core).sets.len(), st(&core).sets_req), (0, 2, 5));
     // A count for another run is dropped too.
-    core.tabs[0].sql.as_mut().unwrap().sets[0].page = Some(Default::default());
+    std::sync::Arc::make_mut(&mut core.tabs[0].sql.as_mut().unwrap().sets[0]).page = Some(Default::default());
     core.inject(Msg::SqlCount { req: 4, idx: 0, res: Ok(9) });
     assert_eq!(st(&core).sets[0].page.unwrap().total, None);
     core.inject(Msg::SqlCount { req: 5, idx: 0, res: Ok(9) });
@@ -151,7 +158,7 @@ fn an_answer_to_an_older_run_is_dropped() {
 #[test]
 fn checks_follow_clicks_and_a_picked_set_clears_them() {
     let (mut core, uid) = query_core(false);
-    core.tabs[0].sql.as_mut().unwrap().sets = vec![set_of(5, "SELECT a"), set_of(2, "SELECT b")];
+    core.tabs[0].sql.as_mut().unwrap().sets = vec![set_of(5, "SELECT a").into(), set_of(2, "SELECT b").into()];
     sql(&mut core, SqlA::Check { tab: uid, row: 1, range: false }).unwrap();
     sql(&mut core, SqlA::Check { tab: uid, row: 3, range: true }).unwrap();
     assert_eq!(st(&core).qchecked.iter().copied().collect::<Vec<_>>(), [1, 2, 3]);
@@ -170,7 +177,7 @@ fn checks_follow_clicks_and_a_picked_set_clears_them() {
 #[test]
 fn a_client_sort_keeps_checks_on_their_rows() {
     let (mut core, uid) = query_core(false);
-    core.tabs[0].sql.as_mut().unwrap().sets = vec![set_of(3, "SELECT id")];
+    core.tabs[0].sql.as_mut().unwrap().sets = vec![set_of(3, "SELECT id").into()];
     sql(&mut core, SqlA::Check { tab: uid, row: 0, range: false }).unwrap();
     sql(&mut core, SqlA::SortPage { tab: uid, keys: vec![("id".into(), true)] }).unwrap();
     assert_eq!(st(&core).qchecked.iter().copied().collect::<Vec<_>>(), [2], "row id 0 is last once sorted descending");
@@ -306,6 +313,11 @@ pub(super) fn struct_actions() -> Vec<StructA> {
         StructA::TrigDrop { tab, name: "t".into() },
         StructA::Maintain { tab, what: crate::db::sql::Maint::Optimize },
         StructA::RunMaint { tab, what: crate::db::sql::Maint::Analyze },
+        StructA::Load { tab },
+        StructA::TrigDraft { tab, key: "t".into(), def: Default::default() },
+        StructA::TrigDone { tab },
+        StructA::TrigPrune { tab },
+        StructA::TrigPick { tab },
     ]
 }
 
@@ -313,7 +325,7 @@ pub(super) fn struct_variant(a: &StructA) {
     match a {
         StructA::DropColumn { .. } | StructA::MoveColumn { .. } | StructA::DropIndex { .. } | StructA::Unstage { .. } | StructA::Discard { .. } | StructA::Apply { .. } | StructA::Run { .. } | StructA::Refresh { .. } => {}
         StructA::EditColumn { .. } | StructA::DuplicateColumn { .. } | StructA::EditIndex { .. } | StructA::EditCheck { .. } | StructA::DropCheck { .. } | StructA::EditFk { .. } | StructA::DropFk { .. } | StructA::EditTable { .. } | StructA::Stage { .. } | StructA::StageTable { .. } => {}
-        StructA::TrigNew { .. } | StructA::TrigRevert { .. } | StructA::TrigSave { .. } | StructA::TrigAskDrop { .. } | StructA::TrigDrop { .. } | StructA::Maintain { .. } | StructA::RunMaint { .. } => {}
+        StructA::TrigNew { .. } | StructA::TrigRevert { .. } | StructA::TrigSave { .. } | StructA::TrigAskDrop { .. } | StructA::TrigDrop { .. } | StructA::Maintain { .. } | StructA::RunMaint { .. } | StructA::Load { .. } | StructA::TrigDraft { .. } | StructA::TrigDone { .. } | StructA::TrigPrune { .. } | StructA::TrigPick { .. } => {}
     }
 }
 

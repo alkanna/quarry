@@ -233,7 +233,7 @@ impl App {
         });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
-                self.core.pg_create_table(f);
+                self.exec(Action::Ddl(DdlA::CreatePgTable { conn: f.conn, database: f.database.clone(), spec: f.spec() }));
                 *keep = false;
             }
             if ui.button("Preview SQL").clicked() {

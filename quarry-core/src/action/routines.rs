@@ -27,6 +27,19 @@ pub enum RoutineA {
     Drop,
     /// Runs the call in a new Query tab.
     Run,
+    /// The window's text editor changed the definition to this text.
+    Text(String),
+    /// The window's Edit.
+    Edit,
+    /// Revert of an edit, or Cancel of a new routine, which closes the window.
+    Revert,
+    /// Drop and create instead, after PostgreSQL refused to replace the routine in place.
+    Recreate,
+    /// The Run pane's value of argument `i`, and whether it is NULL.
+    Arg { i: usize, value: String, null: bool },
+    /// The Drop pane's typed confirmation.
+    Typed(String),
+    Close,
 }
 
 impl Core {
@@ -55,6 +68,42 @@ impl Core {
             RoutineA::Save { restore } => return self.routine_save(restore),
             RoutineA::Drop => return self.routine_drop(),
             RoutineA::Run => return self.routine_run(),
+            RoutineA::Text(t) => {
+                if let Some(w) = self.routines.win.as_mut() {
+                    w.text = t;
+                    w.error = None;
+                }
+            }
+            RoutineA::Edit => {
+                if let Some(w) = self.routines.win.as_mut() {
+                    w.editing = true;
+                }
+            }
+            RoutineA::Revert => {
+                let Some(w) = self.routines.win.as_mut() else { return Ok(Reply::Done) };
+                if w.routine.is_none() {
+                    self.routines.win = None;
+                } else {
+                    w.text = w.base.clone();
+                    (w.editing, w.recreate, w.offer_recreate, w.error) = (false, false, false, None);
+                }
+            }
+            RoutineA::Recreate => {
+                if let Some(w) = self.routines.win.as_mut() {
+                    (w.recreate, w.offer_recreate, w.error) = (true, false, None);
+                }
+            }
+            RoutineA::Arg { i, value, null } => {
+                if let Some(a) = self.routines.win.as_mut().and_then(|w| w.args.get_mut(i)) {
+                    (a.value, a.null) = (value, null);
+                }
+            }
+            RoutineA::Typed(t) => {
+                if let Some(w) = self.routines.win.as_mut() {
+                    w.typed = t;
+                }
+            }
+            RoutineA::Close => self.routines.win = None,
         }
         Ok(Reply::Done)
     }
@@ -78,7 +127,7 @@ impl Core {
         let dialect = self.dialect_of(conn);
         // A namespace that belongs to the server: the schema on PostgreSQL, the database on MySQL.
         let system = if dialect == crate::db::sql::Dialect::Postgres { crate::db::sql::pg::create::system_schema(&schema) } else { crate::db::sql::create::SYSTEM_SCHEMAS.contains(&db.as_str()) };
-        RoutineWin { conn, db, schema, dialect, system, kind, routine, detail: None, req: 0, busy: false, error: None, text: String::new(), base: String::new(), editing: false, recreate: false, offer_recreate: false, undo: None, pane: Pane::View, typed: String::new(), args: Vec::new(), memo: None }
+        RoutineWin { conn, db, schema, dialect, system, kind, routine, detail: None, req: 0, busy: false, error: None, text: String::new(), base: String::new(), editing: false, recreate: false, offer_recreate: false, undo: None, pane: Pane::View, typed: String::new(), args: Vec::new() }
     }
 
     fn routine_open(&mut self, conn: u64, db: String, schema: String, r: Option<Routine>, pane: Pane) {
@@ -169,7 +218,6 @@ impl Core {
                 w.recreate = false;
                 w.offer_recreate = false;
                 w.error = None;
-                w.memo = None;
                 // Read again, so the view shows what the server holds now and Undo has the current routine to work on.
                 w.base = String::new();
                 w.detail = None;

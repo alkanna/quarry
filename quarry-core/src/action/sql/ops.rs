@@ -17,24 +17,29 @@ pub enum SqlOpsA {
     Bulk { tab: u64, update: bool, col: Option<String> },
     /// The column menu's Data action `op` over every row the query matches.
     ReadColumn { tab: u64, col: String, op: ColOp },
+    /// The bulk dialog's confirmed Update or Delete of `plan` on the table of `sel`, whose namespace is `ns`. It runs on the
+    /// table the dialog opened on, wherever the current tab is by now.
+    BulkRun { sel: crate::state::Sel, ns: String, plan: BulkPlan },
 }
 
 impl SqlOpsA {
-    fn tab(&self) -> u64 {
+    fn tab(&self) -> Option<u64> {
         match self {
-            SqlOpsA::Bulk { tab, .. } | SqlOpsA::ReadColumn { tab, .. } => *tab,
+            SqlOpsA::Bulk { tab, .. } | SqlOpsA::ReadColumn { tab, .. } => Some(*tab),
+            SqlOpsA::BulkRun { .. } => None,
         }
     }
 }
 
 impl Core {
     pub(in crate::action) fn sql_ops(&mut self, a: SqlOpsA) -> Result<Reply, Refusal> {
-        if self.tabs.get(self.cur).is_none_or(|t| t.uid != a.tab() || t.sql.is_none()) {
+        if let Some(uid) = a.tab() && self.tabs.get(self.cur).is_none_or(|t| t.uid != uid || t.sql.is_none()) {
             return Err(self.refuse("That tab is no longer open."));
         }
         match a {
             SqlOpsA::Bulk { update, col, .. } => self.open_bulk_with(update, col)?,
             SqlOpsA::ReadColumn { col, op, .. } => self.sql_read_column(col, op),
+            SqlOpsA::BulkRun { sel, ns, plan } => self.sql_bulk_run(sel, ns, plan),
         }
         Ok(Reply::Done)
     }
@@ -69,16 +74,16 @@ impl Core {
     }
 
     /// Sends a confirmed plan of the bulk dialog. A connection locked again since the dialog opened is refused here and by the worker.
-    pub fn sql_bulk_run(&mut self, f: &BulkForm, plan: BulkPlan) {
-        let conn = f.sel.conn;
+    pub fn sql_bulk_run(&mut self, sel: crate::state::Sel, ns: String, plan: BulkPlan) {
+        let conn = sel.conn;
         if !self.conn_writable(conn) {
             return self.warn_ro();
         }
         if self.sql_db_for(conn, Some("Connect first.")).is_none() {
             return;
         }
-        let Some((db, _)) = self.sql_target(&f.sel) else { return self.warn_offline() };
-        self.worker.sql_bulk(conn, db, f.ns.clone(), f.sel.coll.clone(), plan, !self.conn_writable(conn));
+        let Some((db, _)) = self.sql_target(&sel) else { return self.warn_offline() };
+        self.worker.sql_bulk(conn, db, ns, sel.coll.clone(), plan, !self.conn_writable(conn));
     }
 
     /// Reads column `c` from every row the grid's query matches; the answer is `Msg::ColumnValues`.

@@ -191,7 +191,7 @@ impl App {
     /// type wants: the calendar for dates, a list for ENUM, SET and foreign key columns, a switch for booleans, and
     /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
-        let Some(mut e) = self.core.sql_cell.take() else { return };
+        let Some(mut e) = self.core.cell_edit().take() else { return };
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
         let d = self.sql_dialect();
@@ -203,7 +203,7 @@ impl App {
         ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if bad { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
         // The large editor has the text, so the cell only keeps its outline.
         if e.big {
-            self.core.sql_cell = Some(e);
+            *self.core.cell_edit() = Some(e);
             return;
         }
         let ctx = ui.ctx().clone();
@@ -215,7 +215,7 @@ impl App {
         let nullable = col.nullable || col.auto_increment;
         if check::is_bool(d, &col) {
             sql_bool_cell(ui, &mut e, &col, rect, below, click_out);
-            self.core.sql_cell = Some(e);
+            *self.core.cell_edit() = Some(e);
             return;
         }
         let date = matches!(col.kind, Kind::Date | Kind::DateTime);
@@ -353,7 +353,7 @@ impl App {
         }
         e.pop = pop.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
         e.grabs_keys = e.pick.is_some() || list_n > 0;
-        self.core.sql_cell = Some(e);
+        *self.core.cell_edit() = Some(e);
     }
 
     /// The clock in the zone `col` is read in, as milliseconds of that wall clock. None for a TIMESTAMP column under
@@ -382,11 +382,8 @@ impl App {
         let t = e.text.trim();
         let q = if t.eq_ignore_ascii_case("null") { "" } else { t };
         // One lookup at a time; the answer for older text asks again with the newest.
-        if !look.busy && look.asked.as_deref() != Some(q) && !self.core.demo && let Some((db, space)) = self.t().map(|t| t.sel.clone()).and_then(|s| self.sql_target(&s)) {
-            self.core.req += 1;
-            (look.req, look.busy, look.asked) = (self.core.req, true, Some(q.to_string()));
-            let schema = if fk.ref_db.is_empty() { space } else { fk.ref_db.clone() };
-            self.core.worker.sql_key_search(self.core.req, db, schema, fk.ref_table.clone(), key.clone(), q.to_string(), look.table.clone());
+        if !look.busy && look.asked.as_deref() != Some(q) && let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::KeySearch { fk: fk.clone(), q: q.to_string(), known: look.table.clone() })) {
+            (look.req, look.busy, look.asked) = (req, true, Some(q.to_string()));
         }
         let title = format!("{} references {} ({key})", col.src, fk.ref_table);
         let saves = look.rows.get(e.hl.unwrap_or(0)).map(|r| format!(" Picking one saves {}.", r.0)).unwrap_or_default();
@@ -402,9 +399,9 @@ impl App {
 
     /// After the table is drawn: stage the edit, or keep the editor open with its error.
     pub(in crate::app) fn sql_cell_finish(&mut self) {
-        let Some(mut e) = self.core.sql_cell.take() else { return };
+        let Some(mut e) = self.core.cell_edit().take() else { return };
         match e.done {
-            None => self.core.sql_cell = Some(e),
+            None => *self.core.cell_edit() = Some(e),
             Some(false) => {}
             Some(true) => {
                 let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
@@ -414,7 +411,7 @@ impl App {
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
-                        self.core.sql_cell = Some(e);
+                        *self.core.cell_edit() = Some(e);
                     }
                 }
             }
@@ -422,7 +419,9 @@ impl App {
     }
 
     pub(in crate::app) fn sql_set_cell(&mut self, i: usize, col: &str, v: Bson) {
-        self.core.sql_set_cell(i, col, v)
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::SetCell { tab, row: i, col: col.to_string(), value: v }));
+        }
     }
 
     /// The columns of row `i` that have unsaved edits, for tinting.
@@ -437,7 +436,9 @@ impl App {
     }
 
     pub(in crate::app) fn write_sql_drafts(&mut self, keys: Vec<String>) {
-        self.core.write_sql_drafts(keys)
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::WriteDrafts { tab, keys }));
+        }
     }
 
     /// The results with the staged-edits bar under them; the table shrinks to leave room.
@@ -689,10 +690,7 @@ impl App {
                     return self.warn("This table has no primary key or unique key to filter by.");
                 }
                 let text = key_list();
-                let t = self.tm().unwrap();
-                t.filter_txt = text;
-                t.page = 0;
-                self.reload();
+                self.exec(Action::Tab(TabA::FilterText { sel: None, text }));
             }
             DocsAct::EditQuery => {
                 if pk.is_empty() {
@@ -712,11 +710,9 @@ impl App {
                     sets.push(format!("{0} = {0}", d.quote_ident(&c.src)));
                 }
                 let text = format!("UPDATE {}\nSET {}\nWHERE {};", d.qualified(sel.space(), &sel.coll), sets.join(",\n    "), key_list());
-                let t = self.tm().unwrap();
-                if let Some(s) = t.sql.as_mut() {
-                    s.query = text;
+                if let Some(tab) = self.uid_of(self.core.cur) {
+                    self.exec(Action::Sql(SqlA::SetQuery { tab, text, run_db: None, run_schema: None, caret: None, show: true }));
                 }
-                t.view = View::Sql;
             }
             DocsAct::Export => self.open_export(rows, false),
             DocsAct::Duplicate => {
@@ -822,16 +818,9 @@ impl App {
             if primary(ui, &format!("Stage {n} edit{}", if n == 1 { "" } else { "s" }), PRIMARY()).clicked() {
                 match parsed {
                     Ok(v) => {
-                        for r in &f.rows {
-                            let key = self.draft_key(r);
-                            let sel = sel.clone();
-                            // Staged on top of any earlier edit of the same row, which keeps its original.
-                            let cur = self.core.drafts.get(&key).map(|x| x.current.clone()).unwrap_or_else(|| r.clone());
-                            let mut new = cur.clone();
-                            new.insert(col.name.clone(), v.clone());
-                            stage_draft(&mut self.core.drafts, &key, &sel, &cur, new);
+                        if let Some(tab) = self.uid_of(self.core.cur) {
+                            self.exec(Action::Sql(SqlA::StageValue { tab, rows: f.rows.clone(), col: col.name.clone(), value: v }));
                         }
-                        self.ok(format!("Staged {n} edit{}. Save writes them.", if n == 1 { "" } else { "s" }));
                         *keep = false;
                     }
                     Err(m) => f.err = Some(m),
@@ -920,10 +909,7 @@ impl App {
                     let numeric = self.sql_col(&col).is_some_and(|c| is_numeric(c.kind));
                     let q = self.sql_dialect().quote_ident(&col);
                     let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(self.sql_dialect(), Some(&v), numeric, self.sql_bs())) };
-                    let t = self.tm().unwrap();
-                    t.filter_txt = text;
-                    t.page = 0;
-                    self.reload();
+                    self.exec(Action::Tab(TabA::FilterText { sel: None, text }));
                 }
             }
         }
@@ -931,7 +917,8 @@ impl App {
 
     /// The offline demo of `QUARRY_TEST_SQL=edit`: two cells of row 3 staged.
     pub(in crate::app) fn sql_demo_stage(&mut self) {
-        let Some(t) = self.core.tabs.get_mut(0) else { return };
+        let core = self.core.setup();
+        let Some(t) = core.tabs.get_mut(0) else { return };
         let Some(orig) = t.docs.get(2).map(db::Row::owned) else { return };
         let mut old = orig.clone();
         old.insert("status", "pending");
@@ -941,7 +928,7 @@ impl App {
         }
         let sel = t.sel.clone();
         let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
-        stage_draft(&mut self.core.drafts, &key, &sel, &old, orig);
+        stage_draft(&mut core.drafts, &key, &sel, &old, orig);
     }
 }
 

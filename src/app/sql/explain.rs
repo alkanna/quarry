@@ -28,7 +28,7 @@ impl App {
     /// Shows the plan of `text` in a dialog. `text` is the statement under the caret of a Query view or the last page's
     /// SELECT of a Content grid.
     pub(in crate::app) fn sql_explain(&mut self, text: String) {
-        if let Some(x) = self.core.sql_explain_new(text) {
+        if let Some(x) = self.core.explain().open(text) {
             self.modal = Some(Modal::SqlExplain(Box::new(x)));
         }
     }
@@ -63,7 +63,7 @@ impl App {
     /// The answer of a request of the open dialog.
     pub(in crate::app) fn sql_explained(&mut self, req: u64, sets: Vec<db::sql::ResultSet>) {
         let Some(Modal::SqlExplain(x)) = &mut self.modal else { return };
-        if !self.core.sql_explained(x, req, sets) {
+        if !self.core.explain().explained(x, req, sets) {
             self.modal = None;
         }
     }
@@ -71,7 +71,7 @@ impl App {
     /// The catalog answered: the findings are worked out again with it, and the selection and scroll stay where they are.
     pub(in crate::app) fn sql_explain_evidence(&mut self, req: u64, ev: plan::Evidence) {
         if let Some(Modal::SqlExplain(x)) = &mut self.modal {
-            self.core.sql_explain_evidence(x, req, ev);
+            self.core.explain().evidence(x, req, ev);
         }
     }
 
@@ -207,24 +207,17 @@ impl App {
                     ctx.copy_text(text);
                     self.toast_ok("Copied.".into(), None);
                 }
-                XAct::Hypo(fix) => self.core.sql_explain_hypo_try(x, fix),
+                XAct::Hypo(fix) => self.core.explain().hypo_try(x, fix),
                 XAct::HypoCompare => self.sql_explain_hypo_compare(x),
                 XAct::Draft(sql) => {
                     *keep = false;
                     self.core.sql_explain_stop(x);
                     self.sql_new_query(x.conn, x.tab_db.clone());
-                    if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
-                        s.query = sql;
-                        // The draft runs where the plan was made, not where the sidebar happens to be.
-                        if x.dialect == Dialect::Postgres {
-                            s.run_schema = x.schema.clone();
-                            // Left empty for the tab's own database, as the picker leaves it.
-                            if x.database != x.tab_db {
-                                s.run_db = x.database.clone();
-                            }
-                        } else {
-                            s.run_db = x.schema.clone();
-                        }
+                    // The draft runs where the plan was made, not where the sidebar happens to be. On PostgreSQL the database is
+                    // left empty for the tab's own, as the picker leaves it.
+                    let (run_db, run_schema) = if x.dialect == Dialect::Postgres { (Some(x.database.clone()).filter(|d| *d != x.tab_db), Some(x.schema.clone())) } else { (Some(x.schema.clone()), None) };
+                    if let Some(tab) = self.uid_of(self.core.cur) {
+                        self.exec(Action::Sql(SqlA::SetQuery { tab, text: sql, run_db, run_schema, caret: None, show: false }));
                     }
                     return;
                 }
@@ -234,7 +227,7 @@ impl App {
             self.core.sql_explain_stop(x);
         }
         if let Some(a) = again {
-            self.core.sql_explain_send(x, Some(a));
+            self.core.explain().send(x, Some(a));
         }
         if rows {
             *keep = false;
@@ -246,8 +239,8 @@ impl App {
     /// The classic EXPLAIN rows, in a Query tab of their own.
     fn sql_explain_rows(&mut self, x: &SqlExplain) {
         self.sql_new_query(x.conn, x.tab_db.clone());
-        if let Some(s) = self.core.tabs[self.core.cur].sql.as_mut() {
-            s.query = format!("EXPLAIN {}", x.stmt.trim().trim_end_matches(';'));
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::SetQuery { tab, text: format!("EXPLAIN {}", x.stmt.trim().trim_end_matches(';')), run_db: None, run_schema: None, caret: None, show: false }));
         }
         self.sql_run(true, false);
     }

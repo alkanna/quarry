@@ -34,7 +34,7 @@ fn view_editor(ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer, d: db::sql::D
 
 impl App {
     /// Content tab: a new view from the SELECT of the grid's last page, not from what the bar says now.
-    fn save_content_as_view(&mut self, i: usize) {
+    pub(in crate::app) fn save_content_as_view(&mut self, i: usize) {
         let Some(t) = self.core.tabs.get(i) else { return };
         let Some(s) = t.sql.as_ref() else { return };
         let (conn, db, coll) = (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone());
@@ -45,13 +45,12 @@ impl App {
         }
     }
 
-    /// Opens the dialog a Content tab's Save as view button asked for. Called once a frame, since the button is drawn where the app is borrowed.
-    pub(in crate::app) fn view_requests(&mut self) {
-        let Some(i) = self.core.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.save_view)) else { return };
-        if let Some(s) = self.core.tabs[i].sql.as_mut() {
-            s.save_view = false;
+    /// Sends the dialog's view, which then waits for the answer.
+    fn view_save(&mut self, f: &mut ViewForm, drop_first: bool) {
+        let pg = self.is_pg(f.conn);
+        if self.exec_req(Action::Ddl(DdlA::SaveView { conn: f.conn, database: f.database.clone(), spec: f.spec(pg, drop_first) })).is_some() {
+            (f.busy, f.error, f.ask_drop) = (true, None, false);
         }
-        self.save_content_as_view(i);
     }
 
     pub(in crate::app) fn sql_view_def_done(&mut self, conn: u64, database: String, schema: String, name: String, res: db::Res<ViewDef>) {
@@ -82,7 +81,7 @@ impl App {
         if ok && waiting {
             self.modal = None;
         }
-        if let Some(e) = self.core.sql_view_saved(conn, database, schema, name, kind, res, undo, sql_mode, waiting) && let Some(Modal::SqlView(f)) = self.modal.as_mut() {
+        if let Some(e) = self.core.view_saved(conn, database, schema, name, kind, res, undo, sql_mode, waiting) && let Some(Modal::SqlView(f)) = self.modal.as_mut() {
             f.busy = false;
             if need_drop {
                 f.ask_drop = true;
@@ -179,10 +178,10 @@ impl App {
         dialog_foot(ui, |ui| {
             if f.ask_drop {
                 if ui.add_enabled_ui(ok, |ui| danger(ui, "Drop and create")).inner.clicked() {
-                    self.core.view_save(f, true);
+                    self.view_save(f, true);
                 }
             } else if ui.add_enabled(ok, primary_button(ui, if f.edit { "Save view" } else { "Create view" }, PRIMARY())).clicked() {
-                self.core.view_save(f, false);
+                self.view_save(f, false);
             }
             if ui.button(if materialized { "Close" } else { "Cancel" }).on_hover_text("Esc").clicked() {
                 *keep = false;

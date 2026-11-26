@@ -4,10 +4,9 @@
 
 use crate::app::*;
 use db::sql::server::{metrics, rate, Metrics, Overview, Proc, StatusGroup, Var};
-use quarry_core::action::{Action, ServerA, SqlServerA};
+use quarry_core::action::{Action, ServerA, SqlServerA, SrvText};
 use std::collections::HashMap;
 pub(crate) use quarry_core::state::sql::server::*;
-pub(crate) use quarry_core::state::sql::server::POLL;
 
 mod locks;
 
@@ -61,11 +60,7 @@ fn shown_vars<'a>(rows: &'a [Var], filter: &str) -> Vec<&'a Var> {
 
 impl App {
     pub(in crate::app) fn sql_server_window(&mut self, ctx: &egui::Context) {
-        if self.core.sql_server.is_some() && ctx.input(|i| i.focused) && self.core.sql_server_poll() {
-            ctx.request_repaint_after(POLL);
-        }
-        self.core.server_windows_frame();
-        let Some(mut s) = self.core.sql_server.take() else { return };
+        let Some(s) = self.core.sql_server.as_ref() else { return };
         let conn = s.conn;
         let (name, product) = self.conn(conn).map(|c| (c.meta.name.clone(), format!("{} {}", c.server.product, c.server.version))).unwrap_or_default();
         let mut open = true;
@@ -88,11 +83,11 @@ impl App {
                     ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
                 } else {
                     match s.tab {
-                        SqlServerTab::Overview => overview_view(ui, &s, &mut acts),
-                        SqlServerTab::Status => status_view(ui, &mut s, max, &mut acts),
-                        SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut acts),
-                        SqlServerTab::Locks => locks::locks_view(ui, &s, max, &mut acts),
-                        SqlServerTab::Variables => vars_view(ui, &mut s, max, &mut acts),
+                        SqlServerTab::Overview => overview_view(ui, s, &mut acts),
+                        SqlServerTab::Status => status_view(ui, s, max, &mut acts),
+                        SqlServerTab::Processes => procs_view(ui, s, max, &mut acts),
+                        SqlServerTab::Locks => locks::locks_view(ui, s, max, &mut acts),
+                        SqlServerTab::Variables => vars_view(ui, s, max, &mut acts),
                     }
                 }
             });
@@ -109,7 +104,6 @@ impl App {
                 done
             });
         });
-        self.core.sql_server = Some(s);
         for a in acts {
             self.exec(Action::Server(ServerA::Sql(a)));
         }
@@ -143,7 +137,7 @@ pub(in crate::app) fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
     }
 }
 
-fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
+fn procs_view(ui: &mut egui::Ui, s: &SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
     let (filter, hide) = (s.filter.clone(), s.hide_sleeping);
     let (me, total, running, identity, rows): (u64, usize, usize, String, Vec<&Proc>) = match &s.procs {
         Some(Ok(p)) => (p.me, p.rows.len(), p.rows.iter().filter(|r| r.running()).count(), p.identity.clone(), shown(&p.rows, &filter, hide)),
@@ -177,7 +171,10 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, acts: &mut Ve
         ui.add_space(14.0);
     }
     ui.horizontal(|ui| {
-        well_field(ui, egui::Id::unique("sql-procs-filter"), FieldIcon::Search, None, |ui| ui.add(field_edit(&mut s.filter, egui::Id::unique("sql-procs-filter"), "Filter by user, database or query", 260.0, egui::TextStyle::Body)));
+        let mut text = s.filter.clone();
+        if well_field(ui, egui::Id::unique("sql-procs-filter"), FieldIcon::Search, None, |ui| ui.add(field_edit(&mut text, egui::Id::unique("sql-procs-filter"), "Filter by user, database or query", 260.0, egui::TextStyle::Body))).changed() {
+            acts.push(SqlServerA::Text(SrvText::Procs, text));
+        }
         ui.add_space(4.0);
         if chip(ui, "Hide sleeping", PRIMARY(), s.hide_sleeping).clicked() {
             acts.push(SqlServerA::HideSleeping(!s.hide_sleeping));
@@ -333,9 +330,12 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, acts: &mut Ve
     ui.add_space(14.0);
 }
 
-fn vars_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
+fn vars_view(ui: &mut egui::Ui, s: &SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.var_filter).hint_text("Filter variables").desired_width(300.0));
+        let mut text = s.var_filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter variables").desired_width(300.0)).changed() {
+            acts.push(SqlServerA::Text(SrvText::Vars, text));
+        }
         let mut scope = s.global;
         segmented(ui, &mut scope, &[(false, "Session"), (true, "Global")]);
         if scope != s.global {
@@ -538,9 +538,12 @@ fn overview_view(ui: &mut egui::Ui, s: &SqlServerWin, acts: &mut Vec<SqlServerA>
     });
 }
 
-fn status_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
+fn status_view(ui: &mut egui::Ui, s: &SqlServerWin, max_h: f32, acts: &mut Vec<SqlServerA>) {
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.st_filter).hint_text("Filter status names").desired_width(300.0));
+        let mut text = s.st_filter.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).hint_text("Filter status names").desired_width(300.0)).changed() {
+            acts.push(SqlServerA::Text(SrvText::Status, text));
+        }
         let mut g = s.st_group;
         segmented(ui, &mut g, &StatusGroup::ALL);
         if g != s.st_group {

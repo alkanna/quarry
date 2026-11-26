@@ -1,7 +1,7 @@
 use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Target, UndoAction, UndoKind, Worker};
 use quarry_core::core::{Core, Front};
-use quarry_core::action::{Action, ConnA, GroupA, Secret, SideA};
+use quarry_core::action::{Action, ConnA, GroupA, Secret, SideA, SqlA, SqlAskA, TabA};
 use quarry_core::cmd::{Chord, Cmd};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
@@ -141,6 +141,8 @@ pub struct App {
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
     /// Text an action put on the clipboard, copied by the next `logic()`.
     clip: Option<String>,
+    /// The shortest wait an action asked to be drawn again after, read back by `take_repaint`.
+    repaint: Option<f64>,
     /// An approval waits while the window has no focus: the next `logic()` asks for the user's attention.
     attention: bool,
 }
@@ -175,6 +177,7 @@ impl App {
             scroll_gesture: Default::default(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
             clip: None,
+            repaint: None,
             attention: false,
         }
     }

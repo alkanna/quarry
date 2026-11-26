@@ -313,21 +313,21 @@ pub fn drop_table_sql(schema: &str, table: &str, view: bool, cascade: bool) -> R
 }
 
 /// One UNIQUE constraint over its columns, in key order. An empty name lets the server name it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Unique {
     pub name: String,
     pub cols: Vec<String>,
 }
 
 /// One CHECK constraint. An empty name lets the server name it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Check {
     pub name: String,
     pub expr: String,
 }
 
 /// A plain btree index made right after the table, in the same transaction. An empty name lets the server name it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewIndex {
     pub name: String,
     pub cols: Vec<String>,
@@ -338,7 +338,7 @@ pub struct NewIndex {
 /// What the New table dialog collects. A column is the structure editor's `ColDef`, so its type, default and identity are written
 /// and checked by the same code that adds a column to an existing table, and a foreign key is the Relations editor's `ForeignKey`
 /// (an empty name lets the server name it, `ref_db` is the parent's schema and empty for the table's own).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,

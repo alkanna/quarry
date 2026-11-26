@@ -290,7 +290,9 @@ impl App {
         let summary = format!("{}{}", plural(f.cols.len() as u64, "column"), if keys.is_empty() { String::new() } else { format!("  ·  primary key {}", keys.join(", ")) });
         dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
-                self.core.sql_create_table(f);
+                if let Some(meta) = f.meta.clone() {
+                    self.exec(Action::Ddl(DdlA::CreateTable { conn: f.conn, spec: f.spec(), meta }));
+                }
                 *keep = false;
             }
             if ui.button("Preview SQL").clicked() {
@@ -494,7 +496,7 @@ impl App {
             return;
         }
         // The designs show the actions enabled, which they are on an unlocked connection.
-        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3) {
+        if let Some(c) = self.core.setup().conns.iter_mut().find(|c| c.meta.id == 3) {
             c.writable = true;
         }
         let cs = |n: &str, d: &str, c: &str| create::Charset { name: n.into(), desc: d.into(), default_collation: c.into() };

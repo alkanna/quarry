@@ -140,7 +140,7 @@ impl App {
     }
 
     pub(in crate::app) fn routine_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.core.routines.win.take() else { return };
+        let Some(w) = self.core.routines.win.as_ref() else { return };
         let writable = self.conn_writable(w.conn);
         let session_mode = self.conn(w.conn).and_then(|c| c.sql.as_ref()).map(|s| s.sql_mode.clone());
         let conn_name = self.conn(w.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -151,19 +151,30 @@ impl App {
             let ns = if w.dialect == db::sql::Dialect::Postgres { format!("{} / {}", w.db, w.schema) } else { w.db.clone() };
             let sub = format!("{conn_name} · {} · {ns}", w.kind.noun());
             dialog_head(ui, &Head::new(w.title()).sub(sub).glyph(glyphs::code));
+            // The plan of the text as edited this frame, which the footer's Save reads too.
+            let mut plan = None;
             dialog_pane(ui, |ui| match w.pane {
-                Pane::View => view_pane(ui, &mut w, writable, session_mode.as_deref(), screen.height()),
-                Pane::Run => run_pane(ui, &mut w, writable),
-                Pane::Drop => drop_pane(ui, &mut w),
+                Pane::View => view_pane(ui, w, writable, session_mode.as_deref(), screen.height(), &mut acts, &mut plan),
+                Pane::Run => run_pane(ui, w, writable, &mut acts),
+                Pane::Drop => drop_pane(ui, w, &mut acts),
             });
-            foot(ui, &mut w, writable, &mut acts)
+            foot(ui, w, writable, &mut acts, plan.as_ref())
         });
         let keep = r.inner && !(r.should_close() && self.modal.is_none());
         let (save, undo, drop, run) = (acts.save, acts.undo, acts.drop, acts.run);
-        if keep {
-            self.core.routines.win = Some(w);
-        }
         let mut next = Vec::new();
+        next.extend(acts.text.map(RoutineA::Text));
+        next.extend(acts.arg.map(|(i, a)| RoutineA::Arg { i, value: a.value, null: a.null }));
+        next.extend(acts.typed.map(RoutineA::Typed));
+        if acts.recreate {
+            next.push(RoutineA::Recreate);
+        }
+        if acts.edit {
+            next.push(RoutineA::Edit);
+        }
+        if acts.revert {
+            next.push(RoutineA::Revert);
+        }
         if let Some(i) = acts.pane {
             next.push(RoutineA::Pane(i));
         }
@@ -179,6 +190,9 @@ impl App {
         if run {
             next.push(RoutineA::Run);
         }
+        if !keep {
+            next.push(RoutineA::Close);
+        }
         for a in next {
             self.exec(Action::Routines(a));
         }
@@ -189,10 +203,10 @@ impl App {
         let dialect = self.dialect_of(conn);
         let list = demo_list(pg);
         let key = self.routines_key(conn, db, schema);
-        self.core.routines.lists.insert(key, Loaded::Ok(list.clone()));
-        self.core.open_dbs.insert((conn, db.to_string()));
+        self.core.setup().routines.lists.insert(key, Loaded::Ok(list.clone()));
+        self.core.setup().open_dbs.insert((conn, db.to_string()));
         let pick = if view == "new" { None } else { list.iter().find(|r| r.kind == if view == "run" { Kind::Procedure } else { Kind::Function }).cloned() };
-        let mut w = self.core.routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
+        let mut w = self.core.setup().routine_window_for(conn, db.into(), schema.into(), Kind::Function, pick.clone());
         match pick {
             Some(r) => {
                 let d = demo_detail(dialect, &r);
@@ -212,7 +226,7 @@ impl App {
                 w.editing = true;
             }
         }
-        self.core.routines.win = Some(w);
+        self.core.setup().routines.win = Some(w);
     }
 }
 
@@ -223,6 +237,12 @@ struct WinActs {
     drop: bool,
     run: bool,
     pane: Option<Pane>,
+    text: Option<String>,
+    arg: Option<(usize, Arg)>,
+    typed: Option<String>,
+    edit: bool,
+    revert: bool,
+    recreate: bool,
 }
 
 /// One row of the facts card: a caption and the value in monospace.
@@ -288,7 +308,7 @@ fn code_editor(ui: &mut egui::Ui, text: &mut String, dialect: db::sql::Dialect, 
     changed
 }
 
-fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode: Option<&str>, screen_h: f32) {
+fn view_pane(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, session_mode: Option<&str>, screen_h: f32, acts: &mut WinActs, plan_out: &mut Option<Result<rt::Plan, String>>) {
     if w.routine.is_some() && w.detail.is_none() && w.error.is_none() {
         ui.horizontal(|ui| {
             spin(ui);
@@ -312,33 +332,31 @@ fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode
     let can_edit = !w.system && !blind;
     let height = (screen_h - 560.0).clamp(160.0, 520.0);
     let editable = w.editing && can_edit;
-    let changed = code_editor(ui, &mut w.text, w.dialect, editable, height);
+    let mut text = w.text.clone();
+    let changed = code_editor(ui, &mut text, w.dialect, editable, height);
     if changed {
-        w.error = None;
+        acts.text = Some(text.clone());
     }
-    if let Some(e) = w.error.clone() {
+    let error = if changed { None } else { w.error.clone() };
+    if let Some(e) = error {
         ui.add_space(8.0);
         let lead = if w.offer_recreate { "PostgreSQL cannot replace it in place." } else { "Not done." };
         if banner(ui, if w.offer_recreate { Notice::Warn } else { Notice::Danger }, lead, &e, w.offer_recreate.then_some("Drop and create instead")) {
-            w.recreate = true;
-            w.offer_recreate = false;
-            w.error = None;
+            acts.recreate = true;
         }
     }
     if !w.editing {
         return;
     }
-    if let (Some(d), Some(now)) = (w.detail.as_ref().filter(|_| w.dirty()), session_mode) && !d.sql_mode.is_empty() && !db::sql::ddl::same_modes(&d.sql_mode, now) {
+    let dirty = text.trim() != w.base.trim();
+    if let (Some(d), Some(now)) = (w.detail.as_ref().filter(|_| dirty), session_mode) && !d.sql_mode.is_empty() && !db::sql::ddl::same_modes(&d.sql_mode, now) {
         ui.add_space(8.0);
         ui.label(RichText::new(format!("It was created with sql_mode {:?}. Saving creates it with this session's {:?}, which can change how its body runs.", d.sql_mode, now)).size(TXT_SMALL).color(WARNING()));
     }
-    if !w.dirty() && w.routine.is_some() {
+    if !dirty && w.routine.is_some() {
         return;
     }
-    if !w.memo.as_ref().is_some_and(|m| m.0 == w.text && m.1 == w.recreate) {
-        w.memo = Some((w.text.clone(), w.recreate, rt::plan(w.dialect, &w.schema, w.detail.as_ref(), &w.text, w.recreate)));
-    }
-    let Some((_, _, plan)) = &w.memo else { return };
+    let plan = plan_out.insert(rt::plan(w.dialect, &w.schema, w.detail.as_ref(), &text, w.recreate));
     ui.add_space(8.0);
     caption(ui, "SQL TO RUN");
     ui.add_space(4.0);
@@ -360,7 +378,7 @@ fn view_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, session_mode
     }
 }
 
-fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
+fn run_pane(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, acts: &mut WinActs) {
     let Some(d) = w.detail.clone() else {
         ui.horizontal(|ui| {
             spin(ui);
@@ -372,13 +390,17 @@ fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
     if inputs.is_empty() {
         ui.label(RichText::new("It takes no arguments.").color(MUTED()));
     }
-    for (p, a) in inputs.iter().zip(w.args.iter_mut()) {
+    for (i, (p, shown)) in inputs.iter().zip(w.args.iter()).enumerate() {
+        let mut a = shown.clone();
         ui.horizontal(|ui| {
             ui.set_min_height(BUTTON_H);
             ui.add_sized([180.0, BUTTON_H], egui::Label::new(RichText::new(format!("{} {}", if p.name.is_empty() { "(unnamed)" } else { &p.name }, p.mode.label())).size(TXT_SMALL).color(MUTED())).truncate());
             ui.add_enabled(!a.null, egui::TextEdit::singleline(&mut a.value).font(egui::TextStyle::Monospace).desired_width(260.0).hint_text(p.ty.as_str())).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, format!("Argument {}", p.name)));
             ui.checkbox(&mut a.null, "NULL");
         });
+        if a != *shown {
+            acts.arg = Some((i, a));
+        }
     }
     for p in d.params.iter().filter(|p| p.mode == ArgMode::Out) {
         ui.label(RichText::new(format!("{} {} comes back in the result.", p.name, p.ty)).size(TXT_SMALL).color(FAINT()));
@@ -398,16 +420,20 @@ fn run_pane(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool) {
     }
 }
 
-fn drop_pane(ui: &mut egui::Ui, w: &mut RoutineWin) {
+fn drop_pane(ui: &mut egui::Ui, w: &RoutineWin, acts: &mut WinActs) {
     let name = w.routine.as_ref().map(|r| r.label(w.dialect)).unwrap_or_default();
     banner(ui, Notice::Danger, "This cannot be undone.", &format!("{name} is dropped for good. Grants made on it go with it, and whatever calls it fails afterwards."), None);
     ui.add_space(10.0);
     let expect = w.routine.as_ref().map(|r| r.name.clone()).unwrap_or_default();
-    crate::app::modals::typed_confirm(ui, &expect, &mut w.typed);
+    let mut typed = w.typed.clone();
+    crate::app::modals::typed_confirm(ui, &expect, &mut typed);
+    if typed != w.typed {
+        acts.typed = Some(typed);
+    }
 }
 
 /// The footer. Returns whether the window stays open.
-fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinActs) -> bool {
+fn foot(ui: &mut egui::Ui, w: &RoutineWin, writable: bool, acts: &mut WinActs, plan: Option<&Result<rt::Plan, String>>) -> bool {
     let mut open = true;
     let busy = w.busy || (w.routine.is_some() && w.detail.is_none() && w.error.is_none());
     let blind = w.detail.as_ref().is_some_and(|d| d.header_missing.is_some());
@@ -415,20 +441,13 @@ fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinAct
     dialog_foot(ui, |ui| {
         match w.pane {
             Pane::View if w.editing => {
-                let ok = !busy && w.dirty() && w.memo.as_ref().is_some_and(|m| m.2.is_ok());
+                let ok = !busy && w.dirty() && plan.is_some_and(|p| p.is_ok());
                 let label = if w.busy { "Saving..." } else if w.routine.is_some() { "Save routine" } else { "Create routine" };
                 if ui.add_enabled(ok, primary_button(ui, label, PRIMARY())).on_disabled_hover_text(if busy { "Working" } else { "Nothing to save yet" }).clicked() {
                     acts.save = true;
                 }
                 if quiet_enabled(ui, !w.busy, if w.routine.is_some() { "Revert" } else { "Cancel" }).clicked() {
-                    if w.routine.is_none() {
-                        open = false;
-                    }
-                    w.text = w.base.clone();
-                    w.editing = false;
-                    w.recreate = false;
-                    w.offer_recreate = false;
-                    w.error = None;
+                    acts.revert = true;
                 }
             }
             Pane::View => {
@@ -437,7 +456,7 @@ fn foot(ui: &mut egui::Ui, w: &mut RoutineWin, writable: bool, acts: &mut WinAct
                 }
                 if w.routine.is_some() {
                     if quiet_enabled(ui, can_edit && !busy, "Edit").on_disabled_hover_text(if w.system { "Belongs to the server" } else { "The definition could not be read in full" }).clicked() {
-                        w.editing = true;
+                        acts.edit = true;
                     }
                     if quiet_enabled(ui, w.detail.is_some() && !w.busy, "Run…").clicked() {
                         acts.pane = Some(Pane::Run);

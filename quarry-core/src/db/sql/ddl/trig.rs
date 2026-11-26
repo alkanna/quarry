@@ -4,7 +4,7 @@ use super::*;
 
 /// A trigger as the editor holds it. The body is the user's own SQL, written after FOR EACH ROW as typed. On PostgreSQL the
 /// body is the source of the trigger's function, the event is the events joined with OR, and `pg` holds the rest.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrigDef {
     pub name: String,
     pub timing: String,
@@ -14,7 +14,7 @@ pub struct TrigDef {
 }
 
 /// What a PostgreSQL trigger has that MySQL's does not.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PgDef {
     /// FOR EACH ROW, else FOR EACH STATEMENT.
     pub per_row: bool,

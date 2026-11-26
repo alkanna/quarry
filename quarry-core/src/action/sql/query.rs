@@ -9,6 +9,7 @@ use crate::state::library::snippet_strip::{fill_tab, Src};
 use crate::state::config::push_history;
 use crate::state::sql::query::{ran_target, run_db, run_target};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 impl Core {
     /// `text`, run from the open Query tab, with its snippet values filled in.
@@ -83,7 +84,7 @@ impl Core {
                     if let (Some(o), Some(n)) = (old.page, new.page.as_mut()) {
                         n.total = o.total;
                     }
-                    *old = new;
+                    *old = Arc::new(new);
                     None
                 }
                 (_, Some(new)) => new.error,
@@ -95,7 +96,7 @@ impl Core {
             return;
         }
         s.sets_req = req;
-        (s.set_sel, s.sets) = (0, sets);
+        (s.set_sel, s.sets) = (0, sets.into_iter().map(Arc::new).collect());
         // A last page already knows the total; the others ask the server.
         let wants: Vec<(usize, String)> = s.sets.iter().enumerate().filter(|(_, x)| x.page.is_some_and(|p| p.next)).map(|(i, x)| (i, x.stmt.clone())).collect();
         if let Some((db, ns)) = self.conn(conn).and_then(|c| c.sql.clone()).map(|db| ran_target(&self.tabs[ti], db)) {
@@ -116,7 +117,7 @@ impl Core {
 
     /// The row count of a paged result arrived.
     pub fn sql_counted(&mut self, req: u64, idx: usize, res: db::Res<u64>) {
-        let p = self.tabs.iter_mut().find_map(|t| t.sql.as_mut().filter(|s| s.sets_req == req)).and_then(|s| s.sets.get_mut(idx)).and_then(|x| x.page.as_mut());
+        let p = self.tabs.iter_mut().find_map(|t| t.sql.as_mut().filter(|s| s.sets_req == req)).and_then(|s| s.sets.get_mut(idx)).and_then(|x| Arc::make_mut(x).page.as_mut());
         if let (Some(p), Ok(n)) = (p, res) {
             p.total = Some(n);
         }
@@ -128,7 +129,7 @@ impl Core {
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let i = s.set_sel.min(s.sets.len().saturating_sub(1));
         let Some(set) = s.sets.get_mut(i) else { return };
-        let moved = db::sql::sort::sort_rows(set, &keys);
+        let moved = db::sql::sort::sort_rows(Arc::make_mut(set), &keys);
         s.qchecked = s.qchecked.iter().filter_map(|&r| moved.get(r).copied()).collect();
         s.qanchor = s.qanchor.and_then(|r| moved.get(r).copied());
         s.qsel = s.qsel.and_then(|r| moved.get(r).copied());

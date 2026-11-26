@@ -360,8 +360,8 @@ impl App {
                 self.sql_sort_page(keys);
             }
             HeadAct::Col(a) => {
-                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    super::table::col_acts_on(s.qprefs.entry(names.clone()).or_default(), usize::MAX, &names, vec![a]);
+                if let Some(uid) = self.uid_of(self.core.cur) {
+                    super::table::col_acts_on(self.ui.qprefs.entry(uid).or_default().entry(names.clone()).or_default(), usize::MAX, &names, vec![a]);
                 }
             }
             HeadAct::Width(wp) => {
@@ -370,8 +370,8 @@ impl App {
                     WidthPreset::Optimal => None,
                     WidthPreset::Max => Some(super::table::optimal_width(ui, Rows::Raw(&rows), c, c, !self.core.prefs.object_preview, COL_MAX_W).min(COL_MAX_W)),
                 };
-                if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-                    let widths = &mut s.qprefs.entry(names).or_default().widths;
+                if let Some(uid) = self.uid_of(self.core.cur) {
+                    let widths = &mut self.ui.qprefs.entry(uid).or_default().entry(names).or_default().widths;
                     match w {
                         Some(w) => widths.insert(key.into(), w),
                         None => widths.remove(key),

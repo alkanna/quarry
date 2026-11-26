@@ -13,6 +13,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+/// The filter fields of the MySQL Server window.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SrvText {
+    Procs,
+    Vars,
+    Status,
+}
+
+/// The filter fields of the PostgreSQL Server window.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgText {
+    Settings,
+    Activity,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SqlServerA {
     Open { conn: u64 },
@@ -33,6 +48,8 @@ pub enum SqlServerA {
     StGroup(StatusGroup),
     /// Status' "Refresh every 2 s".
     StAuto(bool),
+    /// A filter field changed to this text.
+    Text(SrvText, String),
     Unlock,
     Close,
 }
@@ -56,6 +73,8 @@ pub enum PgServerA {
     Signal { pid: u64 },
     /// Copy query on a row whose text the list cut: asks for the whole of it.
     FetchQuery { pid: u64 },
+    /// A filter field changed to this text.
+    Text(PgText, String),
     Unlock,
     Close,
 }
@@ -135,6 +154,9 @@ impl Core {
             }
             SqlServerA::StGroup(g) => s.st_group = g,
             SqlServerA::StAuto(on) => s.st_auto = on,
+            SqlServerA::Text(SrvText::Procs, t) => s.filter = t,
+            SqlServerA::Text(SrvText::Vars, t) => s.var_filter = t,
+            SqlServerA::Text(SrvText::Status, t) => s.st_filter = t,
             SqlServerA::Unlock => self.ui_fx.push(UiFx::Open(Dialog::Unlock(conn))),
             SqlServerA::Close => self.sql_server = None,
             SqlServerA::Open { .. } => {}
@@ -202,6 +224,8 @@ impl Core {
                     return Ok(Reply::Pending(self.req));
                 }
             }
+            PgServerA::Text(PgText::Settings, t) => s.set_filter = t,
+            PgServerA::Text(PgText::Activity, t) => s.filter = t,
             PgServerA::Unlock => self.ui_fx.push(UiFx::Open(Dialog::Unlock(conn))),
             PgServerA::Close => self.pg_server = None,
             PgServerA::Open { .. } => {}
@@ -479,6 +503,11 @@ impl Core {
         let Some(s) = self.pg_server.as_mut() else { return };
         if let Some(e) = s.take(req, ans, Instant::now()) {
             self.err(e);
+        }
+        // The text of a cut query asked for with Copy query goes to the clipboard.
+        if let Some(t) = self.pg_server.as_mut().and_then(|s| s.copy.take()) {
+            self.ui_fx.push(UiFx::CopyText(t));
+            self.ok("Copied the query");
         }
     }
 }

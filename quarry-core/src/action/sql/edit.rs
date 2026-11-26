@@ -142,6 +142,20 @@ impl Core {
         self.sql_stage(&cur, new);
     }
 
+    /// Stages `value` as the value of `col` on each of `rows`, on top of any earlier edit of the same row, which keeps its original.
+    pub fn sql_stage_value(&mut self, rows: Vec<Document>, col: &str, value: Bson) {
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        let n = rows.len();
+        for r in &rows {
+            let key = self.draft_key(r);
+            let cur = self.drafts.get(&key).map(|x| x.current.clone()).unwrap_or_else(|| r.clone());
+            let mut new = cur.clone();
+            new.insert(col, value.clone());
+            stage_draft(&mut self.drafts, &key, &sel, &cur, new);
+        }
+        self.ok(format!("Staged {n} edit{}. Save writes them.", if n == 1 { "" } else { "s" }));
+    }
+
     fn sql_stage(&mut self, d: &Document, new: Document) {
         let key = self.draft_key(d);
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };

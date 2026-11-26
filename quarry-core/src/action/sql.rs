@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub use filter::FilterA;
 
 pub mod ac;
+pub mod asks;
+pub mod jobs;
 pub mod content;
 pub mod edit;
 pub mod filter;
@@ -70,13 +72,28 @@ pub enum SqlA {
     CrumbDb { tab: u64, db: String, schema: String },
     /// The crumb's schema pick on a PostgreSQL Query view.
     CrumbSchema { tab: u64, schema: String },
+    /// Replaces the script of a Query tab, and where it runs when `run_db` or `run_schema` is given. `caret` is the byte
+    /// offset of the caret in the new text, when the editor knows it.
+    SetQuery { tab: u64, text: String, run_db: Option<String>, run_schema: Option<String>, caret: Option<usize>, show: bool },
+    /// Tab on a selected row: opens or closes its record.
+    Record { tab: u64 },
+    /// Content: a tab loaded with another page size, set from another tab, starts over on its first page.
+    PageSize { tab: u64 },
+    /// The Text view of the shown result is built once, until the result or its order changes.
+    BuildText { tab: u64 },
+    /// The cell editor's commit: stages `value` as the value of column `col` of page row `row`.
+    SetCell { tab: u64, row: usize, col: String, value: mongodb::bson::Bson },
+    /// The Set value dialog's Stage: `value` for column `col` of each of these rows.
+    StageValue { tab: u64, rows: Vec<mongodb::bson::Document>, col: String, value: mongodb::bson::Bson },
+    /// Writes the staged edits of these drafts.
+    WriteDrafts { tab: u64, keys: Vec<String> },
 }
 
 impl SqlA {
     /// The uid of the tab the action was drawn for.
     fn tab(&self) -> u64 {
         match self {
-            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } | SqlA::CrumbDb { tab, .. } | SqlA::CrumbSchema { tab, .. } => *tab,
+            SqlA::Run { tab, .. } | SqlA::RunText { tab, .. } | SqlA::Stop { tab } | SqlA::PickSet { tab, .. } | SqlA::TextMode { tab, .. } | SqlA::GotoPage { tab, .. } | SqlA::SortPage { tab, .. } | SqlA::Check { tab, .. } | SqlA::CheckAll { tab, .. } | SqlA::ClearChecks { tab } | SqlA::SelectRow { tab, .. } | SqlA::Apply { tab } | SqlA::Page { tab, .. } | SqlA::Ungroup { tab } | SqlA::Drill { tab, .. } | SqlA::WhereMode { tab, .. } | SqlA::Filter { tab, .. } | SqlA::OpenCell { tab, .. } | SqlA::SetNull { tab, .. } | SqlA::Save { tab } | SqlA::Discard { tab } | SqlA::NewRow { tab, .. } | SqlA::Insert { tab, .. } | SqlA::DeleteRows { tab, .. } | SqlA::CrumbDb { tab, .. } | SqlA::CrumbSchema { tab, .. } | SqlA::SetQuery { tab, .. } | SqlA::Record { tab } | SqlA::PageSize { tab } | SqlA::BuildText { tab } | SqlA::SetCell { tab, .. } | SqlA::StageValue { tab, .. } | SqlA::WriteDrafts { tab, .. } => *tab,
         }
     }
 }
@@ -148,6 +165,51 @@ impl Core {
                     // A table's Query view keeps its table and only runs elsewhere. Its own database runs in the table's schema.
                     q.run_schema = if own { String::new() } else { schema };
                     q.run_db = db;
+                }
+            }
+            SqlA::Record { .. } => {
+                let t = &mut self.tabs[self.cur];
+                if t.record_row() {
+                    t.record = !t.record;
+                }
+            }
+            SqlA::SetCell { row, col, value, .. } => self.sql_set_cell(row, &col, value),
+            SqlA::StageValue { rows, col, value, .. } => self.sql_stage_value(rows, &col, value),
+            SqlA::WriteDrafts { keys, .. } => self.write_sql_drafts(keys),
+            SqlA::BuildText { .. } => {
+                let s = self.sql_tab();
+                let sel = s.set_sel.min(s.sets.len().saturating_sub(1));
+                if let Some(set) = s.sets.get(sel).filter(|_| s.text_cache.as_ref().is_none_or(|c| c.0 != sel)) {
+                    let docs: Vec<mongodb::bson::Document> = set.rows.iter().map(crate::db::Row::owned).collect();
+                    s.text_cache = Some((sel, crate::db::copy::text_table(&set.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), &docs)));
+                }
+            }
+            SqlA::PageSize { .. } => {
+                let size = self.page_size();
+                let t = &mut self.tabs[self.cur];
+                if t.size != 0 && t.size != size && !t.loading {
+                    t.page = 0;
+                    self.reload();
+                }
+            }
+            SqlA::SetQuery { text, run_db, run_schema, caret, show, .. } => {
+                if show {
+                    self.tabs[self.cur].view = crate::state::View::Sql;
+                }
+                // Editing the script puts the snippet strip back on.
+                if self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.query != text) {
+                    self.tabs[self.cur].snip.off = false;
+                }
+                let s = self.sql_tab();
+                s.query = text;
+                if let Some(c) = caret {
+                    s.caret = c;
+                }
+                if let Some(d) = run_db {
+                    s.run_db = d;
+                }
+                if let Some(d) = run_schema {
+                    s.run_schema = d;
                 }
             }
             SqlA::CrumbSchema { schema, .. } => {

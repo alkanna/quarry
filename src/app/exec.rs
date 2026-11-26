@@ -2,15 +2,38 @@
 //! the same action again, and the effects only the UI can carry out.
 
 use super::*;
-use quarry_core::action::{Action, Dialog, Refusal, RefusalKind, TabA, UiFx};
+use quarry_core::action::{Action, Dialog, Refusal, RefusalKind, Reply, TabA, UiFx};
 
 impl App {
     /// Every click of a window on actions goes through here.
     pub(super) fn exec(&mut self, a: Action) {
-        if let Err(Refusal { kind: RefusalKind::ReadOnly { conn }, .. }) = self.core.execute(a.clone()) {
+        self.exec_reply(a);
+    }
+
+    /// `exec` for an action that starts a request whose answer a dialog waits on: the request id it is matched by, None when
+    /// the action was refused or started nothing.
+    pub(super) fn exec_req(&mut self, a: Action) -> Option<u64> {
+        match self.exec_reply(a) {
+            Some(Reply::Pending(req)) => Some(req),
+            _ => None,
+        }
+    }
+
+    /// Asks egui to draw again once the pause an action is waiting out is over.
+    pub(super) fn take_repaint(&mut self, ctx: &egui::Context) {
+        if let Some(s) = self.repaint.take() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(s.max(0.0)));
+        }
+    }
+
+    fn exec_reply(&mut self, a: Action) -> Option<Reply> {
+        let r = self.core.execute(a.clone());
+        if let Err(Refusal { kind: RefusalKind::ReadOnly { conn }, .. }) = &r {
+            let conn = *conn;
             self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |app: &mut App| app.exec(a)))));
         }
         self.run_fx();
+        r.ok()
     }
 
     /// Carries out what actions and answers left for the UI. Also run each frame from `logic()`.
@@ -41,6 +64,8 @@ impl App {
                 // Sent by `logic()`, which holds the egui context.
                 UiFx::Attention => self.attention = true,
                 UiFx::UpdPopup => self.ui.upd_popup = true,
+                // A debounce waiting out its pause; the drawing code that asked reads it back with `take_repaint`.
+                UiFx::RepaintAfter(s) => self.repaint = Some(self.repaint.map_or(s, |r| r.min(s))),
             }
         }
     }

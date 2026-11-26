@@ -12,14 +12,14 @@ use mongodb::bson::{Bson, Document};
 use std::time::Instant;
 
 /// What happens to the matching rows. Update holds each column by its `Col::name` with the value it takes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BulkOp {
     Update(Vec<(String, Bson)>),
     Delete,
 }
 
 /// A confirmed change, with everything the statement is built from, so the worker sends the text the dialog showed.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BulkPlan {
     pub op: BulkOp,
     pub filter: String,

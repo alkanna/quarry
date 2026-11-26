@@ -66,6 +66,16 @@ pub enum StructA {
     Maintain { tab: u64, what: crate::db::sql::Maint },
     /// Info: runs a maintenance statement, once confirmed.
     RunMaint { tab: u64, what: crate::db::sql::Maint },
+    /// Asks for the structure of the tab the first time a view wants it.
+    Load { tab: u64 },
+    /// Triggers: the editor changed draft `key`.
+    TrigDraft { tab: u64, key: String, def: crate::db::sql::ddl::TrigDef },
+    /// Triggers: the structure now lists the trigger the new draft made, so the draft has done its job.
+    TrigDone { tab: u64 },
+    /// Triggers: drops the drafts of triggers that are gone.
+    TrigPrune { tab: u64 },
+    /// Triggers: a listed trigger was picked, which ends the new trigger's editor.
+    TrigPick { tab: u64 },
 }
 
 impl StructA {
@@ -73,7 +83,7 @@ impl StructA {
         match self {
             StructA::DropColumn { tab, .. } | StructA::MoveColumn { tab, .. } | StructA::DropIndex { tab, .. } | StructA::Unstage { tab, .. } | StructA::Discard { tab } | StructA::Apply { tab } | StructA::Run { tab } | StructA::Refresh { tab } => *tab,
             StructA::EditColumn { tab, .. } | StructA::DuplicateColumn { tab, .. } | StructA::EditIndex { tab, .. } | StructA::EditCheck { tab, .. } | StructA::DropCheck { tab, .. } | StructA::EditFk { tab, .. } | StructA::DropFk { tab, .. } | StructA::EditTable { tab } | StructA::Stage { tab, .. } | StructA::StageTable { tab, .. } => *tab,
-            StructA::TrigNew { tab } | StructA::TrigRevert { tab, .. } | StructA::TrigSave { tab, .. } | StructA::TrigAskDrop { tab, .. } | StructA::TrigDrop { tab, .. } | StructA::Maintain { tab, .. } | StructA::RunMaint { tab, .. } => *tab,
+            StructA::TrigNew { tab } | StructA::TrigRevert { tab, .. } | StructA::TrigSave { tab, .. } | StructA::TrigAskDrop { tab, .. } | StructA::TrigDrop { tab, .. } | StructA::Maintain { tab, .. } | StructA::RunMaint { tab, .. } | StructA::Load { tab } | StructA::TrigDraft { tab, .. } | StructA::TrigDone { tab } | StructA::TrigPrune { tab } | StructA::TrigPick { tab } => *tab,
         }
     }
 }
@@ -126,6 +136,29 @@ impl Core {
             StructA::TrigAskDrop { name, .. } => return self.trig_ask_drop(name),
             StructA::TrigDrop { name, .. } => return self.drop_trigger(&name),
             StructA::Maintain { what, .. } => return self.sql_maintain(what),
+            StructA::Load { .. } => self.request_structure(),
+            StructA::TrigDraft { key, def, .. } => {
+                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    s.st.trig.insert(key, def);
+                }
+            }
+            StructA::TrigDone { .. } => {
+                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    s.st.trig.remove(crate::state::sql::trig::NEW);
+                    (s.st.trig_new, s.st.trig_made) = (false, None);
+                }
+            }
+            StructA::TrigPrune { .. } => {
+                let live: Vec<String> = self.structure().map(|d| d.triggers.iter().map(|t| t.name.clone()).collect()).unwrap_or_default();
+                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    s.st.trig.retain(|k, _| k == crate::state::sql::trig::NEW || live.contains(k));
+                }
+            }
+            StructA::TrigPick { .. } => {
+                if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                    s.st.trig_new = false;
+                }
+            }
             StructA::RunMaint { what, .. } => {
                 let sel = self.tabs[self.cur].sel.clone();
                 if let Some(stmt) = self.dialect_of(sel.conn).maintenance(what, sel.space(), &sel.coll) {

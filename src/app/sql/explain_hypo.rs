@@ -66,7 +66,7 @@ impl App {
     /// The answer of a trial of the open dialog.
     pub(in crate::app) fn sql_explain_hypo(&mut self, req: u64, res: db::Res<hypo::Trial>) {
         if let Some(Modal::SqlExplain(x)) = &mut self.modal {
-            self.core.sql_explain_hypo(x, req, res);
+            self.core.explain().hypo(x, req, res);
         }
     }
 

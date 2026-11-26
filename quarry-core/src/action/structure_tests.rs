@@ -109,6 +109,13 @@ pub(super) fn routine_actions() -> Vec<RoutineA> {
         RoutineA::Save { restore: true },
         RoutineA::Drop,
         RoutineA::Run,
+        RoutineA::Text("SELECT 1".into()),
+        RoutineA::Edit,
+        RoutineA::Revert,
+        RoutineA::Recreate,
+        RoutineA::Arg { i: 0, value: "1".into(), null: false },
+        RoutineA::Typed("f".into()),
+        RoutineA::Close,
     ]
 }
 

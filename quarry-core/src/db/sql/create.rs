@@ -259,7 +259,7 @@ pub fn type_def(name: &str) -> Option<&'static TypeDef> {
     TYPES.iter().find(|d| d.name.eq_ignore_ascii_case(name))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum DefaultKind {
     #[default]
     None,
@@ -270,7 +270,7 @@ pub enum DefaultKind {
     Value,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnSpec {
     pub name: String,
     pub ty: String,
@@ -297,7 +297,7 @@ impl ColumnSpec {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,

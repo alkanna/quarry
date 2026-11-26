@@ -49,6 +49,12 @@ pub enum DdlA {
     CreatePgDb { conn: u64, name: String, opts: DbOpts },
     /// PostgreSQL's New schema dialog's Create schema.
     CreateSchema { conn: u64, database: String, name: String },
+    /// MySQL's New table dialog's Create table, with the server's lists it was built from.
+    CreateTable { conn: u64, spec: crate::db::sql::create::TableSpec, meta: Meta },
+    /// PostgreSQL's New table dialog's Create table, in `database`.
+    CreatePgTable { conn: u64, database: String, spec: crate::db::sql::pg::create::TableSpec },
+    /// The view dialog's Save or Create, in `database` on PostgreSQL. Pending once sent, which is when the dialog waits.
+    SaveView { conn: u64, database: String, spec: crate::db::sql::view::ViewSpec },
 }
 
 /// The forms of the dialogs these actions open. They live in the app's Modal; `modal` hands one over.
@@ -142,6 +148,25 @@ impl Core {
                 if let Some(sql) = self.sql_db_for(conn, None) {
                     self.worker.pg_create_schema(conn, sql.at(&database), name, !self.conn_writable(conn));
                 }
+            }
+            DdlA::CreateTable { conn, spec, meta } => {
+                if let Some(sql) = self.sql_db_for(conn, None) {
+                    self.worker.sql_create_table(conn, sql, spec, meta, !self.conn_writable(conn));
+                }
+            }
+            DdlA::CreatePgTable { conn, database, spec } => {
+                if let Some(sql) = self.sql_db_for(conn, None) {
+                    self.worker.pg_create_table(conn, sql.at(&database), spec, !self.conn_writable(conn));
+                }
+            }
+            DdlA::SaveView { conn, database, spec } => {
+                let pg = self.is_pg(conn);
+                let Some(sql) = self.sql_db_for(conn, None) else { return Ok(Reply::Done) };
+                let sql = if pg { sql.at(&database) } else { sql };
+                self.worker.sql_save_view(conn, sql, spec, !self.conn_writable(conn));
+                // The dialog waits for the answer, which names no request, so the id only says it was sent.
+                self.req += 1;
+                return Ok(Reply::Pending(self.req));
             }
         }
         Ok(Reply::Done)
@@ -266,7 +291,7 @@ impl Core {
     }
 
     /// The sidebar menu's Refresh on a database of a SQL connection, which says so when it is not connected.
-    fn side_refresh(&mut self, conn: u64, db: &str) {
+    pub(in crate::action) fn side_refresh(&mut self, conn: u64, db: &str) {
         if self.conn(conn).is_some_and(|c| c.sql.is_some()) {
             self.refresh_db(conn, db);
         } else if self.is_sql(conn) {
@@ -494,20 +519,6 @@ impl Core {
             Ddl::Emptied => self.pg_emptied(conn, &database),
         }
     }
-
-    /// The New table dialog's Create table.
-    pub fn pg_create_table(&mut self, f: &PgNewTable) {
-        if let Some(sql) = self.sql_db_for(f.conn, None) {
-            self.worker.pg_create_table(f.conn, sql.at(&f.database), f.spec(), !self.conn_writable(f.conn));
-        }
-    }
-
-    /// MySQL's New table dialog's Create.
-    pub fn sql_create_table(&mut self, f: &NewTable) {
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        let Some(meta) = f.meta.clone() else { return };
-        self.worker.sql_create_table(f.conn, sql, f.spec(), meta, !self.conn_writable(f.conn));
-    }
 }
 
 // Rename, duplicate and empty.
@@ -681,15 +692,6 @@ impl Core {
             Err(e) => return Err(self.refuse(e)),
         };
         self.sql_new_view(conn, db, text)
-    }
-
-    /// The view dialog's Save or Create, or Drop and create with `drop_first`. The form waits for the answer.
-    pub fn view_save(&mut self, f: &mut ViewForm, drop_first: bool) {
-        let pg = self.is_pg(f.conn);
-        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
-        let sql = if pg { sql.at(&f.database) } else { sql };
-        self.worker.sql_save_view(f.conn, sql, f.spec(pg, drop_first), !self.conn_writable(f.conn));
-        (f.busy, f.error, f.ask_drop) = (true, None, false);
     }
 
     /// A save or an undo of a view finished. The dialog it came from, when it still waits (`waiting`), takes a failure

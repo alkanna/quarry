@@ -80,8 +80,8 @@ mod agents_tests;
 
 pub use roles::RolesA;
 pub use server::{MongoServerA, ServerA};
-pub use users::{MongoUsersA, SqlUsersA, UsersA};
-pub use sql_server::{PgServerA, SqlServerA};
+pub use users::{MongoUsersA, SqlUsersA, UsersA, UsersText};
+pub use sql_server::{PgServerA, PgText, SqlServerA, SrvText};
 pub use shell::ShellA;
 pub use tools::ToolsA;
 pub use watch::WatchA;
@@ -103,6 +103,7 @@ pub use grid::GridA;
 pub use routines::RoutineA;
 pub use sql::ddl::{DdlA, SqlForm};
 pub use sql::ops::SqlOpsA;
+pub use sql::asks::SqlAskA;
 pub use agents::{AgentCall, AgentsA, Origin};
 pub use confirm::ConfirmA;
 pub use cloud::CloudA;
@@ -136,6 +137,7 @@ pub enum Action {
     Agents(AgentsA),
     Confirm(ConfirmA),
     Cloud(CloudA),
+    SqlAsk(SqlAskA),
 }
 
 /// What an action did: finished, or started worker call `req` whose answer comes back through `on_msg`.
@@ -183,6 +185,8 @@ pub enum UiFx {
     Attention,
     /// Opens the update popover on the next frame, after a check started from the menu or the palette.
     UpdPopup,
+    /// Draw again after this many seconds, for a debounce that is waiting out a pause.
+    RepaintAfter(f64),
 }
 
 /// The app's dialogs an action opens. The app keeps `Modal`, which holds its own closures, so Core names them here.
@@ -317,6 +321,7 @@ impl Core {
             Action::SqlOps(a) => self.sql_ops(a),
             Action::Agents(a) => self.agents_act(a),
             Action::Cloud(a) => self.cloud_act(a),
+            Action::SqlAsk(a) => self.sql_ask(a),
         }
     }
 
@@ -376,7 +381,7 @@ impl Core {
             Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) => true,
             Msg::LibScan { link, .. } => *link != 0,
             Msg::LibFile { .. } => true,
-            Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } => true,
+            Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } | Msg::SqlSchema { .. } | Msg::SqlJob { .. } | Msg::SqlLists { .. } => true,
             Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => true,
             Msg::SqlAltered { .. } => true,
             // Msg::Docs stays in the app's poll: the page's field suggestions are built by its autocomplete.
@@ -428,6 +433,9 @@ impl Core {
             Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
             Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
             Msg::SqlLint { req, lint } => self.sql_linted(req, lint),
+            Msg::SqlSchema { conn, database, schema, res } => self.sql_schema_done(conn, database, schema, res),
+            Msg::SqlJob { req, res } => self.sql_job_done(req, res),
+            Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
             Msg::SqlCols { req, cols, pk, estimated, matched } => self.sql_cols(req, cols, pk, estimated, matched),
             Msg::SqlFilterCount { req, res } => self.sql_filter_counted(req, res),
             Msg::SqlKeys { req, res } => self.sql_keys_done(req, res),
@@ -471,6 +479,19 @@ impl Core {
             self.conns.iter_mut().for_each(|c| c.writable = true);
         }
         self.stop_hidden_watches();
+        // The Server windows poll while Quarry is focused, and the Roles window fills its fields before it draws.
+        if self.agents.ui.focused {
+            let (sql, pg) = (self.sql_server.is_some() && self.sql_server_poll(), self.pg_server.is_some() && self.pg_server_poll());
+            if sql || pg {
+                self.ui_fx.push(UiFx::RepaintAfter(crate::state::server::POLL.as_secs_f64()));
+            }
+        }
+        self.server_windows_frame();
+        self.pg_roles_fields();
+        // The record belongs to a selected row: whatever let the row go (a view switch, a reload, a delete) ends it too.
+        if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
+            t.record = false;
+        }
         // Once per frame: the list the header counts drops what a day made too old, and the next launch reopens these tabs.
         crate::core::notify::trim_undo(&mut self.undo, std::time::Instant::now());
         // The rail's tiles follow the open connections, each in the place it had.

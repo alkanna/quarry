@@ -240,18 +240,14 @@ impl App {
     /// Tab on a selected SQL row opens or closes its record. Read before anything draws: egui has already turned the Tab
     /// into a focus move, which would give the focus to the first button of the top bar.
     pub(in crate::app) fn record_key(&mut self, ctx: &egui::Context) {
-        // The record belongs to a selected row: whatever let the row go (a view switch, a reload, a delete) ends it too.
-        if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
-            t.record = false;
-        }
         // A filter panel with a selected row has the keys, as its arrows and Enter do. Without one, Tab is the grid's.
         let panel = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.bar.panel.open && s.bar.panel.sel.is_some());
         if self.window_open() || self.core.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() || panel {
             return;
         }
-        let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.record_row()) else { return };
+        let Some(tab) = self.t().filter(|t| t.sql.is_some() && t.record_row()).map(|t| t.uid) else { return };
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
-            t.record = !t.record;
+            self.exec(Action::Sql(SqlA::Record { tab }));
             // The record's cursor starts on the field of the grid's cursor.
             let col = self.vcol();
             self.set_vline(col);

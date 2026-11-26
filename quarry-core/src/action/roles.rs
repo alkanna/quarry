@@ -41,10 +41,14 @@ pub enum RolesA {
     System(bool),
     /// The matrix cell whose editor is open: the object's oid and the grantee ("" for PUBLIC).
     Cell(Option<(String, String)>),
-    /// The Role tab's Connection limit field changed; its text is read from the window.
-    LimitEdited,
-    /// The Role tab's Valid until field changed.
-    UntilEdited,
+    /// The Role tab's Connection limit field changed to this text.
+    LimitEdited(String),
+    /// The Role tab's Valid until field changed to this text.
+    UntilEdited(String),
+    /// The matrix's and the role list's Filter roles field.
+    Filter(String),
+    /// The staged bar's field for typing the own role's name to confirm.
+    Confirm(String),
     /// The + Default privilege form, as edited, or None to close it.
     DefForm(Option<DefForm>),
     /// The New role dialog's Create.
@@ -175,7 +179,10 @@ impl Core {
             RolesA::Inherited(on) => self.pg_roles.as_mut().unwrap().inherited = on,
             RolesA::System(on) => self.pg_roles.as_mut().unwrap().system = on,
             RolesA::Cell(c) => self.pg_roles.as_mut().unwrap().cell = c,
-            RolesA::LimitEdited => {
+            RolesA::Filter(t) => self.pg_roles.as_mut().unwrap().filter = t,
+            RolesA::Confirm(t) => self.pg_roles.as_mut().unwrap().confirm = t,
+            RolesA::LimitEdited(t) => {
+                self.pg_roles.as_mut().unwrap().lim = t;
                 let Some((role, now)) = self.pg_roles_field_role() else { return Ok(Reply::Done) };
                 let w = self.pg_roles.as_mut().unwrap();
                 match w.lim.trim().parse::<i64>() {
@@ -186,7 +193,8 @@ impl Core {
                     _ => w.field_err = Some("The connection limit is a whole number, -1 for none.".into()),
                 }
             }
-            RolesA::UntilEdited => {
+            RolesA::UntilEdited(t) => {
+                self.pg_roles.as_mut().unwrap().until = t;
                 let Some((role, now)) = self.pg_roles_field_role() else { return Ok(Reply::Done) };
                 let w = self.pg_roles.as_ref().unwrap();
                 let v = w.until.trim();

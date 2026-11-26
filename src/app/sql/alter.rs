@@ -90,10 +90,6 @@ impl App {
         self.core.staged()
     }
 
-    pub(in crate::app) fn set_staged(&mut self, v: Vec<Change>) {
-        self.core.set_staged(v)
-    }
-
     pub(in crate::app) fn alter_env(&self) -> (Dialect, String, Mode) {
         self.core.alter_env()
     }
@@ -668,7 +664,7 @@ impl App {
         def.nullable = false;
         def.default = Dv::None;
         let staged = vec![Change::Add { def, pos: Pos::After("id".into()) }, Change::Drop("note".into()), Change::DropIndex("idx_status".into())];
-        self.set_staged(staged);
+        self.core.setup().set_staged(staged);
     }
 }
 

@@ -10,12 +10,8 @@ use std::collections::HashMap;
 pub struct StructState {
     pub load: Load,
     pub data: Option<Structure>,
-    /// The selected row of each grid: columns, indexes, keys out, keys in, triggers, checks.
-    pub sel: [Option<usize>; 6],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub staged: Vec<Change>,
-    /// The statement and warnings of `staged`, kept between frames.
-    pub bar: Option<crate::state::sql::alter::PlanMemo>,
     /// The ALTER or trigger statement is running.
     pub applying: bool,
     /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
@@ -27,8 +23,6 @@ pub struct StructState {
     /// The draft key of a trigger edit on its way, dropped once the server took it: the draft is the live trigger then,
     /// and left behind it would show an Undo or someone else's later change as a pending edit of ours.
     pub trig_saving: Option<String>,
-    /// What the trigger editor shows for the draft, kept between frames.
-    pub trig_memo: Option<super::trig::TrigMemo>,
 }
 
 #[derive(Default)]

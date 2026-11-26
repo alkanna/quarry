@@ -68,10 +68,6 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
 }
 
 impl App {
-    fn trig_state_mut(&mut self) -> Option<&mut crate::app::sql::structure::StructState> {
-        Some(&mut self.core.tabs.get_mut(self.core.cur)?.sql.as_mut()?.st)
-    }
-
     fn trig_state(&self) -> Option<&crate::app::sql::structure::StructState> {
         Some(&self.t()?.sql.as_ref()?.st)
     }
@@ -108,7 +104,8 @@ impl App {
         let pg = d == db::sql::Dialect::Postgres;
         let Some(mut def) = self.trig_state().and_then(|s| s.trig.get(key).cloned()).or_else(|| live_trig.map(def_of)).or_else(|| (key == NEW).then(|| blank(pg))) else { return };
         let exists = live_trig.is_some();
-        let mut memo = self.trig_state_mut().and_then(|s| s.trig_memo.take());
+        let tab = self.core.tabs[self.core.cur].uid;
+        let mut memo = self.ui.trig_memo.remove(&tab);
         let cols: Vec<&str> = st.columns.iter().map(|c| c.name.as_str()).collect();
         if !memo.as_ref().is_some_and(|x| x.holds(key, live_trig, st.triggers.len(), m, &cols, &def)) {
             memo = Some(self.trig_memo(st, key, live_trig, &def, &cols));
@@ -149,11 +146,9 @@ impl App {
         // The memo still holds the draft as it was drawn, so a difference is an edit made this frame.
         if memo.as_ref().is_none_or(|x| x.def != def) {
             memo = Some(self.trig_memo(st, key, live_trig, &def, &cols));
-            if let Some(s) = self.trig_state_mut() {
-                s.trig.insert(key.to_string(), def.clone());
-            }
-        } else if dirty && let Some(s) = self.trig_state_mut().filter(|s| !s.trig.contains_key(key)) {
-            s.trig.insert(key.to_string(), def.clone());
+            acts.push(crate::app::sql::structure::Act::TrigDraft(key.to_string(), def.clone()));
+        } else if dirty && !self.trig_state().is_some_and(|s| s.trig.contains_key(key)) {
+            acts.push(crate::app::sql::structure::Act::TrigDraft(key.to_string(), def.clone()));
         }
         let Some(memo) = memo else { return };
         let dirty = memo.dirty;
@@ -214,9 +209,7 @@ impl App {
         if save && steps.as_ref().is_some_and(|s| s.is_ok()) {
             acts.push(crate::app::sql::structure::Act::SaveTrigger(key.to_string()));
         }
-        if let Some(s) = self.trig_state_mut() {
-            s.trig_memo = Some(memo);
-        }
+        self.ui.trig_memo.insert(tab, memo);
     }
 
     /// The save job, the preview and the verdict on the draft, which walk the whole trigger and run again only when an input changes.
@@ -257,12 +250,13 @@ impl App {
             return;
         }
         let body = "BEGIN\n  IF NEW.status = 'refunded' AND OLD.status <> 'paid' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only paid orders can be refunded';\n  END IF;\n  IF NEW.total < 0 THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'The total cannot be negative';\n  END IF;\nEND";
-        let Some(t) = self.core.tabs.first_mut() else { return };
+        let core = self.core.setup();
+        let Some(t) = core.tabs.first_mut() else { return };
         let conn = t.sel.conn;
         if let Some(s) = t.sql.as_mut() {
             s.st.trig.insert("orders_before_update".into(), TrigDef { name: "orders_before_update".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: body.into(), pg: Default::default() });
         }
-        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == conn) {
+        if let Some(c) = core.conns.iter_mut().find(|c| c.meta.id == conn) {
             c.writable = true;
         }
     }

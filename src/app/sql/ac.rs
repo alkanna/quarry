@@ -21,26 +21,19 @@ impl App {
         Scope { schema: schemas.get(&(conn, key.clone())).cloned().unwrap_or_default(), db: shown, dbs, dialect, table: table.filter(|t| !t.is_empty()).map(str::to_string), fallback: Default::default(), schemas: others, views: views.of(conn, &key).cloned().unwrap_or_default() }
     }
 
-    /// Keeps a loaded schema, with the row estimates the sidebar reads next to each table name.
-    pub(in crate::app) fn put_sql_schema(&mut self, conn: u64, key: String, schema: Arc<db::sql::schema::Schema>) {
-        self.core.sql_rows.insert((conn, key.clone()), schema.tables.iter().filter_map(|t| Some((t.name.clone(), t.rows?))).collect());
-        self.core.sql_schema.insert((conn, key), schema);
-        self.lint_schema_changed(conn);
-    }
-
     pub(in crate::app) fn sql_serve(&mut self, conn: u64, db: &str, schema: &str, wants: Wants) {
-        self.core.sql_serve(conn, db, schema, wants)
+        self.exec(Action::SqlAsk(SqlAskA::Serve { conn, db: db.to_string(), schema: schema.to_string(), wants }))
     }
 
     pub(in crate::app) fn sql_serve_facts(&mut self, conn: u64, db: &str, schema: &str, table: &str, column: String, kind: db::sql::value::Kind) {
-        self.core.sql_serve_facts(conn, db, schema, table, column, kind)
+        self.exec(Action::SqlAsk(SqlAskA::ServeFacts { conn, db: db.to_string(), schema: schema.to_string(), table: table.to_string(), column, kind }))
     }
 
     /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
     /// under that name would never get its autocomplete and shell types back. A PostgreSQL database holds one cache per
     /// schema, all of them under keys that start with its name.
     pub(in crate::app) fn forget_schema(&mut self, conn: u64, db: &str) {
-        self.core.forget_schema(conn, db)
+        self.exec(Action::SqlAsk(SqlAskA::ForgetSchema { conn, db: db.to_string() }))
     }
 
 }

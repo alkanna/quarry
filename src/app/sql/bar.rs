@@ -392,6 +392,12 @@ pub(in crate::app) struct Side<'a> {
     pub(in crate::app) facts: Option<&'a HashMap<String, db::sql::facts::ColFacts>>,
     /// The mode switch and the filter panel's structural edits, run once the bar is drawn.
     pub(in crate::app) acts: Vec<quarry_core::action::SqlA>,
+    /// The Save as view menu item was clicked; `sql_content` opens the dialog once the bar is drawn.
+    pub(in crate::app) save_view: bool,
+    /// The Explain button was clicked; `sql_content` runs the same entry point as Cmd+E.
+    pub(in crate::app) explain: bool,
+    /// The panel's Save as filter was clicked; `sql_content` opens the Save dialog.
+    pub(in crate::app) save_filter: bool,
 }
 
 /// A row of the "+" menu: a condition or a clause. `on` marks the ones already in the query.
@@ -588,7 +594,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
                 ui.spacing_mut().item_spacing.x = 2.0;
                 run |= line_run(ui, dirty, |ui| {
                     if run_item(ui, "Explain", "⌘E").on_hover_text("Explain the SELECT of the rows shown in a new Query tab").clicked() {
-                        b.explain = true;
+                        side.explain = true;
                         ui.close();
                     }
                     if run_item(ui, "Copy as SQL", "").on_hover_text("Copy the whole SELECT").clicked() {
@@ -682,7 +688,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
             side.acts.push(quarry_core::action::SqlA::WhereMode { tab, sql: true });
             ui.memory_mut(|m| m.request_focus(fid));
         }
-        b.save_filter |= out.save;
+        side.save_filter |= out.save;
         run |= out.run;
     }
     fold_line(ui, t, d);
@@ -694,9 +700,7 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
     if copy {
         ui.ctx().copy_text(format!("{};", select_sql(t, d)));
     }
-    if save_view && let Some(s) = t.sql.as_mut() {
-        s.save_view = true;
-    }
+    side.save_view = save_view;
     run
 }
 

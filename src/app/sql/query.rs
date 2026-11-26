@@ -1,7 +1,7 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
 use crate::app::*;
-use quarry_core::action::{Action, SqlA};
+use quarry_core::action::{Action, Pref, PrefsA, SqlA};
 use crate::app::column_menu::{query_col_popover, HeadAct};
 use crate::app::sql::edit::CellAct;
 use crate::app::library::snippet_strip::{literal_at, Src};
@@ -403,12 +403,19 @@ impl App {
 
     /// Opens a Query tab for a database. It has no table, so its collection name stays empty.
     pub(in crate::app) fn sql_new_query(&mut self, conn: u64, db: String) {
-        self.core.sql_new_query(conn, db)
+        self.exec(Action::Tab(TabA::NewQuery { conn, db, schema: String::new() }))
+    }
+
+    pub(in crate::app) fn sql_sort_page(&mut self, keys: Vec<(String, bool)>) {
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::SortPage { tab, keys }));
+        }
     }
 
     pub(in crate::app) fn sql_run(&mut self, all: bool, explain: bool) {
-        self.core.sql_run(all, explain);
-        self.run_fx();
+        if let Some(tab) = self.uid_of(self.core.cur) {
+            self.exec(Action::Sql(SqlA::Run { tab, all, explain }));
+        }
     }
 
     /// The text selected in the editor, if any, for Run selection.
@@ -450,14 +457,6 @@ impl App {
             }
         });
         pick
-    }
-
-    pub(in crate::app) fn lint_schema_changed(&mut self, conn: u64) {
-        self.core.lint_schema_changed(conn)
-    }
-
-    pub(in crate::app) fn sql_sort_page(&mut self, keys: Vec<(String, bool)>) {
-        self.core.sql_sort_page(keys)
     }
 
     /// A cell menu pick in the shown result.
@@ -510,12 +509,7 @@ impl App {
 
     /// Opens a table's Content in a tab of its own, filtered by the WHERE text `filter`.
     pub(in crate::app) fn sql_open_filtered(&mut self, sel: Sel, filter: String) {
-        self.open_tab(sel, Open::Link);
-        let Some(t) = self.tm() else { return };
-        t.view = View::Documents;
-        t.filter_txt = filter;
-        t.page = 0;
-        self.reload();
+        self.exec(Action::Tab(TabA::FilterText { sel: Some(sel), text: filter }));
     }
 
     /// Show the other row of a duplicate-key error on table `sel`. The error names an index (a PostgreSQL unique
@@ -526,10 +520,7 @@ impl App {
         if self.core.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
-        let Some((db, space)) = self.sql_target(&sel) else { return self.warn_offline() };
-        self.core.req += 1;
-        self.core.dup_wait = Some((self.core.req, sel.clone(), index, value));
-        self.core.worker.sql_structure(self.core.req, db, space, sel.coll.clone());
+        self.exec(Action::SqlAsk(SqlAskA::ShowDup { sel, index, value }));
     }
 
     /// The table's indexes are in: the duplicate's index must be on this table and be one whole column.
@@ -670,50 +661,18 @@ impl App {
     }
 
     /// Sends the statement under the caret (`stmt`, a byte range of the script) to be checked once typing has rested, one
-    /// request at a time per tab. Only on a live connection: the demo and a closed connection have no server to ask.
+    /// request at a time per tab; Core decides, the app only waits out the pause.
     fn sql_lint_tick(&mut self, ctx: &egui::Context, stmt: Option<Range<usize>>) {
-        let (ti, now) = (self.core.cur, ctx.input(|i| i.time));
-        let Some(t) = self.core.tabs.get(ti) else { return };
-        let conn = t.sel.conn;
-        let (Some(r), Some(s)) = (stmt, t.sql.as_ref()) else { return };
-        // A statement with {{...}} values is not SQL until Run fills it, so the server is not asked about it.
-        if self.conn(conn).and_then(|c| c.sql.as_ref()).is_none() || r.len() > db::sql::LINT_MAX || crate::library::snippet::is_snippet(&s.query[r.clone()], self.dialect_of(conn)) {
-            return;
-        }
-        let target = format!("{conn}\u{1f}{}\u{1f}{}\u{1f}{}", run_db(t), s.run_schema, t.sel.schema);
-        let Some(s) = self.core.tabs[ti].sql.as_mut() else { return };
-        let l = &mut s.lint;
-        // An answer still in flight for the old target is dropped with its request.
-        if l.target != target {
-            (l.target, l.seen, l.wait, l.req) = (target, HashMap::new(), None, 0);
-        }
-        let text = &s.query[r];
-        if l.req != 0 || !l.stale(text) {
-            return;
-        }
-        let since = match &l.wait {
-            Some((w, at)) if w == text => *at,
-            _ => {
-                l.wait = Some((text.to_string(), now));
-                now
-            }
-        };
-        if now - since < LINT_PAUSE {
-            return ctx.request_repaint_after(std::time::Duration::from_secs_f64(LINT_PAUSE - (now - since)));
-        }
-        (l.wait, l.asked) = (None, text.to_string());
-        self.core.req += 1;
-        l.req = self.core.req;
-        let stmt = l.asked.clone();
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        let (db, schema) = run_target(&self.core.tabs[ti], db);
-        self.core.worker.sql_lint(self.core.req, db, schema, stmt);
+        let Some(stmt) = stmt else { return };
+        self.exec(Action::SqlAsk(SqlAskA::LintTick { now: ctx.input(|i| i.time), stmt }));
+        self.take_repaint(ctx);
     }
 
     /// QUARRY_TEST_SQL=lint and QUARRY_TEST_PG=lint: a statement with a syntax error under the caret and one naming an
     /// unknown table, marked as the live check marks them.
     pub(in crate::app) fn demo_lint(&mut self, pg: bool) {
-        let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) else { return };
+        let core = self.core.setup();
+        let Some(s) = core.tabs.get_mut(core.cur).and_then(|t| t.sql.as_mut()) else { return };
         let (bad, unknown) = ("SELCT ( FRO orders", "SELECT * FROM shipment WHERE order_id = 4405");
         let lint = |span: Range<usize>, msg: &str, warn: bool| Ok(Some(db::sql::Lint { span, msg: db::lint_wording(msg, warn), warn }));
         let (err, warn) = if pg {
@@ -735,18 +694,18 @@ impl App {
     /// one after the text had rested for a second. `select` is the range of the new text to leave selected.
     pub(in crate::app) fn sql_replace(&mut self, ctx: &egui::Context, new: String, select: Option<Range<usize>>) {
         let id = Self::sql_editor_id(self.core.cur);
-        let Some(s) = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()) else { return };
-        if s.query == new {
+        let Some((tab, mut text)) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref().map(|s| (t.uid, s.query.clone()))) else { return };
+        if text == new {
             return;
         }
-        let range = crate::ui::editor::replace_with_undo(ctx, id, &mut s.query, new, |before, _, new| {
+        let range = crate::ui::editor::replace_with_undo(ctx, id, &mut text, new, |before, _, new| {
             let end = new.chars().count();
             match select {
                 Some(r) => CCursorRange::two(CCursor::new(r.start.min(end)), CCursor::new(r.end.min(end))),
                 None => CCursorRange::one(CCursor::new(usize::from(before.primary.index).min(end))),
             }
         });
-        s.caret = usize::from(range.primary.index);
+        self.exec(Action::Sql(SqlA::SetQuery { tab, text, run_db: None, run_schema: None, caret: Some(usize::from(range.primary.index)), show: false }));
     }
 
     /// Format: the selection, or the whole script when nothing is selected.
@@ -794,9 +753,13 @@ impl App {
         let mut gutter_run = None;
         let mut lint_stmt = None;
         let mut make_value = None;
-        let Some(t) = self.core.tabs.get_mut(self.core.cur) else { return };
-        let snip = &mut t.snip;
-        let Some(s) = t.sql.as_mut() else { return };
+        let tab = self.core.tabs.get(self.core.cur).map_or(0, |t| t.uid);
+        // The editor edits copies, which are sent as one action once it is drawn: the script, and its suggestion list.
+        let mut ac = self.ui.sql_ac.remove(&tab).unwrap_or_default();
+        let Some(s) = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()) else { return };
+        let mut query = s.query.clone();
+        let mut wants = crate::ui::sql_complete::Wants::default();
+        let mut new_caret = s.caret;
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
         let (lo, hi) = (3.0 * LINE_H + 24.0, avail - 3.0 * ROW_H - TABLE_HEAD_H - 110.0);
@@ -819,11 +782,11 @@ impl App {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
                 if s.bar.preset.ac {
-                    open_list(ui, id, &s.query, &mut s.bar.ac, &scope, values);
+                    open_list(ui, id, &query, &mut ac, &scope, values);
                 }
                 // The suggestions work on the statement under the caret, with the tail after it for aliases.
-                let (out, _) = crate::ui::vim::wrap_with(ui, id, &mut s.query, |ui, query| {
-                    sql_ac_field(ui, id, query, &mut s.bar.ac, &scope, values, &mut s.bar.wants, |ui, text, _| {
+                let (out, _) = crate::ui::vim::wrap_with(ui, id, &mut query, |ui, query| {
+                    sql_ac_field(ui, id, query, &mut ac, &scope, values, &mut wants, |ui, text, _| {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
@@ -837,10 +800,7 @@ impl App {
                     })
                 });
                 if let Some(r) = out.cursor_range {
-                    s.caret = usize::from(r.primary.index);
-                }
-                if out.response.changed() {
-                    snip.off = false;
+                    new_caret = usize::from(r.primary.index);
                 }
                 // Make it a value... turns the literal under the selection into a {{...}} placeholder. The selection is read
                 // from the editor's stored state when the menu draws, as Run selection does.
@@ -848,8 +808,8 @@ impl App {
                     menu_list(ui);
                     let picked = egui::TextEdit::load_state(ui.ctx(), id).and_then(|st| st.cursor.char_range()).and_then(|r| {
                         let (a, b) = (usize::from(r.primary.index), usize::from(r.secondary.index));
-                        let (a, b) = (byte_at(&s.query, a.min(b)), byte_at(&s.query, a.max(b)));
-                        literal_at(&s.query, a..b.max(a + 1), dialect.into())
+                        let (a, b) = (byte_at(&query, a.min(b)), byte_at(&query, a.max(b)));
+                        literal_at(&query, a..b.max(a + 1), dialect.into())
                     });
                     let mut acts = Vec::new();
                     if let Some(r) = picked {
@@ -897,15 +857,21 @@ impl App {
             // inner_rect is the room offered before the area shrank, so the content is read instead.
             shown.content_size.y.min(h)
         });
-        let wants = self.core.tabs.get_mut(self.core.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        self.ui.sql_ac.insert(tab, ac);
+        let edited = self.core.tabs.get(self.core.cur).and_then(|t| t.sql.as_ref()).is_some_and(|s| s.query != query || s.caret != new_caret);
+        if edited {
+            self.exec(Action::Sql(SqlA::SetQuery { tab, text: query, run_db: None, run_schema: None, caret: Some(new_caret), show: false }));
+        }
         self.sql_serve(conn, &db, &schema, wants);
-        self.sql_lint_tick(ui.ctx(), lint_stmt);
+        // What was under the caret belongs to the script before this frame's typing, so the check waits for the next frame.
+        self.sql_lint_tick(ui.ctx(), lint_stmt.filter(|_| !edited));
         if let Some(r) = make_value {
             self.ask_make_value(r, Src::Query);
         }
         let bar = splitter(ui);
-        if resize_editor(&bar, &mut self.core.prefs.query_editor_h, framed.inner, lo, hi) {
-            self.save_prefs();
+        let mut editor_h = self.core.prefs.query_editor_h;
+        if resize_editor(&bar, &mut editor_h, framed.inner, lo, hi) {
+            self.exec(Action::Prefs(PrefsA::Set(Pref::QueryEditorH(editor_h))));
         }
         // The same path as picking the statement from the Run menu.
         if let Some(text) = gutter_run {
@@ -922,7 +888,11 @@ impl App {
         let hidden = self.modal.is_some() || self.core.insert.is_some();
         let dialect = self.sql_dialect();
         let record_open = self.core.tabs.get(cur).is_some_and(|t| t.record);
-        let Some(s) = self.core.tabs.get_mut(cur).and_then(|t| t.sql.as_mut()) else { return };
+        // The Text view is built by Core, once per result, before the frame reads it.
+        if self.core.tabs.get(cur).and_then(|t| t.sql.as_ref()).is_some_and(|s| s.text_mode && !s.sets.is_empty() && s.text_cache.as_ref().is_none_or(|c| c.0 != s.set_sel.min(s.sets.len() - 1))) {
+            self.exec(Action::Sql(SqlA::BuildText { tab }));
+        }
+        let Some(s) = self.core.tabs.get(cur).and_then(|t| t.sql.as_ref()) else { return };
         if s.sets.is_empty() {
             ui.horizontal(|ui| {
                 if running {
@@ -1044,7 +1014,7 @@ impl App {
             }
             let checked_n = s.qchecked.len();
             let colnames = result_keys(&s.sets[sel].cols);
-            let nshown = table::visible_cols(s.qprefs.get(&colnames), &colnames, usize::MAX).len();
+            let nshown = table::visible_cols(self.ui.qprefs.get(&tab).and_then(|m| m.get(&colnames)), &colnames, usize::MAX).len();
             let sorted_by = s.sets[sel].sort.clone();
             if !s.sets[sel].rows.is_empty() && !text_mode && (!sorted_by.is_empty() || nshown < colnames.len()) {
                 ui.horizontal(|ui| {
@@ -1066,10 +1036,6 @@ impl App {
             if s.sets[sel].rows.is_empty() {
                 ui.label(RichText::new("No rows").color(MUTED()));
             } else if text_mode {
-                if s.text_cache.as_ref().is_none_or(|c| c.0 != sel) {
-                    let docs: Vec<Document> = s.sets[sel].rows.iter().map(db::Row::owned).collect();
-                    s.text_cache = Some((sel, db::copy::text_table(&s.sets[sel].cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), &docs)));
-                }
                 let text = s.text_cache.as_ref().map(|c| c.1.as_str()).unwrap_or_default();
                 egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
                     egui::ScrollArea::both().id_salt("sql-text").auto_shrink(false).show(ui, |ui| {
@@ -1091,8 +1057,8 @@ impl App {
                 }
                 // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
-                let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
-                let prefs = s.qprefs.get(&colnames).cloned().unwrap_or_default();
+                let (sets, checked) = (s.sets.clone(), s.qchecked.clone());
+                let prefs = self.ui.qprefs.get(&tab).and_then(|m| m.get(&colnames)).cloned().unwrap_or_default();
                 // Shown columns first, in grid order, so Tab puts the record's cursor on the grid cursor's column.
                 let names = if record_open { table::record_names(&table::visible_cols(Some(&prefs), &colnames, usize::MAX), &colnames) } else { Vec::new() };
                 // Only a result read from one table has a table to filter. The lexer reads a short statement per frame.
@@ -1114,8 +1080,7 @@ impl App {
                 if let Some(c) = out.col {
                     self.set_vcol(c);
                 }
-                let Some(s) = self.core.tabs[cur].sql.as_mut() else { return };
-                (s.sets, s.qchecked) = (sets, checked);
+                let Some(s) = self.core.tabs[cur].sql.as_ref() else { return };
                 view = out.view.or(rec.view);
                 head_acts = out.head;
                 cell_act = out.cell.or(vim_act);
@@ -1149,8 +1114,8 @@ impl App {
         if unsort {
             acts.push(SqlA::SortPage { tab, keys: Vec::new() });
         }
-        if let Some(names) = show_cols && let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            let p = s.qprefs.entry(names.clone()).or_default();
+        if let Some(names) = show_cols {
+            let p = self.ui.qprefs.entry(tab).or_default().entry(names.clone()).or_default();
             let mut all = table::visible_cols(Some(p), &names, usize::MAX);
             all.extend(names.iter().filter(|n| !all.contains(n)).cloned().collect::<Vec<_>>());
             p.shown = Some(all);
@@ -1203,11 +1168,12 @@ impl App {
         // QUARRY_TEST_SQL=library has two saved scripts and the menu open.
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
             let saved = |name: &str, sql: &str| crate::library::Script { name: name.into(), kind: "sql".into(), body: sql.into(), conn: 3, ..Default::default() };
-            let id = self.core.library.next_id();
-            self.core.library.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
-            let id = self.core.library.next_id();
-            self.core.library.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
-            self.core.library.recent = self.core.library.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
+            let lib = &mut self.core.setup().library;
+            let id = lib.next_id();
+            lib.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
+            let id = lib.next_id();
+            lib.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
+            lib.recent = lib.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
         }
         let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw, db::sql::Dialect::MySql).text } else { raw.to_string() };
         let query = query.as_str();
@@ -1228,14 +1194,15 @@ impl App {
         };
         if let Some(s) = t.sql.as_mut() {
             s.caret = query.lines().take(6).map(|l| l.chars().count() + 1).sum::<usize>() - 1;
-            (s.query, s.sets) = (query.into(), vec![first, refused, last]);
+            (s.query, s.sets) = (query.into(), vec![first.into(), refused.into(), last.into()]);
             // QUARRY_TEST_CHECKED=1 shows three rows checked with the selection bar.
             if std::env::var("QUARRY_TEST_CHECKED").is_ok() {
                 s.qchecked = [0, 2, 3].into();
             }
         }
-        self.core.tabs.push(t);
-        self.core.cur = self.core.tabs.len() - 1;
+        let core = self.core.setup();
+        core.tabs.push(t);
+        core.cur = core.tabs.len() - 1;
         // QUARRY_TEST_EXPORT=1 opens the Export dialog on the checked rows.
         // QUARRY_TEST_EXPORT=script shows the scope "All statements in the editor" on the demo script, which has a write in it
         // and so is refused; =script-ok shows it on a script of reads.

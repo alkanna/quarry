@@ -58,8 +58,6 @@ pub struct Bar {
     /// The tree as the open tabs save it.
     pub tree_json: String,
     pub panel: Panel,
-    /// Set by the panel's Save as filter; `sql_content` opens the Save dialog.
-    pub save_filter: bool,
     /// A column whose facts a value cell asked for, and its kind; `sql_content` sends the request.
     pub want_facts: Option<(String, Kind)>,
     /// The WHERE text the tree was last written as; a different `filter_txt` came from elsewhere.
@@ -73,8 +71,6 @@ pub struct Bar {
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
     pub ac: Ac,
     pub wants: Wants,
-    /// Set by the Explain button; `sql_content` runs the same entry point as Cmd+E.
-    pub explain: bool,
     /// Initial open states; only the offline demo sets them.
     pub preset: Preset,
     /// The clause whose popover the "+" opened, because a clause with no chip has nothing else to hang it on.

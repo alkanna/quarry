@@ -140,11 +140,9 @@ fn the_window_s_choices_are_actions() {
     roles(&mut core, RolesA::OpenRole("app_writer".into())).unwrap();
     core.pg_roles_fields();
     assert_eq!(core.pg_roles.as_ref().unwrap().lim, "20");
-    core.pg_roles.as_mut().unwrap().lim = "35".into();
-    roles(&mut core, RolesA::LimitEdited).unwrap();
+    roles(&mut core, RolesA::LimitEdited("35".into())).unwrap();
     assert!(matches!(core.pg_roles.as_ref().unwrap().staged.as_slice(), [Change::Attrs { to, .. }] if to.conn_limit == 35));
-    core.pg_roles.as_mut().unwrap().lim = "many".into();
-    roles(&mut core, RolesA::LimitEdited).unwrap();
+    roles(&mut core, RolesA::LimitEdited("many".into())).unwrap();
     assert!(core.pg_roles.as_ref().unwrap().field_err.is_some());
 
     // New role and Drop open the app's dialogs; Unlock opens Unlock with nothing to run after.
@@ -199,8 +197,10 @@ fn all_actions() -> Vec<Action> {
         RolesA::Inherited(false),
         RolesA::System(true),
         RolesA::Cell(Some(("1".into(), String::new()))),
-        RolesA::LimitEdited,
-        RolesA::UntilEdited,
+        RolesA::LimitEdited("5".into()),
+        RolesA::UntilEdited("never".into()),
+        RolesA::Filter("a".into()),
+        RolesA::Confirm("me".into()),
         RolesA::DefForm(Some(form)),
         RolesA::Create { conn: 1, spec, password: pw() },
         RolesA::SetPassword { conn: 1, role: "r".into(), oid: "1".into(), password: pw() },
@@ -232,6 +232,7 @@ fn all_actions() -> Vec<Action> {
         SqlUsersA::DbPriv { pattern: "shop".into(), privilege: "SELECT".into(), on: true },
         SqlUsersA::DbAdd(Some("shop".into())),
         SqlUsersA::DbAddDone,
+        SqlUsersA::Text(crate::action::UsersText::Limit(1), "5".into()),
     ];
     let m = [
         MongoUsersA::Open { conn: 1 },
@@ -273,6 +274,7 @@ fn all_actions() -> Vec<Action> {
         SqlServerA::Global(true),
         SqlServerA::StGroup(crate::db::sql::server::StatusGroup::InnoDb),
         SqlServerA::StAuto(false),
+        SqlServerA::Text(crate::action::SrvText::Vars, "a".into()),
         SqlServerA::Unlock,
         SqlServerA::Close,
     ];
@@ -290,6 +292,7 @@ fn all_actions() -> Vec<Action> {
         PgServerA::Disarm,
         PgServerA::Signal { pid: 41 },
         PgServerA::FetchQuery { pid: 41 },
+        PgServerA::Text(crate::action::PgText::Activity, "a".into()),
         PgServerA::Unlock,
         PgServerA::Close,
     ];
@@ -374,6 +377,7 @@ fn all_actions() -> Vec<Action> {
     all.extend(tab_and_docs_actions());
     all.extend(super::ddl_tests::ddl_actions().into_iter().map(Action::Ddl));
     all.extend(super::ddl_tests::ops_actions().into_iter().map(Action::SqlOps));
+    all.extend(super::ddl_tests::ask_actions().into_iter().map(Action::SqlAsk));
     all.extend(super::agents_tests::agents_actions().into_iter().map(Action::Agents));
     all.extend([CloudA::Load { force: true }, CloudA::Proxy { install: false }, CloudA::GcloudAsk, CloudA::GcloudForget, CloudA::Open { change: true }, CloudA::Close, CloudA::Set(Box::default())].map(Action::Cloud));
     let (scope, sel, one) = (crate::db::Scope::default(), crate::state::Sel::default(), || vec![mongodb::bson::doc! { "$match": { "a": 1 } }]);
@@ -418,6 +422,7 @@ fn tab_and_docs_actions() -> Vec<Action> {
         TabA::DropAggRow,
         TabA::ResetDoc,
         TabA::Connected { conn: 1, sql: true },
+        TabA::FilterText { sel: Some(sel.clone()), text: "id = 1".into() },
     ];
     let k = [
         DocsA::Run { tab: 1 },
@@ -474,10 +479,10 @@ fn variant(a: &Action) -> String {
     let d = format!("{a:?}");
     match a {
         Action::Roles(r) => match r {
-            RolesA::Open { .. } | RolesA::Tab(_) | RolesA::RTab(_) | RolesA::Database(_) | RolesA::Schema(_) | RolesA::Kind(_) | RolesA::Role(_) | RolesA::OpenRole(_) | RolesA::Stage(_) | RolesA::Apply | RolesA::Discard | RolesA::Close | RolesA::Unlock | RolesA::Refresh | RolesA::NewRole | RolesA::Drop(_) | RolesA::Password(_) | RolesA::Inherited(_) | RolesA::System(_) | RolesA::Cell(_) | RolesA::LimitEdited | RolesA::UntilEdited | RolesA::DefForm(_) | RolesA::Create { .. } | RolesA::SetPassword { .. } | RolesA::DropRun { .. } => {}
+            RolesA::Open { .. } | RolesA::Tab(_) | RolesA::RTab(_) | RolesA::Database(_) | RolesA::Schema(_) | RolesA::Kind(_) | RolesA::Role(_) | RolesA::OpenRole(_) | RolesA::Stage(_) | RolesA::Apply | RolesA::Discard | RolesA::Close | RolesA::Unlock | RolesA::Refresh | RolesA::NewRole | RolesA::Drop(_) | RolesA::Password(_) | RolesA::Inherited(_) | RolesA::System(_) | RolesA::Cell(_) | RolesA::LimitEdited(_) | RolesA::UntilEdited(_) | RolesA::Filter(_) | RolesA::Confirm(_) | RolesA::DefForm(_) | RolesA::Create { .. } | RolesA::SetPassword { .. } | RolesA::DropRun { .. } => {}
         },
         Action::Users(UsersA::Sql(u)) => match u {
-            SqlUsersA::Open { .. } | SqlUsersA::Pick { .. } | SqlUsersA::Tab(_) | SqlUsersA::Apply | SqlUsersA::Close | SqlUsersA::Refresh | SqlUsersA::Unlock | SqlUsersA::NewUser | SqlUsersA::Drop { .. } | SqlUsersA::DropRun { .. } | SqlUsersA::Password { .. } | SqlUsersA::Create { .. } | SqlUsersA::SetPassword { .. } | SqlUsersA::Lock(_) | SqlUsersA::Expire(_) | SqlUsersA::Tls(_) | SqlUsersA::Role { .. } | SqlUsersA::RoleAdd(_) | SqlUsersA::RoleAddDone | SqlUsersA::Global { .. } | SqlUsersA::PrivAdd(_) | SqlUsersA::PrivAddDone | SqlUsersA::DbPriv { .. } | SqlUsersA::DbAdd(_) | SqlUsersA::DbAddDone => {}
+            SqlUsersA::Open { .. } | SqlUsersA::Pick { .. } | SqlUsersA::Tab(_) | SqlUsersA::Apply | SqlUsersA::Close | SqlUsersA::Refresh | SqlUsersA::Unlock | SqlUsersA::NewUser | SqlUsersA::Drop { .. } | SqlUsersA::DropRun { .. } | SqlUsersA::Password { .. } | SqlUsersA::Create { .. } | SqlUsersA::SetPassword { .. } | SqlUsersA::Lock(_) | SqlUsersA::Expire(_) | SqlUsersA::Tls(_) | SqlUsersA::Role { .. } | SqlUsersA::RoleAdd(_) | SqlUsersA::RoleAddDone | SqlUsersA::Global { .. } | SqlUsersA::PrivAdd(_) | SqlUsersA::PrivAddDone | SqlUsersA::DbPriv { .. } | SqlUsersA::DbAdd(_) | SqlUsersA::DbAddDone | SqlUsersA::Text(..) => {}
         },
         Action::Users(UsersA::Mongo(m)) => match m {
             MongoUsersA::Open { .. } | MongoUsersA::Refresh | MongoUsersA::Unlock | MongoUsersA::Edit { .. } | MongoUsersA::CloseEdit | MongoUsersA::Save | MongoUsersA::Add | MongoUsersA::Drop { .. } | MongoUsersA::DropRun { .. } | MongoUsersA::Close => {}
@@ -486,10 +491,10 @@ fn variant(a: &Action) -> String {
             MongoServerA::Open { .. } | MongoServerA::Ops(_) | MongoServerA::Refresh | MongoServerA::AutoOps(_) | MongoServerA::ArmKill { .. } | MongoServerA::Disarm | MongoServerA::Kill { .. } | MongoServerA::Unlock | MongoServerA::Close => {}
         },
         Action::Server(ServerA::Sql(s)) => match s {
-            SqlServerA::Open { .. } | SqlServerA::Tab(_) | SqlServerA::Refresh | SqlServerA::Auto(_) | SqlServerA::HideSleeping(_) | SqlServerA::Select(_) | SqlServerA::ArmKill { .. } | SqlServerA::Disarm | SqlServerA::Kill { .. } | SqlServerA::Global(_) | SqlServerA::StGroup(_) | SqlServerA::StAuto(_) | SqlServerA::Unlock | SqlServerA::Close => {}
+            SqlServerA::Open { .. } | SqlServerA::Tab(_) | SqlServerA::Refresh | SqlServerA::Auto(_) | SqlServerA::HideSleeping(_) | SqlServerA::Select(_) | SqlServerA::ArmKill { .. } | SqlServerA::Disarm | SqlServerA::Kill { .. } | SqlServerA::Global(_) | SqlServerA::StGroup(_) | SqlServerA::StAuto(_) | SqlServerA::Text(..) | SqlServerA::Unlock | SqlServerA::Close => {}
         },
         Action::Server(ServerA::Pg(s)) => match s {
-            PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Unlock | PgServerA::Close => {}
+            PgServerA::Open { .. } | PgServerA::Tab(_) | PgServerA::Refresh | PgServerA::Auto(_) | PgServerA::HideIdle(_) | PgServerA::ChangedOnly(_) | PgServerA::Select(_) | PgServerA::Setting(_) | PgServerA::ArmSignal { .. } | PgServerA::Disarm | PgServerA::Signal { .. } | PgServerA::FetchQuery { .. } | PgServerA::Text(..) | PgServerA::Unlock | PgServerA::Close => {}
         },
         Action::Shell(s) => match s {
             ShellA::Run { .. } | ShellA::Start { .. } | ShellA::Stop { .. } | ShellA::Code { .. } | ShellA::Detach { .. } | ShellA::Attach { .. } | ShellA::Help { .. } | ShellA::Queries { .. } | ShellA::Raw { .. } | ShellA::Page { .. } | ShellA::Filled { .. } | ShellA::Packages(_) => {}
@@ -525,7 +530,7 @@ fn variant(a: &Action) -> String {
         Action::Sql(a) => super::sql_tests::sql_variant(a),
         Action::Structure(a) => super::sql_tests::struct_variant(a),
         Action::Tab(t) => match t {
-            TabA::Open { .. } | TabA::Pick { .. } | TabA::Close { .. } | TabA::CloseMany { .. } | TabA::Duplicate { .. } | TabA::Move { .. } | TabA::Reopen | TabA::Nav { .. } | TabA::View { .. } | TabA::OpenTab { .. } | TabA::Select { .. } | TabA::Focus { .. } | TabA::NewQuery { .. } | TabA::Retry { .. } | TabA::Reload { .. } | TabA::CloseTabs { .. } | TabA::DropAggRow | TabA::ResetDoc | TabA::Connected { .. } => {}
+            TabA::Open { .. } | TabA::Pick { .. } | TabA::Close { .. } | TabA::CloseMany { .. } | TabA::Duplicate { .. } | TabA::Move { .. } | TabA::Reopen | TabA::Nav { .. } | TabA::View { .. } | TabA::OpenTab { .. } | TabA::Select { .. } | TabA::Focus { .. } | TabA::NewQuery { .. } | TabA::Retry { .. } | TabA::Reload { .. } | TabA::CloseTabs { .. } | TabA::DropAggRow | TabA::ResetDoc | TabA::Connected { .. } | TabA::FilterText { .. } => {}
         },
         Action::Docs(k) => match k {
             DocsA::Edit { act, .. } => match act {
@@ -545,10 +550,11 @@ fn variant(a: &Action) -> String {
         Action::Mongo(m) => super::mongo_tests::mongo_variant(m),
         Action::Grid(g) => super::mongo_tests::grid_variant(g),
         Action::Routines(r) => match r {
-            RoutineA::Load { .. } | RoutineA::Reload { .. } | RoutineA::Fold { .. } | RoutineA::Open { .. } | RoutineA::New { .. } | RoutineA::Pane(_) | RoutineA::Save { .. } | RoutineA::Drop | RoutineA::Run => {}
+            RoutineA::Load { .. } | RoutineA::Reload { .. } | RoutineA::Fold { .. } | RoutineA::Open { .. } | RoutineA::New { .. } | RoutineA::Pane(_) | RoutineA::Save { .. } | RoutineA::Drop | RoutineA::Run | RoutineA::Text(_) | RoutineA::Edit | RoutineA::Revert | RoutineA::Recreate | RoutineA::Arg { .. } | RoutineA::Typed(_) | RoutineA::Close => {}
         },
         Action::Ddl(a) => super::ddl_tests::ddl_variant(a),
         Action::SqlOps(a) => super::ddl_tests::ops_variant(a),
+        Action::SqlAsk(a) => super::ddl_tests::ask_variant(a),
         Action::Agents(a) => super::agents_tests::agents_variant(a),
         Action::Cloud(c) => match c {
             CloudA::Load { .. } | CloudA::Proxy { .. } | CloudA::GcloudAsk | CloudA::GcloudForget | CloudA::Open { .. } | CloudA::Close | CloudA::Set(_) => {}

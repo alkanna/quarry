@@ -157,8 +157,7 @@ fn mono_label(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
 
 impl App {
     pub(in crate::app) fn pg_roles_window(&mut self, ctx: &egui::Context) {
-        self.core.pg_roles_fields();
-        let Some(mut w) = self.core.pg_roles.take() else { return };
+        let Some(w) = self.core.pg_roles.as_ref() else { return };
         let conn = w.conn;
         let env = self.core.roles_env(&w);
         let locked = !self.conn_writable(conn);
@@ -198,14 +197,13 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(format!("Could not read the roles: {e}")).color(ALERT())).wrap());
                 }
                 Some(Ok(_)) => match w.tab {
-                    PTab::Privileges => self.pg_privileges_tab(ui, &mut w, &env, &mut acts),
-                    PTab::Roles => self.pg_roles_tab(ui, &mut w, &env, &mut acts),
+                    PTab::Privileges => self.pg_privileges_tab(ui, w, &env, &mut acts),
+                    PTab::Roles => self.pg_roles_tab(ui, w, &env, &mut acts),
                 },
             }
             b.end(outer);
-            dialog_foot_free(outer, |ui| self.pg_staged_bar(ui, &mut w, &env, &mut acts));
+            dialog_foot_free(outer, |ui| self.pg_staged_bar(ui, w, &env, &mut acts));
         });
-        self.core.pg_roles = Some(w);
         for a in acts {
             self.exec(Action::Roles(a));
         }
@@ -217,8 +215,9 @@ impl App {
         }
     }
 
-    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let preview = rp::preview(env.major, &w.staged);
+        let mut confirm = w.confirm.clone();
         let risky = w.risky();
         let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
         if !risky.is_empty() {
@@ -229,7 +228,11 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Type {me} to apply")).color(MUTED()));
-                    ui.add(egui::TextEdit::singleline(&mut w.confirm).font(egui::TextStyle::Monospace).desired_width(160.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirm own membership"));
+                    let typed = ui.add(egui::TextEdit::singleline(&mut confirm).font(egui::TextStyle::Monospace).desired_width(160.0));
+                    typed.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirm own membership"));
+                    if typed.changed() {
+                        acts.push(Act::Confirm(confirm.clone()));
+                    }
                 });
             });
             ui.add_space(6.0);
@@ -264,7 +267,7 @@ impl App {
                     });
                 });
                 right_group(ui, |ui| {
-                    let confirmed = risky.is_empty() || w.confirm == me;
+                    let confirmed = risky.is_empty() || confirm == me;
                     let can = !w.staged.is_empty() && preview.is_ok() && !w.busy && gate.is_none() && confirmed;
                     let why = if w.busy { "Applying…" } else if let Some(b) = &gate { b.as_str() } else if !confirmed { "Type the role name above to confirm" } else { "Nothing to apply" };
                     if ui.add_enabled(can, primary_button(ui, if w.busy { "Applying…" } else { "Apply" }, PRIMARY())).on_disabled_hover_text(why).clicked() {
@@ -281,7 +284,7 @@ impl App {
 
     // Privileges.
 
-    fn pg_privileges_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_privileges_tab(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let Some(c) = w.cl_arc() else { return };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -320,8 +323,12 @@ impl App {
                     acts.push(Act::Inherited(inherited));
                 }
                 // A server with many roles makes a wide matrix; the filter keeps the columns that matter.
-                let f = ui.add(egui::TextEdit::singleline(&mut w.filter).hint_text("Filter roles").desired_width(120.0));
+                let mut filter = w.filter.clone();
+                let f = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter roles").desired_width(120.0));
                 f.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Filter roles"));
+                if f.changed() {
+                    acts.push(Act::Filter(filter));
+                }
             });
         });
         ui.add_space(10.0);
@@ -341,25 +348,19 @@ impl App {
         });
     }
 
-    fn pg_matrix(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
-        // Taken out for the frame instead of cloned: a schema can list thousands of objects.
-        let objs = match w.objs.take() {
+    fn pg_matrix(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
+        match &w.objs {
             None => {
                 spin(ui);
-                return;
             }
             Some(Err(e)) => {
                 ui.add(egui::Label::new(RichText::new(format!("Could not read the {}s of {}: {e}", w.kind.noun(), w.database)).color(ALERT())).wrap());
-                w.objs = Some(Err(e));
-                return;
             }
-            Some(Ok(o)) => o,
-        };
-        self.pg_matrix_of(ui, w, c, env, acts, &objs);
-        w.objs = Some(Ok(objs));
+            Some(Ok(objs)) => self.pg_matrix_of(ui, w, c, env, acts, objs),
+        }
     }
 
-    fn pg_matrix_of(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>, objs: &Objects) {
+    fn pg_matrix_of(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>, objs: &Objects) {
         let find = w.filter.trim().to_lowercase();
         let mut cols: Vec<(String, String)> = w.roles().iter().filter(|r| find.is_empty() || r.name.to_lowercase().contains(&find)).map(|r| (r.name.clone(), col_sub(c, r))).collect();
         cols.push((String::new(), "every role".into()));
@@ -436,7 +437,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn pg_cell(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, o: &Obj, role: &str, rect: egui::Rect, order: &[&str], env: &Env, acts: &mut Vec<Act>) {
+    fn pg_cell(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, o: &Obj, role: &str, rect: egui::Rect, order: &[&str], env: &Env, acts: &mut Vec<Act>) {
         let id = egui::Id::unique(("pg-cell", w.conn, &o.oid, role));
         let resp = ui.interact(rect.shrink(2.0), id, Sense::click());
         let cell = match w.chains.get(role) {
@@ -564,7 +565,7 @@ impl App {
 
     // Roles.
 
-    fn pg_roles_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_roles_tab(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let Some(c) = w.cl_arc() else { return };
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(240.0, 480.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -596,7 +597,7 @@ impl App {
         });
     }
 
-    fn pg_role_attrs(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_role_attrs(&self, ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, role: &Role, env: &Env, acts: &mut Vec<Act>) {
         let may = c.may_alter(role);
         let can = env.blocked.is_none() && may.is_ok() && !w.busy;
         if let (None, Err(why)) = (&env.blocked, &may) {
@@ -645,21 +646,23 @@ impl App {
         ui.add_space(4.0);
         egui::Grid::new("pg-role-signin").num_columns(3).spacing([14.0, 8.0]).min_col_width(140.0).show(ui, |ui| {
             form_label(ui, "Connection limit");
-            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.lim).font(egui::TextStyle::Monospace).desired_width(90.0));
+            let mut lim = w.lim.clone();
+            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut lim).font(egui::TextStyle::Monospace).desired_width(90.0));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Connection limit"));
             let was = role.attrs.conn_limit;
             ui.label(RichText::new(if now.conn_limit != was { format!("was {was}, -1 is no limit") } else { "-1 is no limit".into() }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
-                acts.push(Act::LimitEdited);
+                acts.push(Act::LimitEdited(lim));
             }
             form_label(ui, "Valid until");
-            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
+            let mut until = w.until.clone();
+            let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Valid until"));
             ui.label(RichText::new(if now.valid_until == "-infinity" { "expired: -infinity, never valid" } else { "a date in UTC, or empty for never" }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
-                acts.push(Act::UntilEdited);
+                acts.push(Act::UntilEdited(until));
             }
             form_label(ui, "Password");
             // Every role may set its own password, CREATEROLE or not.
@@ -1010,10 +1013,13 @@ fn pg_side_panel(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, acts: &mut Vec<
     });
 }
 
-fn pg_role_list(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
-    ui.add(egui::TextEdit::singleline(&mut w.filter).hint_text("Filter roles").desired_width(f32::INFINITY));
+fn pg_role_list(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, env: &Env, acts: &mut Vec<Act>) {
+    let mut filter = w.filter.clone();
+    if ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter roles").desired_width(f32::INFINITY)).changed() {
+        acts.push(Act::Filter(filter.clone()));
+    }
     ui.add_space(6.0);
-    let find = w.filter.trim().to_lowercase();
+    let find = filter.trim().to_lowercase();
     let shown: Vec<Role> = w.roles().into_iter().filter(|r| find.is_empty() || r.name.to_lowercase().contains(&find)).cloned().collect();
     egui::ScrollArea::vertical().id_salt("pg-role-list").max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
         for (title, login) in [("LOGIN ROLES", true), ("GROUP ROLES", false)] {

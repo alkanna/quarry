@@ -110,6 +110,7 @@ prefs! {
     SidebarHidden sidebar_hidden: bool,
     SidePanel side_panel: String,
     LibPreviewH lib_preview_h: f32,
+    QueryEditorH query_editor_h: f32,
 }
 
 impl Pref {

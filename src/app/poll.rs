@@ -4,7 +4,6 @@ use super::*;
 
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
-        self.view_requests();
         // An agent call depends on what the window shows right now: focus, typing and an open dialog.
         self.core.set_agent_ui(quarry_core::state::agents::AgentUi { focused: ctx.input(|i| i.viewport().focused.unwrap_or(true)), typing: ctx.text_edit_focused(), modal: self.modal.is_some() });
         for m in self.core.tick() {
@@ -40,16 +39,7 @@ impl App {
                 Msg::SqlExplainHypo { req, res } => self.sql_explain_hypo(req, res),
                 Msg::SqlBulkPrep { req, res } => self.on_bulk_prep(req, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
-                Msg::SqlJob { req, res } => self.sql_job_done(req, res),
-                Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
-                Msg::SqlSchema { conn, database, schema, res } => {
-                    // A failed read leaves the database without a schema until the next Refresh; typing still works.
-                    if let Ok(s) = res {
-                        let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
-                        self.put_sql_schema(conn, key, Arc::new(s));
-                    }
-                }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
                 Msg::SqlViewDef { conn, database, schema, name, res } => self.sql_view_def_done(conn, database, schema, name, res),
                 Msg::SqlViewSaved { conn, database, schema, name, kind, res, undo, need_drop, sql_mode } => self.sql_view_saved(conn, database, schema, name, kind, res, undo, need_drop, sql_mode),
@@ -63,7 +53,7 @@ impl App {
                 Msg::SqlServer { .. } | Msg::PgServer { .. } => {}
                 Msg::Connected { .. } | Msg::SqlConnected { .. } | Msg::Tested { .. } | Msg::Collections { .. } | Msg::SqlSchemas { .. } | Msg::SqlTables { .. } => {}
                 Msg::UpdateChecked(_) | Msg::UpdateInstalled(_) | Msg::LibFile { .. } => {}
-                Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } => {}
+                Msg::SqlRan { .. } | Msg::SqlCount { .. } | Msg::SqlLint { .. } | Msg::SqlSchema { .. } | Msg::SqlJob { .. } | Msg::SqlLists { .. } => {}
                 Msg::SqlCols { .. } | Msg::SqlFilterCount { .. } | Msg::SqlKeys { .. } | Msg::SqlValues { .. } | Msg::SqlFacts { .. } => {}
                 Msg::SqlAltered { .. } => {}
                 Msg::SqlRoutine { .. } => {}

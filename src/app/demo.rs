@@ -753,7 +753,7 @@ impl App {
             db::Row::from_doc(&d).ok()
         }).collect();
         if query {
-            if let Some(set) = self.core.setup().tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { (set.cols, set.rows) = (cols, rows); }
+            if let Some(set) = self.core.setup().tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { let set = Arc::make_mut(set); (set.cols, set.rows) = (cols, rows); }
         } else if let Some(t) = self.core.setup().tabs.first_mut() {
             t.fields = cols.iter().map(|c| c.name.clone()).collect();
             t.count = rows.len() as u64;
@@ -776,7 +776,7 @@ impl App {
         let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
         let payments = table("payments", Some(4377), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
         let shipments = table("shipments", Some(3120), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
-        self.put_sql_schema(3, "shop".into(), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
+        self.core.setup().put_sql_schema(3, "shop".into(), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });

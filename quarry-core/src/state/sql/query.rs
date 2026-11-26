@@ -63,7 +63,7 @@ pub const LINT_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 impl SqlTab {
     /// The result set shown, clamped to the ones there are.
     pub fn cur_set(&self) -> Option<&db::sql::ResultSet> {
-        self.sets.get(self.set_sel.min(self.sets.len().saturating_sub(1)))
+        self.sets.get(self.set_sel.min(self.sets.len().saturating_sub(1))).map(|s| &**s)
     }
 
     /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept

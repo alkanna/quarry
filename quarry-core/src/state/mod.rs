@@ -592,8 +592,6 @@ pub struct SqlTab {
     pub query: String,
     /// The query of the last page asked for, which whole-query column actions repeat.
     pub ran: db::sql::PageQuery,
-    /// The Content bar's Save as view button was pressed; `view_requests` opens the dialog on the next frame.
-    pub save_view: bool,
     /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
     pub matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.
@@ -601,7 +599,8 @@ pub struct SqlTab {
     /// What Stop reaches of the running Custom Query.
     pub run: db::sql::RunHandle,
     /// The outcome of each statement of the last run, the one shown, and the request still awaited (0 when idle).
-    pub sets: Vec<db::sql::ResultSet>,
+    /// Shared, so a frame can hold the shown result while it draws without copying its rows.
+    pub sets: Vec<Arc<db::sql::ResultSet>>,
     pub set_sel: usize,
     pub run_req: u64,
     /// Database the Query view runs in when it is not the tab's own.
@@ -625,9 +624,6 @@ pub struct SqlTab {
     pub qanchor: Option<usize>,
     /// The selected row of that page, whose record Tab opens. Cleared with the checks.
     pub qsel: Option<usize>,
-    /// Alignment, widths, pins, hidden columns and highlights of Query results, by the column names of a result. Kept
-    /// for this tab only: ad hoc results have no table to save them under.
-    pub qprefs: HashMap<Vec<String>, ColPrefs>,
     /// The run the shown results belong to, which their row counts answer to, and the result tab being
     /// read at another page (its answer replaces only that tab).
     pub sets_req: u64,

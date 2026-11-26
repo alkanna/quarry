@@ -226,7 +226,7 @@ impl App {
                 table("products", Some(2_318), vec![text("sku"), text("title"), col("price", "numeric(10,2)", Kind::Decimal, "", false)]),
             ],
         };
-        self.put_sql_schema(CONN, ns_key(DB, SCHEMA), Arc::new(schema));
+        self.core.setup().put_sql_schema(CONN, ns_key(DB, SCHEMA), Arc::new(schema));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
         self.core.setup().sql_values.insert((CONN, ns_key(DB, SCHEMA)), vals);
@@ -245,10 +245,11 @@ impl App {
         let Some(t) = self.core.setup().tabs.first_mut() else { return };
         t.view = view;
         t.selected = None;
+        let uid = t.uid;
         if let Some(s) = t.sql.as_mut() {
             s.st.data = Some(orders_structure());
-            s.st.sel = [Some(3), None, Some(0), None, Some(0), None];
         }
+        self.ui.struct_sel.insert(uid, [Some(3), None, Some(0), None, Some(0), None]);
     }
 
     /// The Query tab of the design, with a script of two reads and a refused write.
@@ -274,7 +275,7 @@ impl App {
         };
         if let Some(s) = t.sql.as_mut() {
             s.caret = query.lines().take(6).map(|l| l.chars().count() + 1).sum::<usize>() - 1;
-            (s.query, s.sets) = (query.into(), vec![first, refused, last]);
+            (s.query, s.sets) = (query.into(), vec![first.into(), refused.into(), last.into()]);
         }
         self.core.setup().tabs.push(t);
         self.core.setup().cur = self.core.setup().tabs.len() - 1;

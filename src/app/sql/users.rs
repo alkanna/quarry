@@ -7,7 +7,7 @@ use db::sql::users::{self, Account, AccountInfo, AccountPlan, Caps, Grant, Scope
 use db::sql::Dialect;
 pub(crate) use quarry_core::state::sql::users::*;
 use quarry_core::action::users::{has_row, NOTE_USER};
-use quarry_core::action::{Action, Secret, SqlUsersA as Act, UsersA};
+use quarry_core::action::{Action, Secret, SqlUsersA as Act, UsersA, UsersText};
 
 const NOTE_APPLY: &str = "Read-only: unlock writes to change this account";
 
@@ -122,7 +122,7 @@ impl App {
     }
 
     pub(in crate::app) fn sql_users_window(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.core.sql_users.take() else { return };
+        let Some(w) = self.core.sql_users.as_ref() else { return };
         let conn = w.conn;
         let writable = self.conn_writable(conn);
         let conn_name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -162,7 +162,7 @@ impl App {
                             ui.set_width(236.0);
                             ui.set_min_height(body_h);
                             band_spacing(ui);
-                            self.users_list(ui, &mut w, writable, &mut acts);
+                            self.users_list(ui, w, writable, &mut acts);
                         });
                     });
                     let r = pane.response.rect;
@@ -173,14 +173,14 @@ impl App {
                             ui.set_min_height(body_h);
                             band_spacing(ui);
                             egui::ScrollArea::vertical().id_salt("sql-users-detail").max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
-                                self.users_detail(ui, &mut w, &env, &mut acts);
+                                self.users_detail(ui, w, &env, &mut acts);
                             });
                         });
                     });
                 });
             });
             let acct = w.account();
-            let can = self.users_can_apply(&w, &env);
+            let can = self.users_can_apply(w, &env);
             dialog_foot(ui, |ui| {
                 if ui.add_enabled(can, primary_button(ui, "Apply", PRIMARY())).on_disabled_hover_text(if !writable { NOTE_APPLY } else { "Nothing to apply" }).clicked() {
                     acts.push(Act::Apply);
@@ -196,7 +196,6 @@ impl App {
                 });
             });
         });
-        self.core.sql_users = Some(w);
         for a in acts {
             self.exec(Action::Users(UsersA::Sql(a)));
         }
@@ -219,10 +218,13 @@ impl App {
         }
     }
 
-    fn users_list(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, writable: bool, acts: &mut Vec<Act>) {
-        well_field(ui, egui::Id::unique("sql-users-filter"), FieldIcon::Search, None, |ui| ui.add(field_edit(&mut w.filter, egui::Id::unique("sql-users-filter"), "Filter users", ui.available_width(), egui::TextStyle::Body)));
+    fn users_list(&self, ui: &mut egui::Ui, w: &SqlUsersWin, writable: bool, acts: &mut Vec<Act>) {
+        let mut filter = w.filter.clone();
+        if well_field(ui, egui::Id::unique("sql-users-filter"), FieldIcon::Search, None, |ui| ui.add(field_edit(&mut filter, egui::Id::unique("sql-users-filter"), "Filter users", ui.available_width(), egui::TextStyle::Body))).changed() {
+            acts.push(Act::Text(UsersText::Filter, filter.clone()));
+        }
         ui.add_space(8.0);
-        let find = w.filter.trim().to_lowercase();
+        let find = filter.trim().to_lowercase();
         let shown: Vec<&Account> = match &w.list {
             Some(Ok(l)) => l.accounts.iter().enumerate().filter(|(i, _)| find.is_empty() || w.search.get(*i).is_some_and(|s| s.contains(&find))).map(|(_, a)| a).collect(),
             _ => Vec::new(),
@@ -282,7 +284,7 @@ impl App {
         }
     }
 
-    fn users_detail(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
+    fn users_detail(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
         let acct = w.account();
         // Who is open: an initial, the account in mono, how it logs in, and its state.
         if let Some(a) = &acct {
@@ -362,7 +364,7 @@ impl App {
             UTab::Account => self.tab_account(ui, w, env, &acct, acts),
             UTab::Global => self.tab_global(ui, w, env, &acct, acts),
             UTab::Databases => self.tab_databases(ui, w, env, &acct, acts),
-            UTab::Limits => self.tab_limits(ui, w, env, &acct),
+            UTab::Limits => self.tab_limits(ui, w, env, &acct, acts),
         }
         if w.busy {
             ui.horizontal(|ui| {
@@ -372,7 +374,7 @@ impl App {
         }
     }
 
-    fn tab_account(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
+    fn tab_account(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
         let editable = w.info.is_some() && env.caps.alter_user;
         if let Some(why) = w.info_err.as_ref().filter(|_| w.info.is_none()) {
             ui.add(egui::Label::new(RichText::new(format!("The login settings cannot be read: {why}")).size(TXT_SMALL).color(WARNING())).wrap());
@@ -381,10 +383,16 @@ impl App {
         }
         form_card(ui, "Login", "", |rows| {
             rows.row("User name", "", |ui| {
-                ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut w.name).font(egui::TextStyle::Monospace).desired_width(ui.available_width().min(320.0)));
+                let mut text = w.name.clone();
+                if ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace).desired_width(ui.available_width().min(320.0))).changed() {
+                    acts.push(Act::Text(UsersText::Name, text));
+                }
             });
             rows.row("Host", "% matches any host", |ui| {
-                ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut w.host).font(egui::TextStyle::Monospace).desired_width(ui.available_width().min(320.0)));
+                let mut text = w.host.clone();
+                if ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace).desired_width(ui.available_width().min(320.0))).changed() {
+                    acts.push(Act::Text(UsersText::Host, text));
+                }
             });
             rows.row("Authentication", "", |ui| {
                 // Changing the plugin needs a new password, so it is chosen in the Change password dialog.
@@ -410,7 +418,10 @@ impl App {
                     ui.add_enabled_ui(env.caps.lifetime, |ui| {
                         if w.exp == ExpKind::Days {
                             ui.label(RichText::new("days").size(TXT_SMALL).color(FAINT()));
-                            ui.add(egui::TextEdit::singleline(&mut w.days).font(egui::TextStyle::Monospace).desired_width(60.0));
+                            let mut text = w.days.clone();
+                            if ui.add(egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace).desired_width(60.0)).changed() {
+                                acts.push(Act::Text(UsersText::Days, text));
+                            }
                         }
                         let mut exp = w.exp;
                         segmented(ui, &mut exp, &[(ExpKind::Never, "Never"), (ExpKind::Default, "Server default"), (ExpKind::Days, "After N days")]);
@@ -438,7 +449,7 @@ impl App {
         statements(ui, "account", "Statements to run", w.account_plan(acct).and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
-    fn role_chips(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
+    fn role_chips(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
         ui.horizontal_wrapped(|ui| {
             let mut all: Vec<String> = w.roles_orig.clone();
             for r in &w.roles_now {
@@ -464,8 +475,11 @@ impl App {
             }
             let mut add = false;
             let mut cancel = false;
-            let text = w.role_add.as_mut().unwrap();
-            let r = ui.add(egui::TextEdit::singleline(text).hint_text("role name").font(egui::TextStyle::Monospace).desired_width(140.0));
+            let mut text = w.role_add.clone().unwrap_or_default();
+            let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("role name").font(egui::TextStyle::Monospace).desired_width(140.0));
+            if r.changed() {
+                acts.push(Act::RoleAdd(Some(text.clone())));
+            }
             if !r.has_focus() && text.is_empty() {
                 r.request_focus();
             }
@@ -496,7 +510,7 @@ impl App {
         });
     }
 
-    fn tab_global(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
+    fn tab_global(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
         ui.columns(3, |cols| {
             for (ui, (title, list)) in cols.iter_mut().zip([("DATA", &users::GLOBAL_DATA[..]), ("STRUCTURE", &users::GLOBAL_STRUCTURE[..]), ("ADMINISTRATION", &users::GLOBAL_ADMIN[..])]) {
                 caption(ui, title);
@@ -530,15 +544,19 @@ impl App {
                         acts.push(Act::Global { privilege: p, on: !on });
                     }
                 }
-                match &mut w.priv_add {
+                match &w.priv_add {
                     None => {
                         if ui.button("+ Privilege").clicked() {
                             acts.push(Act::PrivAdd(Some(String::new())));
                         }
                     }
-                    Some(text) => {
+                    Some(shown) => {
                         let mut done = None;
-                        let r = ui.add(egui::TextEdit::singleline(text).hint_text("CONNECTION_ADMIN").font(egui::TextStyle::Monospace).desired_width(200.0));
+                        let mut text = shown.clone();
+                        let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("CONNECTION_ADMIN").font(egui::TextStyle::Monospace).desired_width(200.0));
+                        if r.changed() {
+                            acts.push(Act::PrivAdd(Some(text.clone())));
+                        }
                         if !r.has_focus() && text.is_empty() {
                             r.request_focus();
                         }
@@ -566,7 +584,7 @@ impl App {
         statements(ui, "global", "Grants to run", users::preview_checked(env.mode, acct, &w.global_edits(), held_grants(w)));
     }
 
-    fn tab_limits(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
+    fn tab_limits(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
         let editable = w.info.is_some() && env.caps.alter_user;
         if let Some(why) = w.info_err.as_ref().filter(|_| w.info.is_none()) {
             ui.add(egui::Label::new(RichText::new(format!("The limits cannot be read: {why}")).size(TXT_SMALL).color(WARNING())).wrap());
@@ -575,7 +593,10 @@ impl App {
             form_card(ui, "Resource limits", "0 means no limit; counts reset every hour", |rows| {
                 for (i, label) in ["Queries per hour", "Updates per hour", "Connections per hour", "Simultaneous connections"].into_iter().enumerate() {
                     rows.row(label, "", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut w.limits[i]).font(egui::TextStyle::Monospace).hint_text("0").desired_width(96.0));
+                        let mut text = w.limits[i].clone();
+                        if ui.add(egui::TextEdit::singleline(&mut text).font(egui::TextStyle::Monospace).hint_text("0").desired_width(96.0)).changed() {
+                            acts.push(Act::Text(UsersText::Limit(i), text));
+                        }
                     });
                 }
             });
@@ -583,7 +604,7 @@ impl App {
         statements(ui, "limits", "Statements to run", w.limits_plan().and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
-    fn tab_databases(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
+    fn tab_databases(&self, ui: &mut egui::Ui, w: &SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
         self.privilege_table(ui, w, acts);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -600,11 +621,15 @@ impl App {
                 }
             }
         });
-        if let Some(text) = &mut w.adding {
+        if let Some(shown) = &w.adding {
             let mut add = false;
             let mut cancel = false;
+            let mut text = shown.clone();
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(text).hint_text("database name").font(egui::TextStyle::Monospace).desired_width(220.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("database name").font(egui::TextStyle::Monospace).desired_width(220.0));
+                if r.changed() {
+                    acts.push(Act::DbAdd(Some(text.clone())));
+                }
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     add = true;
                 }
@@ -624,17 +649,17 @@ impl App {
                         });
                     });
                 }
-                if ui.add_enabled(users::check_db_name(text).is_ok(), primary_button(ui, "Add", PRIMARY())).clicked() {
+                if ui.add_enabled(users::check_db_name(&text).is_ok(), primary_button(ui, "Add", PRIMARY())).clicked() {
                     add = true;
                 }
                 if ui.button("Cancel").clicked() {
                     cancel = true;
                 }
             });
-            if let Err(e) = users::check_db_name(text) && !text.is_empty() {
+            if let Err(e) = users::check_db_name(&text) && !text.is_empty() {
                 ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
             }
-            if add && users::check_db_name(text).is_ok() {
+            if add && users::check_db_name(&text).is_ok() {
                 acts.push(Act::DbAddDone);
             } else if cancel {
                 acts.push(Act::DbAdd(None));
@@ -829,7 +854,7 @@ impl App {
         if !matches!(which, "users" | "newuser" | "useraccount" | "userglobal" | "userlimits") {
             return;
         }
-        if let Some(c) = self.core.conns.iter_mut().find(|c| c.meta.id == 3) {
+        if let Some(c) = self.core.setup().conns.iter_mut().find(|c| c.meta.id == 3) {
             c.writable = true;
         }
         if which == "newuser" {
@@ -873,7 +898,7 @@ impl App {
         if which != "users" {
             w.limits = if which == "userlimits" { w.limits } else { ["0".into(), "0".into(), "0".into(), "0".into()] };
         }
-        self.core.sql_users = Some(w);
+        self.core.setup().sql_users = Some(w);
     }
 }
 

@@ -86,9 +86,7 @@ impl App {
         match list {
             Some(l) => Some(l.into_iter().filter(|t| !self.core.views.has(conn, schema, t)).collect()),
             None => {
-                if self.core.sql_asked.insert((conn, schema.to_string())) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-                    self.core.worker.sql_tables(conn, sql, schema.to_string());
-                }
+                self.exec(Action::SqlAsk(SqlAskA::Tables { conn, schema: schema.to_string() }));
                 None
             }
         }
@@ -237,10 +235,8 @@ impl App {
             if f.ref_db == schema && f.ref_table == table {
                 f.parent = Some(f.own.clone());
                 f.parent_req = 0;
-            } else if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.core.req += 1;
-                f.parent_req = self.core.req;
-                self.core.worker.sql_structure(self.core.req, sql, f.ref_db.clone(), f.ref_table.clone());
+            } else if let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::Structure { sel: sel.clone(), ns: f.ref_db.clone(), table: f.ref_table.clone() })) {
+                f.parent_req = req;
             }
         }
 
@@ -267,11 +263,9 @@ impl App {
         let okey = key.as_ref().map(OrphanKey::of);
         if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) && f.orphan_for.as_ref() != Some(ok) {
             let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
-            if f.parent.is_some() && (!big || f.check) && let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                self.core.req += 1;
-                (f.orphan_req, f.orphan_for, f.orphans) = (self.core.req, okey.clone(), None);
+            if f.parent.is_some() && (!big || f.check) && let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::Orphans { sel: sel.clone(), schema: schema.clone(), table: table.clone(), fk: k.clone() })) {
+                (f.orphan_req, f.orphan_for, f.orphans) = (req, okey.clone(), None);
                 f.sample.clear();
-                self.core.worker.sql_orphans(self.core.req, sql, schema.clone(), table.clone(), k.clone());
             }
         }
 
@@ -383,12 +377,7 @@ impl App {
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
         let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
-        self.open_tab(sel, Open::Link);
-        let Some(t) = self.tm() else { return };
-        t.view = View::Documents;
-        t.filter_txt = text;
-        t.page = 0;
-        self.reload();
+        self.exec(Action::Tab(TabA::FilterText { sel: Some(sel), text }));
     }
 
     /// QUARRY_TEST_SQL=addrel: the dialog filled as in the design, the currency column of orders pointing at

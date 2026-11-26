@@ -49,7 +49,7 @@ pub fn hex_digits(b: &[u8], upper: bool) -> String {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Int,
     UInt,

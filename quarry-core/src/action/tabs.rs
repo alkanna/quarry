@@ -47,6 +47,9 @@ pub enum TabA {
     NewQuery { conn: u64, db: String, schema: String },
     /// A connection opened: reloads its tabs that hold no rows, Mongo ones through their query bar.
     Connected { conn: u64, sql: bool },
+    /// Reads the open tab with the filter box set to `text`, on its first page. With `sel` the table opens first, in a tab
+    /// that has no filter of the person's, on its Content view.
+    FilterText { sel: Option<Sel>, text: String },
 }
 
 /// What a refusal says when the tab an action names closed in between.
@@ -109,6 +112,17 @@ impl Core {
                 }
             }
             TabA::Connected { conn, sql } => self.connected_tabs(conn, sql),
+            TabA::FilterText { sel, text } => {
+                if let Some(sel) = sel {
+                    self.open_tab(sel, Open::Link);
+                    let Some(t) = self.tm() else { return Ok(Reply::Done) };
+                    t.view = View::Documents;
+                }
+                let Some(t) = self.tm() else { return Ok(Reply::Done) };
+                t.filter_txt = text;
+                t.page = 0;
+                self.reload();
+            }
         }
         Ok(Reply::Done)
     }

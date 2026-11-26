@@ -62,18 +62,18 @@ impl App {
     }
 
     pub(in crate::app) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
-        self.core.pg_ask_schemas(conn, db)
+        self.exec(Action::SqlAsk(SqlAskA::AskSchemas { conn, db: db.to_string() }))
     }
 
     pub(in crate::app) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
-        self.core.pg_load_tables(conn, db, schema)
+        self.exec(Action::SqlAsk(SqlAskA::LoadTables { conn, db: db.to_string(), schema: schema.to_string() }))
     }
 
     /// Refresh: the schema list, the tables of every schema already loaded and the autocomplete cache are read again.
     /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
     /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.
     pub(in crate::app) fn pg_refresh(&mut self, conn: u64, db: &str) {
-        self.core.pg_refresh(conn, db)
+        self.exec(Action::SqlAsk(SqlAskA::Refresh { conn, db: db.to_string() }))
     }
 }
 

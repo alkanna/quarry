@@ -32,24 +32,58 @@ pub(super) fn ddl_actions() -> Vec<DdlA> {
         DdlA::CreateDb { conn, name: "n".into(), charset: "utf8mb4".into(), collation: "utf8mb4_bin".into(), meta: Meta { engines: vec!["InnoDB".into()], ..Default::default() } },
         DdlA::CreatePgDb { conn, name: "n".into(), opts: crate::db::sql::pg::create::DbOpts { template: Some("template0".into()), ..Default::default() } },
         DdlA::CreateSchema { conn, database: db(), name: "s".into() },
+        DdlA::CreateTable { conn, spec: Default::default(), meta: Default::default() },
+        DdlA::CreatePgTable { conn, database: db(), spec: Default::default() },
+        DdlA::SaveView { conn, database: db(), spec: Default::default() },
     ]
 }
 
 /// No wildcard, so a variant missing from `ddl_actions` fails to compile here first.
 pub(super) fn ddl_variant(a: &DdlA) {
     match a {
-        DdlA::NewDb { .. } | DdlA::NewTable { .. } | DdlA::NewSchema { .. } | DdlA::NewView { .. } | DdlA::EditView { .. } | DdlA::QueryAsView { .. } | DdlA::Drop { .. } | DdlA::Rename { .. } | DdlA::Duplicate { .. } | DdlA::Truncate { .. } | DdlA::DropRun { .. } | DdlA::RenameRun { .. } | DdlA::DuplicateRun { .. } | DdlA::TruncateRun { .. } | DdlA::CreateDb { .. } | DdlA::CreatePgDb { .. } | DdlA::CreateSchema { .. } => {}
+        DdlA::NewDb { .. } | DdlA::NewTable { .. } | DdlA::NewSchema { .. } | DdlA::NewView { .. } | DdlA::EditView { .. } | DdlA::QueryAsView { .. } | DdlA::Drop { .. } | DdlA::Rename { .. } | DdlA::Duplicate { .. } | DdlA::Truncate { .. } | DdlA::DropRun { .. } | DdlA::RenameRun { .. } | DdlA::DuplicateRun { .. } | DdlA::TruncateRun { .. } | DdlA::CreateDb { .. } | DdlA::CreatePgDb { .. } | DdlA::CreateSchema { .. } | DdlA::CreateTable { .. } | DdlA::CreatePgTable { .. } | DdlA::SaveView { .. } => {}
     }
 }
 
 /// One of each SqlOpsA variant, for `all_actions`.
 pub(super) fn ops_actions() -> Vec<SqlOpsA> {
-    vec![SqlOpsA::Bulk { tab: 7, update: true, col: Some("note".into()) }, SqlOpsA::ReadColumn { tab: 7, col: "note".into(), op: crate::db::ColOp::ALL[0] }]
+    vec![SqlOpsA::Bulk { tab: 7, update: true, col: Some("note".into()) }, SqlOpsA::ReadColumn { tab: 7, col: "note".into(), op: crate::db::ColOp::ALL[0] }, SqlOpsA::BulkRun { sel: Default::default(), ns: "shop".into(), plan: crate::db::sql::bulk::BulkPlan { op: crate::db::sql::bulk::BulkOp::Delete, filter: String::new(), cols: Vec::new(), pk: Vec::new(), bs: true, expected: 1, undo: false, engine: String::new() } }]
 }
 
 pub(super) fn ops_variant(a: &SqlOpsA) {
     match a {
-        SqlOpsA::Bulk { .. } | SqlOpsA::ReadColumn { .. } => {}
+        SqlOpsA::Bulk { .. } | SqlOpsA::ReadColumn { .. } | SqlOpsA::BulkRun { .. } => {}
+    }
+}
+
+/// One of each SqlAskA variant, for `all_actions`.
+pub(super) fn ask_actions() -> Vec<SqlAskA> {
+    let sel = crate::state::Sel { conn: 1, db: "shop".into(), coll: "orders".into(), ..Default::default() };
+    vec![
+        SqlAskA::AskSchemas { conn: 1, db: "shop".into() },
+        SqlAskA::LoadTables { conn: 1, db: "shop".into(), schema: "public".into() },
+        SqlAskA::Refresh { conn: 1, db: "shop".into() },
+        SqlAskA::Serve { conn: 1, db: "shop".into(), schema: String::new(), wants: Default::default() },
+        SqlAskA::ServeFacts { conn: 1, db: "shop".into(), schema: String::new(), table: "orders".into(), column: "id".into(), kind: Default::default() },
+        SqlAskA::ForgetSchema { conn: 1, db: "shop".into() },
+        SqlAskA::Tables { conn: 1, schema: "shop".into() },
+        SqlAskA::TableSizes { conn: 1, db: "shop".into(), schema: String::new() },
+        SqlAskA::TableInfo { sel: sel.clone() },
+        SqlAskA::Structure { sel: sel.clone(), ns: "shop".into(), table: "orders".into() },
+        SqlAskA::PgStructure { conn: 1, database: "shop".into(), schema: "public".into(), table: "orders".into() },
+        SqlAskA::Orphans { sel: sel.clone(), schema: "shop".into(), table: "orders".into(), fk: Default::default() },
+        SqlAskA::FilterTick { now: 1.5 },
+        SqlAskA::LintTick { now: 1.5, stmt: 0..4 },
+        SqlAskA::KeySearch { fk: Default::default(), q: "a".into(), known: None },
+        SqlAskA::ShowDup { sel, index: "PRIMARY".into(), value: "1".into() },
+        SqlAskA::Dump { conn: 1, db: "shop".into(), plan: crate::db::sql::dump::DumpPlan { schema: "shop".into(), tables: Vec::new(), create_db: false, extras: false, rows_per_insert: 1, snapshot: false, filter: None, grants: false, owners: false }, path: "a.sql".into(), total: 0 },
+        SqlAskA::CancelJob,
+    ]
+}
+
+pub(super) fn ask_variant(a: &SqlAskA) {
+    match a {
+        SqlAskA::AskSchemas { .. } | SqlAskA::LoadTables { .. } | SqlAskA::Refresh { .. } | SqlAskA::Serve { .. } | SqlAskA::ServeFacts { .. } | SqlAskA::ForgetSchema { .. } | SqlAskA::Tables { .. } | SqlAskA::TableSizes { .. } | SqlAskA::TableInfo { .. } | SqlAskA::Structure { .. } | SqlAskA::PgStructure { .. } | SqlAskA::Orphans { .. } | SqlAskA::FilterTick { .. } | SqlAskA::LintTick { .. } | SqlAskA::KeySearch { .. } | SqlAskA::ShowDup { .. } | SqlAskA::Dump { .. } | SqlAskA::CancelJob => {}
     }
 }
 

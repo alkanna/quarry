@@ -53,7 +53,10 @@ impl App {
     /// `src` is the file to read; None asks for one in the system dialog, so a test hands it in.
     pub(in crate::app) fn open_sql_import_with(&mut self, conn: u64, db: String, schema: String, table: String, src: Option<Source>) {
         // The pool of the table's database and the namespace a worker call takes: the schema on PostgreSQL, the database on MySQL.
-        let Some((sql, ns)) = self.sql_target(&Sel { conn, db: db.clone(), schema: schema.clone(), coll: table.clone() }) else { return self.warn_offline() };
+        let sel = Sel { conn, db: db.clone(), schema: schema.clone(), coll: table.clone() };
+        if self.sql_target(&sel).is_none() {
+            return self.warn_offline();
+        }
         if self.core.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -72,9 +75,8 @@ impl App {
             Ok(f) => f,
             Err(e) => return self.err(e),
         };
-        self.core.req += 1;
-        self.core.worker.sql_table_info(self.core.req, sql, ns, table.clone());
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.core.req, info: None, file, dup: Dup::Stop, restore: None })));
+        let req = self.exec_req(Action::SqlAsk(SqlAskA::TableInfo { sel })).unwrap_or_default();
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req, info: None, file, dup: Dup::Stop, restore: None })));
     }
 
     /// The columns of the table arrived.
@@ -422,15 +424,9 @@ impl App {
     }
 
     fn start_sql_import(&mut self, f: &ImportForm, info: &TableInfo, want_undo: bool) {
-        let Some(writable) = self.conn(f.conn).map(|c| c.writable) else { return self.warn_offline() };
-        let Some((sql, ns)) = self.sql_target(&Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() }) else { return self.warn_offline() };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
-        self.core.req += 1;
-        let mut job = crate::app::sql::dump::SqlJob::new(self.core.req, f.conn, sql.clone(), ns.clone(), crate::app::sql::dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
-        job.rolls_back = info.transactional();
-        self.core.worker.sql_import(job.req, f.conn, sql, ns, f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
-        self.core.sql_job = Some(job);
-        self.ok(format!("Importing {} rows into {}", group(&job_rows(&self.core.sql_job).to_string()), f.table));
+        let sel = Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() };
+        self.core.start_import(sel, plan, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
     }
 
     /// QUARRY_TEST_SQL=import: the dialog over the orders table with a file that has one bad value, built offline.
@@ -453,10 +449,6 @@ impl App {
         let conn = self.t().map_or(0, |t| t.sel.conn);
         self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db: "shop".into(), schema: String::new(), table: "orders".into(), req: 0, info: Some(Ok(info)), file, dup: Dup::Stop, restore: None })));
     }
-}
-
-fn job_rows(j: &Option<crate::app::sql::dump::SqlJob>) -> u64 {
-    j.as_ref().map_or(0, |j| j.total_rows)
 }
 
 #[cfg(test)]

@@ -269,10 +269,8 @@ impl App {
                 continue;
             }
             (k.asked, k.parent, k.err) = (want.clone(), None, None);
-            if let Some(sql) = self.core.pg_session(env.conn) {
-                self.core.req += 1;
-                k.req = self.core.req;
-                self.core.worker.sql_structure(self.core.req, sql.at(env.database), want.0, want.1);
+            if let Some(req) = self.exec_req(Action::SqlAsk(SqlAskA::PgStructure { conn: env.conn, database: env.database.to_string(), schema: want.0, table: want.1 })) {
+                k.req = req;
             }
         }
     }
