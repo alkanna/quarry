@@ -108,7 +108,8 @@ impl SqlA {
 impl Core {
     pub(super) fn sql(&mut self, a: SqlA) -> Result<Reply, Refusal> {
         // Drawn and run in the same frame, so another tab means the action is stale or came from elsewhere.
-        if self.tabs.get(self.cur).is_none_or(|t| t.uid != a.tab() || t.sql.is_none()) {
+        // The crumb also moves a Query tab whose SQL state is not built yet, as it did before actions.
+        if self.tabs.get(self.cur).is_none_or(|t| t.uid != a.tab() || (t.sql.is_none() && !matches!(a, SqlA::CrumbDb { .. }))) {
             return Err(self.refuse("That tab is no longer open."));
         }
         match a {

@@ -277,6 +277,8 @@ fn a_first_explain_or_the_same_plan_again_has_no_compare_tab() {
     let Some(mut ui) = explain_in(Dialect::Postgres, FIX_BEFORE) else { return };
     let conn = ui.app().t().map(|t| t.sel.conn).unwrap();
     ui.h.state_mut().core.test_mut().drop_session(conn);
+    // The close's ForgetPlans effect runs on the next frame, as it does after a real disconnect.
+    ui.settle();
     ui.h.state_mut().demo_explain(Dialect::Postgres, STMT, FIX_AFTER);
     ui.settle();
     ui.show("Flame");

@@ -42,7 +42,9 @@ fn approval_stacks_over_settings_and_takes_no_enter() {
 fn allow_works_once_awake() {
     let Some(mut ui) = demo_ui(approval_over_settings) else { return };
     ui.show("Allow once");
-    ui.h.state_mut().core.test_mut().agents.asks[0].shown = Some(Instant::now() - Duration::from_secs(2));
+    // When the dialog first showed the call is the app's to keep since M7.
+    let id = ui.app().core.agents.asks[0].id;
+    ui.h.state_mut().ui.ask_shown = Some((id, Instant::now() - Duration::from_secs(2)));
     ui.settle();
     ui.h.get_by_label("Allow once").click();
     ui.settle();
