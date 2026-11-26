@@ -64,6 +64,16 @@ impl Front {
     }
 
     /// The text behind `r`, for a `TextEdit`. None when its window is not open.
+    /// The big value editor is drawn in place, taken out and put back in the same frame: its document and text can be
+    /// megabytes, too big to copy on every repaint as other editors are.
+    pub fn take_json_edit(&mut self) -> Option<crate::state::JsonEdit> {
+        self.0.json_edit.take()
+    }
+
+    pub fn put_json_edit(&mut self, je: crate::state::JsonEdit) {
+        self.0.json_edit = Some(je);
+    }
+
     pub fn text_mut(&mut self, r: TextRef) -> Option<&mut String> {
         match r {
             TextRef::Insert => self.0.insert.as_mut(),
