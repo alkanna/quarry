@@ -192,7 +192,8 @@ impl App {
     /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
         let Some(before) = self.core.sql_cell.clone() else { return };
-        let e = self.sql_cell_draw(ui, cell, before.clone());
+        // Widgets placed in the row's Ui move its cursor to their own bottom, which pulled the next row up.
+        let e = self.sql_cell_draw(&mut ui.new_child(egui::UiBuilder::new().max_rect(cell)), cell, before.clone());
         if e != before {
             self.sql_cell_set(Some(e));
         }
@@ -260,16 +261,21 @@ impl App {
         // One text row centered in the cell, where the value sat before the double click.
         let font = FontId::monospace(TXT_SMALL);
         let row_h = ui.fonts_mut(|f| f.row_height(&font));
-        let text_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.center().y - row_h / 2.0), egui::pos2(btn.left(), rect.center().y + row_h / 2.0));
+        // Monospaced: glyph width times count, plus the margins and the caret.
+        let need = ui.fonts_mut(|f| f.glyph_width(&font, '0')) * e.text.chars().count() as f32 + 14.0;
+        // A narrow cell gives the expand button's room to the value only when that makes it fit; Shift+Enter still expands.
+        let show_btn = date || need <= btn.left() - rect.left() || need > rect.width();
+        let text_right = if show_btn { btn.left() } else { rect.right() };
+        let text_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.center().y - row_h / 2.0), egui::pos2(text_right, rect.center().y + row_h / 2.0));
         let out = ui
             .scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
-                egui::TextEdit::singleline(&mut e.text).id(id).font(font).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(btn.left() - rect.left() - 16.0).show(ui)
+                egui::TextEdit::singleline(&mut e.text).id(id).font(font).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(text_right - rect.left()).show(ui)
             })
             .inner;
         let (cal, b) = if date {
             (pickers::glyph_button(ui, btn, id.with("cal"), pickers::paint_calendar, e.pick.is_some(), "Pick a date (Alt+Down)").clicked(), false)
         } else {
-            (false, ui.put(btn, expand_button()).clicked())
+            (false, show_btn && ui.put(btn, expand_button()).clicked())
         };
         if e.focus {
             out.response.request_focus();
