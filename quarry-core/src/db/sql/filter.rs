@@ -417,6 +417,32 @@ impl Tree {
         prune_in(&mut self.root);
     }
 
+    /// Adds `item` so it narrows the whole filter: at the end of an all root, or beside the old root moved into a group.
+    /// Returns whether the old root moved, which gives its rows new ids.
+    pub fn and(&mut self, item: Item) -> bool {
+        // An any root of one row reads the same as an all root.
+        let r = &self.root;
+        let wrap = !r.kids.is_empty() && r.mode != Match::All && !(r.mode == Match::Any && r.kids.len() == 1);
+        if wrap {
+            let old = std::mem::take(&mut self.root);
+            self.push(0, Item::Group(old));
+        }
+        self.root.mode = Match::All;
+        self.push(0, item);
+        wrap
+    }
+
+    /// Whether a condition in use is on column `col`.
+    pub fn uses(&self, col: &str) -> bool {
+        fn walk(b: &Block, col: &str) -> bool {
+            b.kids.iter().any(|n| match &n.item {
+                Item::Cond(c) => c.on && c.rule.col == col,
+                Item::Group(g) => walk(g, col),
+            })
+        }
+        walk(&self.root, col)
+    }
+
     /// Adds `item` at the end of group `parent` (0 for the root) and returns its id.
     pub fn push(&mut self, parent: u32, item: Item) -> Option<u32> {
         let n = self.fresh(item);

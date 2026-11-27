@@ -235,6 +235,33 @@ fn the_panel_adds_and_removes_conditions_and_writes_the_where() {
 }
 
 #[test]
+fn a_header_funnel_rule_narrows_the_filter_in_rules_and_in_sql() {
+    use crate::db::sql::filter::Match;
+    use crate::db::sql::rules::Op;
+    let (mut core, uid) = content_core(false);
+    let quick = |core: &mut Core, op, v: &str| sql(core, SqlA::Filter { tab: uid, a: FilterA::Quick { col: "id".into(), op, value: v.into() } }).unwrap();
+    quick(&mut core, Op::Eq, " ");
+    assert_eq!(core.tabs[0].filter_txt, "", "a rule missing its value is not added");
+    quick(&mut core, Op::Gt, " 1");
+    quick(&mut core, Op::IsNull, "ignored");
+    assert_eq!(core.tabs[0].filter_txt, "`id` > 1 AND `id` IS NULL", "a number column's value is trimmed and stays bare");
+    // An any root becomes a group under the new rule.
+    sql(&mut core, SqlA::Filter { tab: uid, a: FilterA::Mode(0, Match::Any) }).unwrap();
+    quick(&mut core, Op::Ne, "5");
+    let tree = &core.tabs[0].sql.as_ref().unwrap().bar.tree;
+    assert_eq!((tree.root.mode, tree.root.kids.len()), (Match::All, 2));
+    assert_eq!(core.tabs[0].filter_txt, "(`id` > 1 OR `id` IS NULL) AND `id` <> 5");
+    // SQL mode keeps the text it has and adds the rule after it.
+    core.tabs[0].sql.as_mut().unwrap().bar.c.sql = true;
+    core.tabs[0].filter_txt = "id > 1 OR id < 0".into();
+    quick(&mut core, Op::Eq, "3");
+    assert_eq!(core.tabs[0].filter_txt, "(id > 1 OR id < 0) AND `id` = 3");
+    core.tabs[0].filter_txt = "id > 1 -- recent".into();
+    quick(&mut core, Op::Eq, "3");
+    assert_eq!(core.tabs[0].filter_txt, "(id > 1 -- recent\n) AND `id` = 3");
+}
+
+#[test]
 fn a_locked_table_refuses_edits_quietly_so_the_app_can_offer_unlock() {
     let (mut core, uid) = content_core(false);
     let toasts = core.toasts.len();

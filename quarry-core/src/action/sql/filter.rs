@@ -3,9 +3,9 @@
 
 use crate::core::Core;
 use crate::db::sql::filter::{self, Block, Cond, Item, Match, Tree};
-use crate::db::sql::rules::Rule;
+use crate::db::sql::rules::{default_case, group_of, input, rule_sql, Group, Input, Op, Rule};
 use crate::db::sql::{Col, Dialect};
-use crate::state::sql::bar::write_tree;
+use crate::state::sql::bar::{and_onto, write_tree};
 use crate::state::sql::filter_panel::Panel;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,9 @@ pub enum FilterA {
     Mode(u32, Match),
     /// Cmd+F in Rules mode: the panel opens, with a new row when it has none. The WHERE text is not rewritten.
     Open,
+    /// A column header's funnel: a rule on `col` joins the filter with AND and the first page is read again. `value` is
+    /// ignored by operators that take none.
+    Quick { col: String, op: Op, value: String },
 }
 
 /// The word a new group takes inside `parent`: the other one than its parent's, so wrapping says something.
@@ -62,8 +65,30 @@ impl Core {
         let t = &mut self.tabs[self.cur];
         let Some(s) = t.sql.as_mut() else { return };
         let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+        // SQL mode, or a text the tree was not read from yet, which writing the tree would not reach.
+        let text_only = s.bar.c.sql || s.bar.src != t.filter_txt;
+        let pairs: Vec<_> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
+        let mut reload = false;
         let (tree, p) = (&mut s.bar.tree, &mut s.bar.panel);
         match a {
+            FilterA::Quick { col, op, value } => {
+                let Some(c) = cols.iter().find(|c| c.name == col) else { return };
+                // Spaces around a text value can be what it matches; around a number or a date they are slips.
+                let value = if group_of(c.kind) == Group::Text { value } else { value.trim().to_string() };
+                let values = if input(op) == Input::One { vec![value] } else { Vec::new() };
+                let rule = Rule { col, kind: c.kind, op, values, case: default_case(op, d) };
+                if !rule.complete() {
+                    return;
+                }
+                (t.page, reload) = (0, true);
+                if text_only {
+                    // The text keeps its spelling; write_tree below skips a text the tree was not read from.
+                    t.filter_txt = and_onto(&t.filter_txt, [rule_sql(&rule, d, bs)], &pairs, d, bs);
+                } else if tree.and(Item::Cond(Cond { rule, on: true })) {
+                    // The old rows got new ids, so a selection would name another row.
+                    (p.sel, p.pick) = (None, None);
+                }
+            }
             FilterA::Open => {
                 if tree.root.kids.is_empty() {
                     add(tree, p, 0, false, &cols, d);
@@ -125,8 +150,10 @@ impl Core {
                 }
             }
         }
-        let pairs: Vec<_> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
         write_tree(&mut s.bar, &mut t.filter_txt, &pairs, d, bs);
         s.bar.tree_json = filter::to_json(&s.bar.tree);
+        if reload {
+            self.sql_reload();
+        }
     }
 }

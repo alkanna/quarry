@@ -1094,6 +1094,8 @@ pub(crate) const EXPAND_BTN: f32 = 20.0;
 /// Height of the bolt marking an indexed field, and the room it takes beside a label.
 pub(crate) const BOLT_H: f32 = 10.0;
 pub(crate) const BOLT_ROOM: f32 = 12.0;
+/// Room a header keeps at its right end for the funnel of a column with a rule in use.
+pub(crate) const FUNNEL_ROOM: f32 = 22.0;
 /// Size of the small painted cross that removes a chip or a tab.
 pub(crate) const CLOSE_W: f32 = 18.0;
 

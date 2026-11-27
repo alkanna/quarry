@@ -4,6 +4,10 @@ use super::*;
 use crate::db::{ColOp, ColOut, col_op_result};
 use quarry_core::action::GridA;
 use quarry_core::action::mongo::col_title;
+use quarry_core::action::sql::FilterA;
+use crate::db::sql::rules::{input, label, ops_for, Input, Op};
+use crate::db::sql::value::Kind;
+use crate::db::sql::Dialect;
 
 pub(super) const COL_MIN_W: f32 = 50.0;
 pub(super) const COL_MAX_W: f32 = 900.0;
@@ -27,6 +31,8 @@ pub(super) enum HeadAct {
     Update,
     Customize,
     Col(ColAct),
+    /// A SQL header's funnel: a rule on the column, with the typed value when the operator takes one.
+    Filter(Op, String),
 }
 
 const CASTS: [(&str, &str); 8] = [("string", "String"), ("int", "Int32"), ("long", "Int64"), ("double", "Double"), ("decimal", "Decimal128"), ("bool", "Boolean"), ("date", "Date"), ("objectId", "ObjectId")];
@@ -268,6 +274,54 @@ pub(in crate::app) fn query_col_popover(ui: &mut egui::Ui, c: &str, desc: Option
     }
 }
 
+/// The funnel menu of a SQL header: a value box over the operators of the column's type that take one value or none.
+/// Enter in the box applies = (or "is"), or the first one-value operator of a type without it.
+fn filter_menu(ui: &mut egui::Ui, id: egui::Id, kind: Kind, d: Dialect, text: &mut String, acts: &mut Vec<HeadAct>) {
+    menu_list(ui);
+    let ops = ops_for(kind, d).iter().copied().filter(|o| matches!(input(*o), Input::None | Input::One));
+    let r = ui.add(egui::TextEdit::singleline(text).id(id).hint_text("Value").desired_width(200.0));
+    if !r.has_focus() && ui.memory(|m| m.focused().is_none()) {
+        r.request_focus();
+    }
+    let typed = !text.trim().is_empty();
+    let mut pick = None;
+    if typed && r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        pick = ops.clone().find(|o| *o == Op::Eq).or_else(|| ops.clone().find(|o| input(*o) == Input::One));
+    }
+    ui.separator();
+    for op in ops {
+        if ui.add_enabled(typed || input(op) == Input::None, egui::Button::new(label(op, kind))).clicked() {
+            pick = Some(op);
+        }
+    }
+    if let Some(op) = pick {
+        acts.push(HeadAct::Filter(op, text.clone()));
+        ui.close();
+    }
+}
+
+/// The funnel at the right end of a SQL header, shown while the header is hovered, its menu is open, or `lit` because a
+/// rule on the column is in use. `seed` fills the value box when the menu opens.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn funnel(ui: &mut egui::Ui, cell: egui::Rect, pop: egui::Id, fill: Color32, c: &str, kind: Kind, d: Dialect, lit: bool, seed: impl FnOnce() -> String, acts: &mut Vec<HeadAct>) {
+    let open = egui::Popup::is_id_open(ui.ctx(), pop);
+    if !open && !lit && !ui.rect_contains_pointer(cell) {
+        return;
+    }
+    let b = egui::Rect::from_center_size(egui::pos2(cell.right() - FUNNEL_ROOM / 2.0 - 4.0, cell.center().y), egui::vec2(EXPAND_BTN, EXPAND_BTN));
+    // Backed by the header's own fill, so a name under it is hidden rather than crossed.
+    ui.painter().rect_filled(b, 0, HDR());
+    ui.painter().rect_filled(b, 0, fill);
+    let r = crate::ui::pickers::glyph_button(ui, b, pop.with("btn"), crate::ui::glyphs::funnel, open || lit, &format!("Filter on {c}"));
+    if !open && !r.clicked() {
+        return;
+    }
+    let key = pop.with("value");
+    let mut text = if open { ui.data(|m| m.get_temp::<String>(key)).unwrap_or_default() } else { seed() };
+    egui::Popup::menu(&r).id(pop).open_memory(r.clicked().then_some(egui::SetOpenCommand::Toggle)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| filter_menu(ui, pop.with("box"), kind, d, &mut text, acts));
+    ui.data_mut(|m| m.insert_temp(key, text));
+}
+
 /// A popover entry that records its action and closes the popover.
 fn item(ui: &mut egui::Ui, label: &str, act: HeadAct, acts: &mut Vec<HeadAct>) {
     if ui.button(label).clicked() {
@@ -327,6 +381,10 @@ impl App {
                 let note = format!("Replace null with the new value of {c}, then run.");
                 let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
                 self.open_in_shell(code);
+            }
+            HeadAct::Filter(op, value) => {
+                let tab = t.uid;
+                self.exec(Action::Sql(quarry_core::action::SqlA::Filter { tab, a: FilterA::Quick { col: c.into(), op, value } }));
             }
             HeadAct::Customize => {
                 let label = if label == c { String::new() } else { label };
