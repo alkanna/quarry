@@ -383,11 +383,17 @@ pub fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
             }
         });
     }
-    let existing = t.filter_txt.trim().to_string();
     let pairs: Vec<(String, Kind)> = tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect();
-    // Conditions joined by AND need no parentheses before the AND that adds the group's.
-    let flat = filter::parse(&existing, &pairs, d, bs).is_some_and(|t| t.root.mode == Match::All);
-    let existing = if existing.is_empty() { None } else if flat { Some(existing) } else { Some(format!("({existing})")) };
-    t.filter_txt = existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ");
+    t.filter_txt = and_onto(&t.filter_txt, conds, &pairs, d, bs);
     ungroup(t);
+}
+
+/// WHERE text `existing` with `conds` after it, joined by AND. Conditions already joined by AND need no parentheses.
+pub fn and_onto(existing: &str, conds: impl IntoIterator<Item = String>, pairs: &[(String, Kind)], d: Dialect, bs: bool) -> String {
+    let existing = existing.trim();
+    let flat = filter::parse(existing, pairs, d, bs).is_some_and(|t| t.root.mode == Match::All);
+    // A line comment at the end would swallow the closing parenthesis, so that goes on its own line.
+    let nl = if existing.lines().last().is_some_and(|l| l.contains("--") || l.contains('#')) { "\n" } else { "" };
+    let existing = if existing.is_empty() { None } else if flat { Some(existing.to_string()) } else { Some(format!("({existing}{nl})")) };
+    existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ")
 }

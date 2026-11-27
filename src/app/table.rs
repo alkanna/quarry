@@ -283,6 +283,11 @@ impl App {
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
         let summarize = !self.core.prefs.object_preview;
+        // Only a tree read from the current WHERE text says which funnels are lit.
+        let ruled = self.t().filter(|t| !agg && t.sql.as_ref().is_some_and(|s| s.matched.is_none() && !s.bar.c.sql && s.bar.src == t.filter_txt)).and_then(|t| t.sql.as_ref()).map(|s| &s.bar.tree);
+        let in_rules: Vec<bool> = cols.iter().map(|c| ruled.is_some_and(|t| t.uses(c))).collect();
+        // Room at a header's right end for the index bolt and a lit funnel.
+        let room: Vec<f32> = indexed.iter().zip(&in_rules).map(|(ix, r)| (if ix.is_some() { BOLT_ROOM } else { 0.0 }) + (if *r { FUNNEL_ROOM } else { 0.0 })).collect();
         // Measuring lays out every loaded cell of the column, so it is done once per result set instead of
         // on every frame. The generation says which answer the rows came from; where they live and how
         // many say which window of it is on screen.
@@ -306,9 +311,9 @@ impl App {
                     w
                 })
             })
-            .zip(cols.iter().zip(&indexed))
-            // A fitted width leaves room for the index bolt; a width the user dragged stays as set.
-            .map(|(w, (c, ix))| if ix.is_none() || prefs.widths.contains_key(c) { w } else { w + BOLT_ROOM })
+            .zip(cols.iter().zip(&room))
+            // A fitted width leaves that room; a width the user dragged stays as set.
+            .map(|(w, (c, r))| if prefs.widths.contains_key(c) { w } else { w + r })
             .collect();
         // The documents view adds a checkbox in front of the row number.
         // The Documents view and the Shell's result take checks; other results do not.
@@ -354,6 +359,7 @@ impl App {
                 _ => None,
             }),
         };
+        let funnel = sql_rows && !sql_grouped;
         let kinds: Vec<Option<db::sql::value::Kind>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).map(|k| k.kind)).collect();
         // Numbers read best right-aligned, so SQL numeric columns start that way unless the user chose otherwise.
         let aligns: Vec<u8> = cols.iter().zip(&kinds).map(|(c, k)| prefs.align.get(c).copied().unwrap_or(if k.is_some_and(is_numeric) { 2 } else { 0 })).collect();
@@ -450,7 +456,7 @@ impl App {
                     };
                     let g = ui.fonts_mut(|f| f.layout_job(LayoutJob::single_section(shown, ui_fmt(TXT_CAPTION, color, W_SEMIBOLD, 0.2))));
                     let ix = &indexed[ci];
-                    let bolt = if ix.is_some() { BOLT_ROOM } else { 0.0 };
+                    let bolt = room[ci];
                     let gx = align_x(aligns[ci], x, *w - bolt, g.size().x);
                     let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
                     if ix.is_some() {
@@ -487,6 +493,13 @@ impl App {
                     // Clicks inside, such as the Data scope switch, keep it open; each action closes it itself.
                     egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, sql, dir, &prefs, &mut scope_query, &mut acts));
                     head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
+                    if funnel && let Some(kind) = kinds[ci] {
+                        // Starts from the selected row's value, the one most often filtered on.
+                        let seed = || selected.filter(|s| s.0 == agg).and_then(|(_, i)| docs.value(i, c)).map(|v| v.bson().into_owned()).filter(|v| *v != Bson::Null).map(|v| super::sql::view::plain_text(&v)).unwrap_or_default();
+                        let mut acts = Vec::new();
+                        super::column_menu::funnel(ui, cell, sid.with(("funnel", c)), hover_fill(state), c, kind, sql_dialect, in_rules[ci], seed, &mut acts);
+                        head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
+                    }
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
                     let dr = ui.interact(handle, sid.with(("w", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn).on_hover_text("Drag to resize, double-click to fit");
