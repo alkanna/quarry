@@ -637,16 +637,18 @@ pub(super) fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec
             }
             i += 1;
             out.push(T::Id(s));
-        } else if c == '\'' {
+        } else if c == '\'' || (c == '"' && d != Dialect::Postgres) {
+            // MySQL also reads a double-quoted string, which the writer spells with single quotes.
+            let q = c;
             let mut s = String::new();
             i += 1;
             loop {
                 match *ch.get(i)? {
-                    '\'' if ch.get(i + 1) == Some(&'\'') => {
-                        s.push('\'');
+                    x if x == q && ch.get(i + 1) == Some(&q) => {
+                        s.push(q);
                         i += 2;
                     }
-                    '\'' => break,
+                    x if x == q => break,
                     '\\' => {
                         s.push('\\');
                         i += 1;
@@ -662,6 +664,11 @@ pub(super) fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec
                 }
             }
             i += 1;
+            // Under ANSI_QUOTES "x" is a column, and any other name fails on the server, so only a column name stays SQL.
+            // shortcut: the session's sql_mode is not passed here; read ANSI_QUOTES from it if a case shows up.
+            if q == '"' && cols.iter().any(|(n, _)| n.eq_ignore_ascii_case(&s)) {
+                return None;
+            }
             out.push(T::Str(unslash(&s)));
         } else if c.is_ascii_digit() || (c == '-' && ch.get(i + 1).is_some_and(|n| n.is_ascii_digit()) && !matches!(out.last(), Some(T::Id(_)) | Some(T::Num(_)) | Some(T::P(')')))) {
             let st = i;
