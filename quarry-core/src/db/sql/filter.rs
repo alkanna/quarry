@@ -662,6 +662,11 @@ mod tests {
         assert_eq!(parse("", &cols(), MY, true), Some(Tree::default()));
         // Bare names and lower case words read like what the writer sends.
         assert_eq!(parse("status = 'paid' and (total between 1 and 2 or id = 3)", &cols(), MY, true).unwrap().root.kids.len(), 2);
+        // A MySQL double-quoted string reads as a rule and is written with single quotes; on PostgreSQL it names a column.
+        assert_eq!(to_sql(&parse("status = \"pa\"\"id\"", &cols(), MY, true).unwrap(), MY, true), "`status` = 'pa\"id'");
+        assert!(parse("status = \"paid\"", &cols(), Dialect::Postgres, true).is_none());
+        // Naming a column, it may be one under ANSI_QUOTES, so it stays SQL.
+        assert!(parse("status = \"name\"", &cols(), MY, true).is_none());
     }
 
     #[test]
