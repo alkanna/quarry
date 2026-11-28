@@ -377,7 +377,8 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
             return;
         }
         ui.open_cell("doc", 1);
-        ui.click("Open in editor");
+        // The new column holds only NULLs, so it is narrow enough that the expand button gives its room to the value.
+        ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
         ui.wait("the dialog", |a| a.core.sql_cell.as_ref().is_some_and(|e| e.big));
         // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection. An edit clears the check too.
         let put = |ui: &mut UiApp, s: &str| {
