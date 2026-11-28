@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.61.0](https://github.com/alkanna/quarry/compare/v0.60.1...v0.61.0) (2026-11-28)
+
+
+### Features
+
+* a funnel on SQL column headers filters on that column from a quick menu of its operators ([#316](https://github.com/alkanna/quarry/issues/316)) ([a4f0fc2](https://github.com/alkanna/quarry/commit/a4f0fc2443525457e56a000cba565df05d126978))
+* state and actions in an egui-free quarry-core crate, the UI changes state only through actions ([#312](https://github.com/alkanna/quarry/issues/312)) ([3a2eb42](https://github.com/alkanna/quarry/commit/3a2eb42e4a20436a67746dd75657edd0e602937e))
+
+
+### Bug Fixes
+
+* editing a SQL cell no longer shifts the rows below it, and a narrow cell shows its whole value ([#314](https://github.com/alkanna/quarry/issues/314)) ([59f9b91](https://github.com/alkanna/quarry/commit/59f9b91eeb77f64a040c4a4dec1620cfcfd412bc))
+* Rules mode reads MySQL and MariaDB double-quoted strings, so such a WHERE switches back to rules ([#315](https://github.com/alkanna/quarry/issues/315)) ([a970fba](https://github.com/alkanna/quarry/commit/a970fba1c541e2dc2ff82d5f2a195417d083dbf7))
+
 ## [0.60.1](https://github.com/alkanna/quarry/compare/v0.60.0...v0.60.1) (2026-11-20)
 
 
